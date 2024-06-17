@@ -1,0 +1,9 @@
+[project]
+name = "restate-sdk-python"
+version = "0.0.1"
+description = "A Python SDK for Restate"
+authors = ["Restate developers <dev@restate.dev>"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
