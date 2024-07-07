@@ -21,11 +21,11 @@ O = typing.TypeVar('O')
 
 class SerializerType(typing.Generic[O]):
     """A type definition for a serializer"""
-    __call__: typing.Callable[[typing.Optional[O]], typing.ByteString]
+    __call__: typing.Callable[[typing.Optional[O]], bytes]
 
 class DeserializerType(typing.Generic[I]):
     """A type definition for a deserializer"""
-    __call__: typing.Callable[[typing.ByteString], typing.Optional[I]]
+    __call__: typing.Callable[[bytes], typing.Optional[I]]
 
 
 
