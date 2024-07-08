@@ -99,19 +99,21 @@ class PythonClassEncoder(json.JSONEncoder):
             return o.value
         return {key: value for key, value in o.__dict__.items() if value is not None}
 
-def compute_discovery_json(endpoint: RestateEndpoint, version: int) -> typing.Tuple[typing.Dict[str, str] ,str]:
+def compute_discovery_json(endpoint: RestateEndpoint,
+                           version: int,
+                           discovered_as: typing.Literal["bidi", "request_response"]) -> typing.Tuple[typing.Dict[str, str] ,str]:
     """
     return restate's discovery object as JSON 
     """
     if version != 1:
         raise ValueError(f"Unsupported protocol version {version}")
 
-    ep = compute_discovery(endpoint)
+    ep = compute_discovery(endpoint, discovered_as)
     json_str = json.dumps(ep, cls=PythonClassEncoder, allow_nan=False)
     headers = {"content-type": "application/vnd.restate.endpointmanifest.v1+json"}
     return (headers, json_str)
 
-def compute_discovery(endpoint: RestateEndpoint) -> Endpoint:
+def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal["bidi", "request_response"]) -> Endpoint:
     """
     return restate's discovery object for an endpoint
     """
@@ -139,7 +141,11 @@ def compute_discovery(endpoint: RestateEndpoint) -> Endpoint:
 
         # add the service
         services.append(Service(name=service.name, ty=service_type, handlers=service_handlers))
-    protocol_mode = PROTOCOL_MODES[endpoint.protocol]
+
+    if endpoint.protocol:
+        protocol_mode = PROTOCOL_MODES[endpoint.protocol]
+    else:
+        protocol_mode = PROTOCOL_MODES[discovered_as]
     return Endpoint(protocolMode=protocol_mode,
                     minProtocolVersion=1,
                     maxProtocolVersion=1,

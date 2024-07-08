@@ -37,7 +37,7 @@ class VMWrapper:
     def __init__(self, headers: typing.List[typing.Tuple[str, str]]):
         self.vm = restate_sdk_python_core.PyVM(headers)
 
-    def get_response_head(self) -> typing.Tuple[int, typing.List[typing.Tuple[str, str]]]:
+    def get_response_head(self) -> typing.Tuple[int, typing.Iterable[typing.Tuple[str, str]]]:
         """
         Retrieves the response head from the virtual machine.
 

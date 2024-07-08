@@ -12,21 +12,16 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
-import asyncio
-
-import uvicorn
 
 from restate.service import Service
 from restate.context import Context, ObjectContext
-from restate.endpoint import Endpoint
+from restate.endpoint import endpoint
 from restate.object import VirtualObject
-
 
 greeter = Service("greeter")
 
 @greeter.handler()
 async def greet(ctx: Context, name: str) -> str:
-    #ctx.service_call(greet_different, "asdads")
     return f"Greet {name}"
 
 
@@ -41,16 +36,7 @@ async def increment(ctx: ObjectContext, value: int) -> int:
     return value + 1
 
 @counter.handler(kind="shared")
-def count(ctx: ObjectContext, value: int) -> int:
+async def count(ctx: ObjectContext, value: int) -> int:
     return value
 
-
-async def main():
-    from restate.server import server
-    app = server(Endpoint().bind(greeter).bind(counter))
-    config = uvicorn.Config(app, port=9080, log_level="debug")
-    server = uvicorn.Server(config)
-    await server.serve()
-
-if __name__ == "__main__":
-        asyncio.run(main())
+app = endpoint().bind(greeter, counter).asgi_app()

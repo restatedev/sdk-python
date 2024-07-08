@@ -1,4 +1,4 @@
 mypy
 pylint
 wheel
-starlette
+hypercorn

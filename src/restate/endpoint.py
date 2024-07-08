@@ -15,24 +15,33 @@ This module defines the Endpoint class, which serves as a container for all the 
 
 import typing
 
-from restate.object import VirtualObject
 from restate.service import Service
+from restate.object import VirtualObject
+
 
 # disable too few methods in a class
 # pylint: disable=R0903
+
 
 class Endpoint:
     """
     Endpoint service that contains all the services and objects
     """
+
+    services: typing.Dict[str, typing.Union[Service, VirtualObject]]
+    protocol: typing.Optional[typing.Literal["bidi", "request_response"]]
+    
     def __init__(self):
         """
         Create a new restate endpoint that serves as a container for all the services and objects
         """
-        self.services: typing.Dict[str, typing.Union[Service, VirtualObject]] = {}
-        self.protocol: typing.Literal["bidi", "request_response"] = "bidi"
+        self.services = {}
+        # we will let the user to override it later perhaps, but for now let us 
+        # auto deduce it on discovery.
+        # None means that the user did not explicitly set it.
+        self.protocol = None
 
-    def bind(self, service: typing.Union[Service, VirtualObject]):
+    def bind(self, *services: typing.Union[Service, VirtualObject]):
         """
         Bind a service to the endpoint
 
@@ -45,7 +54,32 @@ class Endpoint:
         Returns:
             The updated Endpoint instance
         """
-        if service.name in self.services:
-            raise ValueError(f"Service {service.name} already exists")
-        self.services[service.name] = service
+        for service in services:
+            if service.name in self.services:
+                raise ValueError(f"Service {service.name} already exists")
+            self.services[service.name] = service
         return self
+
+    def asgi_app(self):
+        """
+        Returns the ASGI application for this endpoint.
+
+        This method is responsible for creating and returning the ASGI application
+        that will handle incoming requests for this endpoint.
+
+        Returns:
+            The ASGI application for this endpoint.
+       """
+        # we need to import it here to avoid circular dependencies
+        # pylint: disable=C0415
+        from restate.server import asgi_app
+        return asgi_app(self)
+
+def endpoint() -> Endpoint:
+    """
+    Create a new restate endpoint that serves as a container for all the services and objects
+
+    Returns:
+        The new Endpoint instance
+    """
+    return Endpoint()

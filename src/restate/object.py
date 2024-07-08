@@ -78,6 +78,7 @@ class VirtualObject:
         """
         handler_io = HandlerIO[I,O](accept, content_type, serializer, deserializer)
         def wrapper(fn):
+
             @wraps(fn)
             def wrapped(*args, **kwargs):
                 return fn(*args, **kwargs)
