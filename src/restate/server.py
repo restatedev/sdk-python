@@ -1,35 +1,22 @@
+#
+#  Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
+#
+#  This file is part of the Restate SDK for Node.js/TypeScript,
+#  which is released under the MIT license.
+#
+#  You can find a copy of the license in file LICENSE in the root
+#  directory of this repository or package, or at
+#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
+#
 """This module contains the ASGI server for the restate framework."""
 
-import typing
-from typing import Awaitable, Callable, Dict, List, Tuple, Union
-
+from typing import Literal
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
+from restate.server_context import ServerInvocationContext
+from restate.server_types import Receive, Scope, Send, binary_to_header, header_to_binary
 from restate.vm import VMWrapper
 
-
-# Scope is a dictionary with string keys and values that can be any type.
-Scope = Dict[str, Union[str, List[Tuple[bytes, bytes]]]]
-
-# Message is a dictionary with string keys and values that can be any type.
-Message = Dict[str, Union[str, int, bytes, bool, Dict[str, str], Dict[bytes, bytes], List[Tuple[bytes, bytes]]]]
-
-# Receive is an asynchronous callable that returns a Message.
-Receive = Callable[[], Awaitable[Message]]
-
-# Send is an asynchronous callable that takes a Message as an argument.
-Send = Callable[[Message], Awaitable[None]]
-
-# The main ASGI application type is an asynchronous callable that takes a Scope, a Receive callable, and a Send callable.
-ASGIApp = Callable[[Scope, Receive, Send], None]
-
-def header_to_binary(headers: typing.Iterable[typing.Tuple[str, str]]) -> typing.List[typing.Tuple[bytes, bytes]]:
-    """Convert a list of headers to a list of binary headers."""
-    return [ (k.encode('utf-8'), v.encode('utf-8')) for k,v in headers ]
-
-def binary_to_header(headers: typing.Iterable[typing.Tuple[bytes, bytes]]) -> typing.List[typing.Tuple[str, str]]:
-    """Convert a list of binary headers to a list of headers."""
-    return [ (k.decode('utf-8'), v.decode('utf-8')) for k,v in headers ]
 
 async def send404(send):
     """respond with a 404"""
@@ -44,7 +31,11 @@ async def send404(send):
 
 async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
     """respond with a discovery"""
-    discovered_as: typing.Literal['bidi', 'request_response'] = "request_response" if scope['http_version'] == '1.1' else "bidi"
+    discovered_as: Literal["request_response", "bidi"]
+    if scope['http_version'] == '1.1':
+        discovered_as = "request_response"
+    else:
+        discovered_as = "bidi"
     headers, js = compute_discovery_json(endpoint, 1, discovered_as)
     await send({
         'type': 'http.response.start',
@@ -57,7 +48,7 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
         'more_body': False,
     })
 
-async def invoke_user_code(vm: VMWrapper, handler, receive: Receive, send: Send):
+async def process_invocation_to_completion(vm: VMWrapper, handler, receive: Receive, send: Send):
     """Invoke the user code."""
     status, res_headers = vm.get_response_head()
     await send({
@@ -66,12 +57,9 @@ async def invoke_user_code(vm: VMWrapper, handler, receive: Receive, send: Send)
         'headers': header_to_binary(res_headers),
     })
     assert status == 200
-    #
-    # read while:
-    # - VM is not ready
-    # - or there is no more body
-    # - the client has disconnected
-    #
+    # ========================================
+    # Read the input and the journal
+    # ========================================
     while True:
         message = await receive()
         if message['type'] == 'http.disconnect':
@@ -86,50 +74,16 @@ async def invoke_user_code(vm: VMWrapper, handler, receive: Receive, send: Send)
             break
         if vm.take_is_ready_to_execute():
             break
-    # lets run the user code
+    # ========================================
+    # Execute the user code
+    # ========================================
     invocation = vm.sys_input()
-    # lets call the user code
-    in_arg = handler.handler_io.deserializer(invocation.input_buffer)
-    out_arg = await handler.fn(None, in_arg)
-    # lets serialize the output
-    out_invocation = handler.handler_io.serializer(out_arg)
-    vm.sys_write_output(out_invocation)
-    vm.sys_end()
-    while True:
-        chunk = vm.take_output()
-        if not chunk:
-            break
-        await send({
-            'type': 'http.response.body',
-            'body': chunk,
-            'more_body': True,
-        })
-    # end the connection
-    vm.dispose_callbacks()
-    # The following sequence of events is expected during a teardown:
-    #
-    # {'type': 'http.request', 'body': b'', 'more_body': True}
-    # {'type': 'http.request', 'body': b'', 'more_body': False}
-    # {'type': 'http.disconnect'}
-    while True:
-        event = await receive()
-        if not event:
-            break
-        if event['type'] == 'http.disconnect':
-            break
-        if event['type'] == 'http.request' and event['more_body'] is False:
-            break
-    #
-    # finally, we close our side
-    # it is important to do it, after the other side has closed his side,
-    # because some asgi servers (like hypercorn) will remove the stream 
-    # as soon as they see a close event (in asgi terms more_body=False)
-    await send({
-        'type': 'http.response.body',
-        'body': b'',
-        'more_body': False,
-    })
-
+    context = ServerInvocationContext(vm=vm,
+                                      handler=handler,
+                                      invocation=invocation,
+                                      send=send,
+                                      receive=receive)
+    await context.enter()
 
 def asgi_app(endpoint: Endpoint):
     """Create an ASGI-3 app for the given endpoint."""
@@ -146,7 +100,9 @@ def asgi_app(endpoint: Endpoint):
         if not scope['path'].startswith('/invoke/'):
             await send404(send)
             return
-        service_name, handler_name = scope['path'][len('/invoke/'):].split('/')
+        # path is of the form: /invoke/:service/:handler
+        # strip "/invoke/" (= strlen 8) and split the service and handler
+        service_name, handler_name = scope['path'][8:].split('/')
         service = endpoint.services[service_name]
         if not service:
             await send404(send)
@@ -155,13 +111,13 @@ def asgi_app(endpoint: Endpoint):
         if not handler:
             send404(send)
             return
-                #
+        #
         # At this point we have a valid handler.
         # Let us setup restate's execution context for this invocation and handler.
         #
         assert not isinstance(scope['headers'], str)
         assert hasattr(scope['headers'], '__iter__')
         request_headers = binary_to_header(scope['headers'])
-        await invoke_user_code(VMWrapper(request_headers), handler, receive, send)
+        await process_invocation_to_completion(VMWrapper(request_headers), handler, receive, send)
 
     return app

@@ -50,25 +50,25 @@ class KeyValueStore(abc.ABC):
     """
 
     @abc.abstractmethod
-    def get(self, name: str) -> Awaitable[Optional[T]]:
+    async def get(self, name: str) -> Awaitable[Optional[T]]:
         """
         Retrieves the value associated with the given name.
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> Awaitable[List[str]]:
+    async def state_keys(self) -> Awaitable[List[str]]:
         """Returns the list of keys in the store."""
 
     @abc.abstractmethod
-    def set(self, name: str, value: T) -> None:
+    async def set(self, name: str, value: T) -> None:
         """set the value associated with the given name."""
 
     @abc.abstractmethod
-    def clear(self, name: str) -> None:
+    async def clear(self, name: str) -> None:
         """clear the value associated with the given name."""
 
     @abc.abstractmethod
-    def clear_all(self) -> None:
+    async def clear_all(self) -> None:
         """clear all the values in the store."""
 
 
@@ -78,31 +78,31 @@ class Context(abc.ABC):
     """
 
     @abc.abstractmethod
-    def request(self) -> Request:
+    async def request(self) -> Request:
         """
         Returns the request object.
         """
 
     @abc.abstractmethod
-    def run_named(self, name: str, action: RunAction[T]) -> Awaitable[T]:
+    async def run_named(self, name: str, action: RunAction[T]) -> Awaitable[T]:
         """
         Runs the given action with the given name.
         """
 
     @abc.abstractmethod
-    def sleep(self, millis: int) -> Awaitable[None]:
+    async def sleep(self, millis: int) -> Awaitable[None]:
         """
         Suspends the current invocation for the given number of milliseconds.
         """
 
     @abc.abstractmethod
-    def service_call(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I) -> Awaitable[O]:
+    async def service_call(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I) -> Awaitable[O]:
         """
         Invokes the given service with the given argument.
         """
 
     @abc.abstractmethod
-    def object_call(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I) -> Awaitable[O]:
+    async def object_call(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I) -> Awaitable[O]:
         """
         Invokes the given object with the given argument.
         """
@@ -126,17 +126,17 @@ class ObjectSharedContext(Context):
     """
 
     @abc.abstractmethod
-    def key(self) -> str:
+    async def key(self) -> str:
         """Returns the key of the current object."""
 
     @abc.abstractmethod
-    def get(self, name: str) -> Awaitable[Optional[T]]:
+    async def get(self, name: str) -> Awaitable[Optional[T]]:
         """
         Retrieves the value associated with the given name.
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> Awaitable[List[str]]:
+    async def state_keys(self) -> Awaitable[List[str]]:
         """
         Returns the list of keys in the store.
         """

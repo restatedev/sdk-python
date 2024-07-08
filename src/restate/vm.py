@@ -7,8 +7,6 @@ from dataclasses import dataclass
 import typing
 import restate_sdk_python_core
 
-AsyncResultType = typing.Optional[typing.Union[bytes, typing.Tuple[int, str]]]
-
 @dataclass
 class Invocation:
     """
@@ -27,6 +25,9 @@ class Failure:
     """
     code: int
     message: str
+
+
+AsyncResultType = typing.Optional[typing.Union[bytes, Failure]]
 
 class VMWrapper:
     """
@@ -94,7 +95,7 @@ class VMWrapper:
         if isinstance(result, restate_sdk_python_core.PyValue.Failure):
             code = result.value.code
             message = result.value.message
-            return (code, message)
+            return Failure(code, message)
         raise ValueError(f"Unknown result type: {result}")
 
     def sys_input(self) -> Invocation:
@@ -120,16 +121,30 @@ class VMWrapper:
         Writes the output to the system.
 
         Args:
-           output (typing.Union[bytes, Failure]): The output to be written. It can be either a bytes or a Failure object.
+          output: The output to be written. It can be either a bytes or a Failure object.
 
         Returns:
             None
         """
         if isinstance(output, Failure):
-            res = restate_sdk_python_core.PyNonEmptyValue.Failure(output.code, output.message)
+            res = restate_sdk_python_core.PyNonEmptyValue.Failure()
+            res.code =  output.code
+            res.message = output.message
         else:
             res = restate_sdk_python_core.PyNonEmptyValue.Success(output)
         self.vm.sys_write_output(res)
+
+    def sys_get(self, name) -> int:
+        """
+        Retrieves a key-value binding.
+
+        Args:
+            name: The name of the value to be retrieved.
+
+        Returns:
+            The value associated with the given name.
+        """
+        return self.vm.sys_get(name)
 
     def sys_end(self):
         """
