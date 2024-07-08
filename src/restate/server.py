@@ -7,6 +7,24 @@ from restate.vm import VMWrapper
 
 #pylint: disable=C0301
 
+
+from typing import Awaitable, Callable, Dict, List, Tuple, Union
+
+# Scope is a dictionary with string keys and values that can be any type.
+Scope = Dict[str, Union[str, List[Tuple[bytes, bytes]]]]
+
+# Message is a dictionary with string keys and values that can be any type.
+Message = Dict[str, Union[str, int, bytes, bool, Dict[str, str], Dict[bytes, bytes], List[Tuple[bytes, bytes]]]]
+
+# Receive is an asynchronous callable that returns a Message.
+Receive = Callable[[], Awaitable[Message]]
+
+# Send is an asynchronous callable that takes a Message as an argument.
+Send = Callable[[Message], Awaitable[None]]
+
+# The main ASGI application type is an asynchronous callable that takes a Scope, a Receive callable, and a Send callable.
+ASGIApp = Callable[[Scope, Receive, Send], None]
+
 def header_to_binary(headers: typing.Iterable[typing.Tuple[str, str]]) -> typing.List[typing.Tuple[bytes, bytes]]:
     """Convert a list of headers to a list of binary headers."""
     return [ (k.encode('utf-8'), v.encode('utf-8')) for k,v in headers ]
@@ -30,7 +48,7 @@ def asgi_app(endpoint: Endpoint):
             'more_body': False,
         })
 
-    async def app(scope, receive, send):
+    async def app(scope: Scope, receive: Receive, send: Send):
         if scope['type'] != 'http':
             raise NotImplementedError(f"Unknown scope type {scope['type']}")
 
@@ -50,6 +68,7 @@ def asgi_app(endpoint: Endpoint):
             })
             return
         # anything other than invoke is 404
+        assert isinstance(scope['path'], str)
         if not scope['path'].startswith('/invoke/'):
             await send404(send)
             return
@@ -66,6 +85,8 @@ def asgi_app(endpoint: Endpoint):
         # At this point we have a valid handler.
         # Let us setup restate's execution context for this invocation and handler.
         #
+        assert not isinstance(scope['headers'], str)
+        assert hasattr(scope['headers'], '__iter__')
         vm = VMWrapper(binary_to_header(scope['headers']))
         status, res_headers = vm.get_response_head()
         await send({
@@ -87,6 +108,7 @@ def asgi_app(endpoint: Endpoint):
                 vm.dispose_callbacks()
                 return
             if message['type'] == 'http.request':
+                assert isinstance(message['body'], bytes)
                 vm.notify_input(message['body'])
             if not message.get('more_body', False):
                 vm.notify_input_closed()
@@ -97,13 +119,7 @@ def asgi_app(endpoint: Endpoint):
         invocation = vm.sys_input()
         # lets call the user code
         in_arg = handler.handler_io.deserializer(invocation.input_buffer)
-
-
-    
-
         out_arg = await handler.fn(None, in_arg)
-
-
         # lets serialize the output
         out_invocation = handler.handler_io.serializer(out_arg)
         vm.sys_write_output(out_invocation)

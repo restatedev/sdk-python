@@ -29,6 +29,15 @@ clean:
 	@echo "Cleaning the project"
 	rm -rf dist/
 
+example:
+	#!/usr/bin/env bash
+	if [ -z "$PYTHONPATH" ]; then
+		export PYTHONPATH="src/"
+	else
+		export PYTHONPATH="$PYTHONPATH:src/"
+	fi
+	hypercorn -b "0.0.0.0:9080" example:app
+
 # Default recipe to show help message
 default:
     @echo "Available recipes:"
