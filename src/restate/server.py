@@ -1,14 +1,12 @@
 """This module contains the ASGI server for the restate framework."""
 
 import typing
+from typing import Awaitable, Callable, Dict, List, Tuple, Union
+
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
 from restate.vm import VMWrapper
 
-#pylint: disable=C0301
-
-
-from typing import Awaitable, Callable, Dict, List, Tuple, Union
 
 # Scope is a dictionary with string keys and values that can be any type.
 Scope = Dict[str, Union[str, List[Tuple[bytes, bytes]]]]
@@ -33,39 +31,115 @@ def binary_to_header(headers: typing.Iterable[typing.Tuple[bytes, bytes]]) -> ty
     """Convert a list of binary headers to a list of headers."""
     return [ (k.decode('utf-8'), v.decode('utf-8')) for k,v in headers ]
 
-def asgi_app(endpoint: Endpoint):
-    """Create an ASGI-3 app for the given endpoint."""
-
-    async def send404(send):
-        await send({
+async def send404(send):
+    """respond with a 404"""
+    await send({
             'type': 'http.response.start',
             'status': 404,
-            'headers': [],
-        })
-        await send({
+            'headers': []})
+    await send({
             'type': 'http.response.body',
             'body': b'',
-            'more_body': False,
+            'more_body': False})
+
+async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
+    """respond with a discovery"""
+    discovered_as: typing.Literal['bidi', 'request_response'] = "request_response" if scope['http_version'] == '1.1' else "bidi"
+    headers, js = compute_discovery_json(endpoint, 1, discovered_as)
+    await send({
+        'type': 'http.response.start',
+        'status': 200,
+        'headers': header_to_binary(headers.items()),
         })
+    await send({
+        'type': 'http.response.body',
+        'body': js.encode('utf-8'),
+        'more_body': False,
+    })
+
+async def invoke_user_code(vm: VMWrapper, handler, receive: Receive, send: Send):
+    """Invoke the user code."""
+    status, res_headers = vm.get_response_head()
+    await send({
+        'type': 'http.response.start',
+        'status': status,
+        'headers': header_to_binary(res_headers),
+    })
+    assert status == 200
+    #
+    # read while:
+    # - VM is not ready
+    # - or there is no more body
+    # - the client has disconnected
+    #
+    while True:
+        message = await receive()
+        if message['type'] == 'http.disconnect':
+            # everything ends here really ...
+            vm.dispose_callbacks()
+            return
+        if message['type'] == 'http.request':
+            assert isinstance(message['body'], bytes)
+            vm.notify_input(message['body'])
+        if not message.get('more_body', False):
+            vm.notify_input_closed()
+            break
+        if vm.take_is_ready_to_execute():
+            break
+    # lets run the user code
+    invocation = vm.sys_input()
+    # lets call the user code
+    in_arg = handler.handler_io.deserializer(invocation.input_buffer)
+    out_arg = await handler.fn(None, in_arg)
+    # lets serialize the output
+    out_invocation = handler.handler_io.serializer(out_arg)
+    vm.sys_write_output(out_invocation)
+    vm.sys_end()
+    while True:
+        chunk = vm.take_output()
+        if not chunk:
+            break
+        await send({
+            'type': 'http.response.body',
+            'body': chunk,
+            'more_body': True,
+        })
+    # end the connection
+    vm.dispose_callbacks()
+    # The following sequence of events is expected during a teardown:
+    #
+    # {'type': 'http.request', 'body': b'', 'more_body': True}
+    # {'type': 'http.request', 'body': b'', 'more_body': False}
+    # {'type': 'http.disconnect'}
+    while True:
+        event = await receive()
+        if not event:
+            break
+        if event['type'] == 'http.disconnect':
+            break
+        if event['type'] == 'http.request' and event['more_body'] is False:
+            break
+    #
+    # finally, we close our side
+    # it is important to do it, after the other side has closed his side,
+    # because some asgi servers (like hypercorn) will remove the stream 
+    # as soon as they see a close event (in asgi terms more_body=False)
+    await send({
+        'type': 'http.response.body',
+        'body': b'',
+        'more_body': False,
+    })
+
+
+def asgi_app(endpoint: Endpoint):
+    """Create an ASGI-3 app for the given endpoint."""
 
     async def app(scope: Scope, receive: Receive, send: Send):
         if scope['type'] != 'http':
             raise NotImplementedError(f"Unknown scope type {scope['type']}")
-
         # might be a discovery request
         if scope['path'] == '/discover':
-            discovered_as: typing.Literal['bidi', 'request_response'] = "request_response" if scope['http_version'] == '1.1' else "bidi"
-            headers, js = compute_discovery_json(endpoint, 1, discovered_as)
-            await send({
-                'type': 'http.response.start',
-                'status': 200,
-                'headers': header_to_binary(headers.items()),
-            })
-            await send({
-                'type': 'http.response.body',
-                'body': js.encode('utf-8'),
-                'more_body': False,
-            })
+            await send_discovery(scope, send, endpoint)
             return
         # anything other than invoke is 404
         assert isinstance(scope['path'], str)
@@ -81,83 +155,13 @@ def asgi_app(endpoint: Endpoint):
         if not handler:
             send404(send)
             return
-        #
+                #
         # At this point we have a valid handler.
         # Let us setup restate's execution context for this invocation and handler.
         #
         assert not isinstance(scope['headers'], str)
         assert hasattr(scope['headers'], '__iter__')
-        vm = VMWrapper(binary_to_header(scope['headers']))
-        status, res_headers = vm.get_response_head()
-        await send({
-            'type': 'http.response.start',
-            'status': status,
-            'headers': header_to_binary(res_headers),
-        })
-        assert status == 200
-        #
-        # read while:
-        # - VM is not ready
-        # - or there is no more body
-        # - the client has disconnected
-        #
-        while True:
-            message = await receive()
-            if message['type'] == 'http.disconnect':
-                # everything ends here really ...
-                vm.dispose_callbacks()
-                return
-            if message['type'] == 'http.request':
-                assert isinstance(message['body'], bytes)
-                vm.notify_input(message['body'])
-            if not message.get('more_body', False):
-                vm.notify_input_closed()
-                break
-            if vm.take_is_ready_to_execute():
-                break
-        # lets run the user code
-        invocation = vm.sys_input()
-        # lets call the user code
-        in_arg = handler.handler_io.deserializer(invocation.input_buffer)
-        out_arg = await handler.fn(None, in_arg)
-        # lets serialize the output
-        out_invocation = handler.handler_io.serializer(out_arg)
-        vm.sys_write_output(out_invocation)
-        vm.sys_end()
-        while True:
-            chunk = vm.take_output()
-            if not chunk:
-                break
-            await send({
-                'type': 'http.response.body',
-                'body': chunk,
-                'more_body': True,
-            })
-        # end the connection
-        vm.dispose_callbacks()
+        request_headers = binary_to_header(scope['headers'])
+        await invoke_user_code(VMWrapper(request_headers), handler, receive, send)
 
-        # The following sequence of events is expected during a teardown:
-        #
-        # {'type': 'http.request', 'body': b'', 'more_body': True}
-        # {'type': 'http.request', 'body': b'', 'more_body': False}
-        # {'type': 'http.disconnect'}
-        while True:
-            event = await receive()
-            if not event:
-                break
-            if event['type'] == 'http.disconnect':
-                break
-            if event['type'] == 'http.request' and event['more_body'] is False:
-                break
-        #
-        # finally, we close our side
-        # it is important to do it, after the other side has closed his side,
-        # because some asgi servers (like hypercorn) will remove the stream 
-        # as soon as they see a close event (in asgi terms more_body=False)
-        await send({
-            'type': 'http.response.body',
-            'body': b'',
-            'more_body': False,
-        })
-        return
     return app
