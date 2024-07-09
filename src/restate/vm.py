@@ -16,6 +16,7 @@ class Invocation:
     random_seed: int
     headers: typing.List[typing.Tuple[str, str]]
     input_buffer: bytes
+    key: str
 
 
 @dataclass
@@ -120,11 +121,14 @@ class VMWrapper:
         random_seed: int = inp.random_seed
         headers: typing.List[typing.Tuple[str, str]] = inp.headers
         input_buffer: bytes = bytes(inp.input)
+        key: str = inp.key
+
         return Invocation(
             invocation_id=invocation_id,
             random_seed=random_seed,
             headers=headers,
-            input_buffer=input_buffer)
+            input_buffer=input_buffer,
+            key=key)
 
     def sys_write_output_success(self, output: bytes):
         """
@@ -152,7 +156,7 @@ class VMWrapper:
         self.vm.sys_write_output_failure(res)
 
 
-    def sys_get(self, name) -> int:
+    def sys_get_state(self, name) -> int:
         """
         Retrieves a key-value binding.
 
@@ -162,9 +166,9 @@ class VMWrapper:
         Returns:
             The value associated with the given name.
         """
-        return self.vm.sys_get(name)
+        return self.vm.sys_get_state(name)
 
-    def sys_set(self, name: str, value: bytes):
+    def sys_set_state(self, name: str, value: bytes):
         """
         Sets a key-value binding.
 
@@ -175,7 +179,7 @@ class VMWrapper:
         Returns:
             None
         """
-        self.vm.sys_set(name, value)
+        self.vm.sys_set_state(name, value)
 
     def sys_run_enter(self, name: str) -> typing.Union[bytes, None, Failure]:
         """

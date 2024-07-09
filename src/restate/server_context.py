@@ -138,7 +138,7 @@ class ServerInvocationContext(ObjectContext):
             return res
 
     def get(self, name: str) -> typing.Awaitable[typing.Any | None]:
-        coro = self.create_poll_coroutine(self.vm.sys_get(name))
+        coro = self.create_poll_coroutine(self.vm.sys_get_state(name))
 
         async def await_point():
             """Wait for this handle to be resolved."""
@@ -155,7 +155,7 @@ class ServerInvocationContext(ObjectContext):
     def set(self, name: str, value: T) -> None:
         """Set the value associated with the given name."""
         buffer = json.dumps(value).encode('utf-8')
-        self.vm.sys_set(name, bytes(buffer))
+        self.vm.sys_set_state(name, bytes(buffer))
 
     def clear(self, name: str) -> None:
         raise NotImplementedError
@@ -210,4 +210,4 @@ class ServerInvocationContext(ObjectContext):
         raise NotImplementedError
 
     def key(self) -> str:
-        raise NotImplementedError
+        return self.invocation.key
