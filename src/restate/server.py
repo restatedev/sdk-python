@@ -72,7 +72,7 @@ async def process_invocation_to_completion(vm: VMWrapper, handler, receive: Rece
         if not message.get('more_body', False):
             vm.notify_input_closed()
             break
-        if vm.take_is_ready_to_execute():
+        if vm.is_ready_to_execute():
             break
     # ========================================
     # Execute the user code
@@ -84,6 +84,7 @@ async def process_invocation_to_completion(vm: VMWrapper, handler, receive: Rece
                                       send=send,
                                       receive=receive)
     await context.enter()
+    await context.leave()
 
 def asgi_app(endpoint: Endpoint):
     """Create an ASGI-3 app for the given endpoint."""

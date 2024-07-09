@@ -33,7 +33,10 @@ counter = VirtualObject("counter")
 
 @counter.handler()
 async def increment(ctx: ObjectContext, value: int) -> int:
-    return value + 1
+    n = await ctx.get("counter") or 0
+    n += 1
+    ctx.set("counter", n)
+    return n
 
 @counter.handler(kind="shared")
 async def count(ctx: ObjectContext, value: int) -> int:

@@ -11,14 +11,14 @@
 """This module contains the restate context implementation based on the server"""
 
 from typing import Any, Awaitable, Callable, List, TypeVar
-
 import json
+import typing
 
 from restate.context import ObjectContext, Request
 from restate.exceptions import TerminalError
 from restate.handler import Handler
 from restate.server_types import Receive, Send 
-from restate.vm import Failure, Invocation, VMWrapper
+from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper
 
 
 T = TypeVar('T')
@@ -56,13 +56,20 @@ class ServerInvocationContext(ObjectContext):
             out_arg = await self.handler.fn(self, in_arg)
             out_buffer = self.handler.handler_io.serializer(out_arg)
             self.vm.sys_write_output(out_buffer)
+            self.vm.sys_end()
         except TerminalError as t:
             failure = Failure(code=t.status_code, message=t.message)
             self.vm.sys_write_output(failure)
+            self.vm.sys_end()
         # pylint: disable=W0718
+        except SuspendedException:
+            pass
         except Exception as e:
             self.vm.notify_error(str(e))
-        self.vm.sys_end()
+            # no need to call sys_end here, because the error will be propagated
+
+    async def leave(self):
+        """Leave the context."""
         while True:
             chunk = self.vm.take_output()
             if not chunk:
@@ -99,7 +106,8 @@ class ServerInvocationContext(ObjectContext):
             'more_body': False,
         })
 
-    async def create_poll_coroutine(self, handle) -> Awaitable[bytes | None]:
+
+    async def create_poll_coroutine(self, handle) -> bytes | None:
         """Create a coroutine to poll the handle."""
         output = self.vm.take_output()
         if output:
@@ -108,58 +116,62 @@ class ServerInvocationContext(ObjectContext):
                 'body': bytes(output),
                 'more_body': True,
             })
-
-        async def coro():
-            """Wait for this handle to be resolved."""
-            while True:
+        self.vm.notify_await_point(handle)
+        while True:
+            res = self.vm.take_async_result(handle)
+            if isinstance(res, NotReady):
                 chunk = await self.receive()
-                assert isinstance(chunk['body'], bytes)
-                self.vm.notify_input(chunk['body'])
-                result = self.vm.take_async_result(handle)
-                if result is None:
-                    return None
-                if isinstance(result, Failure):
-                    raise TerminalError(result.message, result.code)
-                return result
+                if chunk['body']:
+                    assert isinstance(chunk['body'], bytes)
+                    self.vm.notify_input(chunk['body'])
+                if not chunk.get('more_body', False):
+                    self.vm.notify_input_closed()
+                continue
+            if res is None:
+                return None
+            if isinstance(res, Failure):
+                raise TerminalError(res.message, res.code)
+            return res
 
-        return coro()
-
-    async def get(self, name: str) -> Awaitable[T | None]:
-        coro = await self.create_poll_coroutine(self.vm.sys_get(name))
+    def get(self, name: str) -> typing.Awaitable[typing.Any | None]:
+        coro = self.create_poll_coroutine(self.vm.sys_get(name))
 
         async def await_point():
             """Wait for this handle to be resolved."""
             res = await coro
-            assert res is not None
-            return json.loads(res)
+            if res:
+                return json.loads(res.decode('utf-8'))
+            return None
 
-        return await_point()
-       
-    async def state_keys(self) -> Awaitable[List[str]]:
+        return await_point() # do not await here, the caller will do it.
+
+    def state_keys(self) -> Awaitable[List[str]]:
         raise NotImplementedError
 
-    async def set(self, name: str, value: T) -> None:
+    def set(self, name: str, value: T) -> None:
+        """Set the value associated with the given name."""
+        buffer = json.dumps(value).encode('utf-8')
+        self.vm.sys_set(name, buffer)
+
+    def clear(self, name: str) -> None:
         raise NotImplementedError
 
-    async def clear(self, name: str) -> None:
+    def clear_all(self) -> None:
         raise NotImplementedError
 
-    async def clear_all(self) -> None:
+    def request(self) -> Request:
         raise NotImplementedError
 
-    async def request(self) -> Request:
+    def run_named(self, name: str, action: Callable[[], T] | Callable[[], Awaitable[T]]) -> Awaitable[T]:
         raise NotImplementedError
 
-    async def run_named(self, name: str, action: Callable[[], T] | Callable[[], Awaitable[T]]) -> Awaitable[T]:
+    def sleep(self, millis: int) -> Awaitable[None]:
         raise NotImplementedError
 
-    async def sleep(self, millis: int) -> Awaitable[None]:
+    def service_call(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I) -> Awaitable[O]:
         raise NotImplementedError
 
-    async def service_call(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I) -> Awaitable[O]:
-        raise NotImplementedError
-
-    async def object_call(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I) -> Awaitable[O]:
+    def object_call(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I) -> Awaitable[O]:
         raise NotImplementedError
 
     def key(self) -> str:

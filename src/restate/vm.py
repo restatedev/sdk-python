@@ -26,8 +26,23 @@ class Failure:
     code: int
     message: str
 
+@dataclass
+class NotReady:
+    """
+    NotReady
+    """
+    pass
 
-AsyncResultType = typing.Optional[typing.Union[bytes, Failure]]
+class SuspendedException(Exception):
+    """
+    Suspended Exception
+    """
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+
+NOT_READY = NotReady()
+
+AsyncResultType = typing.Optional[typing.Union[bytes, Failure, NotReady]]
 
 class VMWrapper:
     """
@@ -60,6 +75,10 @@ class VMWrapper:
         """Notify the virtual machine of an error."""
         self.vm.notify_error(error)
 
+    def notify_await_point(self, handle: int):
+        """Notify the virtual machine of an await point."""
+        self.vm.notify_await_point(handle)
+
     def take_output(self) -> typing.Optional[bytes]:
         """Take the output from the virtual machine."""
         result = self.vm.take_output()
@@ -73,9 +92,9 @@ class VMWrapper:
         """Register a callback to be called when the virtual machine is ready to execute."""
         self.vm.on_ready_to_execute(fn)
 
-    def take_is_ready_to_execute(self) -> bool:
-        """Take the result of an asynchronous operation."""
-        return self.vm.take_is_ready_to_execute()
+    def is_ready_to_execute(self) -> bool:
+        """Returns true when the VM is ready to operate."""
+        return self.vm.is_ready_to_execute()
 
     def on_async_ready(self, handle: typing.Any, fn: typing.Callable[[], None]):
         """Register a callback to be called when the virtual machine is ready to execute."""
@@ -87,16 +106,22 @@ class VMWrapper:
 
     def take_async_result(self, handle: typing.Any) -> AsyncResultType:
         """Take the result of an asynchronous operation."""
-        result = self.vm.take_async_result(handle)
-        if isinstance(result, restate_sdk_python_core.PyValue.Void):
-            return None
-        if isinstance(result, restate_sdk_python_core.PyValue.Success):
-            return result.value
-        if isinstance(result, restate_sdk_python_core.PyValue.Failure):
-            code = result.value.code
-            message = result.value.message
-            return Failure(code, message)
-        raise ValueError(f"Unknown result type: {result}")
+        try:
+            result = self.vm.take_async_result(handle)
+            if isinstance(result, restate_sdk_python_core.PyValue.Void):
+                return None
+            if isinstance(result, restate_sdk_python_core.PyValue.Success):
+                return bytes(result._0)
+            if isinstance(result, restate_sdk_python_core.PyValue.Failure):
+                code = result._0.code
+                message = result._0.message
+                return Failure(code, message)
+            raise ValueError(f"Unknown result type: {result}")
+        except restate_sdk_python_core.SuspendedException:
+            print('hi')
+            raise SuspendedException()
+        except restate_sdk_python_core.NotReadyException:
+            return NOT_READY
 
     def sys_input(self) -> Invocation:
         """
@@ -145,6 +170,19 @@ class VMWrapper:
             The value associated with the given name.
         """
         return self.vm.sys_get(name)
+
+    def sys_set(self, name: str, value: bytes):
+        """
+        Sets a key-value binding.
+
+        Args:
+            name: The name of the value to be set.
+            value: The value to be set.
+
+        Returns:
+            None
+        """
+        self.vm.sys_set(name, value)
 
     def sys_end(self):
         """
