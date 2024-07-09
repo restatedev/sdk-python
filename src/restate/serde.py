@@ -13,6 +13,8 @@
 import json
 import typing
 
+from restate.context import Serde
+
 I = typing.TypeVar('I')
 O = typing.TypeVar('O')
 
@@ -26,6 +28,40 @@ class SerializerType(typing.Generic[O]):
 class DeserializerType(typing.Generic[I]):
     """A type definition for a deserializer"""
     __call__: typing.Callable[[bytes], typing.Optional[I]]
+
+
+
+class JsonSerde(Serde[I]):
+    """A JSON serializer/deserializer."""
+
+    def deserialize(self, buf: bytes) -> typing.Optional[I]:
+        """
+        Deserializes a bytearray to a JSON object.
+
+        Args:
+            buf (bytearray): The bytearray to deserialize.
+
+        Returns:
+            typing.Optional[I]: The deserialized JSON object.
+        """
+        if not buf:
+            return None
+        return json.loads(buf)
+
+    def serialize(self, obj: typing.Optional[I]) -> bytes:
+        """
+        Serializes a JSON object to a bytearray.
+
+        Args:
+            obj (I): The JSON object to serialize.
+
+        Returns:
+            bytearray: The serialized bytearray.
+        """
+        if obj is None:
+            return bytes()
+
+        return bytes(json.dumps(obj), "utf-8")
 
 
 

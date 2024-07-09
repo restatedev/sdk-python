@@ -10,13 +10,15 @@
 #
 """This module contains the restate context implementation based on the server"""
 
-from typing import Any, Awaitable, Callable, Dict, List, TypeVar
+import inspect
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import json
 import typing
 
-from restate.context import ObjectContext, Request
+from restate.context import ObjectContext, Request, Serde
 from restate.exceptions import TerminalError
 from restate.handler import Handler, invoke_handler
+from restate.serde import JsonSerde
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper
 
@@ -31,6 +33,9 @@ O = TypeVar('O')
 # disable line too long
 # pylint: disable=C0301
 
+async def async_value(n: Callable[[], T]) -> T:
+    """convert a simple value to a coroutine."""
+    return n()
 
 class ServerInvocationContext(ObjectContext):
     """This class implements the context for the restate framework based on the server."""
@@ -166,8 +171,34 @@ class ServerInvocationContext(ObjectContext):
             body=self.invocation.input_buffer,
         )
 
-    def run_named(self, name: str, action: Callable[[], T] | Callable[[], Awaitable[T]]) -> Awaitable[T]:
-        raise NotImplementedError
+    # pylint: disable=W0236
+    async def run(self,
+                  name: str,
+                  action: Callable[[], T] | Callable[[], Awaitable[T]],
+                  serde: Optional[Serde[T]] = JsonSerde()) -> T |  None:
+        assert serde is not None
+        res = self.vm.sys_run_enter(name)
+        if isinstance(res, Failure):
+            raise TerminalError(res.message, res.code)
+        if isinstance(res, bytes):
+            return serde.deserialize(res)
+        # the side effect was not executed before, so we need to execute it now
+        assert res is None
+        try:
+            if inspect.iscoroutinefunction(action):
+                action_result = await action() # type: ignore
+            else:
+                action_result = action()
+            buffer = serde.serialize(action_result)
+            handle = self.vm.sys_run_exit_success(buffer)
+            await self.create_poll_coroutine(handle)
+            return action_result
+        except TerminalError as t:
+            failure = Failure(code=t.status_code, message=t.message)
+            handle = self.vm.sys_run_exit_failure(failure)
+            await self.create_poll_coroutine(handle)
+            # unreachable
+            assert False
 
     def sleep(self, millis: int) -> Awaitable[None]:
         raise NotImplementedError

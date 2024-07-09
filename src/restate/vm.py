@@ -100,8 +100,8 @@ class VMWrapper:
             return result
         if isinstance(result, restate_sdk_python_core.PyFailure):
             # a terminal failure
-            code = result._0.code # pylint: disable=protected-access
-            message = result._0.message # pylint: disable=protected-access
+            code = result.code # pylint: disable=protected-access
+            message = result.message # pylint: disable=protected-access
             return Failure(code, message)
         if isinstance(result, restate_sdk_python_core.PySuspended):
             # the state machine had suspended
@@ -176,6 +176,46 @@ class VMWrapper:
             None
         """
         self.vm.sys_set(name, value)
+
+    def sys_run_enter(self, name: str) -> typing.Union[bytes, None, Failure]:
+        """
+        Enter a side effect
+
+        Returns:
+            None if the side effect was not journald.
+            PyFailure if the side effect failed.
+            bytes if the side effect was successful.
+        """
+        result = self.vm.sys_run_enter(name)
+        if not result:
+            return None
+        if isinstance(result, restate_sdk_python_core.PyFailure):
+            return Failure(result.code, result.message) # pylint: disable=protected-access
+        assert isinstance(result, bytes)
+        return result
+
+    def sys_run_exit_success(self, output: bytes) -> int:
+        """
+        Exit a side effect
+        
+        Args:
+            output: The output of the side effect.
+
+        Returns:
+            handle
+        """
+        return self.vm.sys_run_exit_success(output)
+
+    def sys_run_exit_failure(self, output: Failure) -> int:
+        """
+        Exit a side effect
+
+        Args:
+            name: The name of the side effect.
+            output: The output of the side effect.
+        """
+        res = restate_sdk_python_core.PyFailure(output.code, output.message)
+        return self.vm.sys_run_exit_failure(res)
 
     def sys_end(self):
         """

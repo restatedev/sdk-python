@@ -23,6 +23,21 @@ O = TypeVar('O')
 
 RunAction = Union[Callable[[], T], Callable[[], Awaitable[T]]]
 
+class Serde(typing.Generic[T], abc.ABC):
+    """serializer/deserializer interface."""
+
+    @abc.abstractmethod
+    def deserialize(self, buf: bytes) -> typing.Optional[T]:
+        """
+        Deserializes a bytearray to an object.
+        """
+
+    @abc.abstractmethod
+    def serialize(self, obj: typing.Optional[T]) -> bytes:
+        """
+        Serializes an object to a bytearray.
+        """
+
 @dataclass
 class Request:
     """
@@ -85,7 +100,10 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def run_named(self, name: str, action: RunAction[T]) -> Awaitable[T]:
+    def run(self,
+            name: str,
+            action: RunAction[T],
+            serde: Optional[Serde[T]] = None) -> Awaitable[T | None]:
         """
         Runs the given action with the given name.
         """
