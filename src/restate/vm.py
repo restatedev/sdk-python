@@ -75,30 +75,17 @@ class VMWrapper:
         """Notify the virtual machine of an error."""
         self.vm.notify_error(error)
 
+    def take_output(self) -> typing.Optional[bytes]:
+        """Take the output from the virtual machine."""
+        return self.vm.take_output()
+
     def notify_await_point(self, handle: int):
         """Notify the virtual machine of an await point."""
         self.vm.notify_await_point(handle)
-
-    def take_output(self) -> typing.Optional[bytes]:
-        """Take the output from the virtual machine."""
-        result = self.vm.take_output()
-        if isinstance(result, restate_sdk_python_core.PyTakeOutputResult.EOF):
-            return None
-        if isinstance(result, restate_sdk_python_core.PyTakeOutputResult.Buffer):
-            return bytes(result._0)
-        raise ValueError(f"Unknown result type: {result}")
-
-    def on_ready_to_execute(self, fn: typing.Callable[[typing.Optional[Exception]], None]):
-        """Register a callback to be called when the virtual machine is ready to execute."""
-        self.vm.on_ready_to_execute(fn)
-
+    
     def is_ready_to_execute(self) -> bool:
         """Returns true when the VM is ready to operate."""
         return self.vm.is_ready_to_execute()
-
-    def on_async_ready(self, handle: typing.Any, fn: typing.Callable[[], None]):
-        """Register a callback to be called when the virtual machine is ready to execute."""
-        self.vm.on_async_ready(handle, fn)
 
     def dispose_callbacks(self):
         """Clear all callbacks"""
@@ -108,20 +95,20 @@ class VMWrapper:
         """Take the result of an asynchronous operation."""
         try:
             result = self.vm.take_async_result(handle)
-            if isinstance(result, restate_sdk_python_core.PyValue.Void):
+            if not result:
+                return NOT_READY
+            if isinstance(result, restate_sdk_python_core.PyVoid):
                 return None
-            if isinstance(result, restate_sdk_python_core.PyValue.Success):
-                return bytes(result._0)
-            if isinstance(result, restate_sdk_python_core.PyValue.Failure):
+            if isinstance(result, bytes):
+                return result
+            if isinstance(result, restate_sdk_python_core.PyFailure):
                 code = result._0.code
                 message = result._0.message
                 return Failure(code, message)
             raise ValueError(f"Unknown result type: {result}")
         except restate_sdk_python_core.SuspendedException:
-            print('hi')
+            print('suspended')
             raise SuspendedException()
-        except restate_sdk_python_core.NotReadyException:
-            return NOT_READY
 
     def sys_input(self) -> Invocation:
         """
@@ -141,7 +128,7 @@ class VMWrapper:
             headers=headers,
             input_buffer=input_buffer)
 
-    def sys_write_output(self, output: typing.Union[bytes, Failure]):
+    def sys_write_output_success(self, output: bytes):
         """
         Writes the output to the system.
 
@@ -151,13 +138,21 @@ class VMWrapper:
         Returns:
             None
         """
-        if isinstance(output, Failure):
-            res = restate_sdk_python_core.PyNonEmptyValue.Failure()
-            res.code =  output.code
-            res.message = output.message
-        else:
-            res = restate_sdk_python_core.PyNonEmptyValue.Success(output)
-        self.vm.sys_write_output(res)
+        self.vm.sys_write_output_success(output)
+    
+    def sys_write_output_failure(self, output: Failure):
+        """
+        Writes the output to the system.
+
+        Args:
+          output: The output to be written. It can be either a bytes or a Failure object.
+
+        Returns:
+            None
+        """
+        res = restate_sdk_python_core.PyFailure(output.code, output.message)
+        self.vm.sys_write_output_failure(res)
+
 
     def sys_get(self, name) -> int:
         """

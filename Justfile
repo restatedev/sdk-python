@@ -5,7 +5,7 @@ python := "python3"
 # Recipe to run mypy for type checking
 mypy:
     @echo "Running mypy..."
-    {{python}} -m mypy --check-untyped-defs src/
+    {{python}} -m mypy --check-untyped-defs --ignore-missing-imports src/
 
 # Recipe to run pylint for linting
 pylint:

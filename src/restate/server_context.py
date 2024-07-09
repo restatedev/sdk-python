@@ -52,14 +52,14 @@ class ServerInvocationContext(ObjectContext):
         """Invoke the user code."""
         try:
             in_buffer = self.invocation.input_buffer
-            in_arg = self.handler.handler_io.deserializer(in_buffer)
-            out_arg = await self.handler.fn(self, in_arg)
-            out_buffer = self.handler.handler_io.serializer(out_arg)
-            self.vm.sys_write_output(out_buffer)
+            in_arg = self.handler.handler_io.deserializer(in_buffer) # type: ignore
+            out_arg = await self.handler.fn(self, in_arg) # type: ignore
+            out_buffer = self.handler.handler_io.serializer(out_arg) # type: ignore
+            self.vm.sys_write_output_success(bytes(out_buffer))
             self.vm.sys_end()
         except TerminalError as t:
             failure = Failure(code=t.status_code, message=t.message)
-            self.vm.sys_write_output(failure)
+            self.vm.sys_write_output_failure(failure)
             self.vm.sys_end()
         # pylint: disable=W0718
         except SuspendedException:
@@ -151,7 +151,7 @@ class ServerInvocationContext(ObjectContext):
     def set(self, name: str, value: T) -> None:
         """Set the value associated with the given name."""
         buffer = json.dumps(value).encode('utf-8')
-        self.vm.sys_set(name, buffer)
+        self.vm.sys_set(name, bytes(buffer))
 
     def clear(self, name: str) -> None:
         raise NotImplementedError

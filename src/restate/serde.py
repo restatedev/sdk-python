@@ -43,7 +43,7 @@ def deserialize_json(buf: typing.ByteString) -> typing.Optional[O]:
         return None
     return json.loads(buf)
 
-def serialize_json(obj: typing.Optional[O]) -> typing.ByteString:
+def serialize_json(obj: typing.Optional[O]) -> bytes:
     """
     Serializes a JSON object to a bytearray.
 
@@ -54,6 +54,6 @@ def serialize_json(obj: typing.Optional[O]) -> typing.ByteString:
         bytearray: The serialized bytearray.
     """
     if obj is None:
-        return bytearray()
+        return bytes()
 
-    return bytearray(json.dumps(obj), "utf-8")
+    return bytes(json.dumps(obj), "utf-8")
