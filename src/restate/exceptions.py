@@ -8,6 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
+"""This module contains the restate exceptions"""
 
 class TerminalError(Exception):
     """This exception is raised to indicate a termination of the execution"""

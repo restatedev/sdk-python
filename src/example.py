@@ -14,7 +14,7 @@
 
 
 from restate.service import Service
-from restate.context import Context, ObjectContext
+from restate.context import Context, ObjectContext, ObjectSharedContext
 from restate.endpoint import endpoint
 from restate.object import VirtualObject
 
@@ -39,7 +39,8 @@ async def increment(ctx: ObjectContext, value: int) -> int:
     return n
 
 @counter.handler(kind="shared")
-async def count(ctx: ObjectContext, value: int) -> int:
-    return value
+async def count(ctx: ObjectSharedContext) -> int:
+    return await ctx.get("counter") or 0
 
-app = endpoint().bind(greeter, counter).asgi_app()
+
+app = endpoint().bind(greeter, counter).app()

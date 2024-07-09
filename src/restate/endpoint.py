@@ -30,13 +30,13 @@ class Endpoint:
 
     services: typing.Dict[str, typing.Union[Service, VirtualObject]]
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]]
-    
+
     def __init__(self):
         """
         Create a new restate endpoint that serves as a container for all the services and objects
         """
         self.services = {}
-        # we will let the user to override it later perhaps, but for now let us 
+        # we will let the user to override it later perhaps, but for now let us
         # auto deduce it on discovery.
         # None means that the user did not explicitly set it.
         self.protocol = None
@@ -60,7 +60,7 @@ class Endpoint:
             self.services[service.name] = service
         return self
 
-    def asgi_app(self):
+    def app(self):
         """
         Returns the ASGI application for this endpoint.
 
@@ -72,6 +72,7 @@ class Endpoint:
        """
         # we need to import it here to avoid circular dependencies
         # pylint: disable=C0415
+        # pylint: disable=R0401
         from restate.server import asgi_app
         return asgi_app(self)
 

@@ -14,12 +14,12 @@ which is used to define the handlers for the services.
 """
 
 from dataclasses import dataclass
-import typing
+from typing import Any, Callable, Awaitable, Generic, Literal, Optional, TypeVar
 
 from restate.serde import DeserializerType, SerializerType
 
-I = typing.TypeVar('I')
-O = typing.TypeVar('O')
+I = TypeVar('I')
+O = TypeVar('O')
 
 # we will use this symbol to store the handler in the function
 RESTATE_UNIQUE_HANDLER_SYMBOL = object()
@@ -29,11 +29,11 @@ class ServiceTag:
     """
     This class is used to identify the service.
     """
-    kind: typing.Literal["object", "service", "workflow"]
+    kind: Literal["object", "service", "workflow"]
     name: str
 
 @dataclass
-class HandlerIO(typing.Generic[I, O]):
+class HandlerIO(Generic[I, O]):
     """
     Represents the input/output configuration for a handler.
 
@@ -49,22 +49,27 @@ class HandlerIO(typing.Generic[I, O]):
     deserializer: DeserializerType[I]
 
 @dataclass
-class Handler(typing.Generic[I, O]):
+class Handler(Generic[I, O]):
     """
     Represents a handler for a service.
     """
     service_tag: ServiceTag
     handler_io: HandlerIO[I, O]
-    kind: typing.Optional[typing.Literal["exclusive", "shared", "workflow"]]
+    kind: Optional[Literal["exclusive", "shared", "workflow"]]
     name: str
-    fn: typing.Callable[[typing.Any, I], typing.Awaitable[O]]
+    fn: Callable[[Any, I], Awaitable[O]] | Callable[[Any], Awaitable[O]]
+    arity: int
 
+
+# disable too many arguments warning
+# pylint: disable=R0913
 
 def make_handler(service_tag: ServiceTag,
-                      handler_io: HandlerIO[I, O],
-                      name: str | None,
-                      kind: typing.Optional[typing.Literal["exclusive", "shared"]],
-                      wrapped: typing.Any) -> Handler[I, O]:
+                 handler_io: HandlerIO[I, O],
+                 name: str | None,
+                 kind: Optional[Literal["exclusive", "shared"]],
+                 wrapped: Any,
+                 arity: int) -> Handler[I, O]:
     """
     Factory function to create a handler.
     """
@@ -75,6 +80,24 @@ def make_handler(service_tag: ServiceTag,
     if not handler_name:
         raise ValueError("Handler name must be provided")
 
-    handler = Handler[I, O](service_tag, handler_io, kind, handler_name, wrapped)
+    handler = Handler[I, O](service_tag,
+                            handler_io,
+                            kind,
+                            handler_name,
+                            wrapped,
+                            arity)
     vars(wrapped)[RESTATE_UNIQUE_HANDLER_SYMBOL] = handler
     return handler
+
+
+async def invoke_handler(handler: Handler[I, O], ctx: Any, in_buffer: bytes) -> bytes:
+    """
+    Invoke the handler with the given context and input.
+    """
+    if handler.arity == 2:
+        in_arg = handler.handler_io.deserializer(in_buffer) # type: ignore
+        out_arg = await handler.fn(ctx, in_arg) # type: ignore [call-arg, arg-type]
+    else:
+        out_arg = await handler.fn(ctx) # type: ignore [call-arg]
+    out_buffer = handler.handler_io.serializer(out_arg) # type: ignore
+    return bytes(out_buffer)

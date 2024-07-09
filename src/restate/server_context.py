@@ -10,14 +10,14 @@
 #
 """This module contains the restate context implementation based on the server"""
 
-from typing import Any, Awaitable, Callable, List, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, TypeVar
 import json
 import typing
 
 from restate.context import ObjectContext, Request
 from restate.exceptions import TerminalError
-from restate.handler import Handler
-from restate.server_types import Receive, Send 
+from restate.handler import Handler, invoke_handler
+from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper
 
 
@@ -39,12 +39,14 @@ class ServerInvocationContext(ObjectContext):
                  vm: VMWrapper,
                  handler: Handler[I, O],
                  invocation: Invocation,
+                 attempt_headers: Dict[str, str],
                  send: Send,
                  receive: Receive) -> None:
         super().__init__()
         self.vm = vm
         self.handler = handler
         self.invocation = invocation
+        self.attempt_headers = attempt_headers
         self.send = send
         self.receive = receive
 
@@ -52,9 +54,7 @@ class ServerInvocationContext(ObjectContext):
         """Invoke the user code."""
         try:
             in_buffer = self.invocation.input_buffer
-            in_arg = self.handler.handler_io.deserializer(in_buffer) # type: ignore
-            out_arg = await self.handler.fn(self, in_arg) # type: ignore
-            out_buffer = self.handler.handler_io.serializer(out_arg) # type: ignore
+            out_buffer = await invoke_handler(handler=self.handler, ctx=self, in_buffer=in_buffer)
             self.vm.sys_write_output_success(bytes(out_buffer))
             self.vm.sys_end()
         except TerminalError as t:
@@ -98,7 +98,7 @@ class ServerInvocationContext(ObjectContext):
                 break
         # finally, we close our side
         # it is important to do it, after the other side has closed his side,
-        # because some asgi servers (like hypercorn) will remove the stream 
+        # because some asgi servers (like hypercorn) will remove the stream
         # as soon as they see a close event (in asgi terms more_body=False)
         await self.send({
             'type': 'http.response.body',
@@ -160,7 +160,12 @@ class ServerInvocationContext(ObjectContext):
         raise NotImplementedError
 
     def request(self) -> Request:
-        raise NotImplementedError
+        return Request(
+            id=self.invocation.invocation_id,
+            headers=dict(self.invocation.headers),
+            attempt_headers=self.attempt_headers,
+            body=self.invocation.input_buffer,
+        )
 
     def run_named(self, name: str, action: Callable[[], T] | Callable[[], Awaitable[T]]) -> Awaitable[T]:
         raise NotImplementedError

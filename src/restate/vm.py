@@ -31,7 +31,6 @@ class NotReady:
     """
     NotReady
     """
-    pass
 
 class SuspendedException(Exception):
     """
@@ -82,7 +81,7 @@ class VMWrapper:
     def notify_await_point(self, handle: int):
         """Notify the virtual machine of an await point."""
         self.vm.notify_await_point(handle)
-    
+
     def is_ready_to_execute(self) -> bool:
         """Returns true when the VM is ready to operate."""
         return self.vm.is_ready_to_execute()
@@ -102,13 +101,12 @@ class VMWrapper:
             if isinstance(result, bytes):
                 return result
             if isinstance(result, restate_sdk_python_core.PyFailure):
-                code = result._0.code
-                message = result._0.message
+                code = result._0.code # pylint: disable=protected-access
+                message = result._0.message # pylint: disable=protected-access
                 return Failure(code, message)
             raise ValueError(f"Unknown result type: {result}")
         except restate_sdk_python_core.SuspendedException:
-            print('suspended')
-            raise SuspendedException()
+            raise SuspendedException() # pylint: disable=raise-missing-from
 
     def sys_input(self) -> Invocation:
         """
@@ -139,7 +137,7 @@ class VMWrapper:
             None
         """
         self.vm.sys_write_output_success(output)
-    
+
     def sys_write_output_failure(self, output: Failure):
         """
         Writes the output to the system.

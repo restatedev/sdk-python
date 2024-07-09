@@ -34,9 +34,9 @@ class Request:
         attempt_headers: The attempt headers of the request.
         body (bytes): The body of the request.
     """
-    id: bytearray
+    id: str
     headers: Dict[str, str]
-    attempt_headers: Dict[str, Union[str, List[str], None]]
+    attempt_headers: Dict[str,str]
     body: bytes
 
 

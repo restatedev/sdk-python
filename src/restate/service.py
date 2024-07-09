@@ -13,6 +13,7 @@ This module defines the Service class for representing a restate service.
 """
 
 from functools import wraps
+import inspect
 import typing
 
 from restate.serde import DeserializerType, SerializerType, deserialize_json, serialize_json
@@ -81,7 +82,8 @@ class Service:
             def wrapped(*args, **kwargs):
                 return fn(*args, **kwargs)
 
-            handler = make_handler(self.service_tag, handler_io, name, None, wrapped)
+            arity = len(inspect.signature(fn).parameters)
+            handler = make_handler(self.service_tag, handler_io, name, None, wrapped, arity)
             self.handlers[handler.name] = handler
             return wrapped
 

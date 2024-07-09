@@ -10,7 +10,7 @@
 #
 """This module contains the ASGI server for the restate framework."""
 
-from typing import Literal
+from typing import Dict, Literal
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
 from restate.server_context import ServerInvocationContext
@@ -48,7 +48,11 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
         'more_body': False,
     })
 
-async def process_invocation_to_completion(vm: VMWrapper, handler, receive: Receive, send: Send):
+async def process_invocation_to_completion(vm: VMWrapper,
+                                           handler,
+                                           attempt_headers: Dict[str, str],
+                                           receive: Receive,
+                                           send: Send):
     """Invoke the user code."""
     status, res_headers = vm.get_response_head()
     await send({
@@ -81,6 +85,7 @@ async def process_invocation_to_completion(vm: VMWrapper, handler, receive: Rece
     context = ServerInvocationContext(vm=vm,
                                       handler=handler,
                                       invocation=invocation,
+                                      attempt_headers=attempt_headers,
                                       send=send,
                                       receive=receive)
     await context.enter()
@@ -119,6 +124,10 @@ def asgi_app(endpoint: Endpoint):
         assert not isinstance(scope['headers'], str)
         assert hasattr(scope['headers'], '__iter__')
         request_headers = binary_to_header(scope['headers'])
-        await process_invocation_to_completion(VMWrapper(request_headers), handler, receive, send)
+        await process_invocation_to_completion(VMWrapper(request_headers),
+                                               handler,
+                                               dict(request_headers),
+                                               receive,
+                                               send)
 
     return app
