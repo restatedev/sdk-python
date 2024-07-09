@@ -5,7 +5,7 @@ wrap the restate_sdk_python_core.PyVM class
 
 from dataclasses import dataclass
 import typing
-import restate_sdk_python_core
+import restate_sdk_python_core # pylint: disable=import-error
 
 @dataclass
 class Invocation:
@@ -40,6 +40,7 @@ class SuspendedException(Exception):
         super().__init__(*args)
 
 NOT_READY = NotReady()
+SUSPENDED = SuspendedException()
 
 AsyncResultType = typing.Optional[typing.Union[bytes, Failure, NotReady]]
 
@@ -86,27 +87,26 @@ class VMWrapper:
         """Returns true when the VM is ready to operate."""
         return self.vm.is_ready_to_execute()
 
-    def dispose_callbacks(self):
-        """Clear all callbacks"""
-        self.vm.dispose_callbacks()
-
     def take_async_result(self, handle: typing.Any) -> AsyncResultType:
         """Take the result of an asynchronous operation."""
-        try:
-            result = self.vm.take_async_result(handle)
-            if not result:
-                return NOT_READY
-            if isinstance(result, restate_sdk_python_core.PyVoid):
-                return None
-            if isinstance(result, bytes):
-                return result
-            if isinstance(result, restate_sdk_python_core.PyFailure):
-                code = result._0.code # pylint: disable=protected-access
-                message = result._0.message # pylint: disable=protected-access
-                return Failure(code, message)
-            raise ValueError(f"Unknown result type: {result}")
-        except restate_sdk_python_core.SuspendedException:
-            raise SuspendedException() # pylint: disable=raise-missing-from
+        result = self.vm.take_async_result(handle)
+        if not result:
+            return NOT_READY
+        if isinstance(result, restate_sdk_python_core.PyVoid):
+            # success with an empty value
+            return None
+        if isinstance(result, bytes):
+            # success with a non empty value
+            return result
+        if isinstance(result, restate_sdk_python_core.PyFailure):
+            # a terminal failure
+            code = result._0.code # pylint: disable=protected-access
+            message = result._0.message # pylint: disable=protected-access
+            return Failure(code, message)
+        if isinstance(result, restate_sdk_python_core.PySuspended):
+            # the state machine had suspended
+            raise SUSPENDED
+        raise ValueError(f"Unknown result type: {result}")
 
     def sys_input(self) -> Invocation:
         """

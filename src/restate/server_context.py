@@ -82,7 +82,6 @@ class ServerInvocationContext(ObjectContext):
         # ========================================
         # End the connection
         # ========================================
-        self.vm.dispose_callbacks()
         # The following sequence of events is expected during a teardown:
         #
         # {'type': 'http.request', 'body': b'', 'more_body': True}

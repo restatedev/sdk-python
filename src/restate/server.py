@@ -68,7 +68,6 @@ async def process_invocation_to_completion(vm: VMWrapper,
         message = await receive()
         if message['type'] == 'http.disconnect':
             # everything ends here really ...
-            vm.dispose_callbacks()
             return
         if message['type'] == 'http.request':
             assert isinstance(message['body'], bytes)
