@@ -264,5 +264,32 @@ class ServerInvocationContext(ObjectContext):
     def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
         self.generic_call(tpe=tpe, key=key, arg=arg, send_delay=send_delay)
 
+    def awakeable(self,
+                  serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:
+        assert serde is not None
+        name, handle = self.vm.sys_awakeable()
+        coro = self.create_poll_coroutine(handle)
+
+        async def await_point():
+            """Wait for this handle to be resolved."""
+            res = await coro
+            assert res is not None
+            return serde.deserialize(res)
+
+
+        return name, await_point()
+
+    def resolve_awakeable(self,
+                          name: str,
+                          value: I,
+                          serde: typing.Optional[Serde[I]] = JsonSerde()) -> None:
+        assert serde is not None
+        buf = serde.serialize(value)
+        self.vm.sys_resolve_awakeable(name, buf)
+
+    def reject_awakeable(self, name: str, failure_message: str, failure_code: int) -> None:
+        return self.vm.sys_reject_awakeable(name, Failure(code=failure_code, message=failure_message))
+
+
     def key(self) -> str:
         return self.invocation.key

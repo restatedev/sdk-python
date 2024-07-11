@@ -225,6 +225,25 @@ class VMWrapper:
         assert isinstance(result, bytes)
         return result
 
+    def sys_awakeable(self) -> typing.Tuple[str, int]:
+        """
+        Return a fresh awaitable
+        """
+        return self.vm.sys_awakeable()
+
+    def sys_resolve_awakeable(self, name: str, value: bytes):
+        """
+        Resolve
+        """
+        self.vm.sys_complete_awakeable_success(name, value)
+
+    def sys_reject_awakeable(self, name: str, failure: Failure):
+        """
+        Reject
+        """
+        py_failure = restate_sdk_python_core.PyFailure(failure.code, failure.message)
+        self.vm.sys_complete_awakeable_failure(name, py_failure)
+
     def sys_run_exit_success(self, output: bytes) -> int:
         """
         Exit a side effect

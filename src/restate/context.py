@@ -153,6 +153,27 @@ class Context(abc.ABC):
         Send a message to an object with the given argument.
         """
 
+    @abc.abstractmethod
+    def awakeable(self,
+                  serde: Optional[Serde[T]] = None) -> typing.Tuple[str, Awaitable[Any]]:
+        """
+        Returns the name of the awakeable and the future to be awaited.
+        """
+
+    @abc.abstractmethod
+    def resolve_awakeable(self,
+                          name: str,
+                          value: I,
+                          serde: typing.Optional[Serde[I]] = None) -> None:
+        """
+        Resolves the awakeable with the given name.
+        """
+
+    @abc.abstractmethod
+    def reject_awakeable(self, name: str, failure_message: str, failure_code: int) -> None:
+        """
+        Rejects the awakeable with the given name.
+        """
 
 
 class ObjectContext(Context, KeyValueStore):
