@@ -206,13 +206,29 @@ class ServerInvocationContext(ObjectContext):
         millis = int(delta.total_seconds() * 1000)
         return self.create_poll_coroutine(self.vm.sys_sleep(millis)) # type: ignore
 
-    def generic_call(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, key: Optional[str] = None) -> Awaitable[O]:
+    def generic_call(self,
+                     tpe: Callable[[Any, I], Awaitable[O]],
+                     arg: I,
+                     key: Optional[str] = None,
+                     send_delay: Optional[timedelta] = None,
+                     send: bool = False) -> Awaitable[O] | None:
         """Make an RPC call to the given handler"""
         target_handler = handler_from_callable(tpe)
-        in_buf = target_handler.handler_io.input_serde.serialize(arg)
-        handle = self.vm.sys_call(service=target_handler.service_tag.name,
-                                  handler=target_handler.name,
-                                  parameter=in_buf,
+        service=target_handler.service_tag.name
+        handler=target_handler.name
+        parameter = target_handler.handler_io.input_serde.serialize(arg)
+
+        if send_delay:
+            ms = int(send_delay.total_seconds() * 1000)
+            self.vm.sys_send(service, handler, parameter, key, delay=ms)
+            return None
+        if send:
+            self.vm.sys_send(service, handler, parameter, key)
+            return None
+
+        handle = self.vm.sys_call(service=service,
+                                  handler=handler,
+                                  parameter=parameter,
                                   key=key)
 
         output_serde = target_handler.handler_io.output_serde
@@ -225,11 +241,28 @@ class ServerInvocationContext(ObjectContext):
 
         return await_point()
 
-    def service_call(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I) -> Awaitable[O]:
-        return self.generic_call(tpe, arg)
+    def service_call(self,
+                     tpe: Callable[[Any, I], Awaitable[O]],
+                     arg: I) -> Awaitable[O]:
+        coro = self.generic_call(tpe, arg)
+        assert coro is not None
+        return coro
 
-    def object_call(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I) -> Awaitable[O]:
-        return self.generic_call(tpe, arg, key)
+    def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None) -> None:
+        self.generic_call(tpe=tpe, arg=arg, send_delay=send_delay)
+
+    def object_call(self,
+                    tpe: Callable[[Any, I],Awaitable[O]],
+                    key: str,
+                    arg: I,
+                    send_delay: Optional[timedelta] = None,
+                    send: bool = False) -> Awaitable[O]:
+        coro = self.generic_call(tpe, arg, key, send_delay, send)
+        assert coro is not None
+        return coro
+
+    def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
+        self.generic_call(tpe=tpe, key=key, arg=arg, send_delay=send_delay)
 
     def key(self) -> str:
         return self.invocation.key

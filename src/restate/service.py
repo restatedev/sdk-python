@@ -37,7 +37,7 @@ class Service:
         name (str): The name of the service.
     """
 
-    def __init__(self, name):
+    def __init__(self, name: str) -> None:
         self.service_tag = ServiceTag("service", name)
         self.handlers: typing.Dict[str, Handler] = {}
 

@@ -45,6 +45,7 @@ SUSPENDED = SuspendedException()
 
 AsyncResultType = typing.Optional[typing.Union[bytes, Failure, NotReady]]
 
+# pylint: disable=too-many-public-methods
 class VMWrapper:
     """
     A wrapper class for the restate_sdk_python_core.PyVM class.
@@ -189,9 +190,23 @@ class VMWrapper:
         """Ask to sleep for a given duration"""
         return self.vm.sys_sleep(millis)
 
-    def sys_call(self, service: str, handler: str, parameter: bytes, key: typing.Optional[str]):
+    def sys_call(self,
+                 service: str,
+                 handler: str,
+                 parameter: bytes,
+                 key: typing.Optional[str] = None):
         """Call a service"""
         return self.vm.sys_call(service, handler, parameter, key)
+
+    # pylint: disable=too-many-arguments
+    def sys_send(self,
+                 service: str,
+                 handler: str,
+                 parameter: bytes,
+                 key: typing.Optional[str] = None,
+                 delay: typing.Optional[int] = None) -> None:
+        """send an invocation to a service (no response)"""
+        self.vm.sys_send(service, handler, parameter, key, delay)
 
     def sys_run_enter(self, name: str) -> typing.Union[bytes, None, Failure]:
         """

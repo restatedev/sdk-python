@@ -116,16 +116,43 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def service_call(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I) -> Awaitable[O]:
+    def service_call(self,
+                     tpe: Callable[[Any, I], Awaitable[O]],
+                     arg: I) -> Awaitable[O]:
         """
         Invokes the given service with the given argument.
         """
 
     @abc.abstractmethod
-    def object_call(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I) -> Awaitable[O]:
+    def service_send(self,
+                     tpe: Callable[[Any, I], Awaitable[O]],
+                     arg: I,
+                     send_delay: Optional[timedelta] = None,
+                     ) -> None:
+        """
+        Invokes the given service with the given argument.
+        """
+
+    @abc.abstractmethod
+    def object_call(self,
+                    tpe: Callable[[Any, I], Awaitable[O]],
+                    key: str,
+                    arg: I) -> Awaitable[O]:
         """
         Invokes the given object with the given argument.
         """
+
+    @abc.abstractmethod
+    def object_send(self,
+                    tpe: Callable[[Any, I], Awaitable[O]],
+                    key: str,
+                    arg: I,
+                    send_delay: Optional[timedelta] = None,
+                    ) -> None:
+        """
+        Send a message to an object with the given argument.
+        """
+
 
 
 class ObjectContext(Context, KeyValueStore):
