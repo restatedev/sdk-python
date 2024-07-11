@@ -16,7 +16,7 @@ from functools import wraps
 import inspect
 import typing
 
-from restate.serde import DeserializerType, SerializerType, deserialize_json, serialize_json
+from restate.serde import Serde, JsonSerde
 from .handler import HandlerIO, ServiceTag, make_handler
 
 I = typing.TypeVar('I')
@@ -53,8 +53,8 @@ class VirtualObject:
                 kind: typing.Optional[typing.Literal["exclusive", "shared"]] = "exclusive",
                 accept: str = "application/json",
                 content_type: str = "application/json",
-                serializer: SerializerType[O] = serialize_json, # type: ignore
-                deserializer: DeserializerType[I] = deserialize_json) -> typing.Callable: # type: ignore
+                input_serde: Serde[I] = JsonSerde[I](), # type: ignore
+                output_serde: Serde[O] = JsonSerde[O]()) -> typing.Callable: # type: ignore
         """
         Decorator for defining a handler function.
 
@@ -77,7 +77,7 @@ class VirtualObject:
                 # handler logic
                 pass
         """
-        handler_io = HandlerIO[I,O](accept, content_type, serializer, deserializer)
+        handler_io = HandlerIO[I,O](accept, content_type, input_serde, output_serde)
         def wrapper(fn):
 
             @wraps(fn)

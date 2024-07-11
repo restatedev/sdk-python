@@ -16,6 +16,7 @@ import abc
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union
 import typing
+from datetime import timedelta
 
 T = TypeVar('T')
 I = TypeVar('I')
@@ -109,9 +110,9 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def sleep(self, millis: int) -> Awaitable[None]:
+    def sleep(self, delta: timedelta) -> Awaitable[None]:
         """
-        Suspends the current invocation for the given number of milliseconds.
+        Suspends the current invocation for the given duration
         """
 
     @abc.abstractmethod

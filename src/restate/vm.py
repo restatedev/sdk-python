@@ -181,6 +181,18 @@ class VMWrapper:
         """
         self.vm.sys_set_state(name, value)
 
+    def sys_clear_state(self, name: str):
+        """Clear the state associated with the given name."""
+        self.vm.sys_clear_state(name)
+
+    def sys_sleep(self, millis: int):
+        """Ask to sleep for a given duration"""
+        return self.vm.sys_sleep(millis)
+
+    def sys_call(self, service: str, handler: str, parameter: bytes, key: typing.Optional[str]):
+        """Call a service"""
+        return self.vm.sys_call(service, handler, parameter, key)
+
     def sys_run_enter(self, name: str) -> typing.Union[bytes, None, Failure]:
         """
         Enter a side effect

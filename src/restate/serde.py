@@ -30,7 +30,6 @@ class DeserializerType(typing.Generic[I]):
     __call__: typing.Callable[[bytes], typing.Optional[I]]
 
 
-
 class JsonSerde(Serde[I]):
     """A JSON serializer/deserializer."""
 
@@ -62,7 +61,6 @@ class JsonSerde(Serde[I]):
             return bytes()
 
         return bytes(json.dumps(obj), "utf-8")
-
 
 
 def deserialize_json(buf: typing.ByteString) -> typing.Optional[O]:

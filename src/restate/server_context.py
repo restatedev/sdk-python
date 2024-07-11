@@ -10,6 +10,7 @@
 #
 """This module contains the restate context implementation based on the server"""
 
+from datetime import timedelta
 import inspect
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import json
@@ -17,7 +18,7 @@ import typing
 
 from restate.context import ObjectContext, Request, Serde
 from restate.exceptions import TerminalError
-from restate.handler import Handler, invoke_handler
+from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import JsonSerde
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper
@@ -158,7 +159,7 @@ class ServerInvocationContext(ObjectContext):
         self.vm.sys_set_state(name, bytes(buffer))
 
     def clear(self, name: str) -> None:
-        raise NotImplementedError
+        self.vm.sys_clear_state(name)
 
     def clear_all(self) -> None:
         raise NotImplementedError
@@ -200,14 +201,35 @@ class ServerInvocationContext(ObjectContext):
             # unreachable
             assert False
 
-    def sleep(self, millis: int) -> Awaitable[None]:
-        raise NotImplementedError
+    def sleep(self, delta: timedelta) -> Awaitable[None]:
+        # convert timedelta to milliseconds
+        millis = int(delta.total_seconds() * 1000)
+        return self.create_poll_coroutine(self.vm.sys_sleep(millis)) # type: ignore
+
+    def generic_call(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, key: Optional[str] = None) -> Awaitable[O]:
+        """Make an RPC call to the given handler"""
+        target_handler = handler_from_callable(tpe)
+        in_buf = target_handler.handler_io.input_serde.serialize(arg)
+        handle = self.vm.sys_call(service=target_handler.service_tag.name,
+                                  handler=target_handler.name,
+                                  parameter=in_buf,
+                                  key=key)
+
+        output_serde = target_handler.handler_io.output_serde
+        coro = self.create_poll_coroutine(handle)
+
+        async def await_point():
+            """Wait for this handle to be resolved, and deserialize the response."""
+            res = await coro
+            return output_serde.deserialize(res) # type: ignore
+
+        return await_point()
 
     def service_call(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I) -> Awaitable[O]:
-        raise NotImplementedError
+        return self.generic_call(tpe, arg)
 
     def object_call(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I) -> Awaitable[O]:
-        raise NotImplementedError
+        return self.generic_call(tpe, arg, key)
 
     def key(self) -> str:
         return self.invocation.key
