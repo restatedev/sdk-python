@@ -17,6 +17,7 @@ import typing
 
 from restate.service import Service
 from restate.object import VirtualObject
+from restate.workflow import Workflow
 
 
 # disable too few methods in a class
@@ -28,7 +29,7 @@ class Endpoint:
     Endpoint service that contains all the services and objects
     """
 
-    services: typing.Dict[str, typing.Union[Service, VirtualObject]]
+    services: typing.Dict[str, typing.Union[Service, VirtualObject, Workflow]]
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]]
 
     def __init__(self):
@@ -41,7 +42,7 @@ class Endpoint:
         # None means that the user did not explicitly set it.
         self.protocol = None
 
-    def bind(self, *services: typing.Union[Service, VirtualObject]):
+    def bind(self, *services: typing.Union[Service, VirtualObject, Workflow]):
         """
         Bind a service to the endpoint
 

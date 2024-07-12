@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import json
 import typing
 
-from restate.context import ObjectContext, Request, Serde
+from restate.context import DurablePromise, ObjectContext, Request, Serde
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import JsonSerde
@@ -37,6 +37,58 @@ O = TypeVar('O')
 async def async_value(n: Callable[[], T]) -> T:
     """convert a simple value to a coroutine."""
     return n()
+
+
+class ServerDurablePromise(DurablePromise):
+
+    def __init__(self, server_context, name, serde) -> None:
+        super().__init__(name=name, serde=JsonSerde() if serde is None else serde)
+        self.server_context = server_context
+
+    def value(self) -> Awaitable[Any]:
+        vm: VMWrapper = self.server_context.vm
+        handle = vm.sys_get_promise(self.name)
+        coro =  self.server_context.create_poll_coroutine(handle)
+        serde = self.serde
+        assert serde is not None
+
+        async def await_point():
+            res = await coro
+            return serde.deserialize(res)
+
+        return await_point()
+
+    def resolve(self, value: Any) -> Awaitable[None]:
+        vm: VMWrapper = self.server_context.vm
+        assert self.serde is not None
+        value_buffer = self.serde.serialize(value)
+        handle = vm.sys_complete_promise_success(self.name, value_buffer)
+        return self.server_context.create_poll_coroutine(handle)
+
+    def reject(self, message: str, code: int = 500) -> Awaitable[None]:
+        vm: VMWrapper = self.server_context.vm
+        py_failure = Failure(code=code, message=message)
+        handle = vm.sys_complete_promise_failure(self.name, py_failure)
+        return self.server_context.create_poll_coroutine(handle)
+
+    def peek(self) -> Awaitable[Any | None]:
+        vm: VMWrapper = self.server_context.vm
+        handle = vm.sys_peek_promise(self.name)
+        coro =  self.server_context.create_poll_coroutine(handle)
+        serde = self.serde
+        assert serde is not None
+
+        async def await_point():
+            res = await coro
+            if res is None:
+                return None
+            return serde.deserialize(res)
+
+        return await_point()
+
+
+# disable too many public method
+# pylint: disable=R0904
 
 class ServerInvocationContext(ObjectContext):
     """This class implements the context for the restate framework based on the server."""
@@ -287,9 +339,12 @@ class ServerInvocationContext(ObjectContext):
         buf = serde.serialize(value)
         self.vm.sys_resolve_awakeable(name, buf)
 
-    def reject_awakeable(self, name: str, failure_message: str, failure_code: int) -> None:
+    def reject_awakeable(self, name: str, failure_message: str, failure_code: int = 500) -> None:
         return self.vm.sys_reject_awakeable(name, Failure(code=failure_code, message=failure_message))
 
+    def promise(self, name: str, serde: typing.Optional[Serde[T]] = JsonSerde()) -> DurablePromise[Any]:
+        """Create a durable promise."""
+        return ServerDurablePromise(self, name, serde)
 
     def key(self) -> str:
         return self.invocation.key

@@ -170,7 +170,7 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def reject_awakeable(self, name: str, failure_message: str, failure_code: int) -> None:
+    def reject_awakeable(self, name: str, failure_message: str, failure_code: int = 500) -> None:
         """
         Rejects the awakeable with the given name.
         """
@@ -207,4 +207,59 @@ class ObjectSharedContext(Context):
     def state_keys(self) -> Awaitable[List[str]]:
         """
         Returns the list of keys in the store.
+        """
+
+class DurablePromise(typing.Generic[T]):
+    """
+    Represents a durable promise.
+    """
+
+    def __init__(self, name: str, serde: typing.Optional[Serde[T]] = None) -> None:
+        self.name = name
+        self.serde = serde
+
+    @abc.abstractmethod
+    def resolve(self, value: T) -> Awaitable[None]:
+        """
+        Resolves the promise with the given value.
+        """
+
+    @abc.abstractmethod
+    def reject(self, message: str, code: int = 500) -> Awaitable[None]:
+        """
+        Rejects the promise with the given message and code.
+        """
+
+    @abc.abstractmethod
+    def peek(self) -> Awaitable[typing.Optional[T]]:
+        """
+        Returns the value of the promise if it is resolved, None otherwise.
+        """
+
+    @abc.abstractmethod
+    def value(self) -> Awaitable[T]:
+        """
+        Returns the value of the promise if it is resolved, None otherwise.
+        """
+
+class WorkflowContext(ObjectContext):
+    """
+    Represents the context of the current workflow invocation.
+    """
+
+    @abc.abstractmethod
+    def promise(self, name: str) -> DurablePromise[Any]:
+        """
+        Returns a durable promise with the given name.
+        """
+
+class WorkflowSharedContext(ObjectSharedContext):
+    """
+    Represents the context of the current workflow invocation.
+    """
+
+    @abc.abstractmethod
+    def promise(self, name: str) -> DurablePromise[Any]:
+        """
+        Returns a durable promise with the given name.
         """

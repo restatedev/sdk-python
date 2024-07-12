@@ -38,7 +38,7 @@ class Workflow:
     """
 
     def __init__(self, name):
-        self.service_tag = ServiceTag("object", name)
+        self.service_tag = ServiceTag("workflow", name)
         self.handlers = {}
 
     @property
@@ -48,13 +48,15 @@ class Workflow:
         """
         return self.service_tag.name
 
-    def run(self,
+    def main(self,
+            name: typing.Optional[str] = None,
             accept: str = "application/json",
             content_type: str = "application/json",
             input_serde: Serde[I] = JsonSerde[I](), # type: ignore
             output_serde: Serde[O] = JsonSerde[O]()) -> typing.Callable: # type: ignore
         """Mark this handler as a workflow entry point"""
-        return self.handler(name="run",
+        return self._add_handler(name,
+                            kind="workflow",
                              accept=accept,
                              content_type=content_type,
                              input_serde=input_serde,
@@ -62,6 +64,18 @@ class Workflow:
 
     def handler(self,
                 name: typing.Optional[str] = None,
+                accept: str = "application/json",
+                content_type: str = "application/json",
+                input_serde: Serde[I] = JsonSerde[I](), # type: ignore
+                output_serde: Serde[O] = JsonSerde[O]()) -> typing.Callable: # type: ignore
+        """
+        Decorator for defining a handler function.
+        """
+        return self._add_handler(name, "shared", accept, content_type, input_serde, output_serde)
+
+    def _add_handler(self,
+                name: typing.Optional[str] = None,
+                kind: typing.Literal["workflow", "shared", "exclusive"] = "shared",
                 accept: str = "application/json",
                 content_type: str = "application/json",
                 input_serde: Serde[I] = JsonSerde[I](), # type: ignore
@@ -96,11 +110,6 @@ class Workflow:
                 return fn(*args, **kwargs)
 
             arity = len(inspect.signature(fn).parameters)
-            kind: typing.Literal["workflow", "shared", "exclusive"]
-            if name == "run":
-                kind = "workflow"
-            else:
-                kind = "shared"
             handler = make_handler(self.service_tag, handler_io, name, kind, wrapped, arity)
             self.handlers[handler.name] = handler
             return wrapped

@@ -13,28 +13,35 @@
 # pylint: disable=W0613
 
 
+from datetime import timedelta
 from restate.service import Service
 from restate.context import Context, ObjectContext, ObjectSharedContext
+from restate.context import WorkflowContext, WorkflowSharedContext
 from restate.endpoint import endpoint
 from restate.object import VirtualObject
+from restate.workflow import Workflow
 
 greeter = Service("greeter")
 
 @greeter.handler()
 async def greet(ctx: Context, name: str) -> str:
-    return f"Greet {name}"
+    ctx.service_send(greet_different, arg=name, send_delay=timedelta(seconds=3))
+    await ctx.sleep(delta=timedelta(seconds=3))
+    return f"Greet {name} here is a greeting just for you "
 
 
 @greeter.handler()
 async def greet_different(ctx: Context, name: str) -> str:
-    return "Just greet it f{name}"
+    ctx.object_send(increment, key=name, arg=1, send_delay=timedelta(seconds=3))
+    await ctx.object_call(increment, key=name, arg=1)
+    return f"Just greet it {name}"
 
 counter = VirtualObject("counter")
 
 @counter.handler()
 async def increment(ctx: ObjectContext, value: int) -> int:
     n = await ctx.get("counter") or 0
-    n += 1
+    n += value
     ctx.set("counter", n)
     return n
 
@@ -43,4 +50,18 @@ async def count(ctx: ObjectSharedContext) -> int:
     return await ctx.get("counter") or 0
 
 
-app = endpoint().bind(greeter, counter).app()
+payment = Workflow("payment")
+
+@payment.main()
+async def pay(ctx: WorkflowContext, amount: int) -> int:
+    promise = ctx.promise("email.clicked")
+    print(await promise.value())
+    return amount
+
+@payment.handler()
+async def email_clicked(ctx: WorkflowSharedContext, secret: str):
+    promise = ctx.promise("email.clicked")
+    await promise.resolve(secret)
+
+
+app = endpoint().bind(greeter, counter, payment).app()
