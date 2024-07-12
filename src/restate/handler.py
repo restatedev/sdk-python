@@ -67,7 +67,7 @@ class Handler(Generic[I, O]):
 def make_handler(service_tag: ServiceTag,
                  handler_io: HandlerIO[I, O],
                  name: str | None,
-                 kind: Optional[Literal["exclusive", "shared"]],
+                 kind: Optional[Literal["exclusive", "shared", "workflow"]],
                  wrapped: Any,
                  arity: int) -> Handler[I, O]:
     """
