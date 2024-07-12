@@ -256,6 +256,23 @@ class VMWrapper:
         """
         return self.vm.sys_run_exit_success(output)
 
+    def sys_get_promise(self, name: str) -> int:
+        """Returns the promise handle"""
+        return self.vm.sys_get_promise(name)
+
+    def sys_peek_promise(self, name: str) -> int:
+        """Peek into the workflow promise"""
+        return self.vm.sys_peek_promise(name)
+
+    def sys_complete_promise_success(self, name: str, value: bytes) -> int:
+        """Complete the promise"""
+        return self.vm.sys_complete_promise_success(name, value)
+
+    def sys_complete_promise_failure(self, name: str, failure: Failure) -> int:
+        """reject the promise on failure"""
+        res = restate_sdk_python_core.PyFailure(failure.code, failure.message)
+        return self.vm.sys_complete_promise_failure(name, res)
+
     def sys_run_exit_failure(self, output: Failure) -> int:
         """
         Exit a side effect
