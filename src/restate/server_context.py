@@ -125,7 +125,6 @@ class ServerInvocationContext(ObjectContext):
             pass
         except Exception as e:
             self.vm.notify_error(str(e))
-            raise e
             # no need to call sys_end here, because the error will be propagated
 
     async def leave(self):
