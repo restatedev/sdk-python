@@ -29,6 +29,9 @@ O = typing.TypeVar('O')
 # disable line too long warning
 # pylint: disable=C0301
 
+# disable similar lines warning
+# pylint: disable=R0801
+
 class Workflow:
     """
     Represents a restate workflow.

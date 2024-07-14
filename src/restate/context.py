@@ -174,6 +174,28 @@ class Context(abc.ABC):
         Send a message to an object with the given argument.
         """
 
+    # pylint: disable=R0913
+    @abc.abstractmethod
+    def generic_call(self,
+                     service: str,
+                     handler: str,
+                     arg: bytes,
+                     key: Optional[str] = None)  -> Awaitable[bytes]:
+        """
+        Invokes the given generic service/handler with the given argument.
+        """
+
+    @abc.abstractmethod
+    def generic_send(self,
+                     service: str,
+                     handler: str,
+                     arg: bytes,
+                     key: Optional[str] = None,
+                     send_delay: Optional[timedelta] = None) -> None:
+        """
+        Send a message to a generic service/handler with the given argument.
+        """
+
     @abc.abstractmethod
     def awakeable(self,
                   serde: Optional[Serde[T]] = None) -> typing.Tuple[str, Awaitable[Any]]:

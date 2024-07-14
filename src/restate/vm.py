@@ -120,7 +120,7 @@ class VMWrapper:
         inp = self.vm.sys_input()
         invocation_id: str = inp.invocation_id
         random_seed: int = inp.random_seed
-        headers: typing.List[typing.Tuple[str, str]] = inp.headers
+        headers: typing.List[typing.Tuple[str, str]] = [(h.key, h.value) for h in inp.headers]
         input_buffer: bytes = bytes(inp.input)
         key: str = inp.key
 

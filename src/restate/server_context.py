@@ -19,7 +19,7 @@ import typing
 from restate.context import DurablePromise, ObjectContext, Request, Serde
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
-from restate.serde import JsonSerde
+from restate.serde import BytesSerde, JsonSerde
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper
 
@@ -40,6 +40,7 @@ async def async_value(n: Callable[[], T]) -> T:
 
 
 class ServerDurablePromise(DurablePromise):
+    """This class implements a durable promise API"""
 
     def __init__(self, server_context, name, serde) -> None:
         super().__init__(name=name, serde=JsonSerde() if serde is None else serde)
@@ -124,6 +125,7 @@ class ServerInvocationContext(ObjectContext):
             pass
         except Exception as e:
             self.vm.notify_error(str(e))
+            raise e
             # no need to call sys_end here, because the error will be propagated
 
     async def leave(self):
@@ -258,18 +260,32 @@ class ServerInvocationContext(ObjectContext):
         millis = int(delta.total_seconds() * 1000)
         return self.create_poll_coroutine(self.vm.sys_sleep(millis)) # type: ignore
 
-    def generic_call(self,
-                     tpe: Callable[[Any, I], Awaitable[O]],
-                     arg: I,
-                     key: Optional[str] = None,
-                     send_delay: Optional[timedelta] = None,
-                     send: bool = False) -> Awaitable[O] | None:
+    def do_call(self,
+                tpe: Callable[[Any, I], Awaitable[O]],
+                parameter: I,
+                key: Optional[str] = None,
+                send_delay: Optional[timedelta] = None,
+                send: bool = False) -> Awaitable[O] | None:
         """Make an RPC call to the given handler"""
         target_handler = handler_from_callable(tpe)
         service=target_handler.service_tag.name
         handler=target_handler.name
-        parameter = target_handler.handler_io.input_serde.serialize(arg)
+        input_serde = target_handler.handler_io.input_serde
+        output_serde = target_handler.handler_io.output_serde
+        return self.do_raw_call(service, handler, parameter, input_serde, output_serde, key, send_delay, send)
 
+
+    def do_raw_call(self,
+                 service: str,
+                 handler:str,
+                 input_param: I,
+                 input_serde: Serde[I],
+                 output_serde: Serde[O],
+                 key: Optional[str] = None,
+                 send_delay: Optional[timedelta] = None,
+                 send: bool = False) -> Awaitable[O] | None:
+        """Make an RPC call to the given handler"""
+        parameter = input_serde.serialize(input_param)
         if send_delay:
             ms = int(send_delay.total_seconds() * 1000)
             self.vm.sys_send(service, handler, parameter, key, delay=ms)
@@ -283,7 +299,6 @@ class ServerInvocationContext(ObjectContext):
                                   parameter=parameter,
                                   key=key)
 
-        output_serde = target_handler.handler_io.output_serde
         coro = self.create_poll_coroutine(handle)
 
         async def await_point():
@@ -296,12 +311,12 @@ class ServerInvocationContext(ObjectContext):
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I) -> Awaitable[O]:
-        coro = self.generic_call(tpe, arg)
+        coro = self.do_call(tpe, arg)
         assert coro is not None
         return coro
 
     def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None) -> None:
-        self.generic_call(tpe=tpe, arg=arg, send_delay=send_delay)
+        self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay)
 
     def object_call(self,
                     tpe: Callable[[Any, I],Awaitable[O]],
@@ -309,12 +324,12 @@ class ServerInvocationContext(ObjectContext):
                     arg: I,
                     send_delay: Optional[timedelta] = None,
                     send: bool = False) -> Awaitable[O]:
-        coro = self.generic_call(tpe, arg, key, send_delay, send)
+        coro = self.do_call(tpe, arg, key, send_delay, send)
         assert coro is not None
         return coro
 
     def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
-        self.generic_call(tpe=tpe, key=key, arg=arg, send_delay=send_delay)
+        self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay)
 
     def workflow_call(self,
                         tpe: Callable[[Any, I], Awaitable[O]],
@@ -324,6 +339,14 @@ class ServerInvocationContext(ObjectContext):
 
     def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
         return self.object_send(tpe, key, arg, send_delay)
+
+    def generic_call(self, service: str, handler: str, arg: bytes, key: str | None = None) -> Awaitable[bytes]:
+        serde = BytesSerde()
+        return self.do_raw_call(service, handler, arg, serde, serde, key) # type: ignore
+
+    def generic_send(self, service: str, handler: str, arg: bytes, key: str | None = None, send_delay: timedelta | None = None) -> None:
+        serde = BytesSerde()
+        return self.do_raw_call(service, handler, arg, serde, serde , key, send_delay) # type: ignore
 
     def awakeable(self,
                   serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:

@@ -30,6 +30,36 @@ class DeserializerType(typing.Generic[I]):
     __call__: typing.Callable[[bytes], typing.Optional[I]]
 
 
+class BytesSerde(Serde[bytes]):
+    """A pass-trough serializer/deserializer."""
+
+    def deserialize(self, buf: bytes) -> typing.Optional[bytes]:
+        """
+        Deserializes a bytearray to a bytearray.
+
+        Args:
+            buf (bytearray): The bytearray to deserialize.
+
+        Returns:
+            typing.Optional[bytes]: The deserialized bytearray.
+        """
+        return buf
+
+    def serialize(self, obj: typing.Optional[bytes]) -> bytes:
+        """
+        Serializes a bytearray to a bytearray.
+
+        Args:
+            obj (bytes): The bytearray to serialize.
+
+        Returns:
+            bytearray: The serialized bytearray.
+        """
+        if obj is None:
+            return bytes()
+        return obj
+
+
 class JsonSerde(Serde[I]):
     """A JSON serializer/deserializer."""
 
