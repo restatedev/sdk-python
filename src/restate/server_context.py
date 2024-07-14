@@ -316,6 +316,15 @@ class ServerInvocationContext(ObjectContext):
     def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
         self.generic_call(tpe=tpe, key=key, arg=arg, send_delay=send_delay)
 
+    def workflow_call(self,
+                        tpe: Callable[[Any, I], Awaitable[O]],
+                        key: str,
+                        arg: I) -> Awaitable[O]:
+        return self.object_call(tpe, key, arg)
+
+    def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
+        return self.object_send(tpe, key, arg, send_delay)
+
     def awakeable(self,
                   serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:
         assert serde is not None

@@ -123,6 +123,7 @@ class Context(abc.ABC):
         Invokes the given service with the given argument.
         """
 
+
     @abc.abstractmethod
     def service_send(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
@@ -144,6 +145,26 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def object_send(self,
+                    tpe: Callable[[Any, I], Awaitable[O]],
+                    key: str,
+                    arg: I,
+                    send_delay: Optional[timedelta] = None,
+                    ) -> None:
+        """
+        Send a message to an object with the given argument.
+        """
+
+    @abc.abstractmethod
+    def workflow_call(self,
+                    tpe: Callable[[Any, I], Awaitable[O]],
+                    key: str,
+                    arg: I) -> Awaitable[O]:
+        """
+        Invokes the given workflow with the given argument.
+        """
+
+    @abc.abstractmethod
+    def workflow_send(self,
                     tpe: Callable[[Any, I], Awaitable[O]],
                     key: str,
                     arg: I,
