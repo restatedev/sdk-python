@@ -1,4 +1,5 @@
 mypy
 pylint
-wheel
 hypercorn
+maturin
+pytest
