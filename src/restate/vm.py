@@ -218,7 +218,7 @@ class VMWrapper:
             bytes if the side effect was successful.
         """
         result = self.vm.sys_run_enter(name)
-        if not result:
+        if result is None:
             return None
         if isinstance(result, restate_sdk_python_core.PyFailure):
             return Failure(result.code, result.message) # pylint: disable=protected-access
