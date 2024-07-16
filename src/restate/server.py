@@ -10,7 +10,9 @@
 #
 """This module contains the ASGI server for the restate framework."""
 
+import asyncio
 from typing import Dict, Literal
+import traceback
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
 from restate.server_context import ServerInvocationContext
@@ -66,10 +68,10 @@ async def process_invocation_to_completion(vm: VMWrapper,
     # ========================================
     while True:
         message = await receive()
-        if message['type'] == 'http.disconnect':
+        if message.get('type') == 'http.disconnect':
             # everything ends here really ...
             return
-        if message['type'] == 'http.request':
+        if message.get('type') == 'http.request':
             assert isinstance(message['body'], bytes)
             vm.notify_input(message['body'])
         if not message.get('more_body', False):
@@ -87,46 +89,56 @@ async def process_invocation_to_completion(vm: VMWrapper,
                                       attempt_headers=attempt_headers,
                                       send=send,
                                       receive=receive)
-    await context.enter()
+    try:
+        await context.enter()
+    except asyncio.exceptions.CancelledError:
+        raise
+    # pylint: disable=W0718
+    except Exception:
+        traceback.print_exc()
     await context.leave()
 
 def asgi_app(endpoint: Endpoint):
     """Create an ASGI-3 app for the given endpoint."""
 
     async def app(scope: Scope, receive: Receive, send: Send):
-        if scope['type'] != 'http':
-            raise NotImplementedError(f"Unknown scope type {scope['type']}")
-        # might be a discovery request
-        if scope['path'] == '/discover':
-            await send_discovery(scope, send, endpoint)
-            return
-        # anything other than invoke is 404
-        assert isinstance(scope['path'], str)
-        if not scope['path'].startswith('/invoke/'):
-            await send404(send)
-            return
-        # path is of the form: /invoke/:service/:handler
-        # strip "/invoke/" (= strlen 8) and split the service and handler
-        service_name, handler_name = scope['path'][8:].split('/')
-        service = endpoint.services[service_name]
-        if not service:
-            await send404(send)
-            return
-        handler = service.handlers[handler_name]
-        if not handler:
-            send404(send)
-            return
-        #
-        # At this point we have a valid handler.
-        # Let us setup restate's execution context for this invocation and handler.
-        #
-        assert not isinstance(scope['headers'], str)
-        assert hasattr(scope['headers'], '__iter__')
-        request_headers = binary_to_header(scope['headers'])
-        await process_invocation_to_completion(VMWrapper(request_headers),
-                                               handler,
-                                               dict(request_headers),
-                                               receive,
-                                               send)
+        try:
+            if scope['type'] != 'http':
+                raise NotImplementedError(f"Unknown scope type {scope['type']}")
+            # might be a discovery request
+            if scope['path'] == '/discover':
+                await send_discovery(scope, send, endpoint)
+                return
+            # anything other than invoke is 404
+            assert isinstance(scope['path'], str)
+            if not scope['path'].startswith('/invoke/'):
+                await send404(send)
+                return
+            # path is of the form: /invoke/:service/:handler
+            # strip "/invoke/" (= strlen 8) and split the service and handler
+            service_name, handler_name = scope['path'][8:].split('/')
+            service = endpoint.services[service_name]
+            if not service:
+                await send404(send)
+                return
+            handler = service.handlers[handler_name]
+            if not handler:
+                send404(send)
+                return
+            #
+            # At this point we have a valid handler.
+            # Let us setup restate's execution context for this invocation and handler.
+            #
+            assert not isinstance(scope['headers'], str)
+            assert hasattr(scope['headers'], '__iter__')
+            request_headers = binary_to_header(scope['headers'])
+            await process_invocation_to_completion(VMWrapper(request_headers),
+                                                   handler,
+                                                   dict(request_headers),
+                                                   receive,
+                                                   send)
+        except Exception as e:
+            traceback.print_exc()
+            raise e
 
     return app

@@ -92,7 +92,7 @@ class VMWrapper:
     def take_async_result(self, handle: typing.Any) -> AsyncResultType:
         """Take the result of an asynchronous operation."""
         result = self.vm.take_async_result(handle)
-        if not result:
+        if result is None:
             return NOT_READY
         if isinstance(result, restate_sdk_python_core.PyVoid):
             # success with an empty value

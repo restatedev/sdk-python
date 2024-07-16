@@ -15,6 +15,7 @@ import inspect
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import json
 import typing
+import traceback
 
 from restate.context import DurablePromise, ObjectContext, Request, Serde
 from restate.exceptions import TerminalError
@@ -124,14 +125,15 @@ class ServerInvocationContext(ObjectContext):
         except SuspendedException:
             pass
         except Exception as e:
-            self.vm.notify_error(str(e))
-            # no need to call sys_end here, because the error will be propagated
+            fmt = '\n'.join(traceback.format_exception(e))
+            self.vm.notify_error(fmt)
+            raise e
 
     async def leave(self):
         """Leave the context."""
         while True:
             chunk = self.vm.take_output()
-            if not chunk:
+            if chunk is None:
                 break
             await self.send({
                 'type': 'http.response.body',
@@ -148,11 +150,11 @@ class ServerInvocationContext(ObjectContext):
         # {'type': 'http.disconnect'}
         while True:
             event = await self.receive()
-            if not event:
+            if event is None:
                 break
-            if event['type'] == 'http.disconnect':
+            if event.get('type') == 'http.disconnect':
                 break
-            if event['type'] == 'http.request' and event['more_body'] is False:
+            if event.get('type') == 'http.request' and event.get('more_body', False) is False:
                 break
         # finally, we close our side
         # it is important to do it, after the other side has closed his side,
@@ -179,7 +181,7 @@ class ServerInvocationContext(ObjectContext):
             res = self.vm.take_async_result(handle)
             if isinstance(res, NotReady):
                 chunk = await self.receive()
-                if chunk['body']:
+                if chunk.get('body', None) is not None:
                     assert isinstance(chunk['body'], bytes)
                     self.vm.notify_input(chunk['body'])
                 if not chunk.get('more_body', False):
@@ -345,7 +347,7 @@ class ServerInvocationContext(ObjectContext):
 
     def generic_send(self, service: str, handler: str, arg: bytes, key: str | None = None, send_delay: timedelta | None = None) -> None:
         serde = BytesSerde()
-        return self.do_raw_call(service, handler, arg, serde, serde , key, send_delay) # type: ignore
+        return self.do_raw_call(service, handler, arg, serde, serde , key, send_delay, True) # type: ignore
 
     def awakeable(self,
                   serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:
