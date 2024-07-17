@@ -300,14 +300,12 @@ class ServerInvocationContext(ObjectContext):
                                   parameter=parameter,
                                   key=key)
 
-        coro = self.create_poll_coroutine(handle)
-
-        async def await_point():
+        async def await_point(s: ServerInvocationContext, h, o: Serde[O]):
             """Wait for this handle to be resolved, and deserialize the response."""
-            res = await coro
-            return output_serde.deserialize(res) # type: ignore
+            res = await s.create_poll_coroutine(h)
+            return o.deserialize(res) # type: ignore
 
-        return await_point()
+        return await_point(self, handle, output_serde)
 
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
