@@ -102,8 +102,8 @@ class VMWrapper:
             return result
         if isinstance(result, restate_sdk_python_core.PyFailure):
             # a terminal failure
-            code = result.code # pylint: disable=protected-access
-            message = result.message # pylint: disable=protected-access
+            code = result.code
+            message = result.message
             return Failure(code, message)
         if isinstance(result, restate_sdk_python_core.PySuspended):
             # the state machine had suspended
