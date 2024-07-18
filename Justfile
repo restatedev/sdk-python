@@ -38,6 +38,11 @@ example:
 	fi
 	hypercorn --config hypercorn-config.toml example:app
 
+docker:
+	@echo "Creating dockerized example example:main"
+	docker build . -t example:main
+
+
 # Default recipe to show help message
 default:
     @echo "Available recipes:"
