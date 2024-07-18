@@ -12,12 +12,12 @@ default:
 # Recipe to run mypy for type checking
 mypy:
     @echo "Running mypy..."
-    {{python}} -m mypy --check-untyped-defs --ignore-missing-imports python/restate_sdk/
+    {{python}} -m mypy --check-untyped-defs --ignore-missing-imports python/restate/
 
 # Recipe to run pylint for linting
 pylint:
     @echo "Running pylint..."
-    {{python}} -m pylint python/restate_sdk
+    {{python}} -m pylint python/restate
 
 test:
     @echo "Running Python tests..."
