@@ -95,7 +95,7 @@ class Context(abc.ABC):
     def run(self,
             name: str,
             action: RunAction[T],
-            serde: Serde[T] = JsonSerde()) -> Awaitable[Any | None]:
+            serde: Serde[T] = JsonSerde()) -> Awaitable[T | None]:
         """
         Runs the given action with the given name.
         """
