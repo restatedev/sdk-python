@@ -10,25 +10,16 @@ permissions:
   contents: read
 
 jobs:
-  linux:
-    runs-on: ${{ matrix.platform.runner }}
-    strategy:
-      matrix:
-        platform:
-          - runner: ubuntu-latest
-            target: x86_64
-          - runner: ubuntu-latest
-            target: aarch64
+  version-check:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install dasel
         run: |
           wget -q https://github.com/TomWright/dasel/releases/download/v2.8.1/dasel_linux_amd64 && \
           mv dasel_linux_amd64 dasel && \
           chmod +x dasel && \
           ./dasel --version
-
       - name: Verify version
         run: |
           # write yaml to remove quotes
@@ -40,6 +31,18 @@ jobs:
             exit 1;
           fi
 
+  linux:
+    runs-on: ${{ matrix.platform.runner }}
+    needs: [version-check]
+    strategy:
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64
+          - runner: ubuntu-latest
+            target: aarch64
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
@@ -58,6 +61,7 @@ jobs:
 
   musllinux:
     runs-on: ${{ matrix.platform.runner }}
+    needs: [version-check]
     strategy:
       matrix:
         platform:
@@ -85,6 +89,7 @@ jobs:
 
   macos:
     runs-on: ${{ matrix.platform.runner }}
+    needs: [version-check]
     strategy:
       matrix:
         platform:
@@ -111,6 +116,7 @@ jobs:
 
   sdist:
     runs-on: ubuntu-latest
+    needs: [version-check]
     steps:
       - uses: actions/checkout@v4
       - name: Build sdist
