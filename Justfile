@@ -40,6 +40,7 @@ clean:
 
 example:
 	#!/usr/bin/env bash
+	cd examples/
 	if [ -z "$PYTHONPATH" ]; then
 		export PYTHONPATH="examples/"
 	else

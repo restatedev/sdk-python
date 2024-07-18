@@ -12,10 +12,17 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
-from greeter import greeter
-from virtual_object import counter
-from workflow import payment
+from restate import VirtualObject, ObjectContext, ObjectSharedContext
 
-import restate
+counter = VirtualObject("counter")
 
-app = restate.app(services=[greeter, counter, payment])
+@counter.handler()
+async def increment(ctx: ObjectContext, value: int) -> int:
+    n = await ctx.get("counter") or 0
+    n += value
+    ctx.set("counter", n)
+    return n
+
+@counter.handler(kind="shared")
+async def count(ctx: ObjectSharedContext) -> int:
+    return await ctx.get("counter") or 0

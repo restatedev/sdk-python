@@ -12,10 +12,10 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
-from greeter import greeter
-from virtual_object import counter
-from workflow import payment
+from restate import Service, Context
 
-import restate
+greeter = Service("greeter")
 
-app = restate.app(services=[greeter, counter, payment])
+@greeter.handler()
+async def greet(ctx: Context, name: str) -> str:
+    return f"Hello {name}!"
