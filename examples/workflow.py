@@ -44,7 +44,7 @@ async def pay(ctx: WorkflowContext, amount: int):
         return { "success" : True }
 
     ctx.set("status", "payment declined")
-    raise TerminalError("Payment declined")
+    raise TerminalError(message="Payment declined", status_code=401)
 
 @payment.handler()
 async def payment_verified(ctx: WorkflowSharedContext, result: str):
