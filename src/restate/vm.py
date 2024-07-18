@@ -1,3 +1,13 @@
+#
+#  Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
+#
+#  This file is part of the Restate SDK for Node.js/TypeScript,
+#  which is released under the MIT license.
+#
+#  You can find a copy of the license in file LICENSE in the root
+#  directory of this repository or package, or at
+#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
+#
 """
 wrap the restate_sdk_python_core.PyVM class
 """
@@ -49,7 +59,7 @@ AsyncResultType = typing.Optional[typing.Union[bytes, Failure, NotReady]]
 class VMWrapper:
     """
     A wrapper class for the restate_sdk_python_core.PyVM class.
-    It provides a type-friendly interface to our shared vm. 
+    It provides a type-friendly interface to our shared vm.
     """
 
     def __init__(self, headers: typing.List[typing.Tuple[str, str]]):
@@ -247,7 +257,7 @@ class VMWrapper:
     def sys_run_exit_success(self, output: bytes) -> int:
         """
         Exit a side effect
-        
+
         Args:
             output: The output of the side effect.
 
