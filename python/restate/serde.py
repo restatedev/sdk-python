@@ -9,12 +9,11 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """ This module contains functions for serializing and deserializing data. """
-
+import abc
 import json
 import typing
 
-from restate.context import Serde
-
+T = typing.TypeVar('T')
 I = typing.TypeVar('I')
 O = typing.TypeVar('O')
 
@@ -28,6 +27,22 @@ class SerializerType(typing.Generic[O]):
 class DeserializerType(typing.Generic[I]):
     """A type definition for a deserializer"""
     __call__: typing.Callable[[bytes], typing.Optional[I]]
+
+
+class Serde(typing.Generic[T], abc.ABC):
+    """serializer/deserializer interface."""
+
+    @abc.abstractmethod
+    def deserialize(self, buf: bytes) -> typing.Optional[T]:
+        """
+        Deserializes a bytearray to an object.
+        """
+
+    @abc.abstractmethod
+    def serialize(self, obj: typing.Optional[T]) -> bytes:
+        """
+        Serializes an object to a bytearray.
+        """
 
 
 class BytesSerde(Serde[bytes]):

@@ -13,14 +13,13 @@
 from datetime import timedelta
 import inspect
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
-import json
 import typing
 import traceback
 
-from restate.context import DurablePromise, ObjectContext, Request, Serde
+from restate.context import DurablePromise, ObjectContext, Request
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
-from restate.serde import BytesSerde, JsonSerde
+from restate.serde import BytesSerde, JsonSerde, Serde
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper
 
@@ -193,24 +192,24 @@ class ServerInvocationContext(ObjectContext):
                 raise TerminalError(res.message, res.code)
             return res
 
-    def get(self, name: str) -> typing.Awaitable[typing.Any | None]:
+    def get(self, name: str, serde: Serde[T] = JsonSerde()) -> typing.Awaitable[Optional[T]]:
         coro = self.create_poll_coroutine(self.vm.sys_get_state(name))
 
         async def await_point():
             """Wait for this handle to be resolved."""
             res = await coro
-            if res:
-                return json.loads(res.decode('utf-8'))
-            return None
+            if res is None:
+                return None
+            return serde.deserialize(res)
 
         return await_point() # do not await here, the caller will do it.
 
     def state_keys(self) -> Awaitable[List[str]]:
         raise NotImplementedError
 
-    def set(self, name: str, value: T) -> None:
+    def set(self, name: str, value: T, serde: Serde[T] = JsonSerde()) -> None:
         """Set the value associated with the given name."""
-        buffer = json.dumps(value).encode('utf-8')
+        buffer = serde.serialize(value)
         self.vm.sys_set_state(name, bytes(buffer))
 
     def clear(self, name: str) -> None:
@@ -231,7 +230,7 @@ class ServerInvocationContext(ObjectContext):
     async def run(self,
                   name: str,
                   action: Callable[[], T] | Callable[[], Awaitable[T]],
-                  serde: Optional[Serde[T]] = JsonSerde()) -> T |  None:
+                  serde: Optional[Serde[T]] = JsonSerde()) -> T | None:
         assert serde is not None
         res = self.vm.sys_run_enter(name)
         if isinstance(res, Failure):
@@ -348,7 +347,7 @@ class ServerInvocationContext(ObjectContext):
         return self.do_raw_call(service, handler, arg, serde, serde , key, send_delay, True) # type: ignore
 
     def awakeable(self,
-                  serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:
+                  serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[I]]:
         assert serde is not None
         name, handle = self.vm.sys_awakeable()
         coro = self.create_poll_coroutine(handle)

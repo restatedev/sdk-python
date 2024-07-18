@@ -17,27 +17,13 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union
 import typing
 from datetime import timedelta
+from restate.serde import JsonSerde, Serde
 
 T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
 
 RunAction = Union[Callable[[], T], Callable[[], Awaitable[T]]]
-
-class Serde(typing.Generic[T], abc.ABC):
-    """serializer/deserializer interface."""
-
-    @abc.abstractmethod
-    def deserialize(self, buf: bytes) -> typing.Optional[T]:
-        """
-        Deserializes a bytearray to an object.
-        """
-
-    @abc.abstractmethod
-    def serialize(self, obj: typing.Optional[T]) -> bytes:
-        """
-        Serializes an object to a bytearray.
-        """
 
 @dataclass
 class Request:
@@ -67,7 +53,9 @@ class KeyValueStore(abc.ABC):
     """
 
     @abc.abstractmethod
-    def get(self, name: str) -> Awaitable[Optional[typing.Any]]:
+    def get(self,
+            name: str,
+            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[T]]:
         """
         Retrieves the value associated with the given name.
         """
@@ -77,7 +65,10 @@ class KeyValueStore(abc.ABC):
         """Returns the list of keys in the store."""
 
     @abc.abstractmethod
-    def set(self, name: str, value: T) -> None:
+    def set(self,
+            name: str,
+            value: T,
+            serde: Serde[T] = JsonSerde()) -> None:
         """set the value associated with the given name."""
 
     @abc.abstractmethod
@@ -104,7 +95,7 @@ class Context(abc.ABC):
     def run(self,
             name: str,
             action: RunAction[T],
-            serde: Optional[Serde[T]] = None) -> Awaitable[T | None]:
+            serde: Serde[T] = JsonSerde()) -> Awaitable[T | None]:
         """
         Runs the given action with the given name.
         """
@@ -198,7 +189,7 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def awakeable(self,
-                  serde: Optional[Serde[T]] = None) -> typing.Tuple[str, Awaitable[Any]]:
+                  serde: Serde[T] = JsonSerde()) -> typing.Tuple[str, Awaitable[T]]:
         """
         Returns the name of the awakeable and the future to be awaited.
         """
@@ -207,7 +198,7 @@ class Context(abc.ABC):
     def resolve_awakeable(self,
                           name: str,
                           value: I,
-                          serde: typing.Optional[Serde[I]] = None) -> None:
+                          serde: Serde[I] = JsonSerde()) -> None:
         """
         Resolves the awakeable with the given name.
         """
@@ -241,7 +232,9 @@ class ObjectSharedContext(Context):
         """Returns the key of the current object."""
 
     @abc.abstractmethod
-    def get(self, name: str) -> Awaitable[Optional[typing.Any]]:
+    def get(self,
+            name: str,
+            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[T]]:
         """
         Retrieves the value associated with the given name.
         """
@@ -257,7 +250,7 @@ class DurablePromise(typing.Generic[T]):
     Represents a durable promise.
     """
 
-    def __init__(self, name: str, serde: typing.Optional[Serde[T]] = None) -> None:
+    def __init__(self, name: str, serde: Serde[T] = JsonSerde()) -> None:
         self.name = name
         self.serde = serde
 
@@ -291,7 +284,7 @@ class WorkflowContext(ObjectContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str) -> DurablePromise[Any]:
+    def promise(self, name: str, serde: Serde[T] = JsonSerde()) -> DurablePromise[T]:
         """
         Returns a durable promise with the given name.
         """
@@ -302,7 +295,7 @@ class WorkflowSharedContext(ObjectSharedContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str) -> DurablePromise[Any]:
+    def promise(self, name: str, serde: Serde[T] = JsonSerde()) -> DurablePromise[T]:
         """
         Returns a durable promise with the given name.
         """

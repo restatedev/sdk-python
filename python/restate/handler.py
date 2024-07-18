@@ -16,7 +16,7 @@ which is used to define the handlers for the services.
 from dataclasses import dataclass
 from typing import Any, Callable, Awaitable, Generic, Literal, Optional, TypeVar
 
-from restate.context import Serde
+from restate.serde import Serde
 
 I = TypeVar('I')
 O = TypeVar('O')
