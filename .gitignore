@@ -166,3 +166,6 @@ debug/
 
 # IntelliJ
 .idea
+
+# Restate data
+restate-data
