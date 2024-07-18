@@ -192,7 +192,7 @@ class ServerInvocationContext(ObjectContext):
                 raise TerminalError(res.message, res.code)
             return res
 
-    def get(self, name: str, serde: Serde[T] = JsonSerde()) -> typing.Awaitable[Optional[T]]:
+    def get(self, name: str, serde: Serde[T] = JsonSerde()) -> typing.Awaitable[Optional[Any]]:
         coro = self.create_poll_coroutine(self.vm.sys_get_state(name))
 
         async def await_point():
@@ -347,7 +347,7 @@ class ServerInvocationContext(ObjectContext):
         return self.do_raw_call(service, handler, arg, serde, serde , key, send_delay, True) # type: ignore
 
     def awakeable(self,
-                  serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[I]]:
+                  serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:
         assert serde is not None
         name, handle = self.vm.sys_awakeable()
         coro = self.create_poll_coroutine(handle)
