@@ -21,6 +21,25 @@ jobs:
             target: aarch64
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install dasel
+        run: |
+          wget -q https://github.com/TomWright/dasel/releases/download/v2.8.1/dasel_linux_amd64 && \
+          mv dasel_linux_amd64 dasel && \
+          chmod +x dasel && \
+          ./dasel --version
+
+      - name: Verify version
+        run: |
+          # write yaml to remove quotes
+          version=$(./dasel --file Cargo.toml --read toml 'package.version' --write yaml)
+          tag_version=${{ github.ref_name }}
+          tag_version=${tag_version#v}
+          if [ ${tag_version} != ${version} ]; then
+            echo "::error file=release.yml,line=28::Cargo.toml version '${version}' is not equal to tag version '${tag_version}'. Please align them."
+            exit 1;
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
