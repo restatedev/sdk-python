@@ -12,4 +12,13 @@
 Restate SDK for Python
 """
 
+from .service import Service
+from .object import VirtualObject
+from .workflow import Workflow
+
+# types
+from .context import Context, ObjectContext, ObjectSharedContext
+from .context import WorkflowContext, WorkflowSharedContext
+from .context import DurablePromise
+
 from .endpoint import app

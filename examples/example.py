@@ -14,11 +14,9 @@
 
 
 from datetime import timedelta
-from restate.service import Service
-from restate.context import Context, ObjectContext, ObjectSharedContext
-from restate.context import WorkflowContext, WorkflowSharedContext
-from restate.object import VirtualObject
-from restate.workflow import Workflow
+from restate import Service, Context
+from restate import VirtualObject, ObjectContext, ObjectSharedContext
+from restate import Workflow, WorkflowContext, WorkflowSharedContext
 import restate
 
 greeter = Service("greeter")
