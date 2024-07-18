@@ -9,7 +9,7 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """
-wrap the restate_sdk._internal.PyVM class
+wrap the restate._internal.PyVM class
 """
 # pylint: disable=E1101
 
