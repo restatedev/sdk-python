@@ -98,11 +98,16 @@ async def process_invocation_to_completion(vm: VMWrapper,
         traceback.print_exc()
     await context.leave()
 
+class LifeSpanNotImplemented(ValueError):
+    """Signal to the asgi server that we didn't implement lifespans"""
+
 def asgi_app(endpoint: Endpoint):
     """Create an ASGI-3 app for the given endpoint."""
 
     async def app(scope: Scope, receive: Receive, send: Send):
         try:
+            if scope['type'] == 'lifespan':
+                raise LifeSpanNotImplemented()
             if scope['type'] != 'http':
                 raise NotImplementedError(f"Unknown scope type {scope['type']}")
             # might be a discovery request
@@ -123,7 +128,7 @@ def asgi_app(endpoint: Endpoint):
                 return
             handler = service.handlers[handler_name]
             if not handler:
-                send404(send)
+                await send404(send)
                 return
             #
             # At this point we have a valid handler.
@@ -137,6 +142,8 @@ def asgi_app(endpoint: Endpoint):
                                                    dict(request_headers),
                                                    receive,
                                                    send)
+        except LifeSpanNotImplemented as e:
+            raise e
         except Exception as e:
             traceback.print_exc()
             raise e

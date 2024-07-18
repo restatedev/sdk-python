@@ -58,8 +58,16 @@ class Endpoint:
         for service in services:
             if service.name in self.services:
                 raise ValueError(f"Service {service.name} already exists")
-            self.services[service.name] = service
         return self
+
+    def streaming_protocol(self):
+        """Use bidirectional streaming protocol. Use with servers that support HTTP2"""
+        self.protocol = "bidi"
+        return self
+
+    def request_response_protocol(self):
+        """Use request response style protocol for communication with restate."""
+        self.protocol = "request_response"
 
     def app(self):
         """
@@ -77,11 +85,15 @@ class Endpoint:
         from restate.server import asgi_app
         return asgi_app(self)
 
-def endpoint() -> Endpoint:
-    """
-    Create a new restate endpoint that serves as a container for all the services and objects
-
-    Returns:
-        The new Endpoint instance
-    """
-    return Endpoint()
+def app(
+    services: typing.Iterable[typing.Union[Service, VirtualObject, Workflow]],
+    protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None):
+    """A restate ASGI application that hosts the given services."""
+    endpoint = Endpoint()
+    if protocol == "bidi":
+        endpoint.streaming_protocol()
+    elif protocol == "request_response":
+        endpoint.request_response_protocol()
+    for service in services:
+        endpoint.bind(service)
+    return endpoint.app()

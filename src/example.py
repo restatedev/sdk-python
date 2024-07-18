@@ -17,9 +17,9 @@ from datetime import timedelta
 from restate.service import Service
 from restate.context import Context, ObjectContext, ObjectSharedContext
 from restate.context import WorkflowContext, WorkflowSharedContext
-from restate.endpoint import endpoint
 from restate.object import VirtualObject
 from restate.workflow import Workflow
+import restate
 
 greeter = Service("greeter")
 
@@ -64,4 +64,4 @@ async def email_clicked(ctx: WorkflowSharedContext, secret: str):
     await promise.resolve(secret)
 
 
-app = endpoint().bind(greeter, counter, payment).app()
+app = restate.app(services=[greeter, counter])

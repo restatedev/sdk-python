@@ -11,3 +11,5 @@
 """
 Restate SDK for Python
 """
+
+from .endpoint import app

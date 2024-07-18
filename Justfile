@@ -36,7 +36,7 @@ example:
 	else
 		export PYTHONPATH="$PYTHONPATH:src/"
 	fi
-	hypercorn -b "0.0.0.0:9080" example:app
+	hypercorn --config hypercorn-config.toml example:app
 
 # Default recipe to show help message
 default:
