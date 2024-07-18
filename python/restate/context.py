@@ -55,7 +55,7 @@ class KeyValueStore(abc.ABC):
     @abc.abstractmethod
     def get(self,
             name: str,
-            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[T]]:
+            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[Any]]:
         """
         Retrieves the value associated with the given name.
         """
@@ -95,7 +95,7 @@ class Context(abc.ABC):
     def run(self,
             name: str,
             action: RunAction[T],
-            serde: Serde[T] = JsonSerde()) -> Awaitable[T | None]:
+            serde: Serde[T] = JsonSerde()) -> Awaitable[Any | None]:
         """
         Runs the given action with the given name.
         """
@@ -189,7 +189,7 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def awakeable(self,
-                  serde: Serde[T] = JsonSerde()) -> typing.Tuple[str, Awaitable[T]]:
+                  serde: Serde[T] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:
         """
         Returns the name of the awakeable and the future to be awaited.
         """
@@ -234,7 +234,7 @@ class ObjectSharedContext(Context):
     @abc.abstractmethod
     def get(self,
             name: str,
-            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[T]]:
+            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[Any]]:
         """
         Retrieves the value associated with the given name.
         """
@@ -284,7 +284,7 @@ class WorkflowContext(ObjectContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = JsonSerde()) -> DurablePromise[T]:
+    def promise(self, name: str, serde: Serde[T] = JsonSerde()) -> DurablePromise[Any]:
         """
         Returns a durable promise with the given name.
         """
@@ -295,7 +295,7 @@ class WorkflowSharedContext(ObjectSharedContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = JsonSerde()) -> DurablePromise[T]:
+    def promise(self, name: str, serde: Serde[T] = JsonSerde()) -> DurablePromise[Any]:
         """
         Returns a durable promise with the given name.
         """
