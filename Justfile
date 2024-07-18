@@ -13,11 +13,13 @@ default:
 mypy:
     @echo "Running mypy..."
     {{python}} -m mypy --check-untyped-defs --ignore-missing-imports python/restate/
+    {{python}} -m mypy --check-untyped-defs --ignore-missing-imports examples/
 
 # Recipe to run pylint for linting
 pylint:
     @echo "Running pylint..."
     {{python}} -m pylint python/restate
+    {{python}} -m pylint examples/
 
 test:
     @echo "Running Python tests..."
@@ -44,8 +46,3 @@ example:
 		export PYTHONPATH="$PYTHONPATH:examples/"
 	fi
 	hypercorn --config hypercorn-config.toml example:app
-
-docker:
-	@echo "Creating dockerized example example:main"
-	docker build . -t example:main
-
