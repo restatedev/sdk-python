@@ -1,0 +1,35 @@
+name: Test
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: "Lint and Test (Python ${{ matrix.python }})"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: [ "3.12" ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build Rust module
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --out dist --interpreter python${{ matrix.python }}
+          sccache: 'true'
+          container: off
+      - run: pip install -r requirements.txt
+      - run: pip install dist/*
+      - name: Verify
+        run: just verify

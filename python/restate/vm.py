@@ -9,13 +9,13 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """
-wrap the restate_sdk_python_core.PyVM class
+wrap the restate._internal.PyVM class
 """
 # pylint: disable=E1101
 
 from dataclasses import dataclass
 import typing
-import restate_sdk_python_core # pylint: disable=import-error
+from restate._internal import PyVM, PyFailure, PySuspended, PyVoid # pylint: disable=import-error,no-name-in-module
 
 @dataclass
 class Invocation:
@@ -58,12 +58,12 @@ AsyncResultType = typing.Optional[typing.Union[bytes, Failure, NotReady]]
 # pylint: disable=too-many-public-methods
 class VMWrapper:
     """
-    A wrapper class for the restate_sdk_python_core.PyVM class.
-    It provides a type-friendly interface to our shared vm.
+    A wrapper class for the restate_sdk._internal.PyVM class.
+    It provides a type-friendly interface to our shared vm. 
     """
 
     def __init__(self, headers: typing.List[typing.Tuple[str, str]]):
-        self.vm = restate_sdk_python_core.PyVM(headers)
+        self.vm = PyVM(headers)
 
     def get_response_head(self) -> typing.Tuple[int, typing.Iterable[typing.Tuple[str, str]]]:
         """
@@ -104,18 +104,18 @@ class VMWrapper:
         result = self.vm.take_async_result(handle)
         if result is None:
             return NOT_READY
-        if isinstance(result, restate_sdk_python_core.PyVoid):
+        if isinstance(result, PyVoid):
             # success with an empty value
             return None
         if isinstance(result, bytes):
             # success with a non empty value
             return result
-        if isinstance(result, restate_sdk_python_core.PyFailure):
+        if isinstance(result, PyFailure):
             # a terminal failure
             code = result.code
             message = result.message
             return Failure(code, message)
-        if isinstance(result, restate_sdk_python_core.PySuspended):
+        if isinstance(result, PySuspended):
             # the state machine had suspended
             raise SUSPENDED
         raise ValueError(f"Unknown result type: {result}")
@@ -163,7 +163,7 @@ class VMWrapper:
         Returns:
             None
         """
-        res = restate_sdk_python_core.PyFailure(output.code, output.message)
+        res = PyFailure(output.code, output.message)
         self.vm.sys_write_output_failure(res)
 
 
@@ -230,7 +230,7 @@ class VMWrapper:
         result = self.vm.sys_run_enter(name)
         if result is None:
             return None
-        if isinstance(result, restate_sdk_python_core.PyFailure):
+        if isinstance(result, PyFailure):
             return Failure(result.code, result.message) # pylint: disable=protected-access
         assert isinstance(result, bytes)
         return result
@@ -251,7 +251,7 @@ class VMWrapper:
         """
         Reject
         """
-        py_failure = restate_sdk_python_core.PyFailure(failure.code, failure.message)
+        py_failure = PyFailure(failure.code, failure.message)
         self.vm.sys_complete_awakeable_failure(name, py_failure)
 
     def sys_run_exit_success(self, output: bytes) -> int:
@@ -280,7 +280,7 @@ class VMWrapper:
 
     def sys_complete_promise_failure(self, name: str, failure: Failure) -> int:
         """reject the promise on failure"""
-        res = restate_sdk_python_core.PyFailure(failure.code, failure.message)
+        res = PyFailure(failure.code, failure.message)
         return self.vm.sys_complete_promise_failure(name, res)
 
     def sys_run_exit_failure(self, output: Failure) -> int:
@@ -291,7 +291,7 @@ class VMWrapper:
             name: The name of the side effect.
             output: The output of the side effect.
         """
-        res = restate_sdk_python_core.PyFailure(output.code, output.message)
+        res = PyFailure(output.code, output.message)
         return self.vm.sys_run_exit_failure(res)
 
     def sys_end(self):

@@ -1,0 +1,17 @@
+[package]
+name = "restate-sdk-python-core"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.maturin]
+name = "restate_sdk._internal"
+
+[lib]
+name = "restate_sdk_python_core"
+crate-type = ["cdylib"]
+doc = false
+
+[dependencies]
+pyo3 = { version = "0.22.0", features = ["extension-module"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+restate-sdk-shared-core = { version = "0.0.3" }

@@ -1,0 +1,27 @@
+[project]
+name = "restate-sdk"
+description = "A Python SDK for Restate"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries :: Application Frameworks"
+]
+dynamic = ["version"]
+license = { file = "LICENSE" }
+authors = [
+    { name = "Restate Developers", email = "dev@restate.dev" }
+]
+
+[project.optional-dependencies]
+test = ["pytest", "hypercorn"]
+lint = ["mypy", "pylint"]
+
+[build-system]
+requires = ["maturin>=1.6,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "restate._internal"
+python-source = "python"

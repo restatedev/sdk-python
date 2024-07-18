@@ -2,19 +2,26 @@
 
 python := "python3"
 
+default:
+    @echo "Available recipes:"
+    @echo "  mypy   - Run mypy for type checking"
+    @echo "  pylint - Run pylint for linting"
+    @echo "  test   - Run pytest for testing"
+    @echo "  verify - Run mypy, pylint, test"
+
 # Recipe to run mypy for type checking
 mypy:
     @echo "Running mypy..."
-    {{python}} -m mypy --check-untyped-defs --ignore-missing-imports src/
+    {{python}} -m mypy --check-untyped-defs --ignore-missing-imports python/restate/
 
 # Recipe to run pylint for linting
 pylint:
     @echo "Running pylint..."
-    {{python}} -m pylint src/
+    {{python}} -m pylint python/restate
 
 test:
-    @echo "Running tests..."
-    {{python}} -m unittest discover tests/
+    @echo "Running Python tests..."
+    {{python}} -m pytest tests/*
 
 # Recipe to run both mypy and pylint
 verify: mypy pylint test
@@ -23,18 +30,18 @@ verify: mypy pylint test
 # Recipe to build the project
 build:
     @echo "Building the project..."
-    {{python}} setup.py sdist bdist_wheel
+    maturin build --release
 
 clean:
 	@echo "Cleaning the project"
-	rm -rf dist/
+	cargo clean
 
 example:
 	#!/usr/bin/env bash
 	if [ -z "$PYTHONPATH" ]; then
-		export PYTHONPATH="src/"
+		export PYTHONPATH="examples/"
 	else
-		export PYTHONPATH="$PYTHONPATH:src/"
+		export PYTHONPATH="$PYTHONPATH:examples/"
 	fi
 	hypercorn --config hypercorn-config.toml example:app
 
@@ -42,10 +49,3 @@ docker:
 	@echo "Creating dockerized example example:main"
 	docker build . -t example:main
 
-
-# Default recipe to show help message
-default:
-    @echo "Available recipes:"
-    @echo "  mypy   - Run mypy for type checking"
-    @echo "  pylint - Run pylint for linting"
-    @echo "  verify  - Run both mypy and pylint"
