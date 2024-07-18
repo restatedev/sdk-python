@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: [ "3.12" ]
+        python: [ "3.11", "3.12" ]
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
