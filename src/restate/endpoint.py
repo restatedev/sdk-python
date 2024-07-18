@@ -58,6 +58,10 @@ class Endpoint:
         for service in services:
             if service.name in self.services:
                 raise ValueError(f"Service {service.name} already exists")
+            if isinstance(service, (Service, VirtualObject, Workflow)):
+                self.services[service.name] = service
+            else:
+                raise ValueError(f"Invalid service type {service}")
         return self
 
     def streaming_protocol(self):

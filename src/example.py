@@ -64,4 +64,4 @@ async def email_clicked(ctx: WorkflowSharedContext, secret: str):
     await promise.resolve(secret)
 
 
-app = restate.app(services=[greeter, counter])
+app = restate.app(services=[greeter, counter, payment])
