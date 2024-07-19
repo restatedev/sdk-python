@@ -314,7 +314,7 @@ class ServerInvocationContext(ObjectContext):
         return coro
 
     def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None) -> None:
-        self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay)
+        self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay, send=True)
 
     def object_call(self,
                     tpe: Callable[[Any, I],Awaitable[O]],
@@ -327,7 +327,7 @@ class ServerInvocationContext(ObjectContext):
         return coro
 
     def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
-        self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay)
+        self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay, send=True)
 
     def workflow_call(self,
                         tpe: Callable[[Any, I], Awaitable[O]],
