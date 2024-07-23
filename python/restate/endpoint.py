@@ -31,6 +31,7 @@ class Endpoint:
 
     services: typing.Dict[str, typing.Union[Service, VirtualObject, Workflow]]
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]]
+    identity_keys: typing.List[str]
 
     def __init__(self):
         """
@@ -41,6 +42,8 @@ class Endpoint:
         # auto deduce it on discovery.
         # None means that the user did not explicitly set it.
         self.protocol = None
+
+        self.identity_keys = []
 
     def bind(self, *services: typing.Union[Service, VirtualObject, Workflow]):
         """
@@ -73,6 +76,10 @@ class Endpoint:
         """Use request response style protocol for communication with restate."""
         self.protocol = "request_response"
 
+    def identity_key(self, identity_key: str):
+        """Add an identity key to this endpoint."""
+        self.identity_keys.append(identity_key)
+
     def app(self):
         """
         Returns the ASGI application for this endpoint.
@@ -91,7 +98,8 @@ class Endpoint:
 
 def app(
     services: typing.Iterable[typing.Union[Service, VirtualObject, Workflow]],
-    protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None):
+    protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None,
+    identity_keys: typing.Optional[typing.List[str]] = None):
     """A restate ASGI application that hosts the given services."""
     endpoint = Endpoint()
     if protocol == "bidi":
@@ -100,4 +108,7 @@ def app(
         endpoint.request_response_protocol()
     for service in services:
         endpoint.bind(service)
+    if identity_keys:
+        for key in identity_keys:
+            endpoint.identity_key(key)
     return endpoint.app()

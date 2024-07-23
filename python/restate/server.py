@@ -18,18 +18,27 @@ from restate.endpoint import Endpoint
 from restate.server_context import ServerInvocationContext
 from restate.server_types import Receive, Scope, Send, binary_to_header, header_to_binary
 from restate.vm import VMWrapper
+from restate._internal import PyIdentityVerifier, IdentityVerificationException # pylint: disable=import-error,no-name-in-module
 
 
-async def send404(send):
+async def send_status(send, receive, status_code: int):
+    """respond with a status code"""
+    await send({'type': 'http.response.start', 'status': status_code})
+    # For more info on why this loop, see ServerInvocationContext.leave()
+    # pylint: disable=R0801
+    while True:
+        event = await receive()
+        if event is None:
+            break
+        if event.get('type') == 'http.disconnect':
+            break
+        if event.get('type') == 'http.request' and event.get('more_body', False) is False:
+            break
+    await send({'type': 'http.response.body'})
+
+async def send404(send, receive):
     """respond with a 404"""
-    await send({
-            'type': 'http.response.start',
-            'status': 404,
-            'headers': []})
-    await send({
-            'type': 'http.response.body',
-            'body': b'',
-            'more_body': False})
+    await send_status(send, receive, 404)
 
 async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
     """respond with a discovery"""
@@ -104,39 +113,53 @@ class LifeSpanNotImplemented(ValueError):
 def asgi_app(endpoint: Endpoint):
     """Create an ASGI-3 app for the given endpoint."""
 
+    # Prepare request signer
+    identity_verifier = PyIdentityVerifier(endpoint.identity_keys)
+
     async def app(scope: Scope, receive: Receive, send: Send):
         try:
             if scope['type'] == 'lifespan':
                 raise LifeSpanNotImplemented()
             if scope['type'] != 'http':
                 raise NotImplementedError(f"Unknown scope type {scope['type']}")
+
+            request_path = scope['path']
+            assert isinstance(request_path, str)
+
+            # Verify Identity
+            assert not isinstance(scope['headers'], str)
+            assert hasattr(scope['headers'], '__iter__')
+            request_headers = binary_to_header(scope['headers'])
+            try:
+                identity_verifier.verify(request_headers, request_path)
+            except IdentityVerificationException:
+                # Identify verification failed, send back unauthorized and close
+                await send_status(send, receive,401)
+                return
+
             # might be a discovery request
-            if scope['path'] == '/discover':
+            if request_path == '/discover':
                 await send_discovery(scope, send, endpoint)
                 return
             # anything other than invoke is 404
-            assert isinstance(scope['path'], str)
-            if not scope['path'].startswith('/invoke/'):
-                await send404(send)
+            if not request_path.startswith('/invoke/'):
+                await send404(send, receive)
                 return
             # path is of the form: /invoke/:service/:handler
             # strip "/invoke/" (= strlen 8) and split the service and handler
-            service_name, handler_name = scope['path'][8:].split('/')
-            service = endpoint.services[service_name]
+            service_name, handler_name = request_path[8:].split('/')
+            service = endpoint.services.get(service_name)
             if not service:
-                await send404(send)
+                await send404(send, receive)
                 return
-            handler = service.handlers[handler_name]
+            handler = service.handlers.get(handler_name)
             if not handler:
-                await send404(send)
+                await send404(send, receive)
                 return
             #
             # At this point we have a valid handler.
             # Let us setup restate's execution context for this invocation and handler.
             #
-            assert not isinstance(scope['headers'], str)
-            assert hasattr(scope['headers'], '__iter__')
-            request_headers = binary_to_header(scope['headers'])
             await process_invocation_to_completion(VMWrapper(request_headers),
                                                    handler,
                                                    dict(request_headers),
