@@ -216,7 +216,7 @@ class ServerInvocationContext(ObjectContext):
         self.vm.sys_clear_state(name)
 
     def clear_all(self) -> None:
-        raise NotImplementedError
+        self.vm.sys_clear_all_state()
 
     def request(self) -> Request:
         return Request(
