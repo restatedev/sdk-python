@@ -25,6 +25,7 @@ async def send_status(send, receive, status_code: int):
     """respond with a status code"""
     await send({'type': 'http.response.start', 'status': status_code})
     # For more info on why this loop, see ServerInvocationContext.leave()
+    # pylint: disable=R0801
     while True:
         event = await receive()
         if event is None:
