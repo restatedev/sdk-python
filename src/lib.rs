@@ -2,12 +2,13 @@ use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone};
 use restate_sdk_shared_core::{
-    AsyncResultHandle, CoreVM, Failure, Header, Input, NonEmptyValue, ResponseHead, RunEnterResult,
-    SuspendedOrVMError, TakeOutputResult, Target, VMError, Value, VM,
+    AsyncResultHandle, CoreVM, Failure, Header, IdentityHeaderMap, IdentityVerifier, Input,
+    NonEmptyValue, ResponseHead, RunEnterResult, SuspendedOrVMError, TakeOutputResult, Target,
+    VMError, Value, VM,
 };
 use std::borrow::Cow;
+use std::convert::Infallible;
 use std::time::Duration;
-
 // Data model
 
 #[pyclass]
@@ -478,6 +479,63 @@ impl PyVM {
     }
 }
 
+#[pyclass]
+struct PyIdentityVerifier {
+    verifier: IdentityVerifier,
+}
+
+struct PyIdentityHeaders(Vec<(String, String)>);
+
+impl IdentityHeaderMap for PyIdentityHeaders {
+    type Error = Infallible;
+
+    fn extract(&self, name: &str) -> Result<Option<&str>, Self::Error> {
+        for (k, v) in &self.0 {
+            if k.eq_ignore_ascii_case(name) {
+                return Ok(Some(v));
+            }
+        }
+        Ok(None)
+    }
+}
+
+// Exceptions
+create_exception!(
+    restate_sdk_python_core,
+    IdentityKeyException,
+    pyo3::exceptions::PyException,
+    "Restate identity key exception."
+);
+
+create_exception!(
+    restate_sdk_python_core,
+    IdentityVerificationException,
+    pyo3::exceptions::PyException,
+    "Restate identity verification exception."
+);
+
+#[pymethods]
+impl PyIdentityVerifier {
+    #[new]
+    fn new(keys: Vec<String>) -> PyResult<Self> {
+        Ok(Self {
+            verifier: IdentityVerifier::new(&keys.iter().map(|x| &**x).collect::<Vec<_>>())
+                .map_err(|e| IdentityKeyException::new_err(e.to_string()))?,
+        })
+    }
+
+    fn verify(
+        self_: PyRef<'_, Self>,
+        headers: Vec<(String, String)>,
+        path: String,
+    ) -> PyResult<()> {
+        self_
+            .verifier
+            .verify_identity(&PyIdentityHeaders(headers), &path)
+            .map_err(|e| IdentityVerificationException::new_err(e.to_string()))
+    }
+}
+
 #[pymodule]
 fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use tracing_subscriber::EnvFilter;
@@ -493,6 +551,15 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVoid>()?;
     m.add_class::<PySuspended>()?;
     m.add_class::<PyVM>()?;
+    m.add_class::<PyIdentityVerifier>()?;
     m.add("VMException", m.py().get_type_bound::<VMException>())?;
+    m.add(
+        "IdentityKeyException",
+        m.py().get_type_bound::<IdentityKeyException>(),
+    )?;
+    m.add(
+        "IdentityVerificationException",
+        m.py().get_type_bound::<IdentityVerificationException>(),
+    )?;
     Ok(())
 }
