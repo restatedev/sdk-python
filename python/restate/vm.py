@@ -196,6 +196,10 @@ class VMWrapper:
         """Clear the state associated with the given name."""
         self.vm.sys_clear_state(name)
 
+    def sys_clear_all_state(self):
+        """Clear the state associated with the given name."""
+        self.vm.sys_clear_all_state()
+
     def sys_sleep(self, millis: int):
         """Ask to sleep for a given duration"""
         return self.vm.sys_sleep(millis)
