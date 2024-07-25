@@ -52,6 +52,7 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
         'type': 'http.response.start',
         'status': 200,
         'headers': header_to_binary(headers.items()),
+        'trailers': False
         })
     await send({
         'type': 'http.response.body',
@@ -70,6 +71,7 @@ async def process_invocation_to_completion(vm: VMWrapper,
         'type': 'http.response.start',
         'status': status,
         'headers': header_to_binary(res_headers),
+        'trailers': False
     })
     assert status == 200
     # ========================================
