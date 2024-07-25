@@ -19,6 +19,7 @@ from restate.server_context import ServerInvocationContext
 from restate.server_types import Receive, Scope, Send, binary_to_header, header_to_binary
 from restate.vm import VMWrapper
 from restate._internal import PyIdentityVerifier, IdentityVerificationException # pylint: disable=import-error,no-name-in-module
+from restate.aws_lambda import is_running_on_lambda, wrap_asgi_as_lambda_handler
 
 
 async def send_status(send, receive, status_code: int):
@@ -172,5 +173,9 @@ def asgi_app(endpoint: Endpoint):
         except Exception as e:
             traceback.print_exc()
             raise e
+
+    if is_running_on_lambda():
+        # If we're on Lambda, just return the adapter
+        return wrap_asgi_as_lambda_handler(app)
 
     return app
