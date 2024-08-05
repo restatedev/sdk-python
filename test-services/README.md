@@ -16,10 +16,10 @@ java -jar restate-sdk-test-suite.jar run --exclusions-file exclusions.yaml resta
 
 ## To debug a single test:
 
-* Run the golang service using your IDE
+* Run the python service using your IDE
 * Run the test runner in debug mode specifying test suite and test:
 ```shell
-java -jar restate-sdk-test-suite.jar debug --image-pull-policy=CACHED --test-config=lazyState --test-name=dev.restate.sdktesting.tests.State default-service=9080
+java -jar restate-sdk-test-suite.jar debug --test-suite=lazyState --test-name=dev.restate.sdktesting.tests.State default-service=9080
 ```
 
 For more info: https://github.com/restatedev/sdk-test-suite
