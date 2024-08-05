@@ -14,11 +14,11 @@
 
 import restate
 import os
-from receiver import receiver
-from coordinator import coordinator
+from counter import counter
+from proxy import proxy
 
 # List of known services
-known_services = [receiver, coordinator]
+known_services = [counter, proxy]
 
 # Resolve the SERVICES env variable, if none just use *
 services = "*"
