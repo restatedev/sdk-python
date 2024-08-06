@@ -1,0 +1,37 @@
+#
+#  Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
+#
+#  This file is part of the Restate SDK for Python,
+#  which is released under the MIT license.
+#
+#  You can find a copy of the license in file LICENSE in the root
+#  directory of this repository or package, or at
+#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
+#
+"""example.py"""
+# pylint: disable=C0116
+# pylint: disable=W0613
+
+from restate import Service, Context, VirtualObject, ObjectContext
+
+from . import awakable_holder
+
+kill_runner = Service("KillTestRunner")
+
+@kill_runner.handler(name="startCallTree")
+async def start_call_tree(ctx: Context):
+    await ctx.object_call(recursive_call, key="", arg=None)
+
+kill_singleton = VirtualObject("KillTestSingleton")
+
+@kill_singleton.handler(name="recursiveCall")
+async def recursive_call(ctx: ObjectContext):
+    name, promise = ctx.awakeable()
+    ctx.object_send(awakable_holder.hold, key="kill", arg=name)
+    await promise
+
+    await ctx.object_call(recursive_call, key="", arg=None)
+
+@kill_singleton.handler(name="isUnlocked")
+async def is_unlocked(ctx: ObjectContext):
+    return None

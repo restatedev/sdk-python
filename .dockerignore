@@ -12,3 +12,5 @@
 **/.venv/
 **/venv/
 
+**/test_report/
+

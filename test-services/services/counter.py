@@ -16,17 +16,17 @@ from typing import TypedDict
 from restate import VirtualObject, ObjectContext
 from restate.exceptions import TerminalError
 
-counter = VirtualObject("Counter")
+counter_object = VirtualObject("Counter")
 
 COUNTER_KEY = "counter"
 
 
-@counter.handler()
+@counter_object.handler()
 async def reset(ctx: ObjectContext):
     ctx.clear(COUNTER_KEY)
 
 
-@counter.handler()
+@counter_object.handler()
 async def get(ctx: ObjectContext) -> int:
     c: int | None = await ctx.get(COUNTER_KEY)
     if c is None:
@@ -39,7 +39,7 @@ class CounterUpdateResponse(TypedDict):
     newValue: int
 
 
-@counter.handler()
+@counter_object.handler()
 async def add(ctx: ObjectContext, addend: int) -> CounterUpdateResponse:
     old_value: int | None = await ctx.get(COUNTER_KEY)
     if old_value is None:
@@ -49,8 +49,8 @@ async def add(ctx: ObjectContext, addend: int) -> CounterUpdateResponse:
     return CounterUpdateResponse(oldValue=old_value, newValue=new_value)
 
 
-@counter.handler()
-async def addThenFail(ctx: ObjectContext, addend: int):
+@counter_object.handler(name="addThenFail")
+async def add_then_fail(ctx: ObjectContext, addend: int):
     old_value: int | None = await ctx.get(COUNTER_KEY)
     if old_value is None:
         old_value = 0

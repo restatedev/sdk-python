@@ -35,15 +35,14 @@ async def start_test(ctx: ObjectContext, op: BlockingOperation):
             raise t
 
 @runner.handler(name="verifyTest")
-async def verify_test(ctx: ObjectContext):
+async def verify_test(ctx: ObjectContext) -> bool:
     state = await ctx.get("state")
     if state is None:
         return False
     return state
 
 
-blocking_service = VirtualObject("BlockingService")
-
+blocking_service = VirtualObject("CancelTestBlockingService")
 
 @blocking_service.handler()
 async def block(ctx: ObjectContext, op: BlockingOperation):

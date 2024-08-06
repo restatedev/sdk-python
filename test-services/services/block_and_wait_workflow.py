@@ -13,7 +13,7 @@
 # pylint: disable=W0613
 # pylint: disable=W0622
 
-from restate import Workflow, WorkflowContext, WorkflowSharedContext 
+from restate import Workflow, WorkflowContext, WorkflowSharedContext
 from restate.exceptions import TerminalError
 
 workflow = Workflow("BlockAndWaitWorkflow")

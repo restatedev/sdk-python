@@ -34,8 +34,8 @@ async def call(ctx: Context, req: ProxyRequest) -> Iterable[int]:
         req['virtualObjectKey']))
 
 
-@proxy.handler()
-async def oneWayCall(ctx: Context, req: ProxyRequest):
+@proxy.handler(name="oneWayCall")
+async def one_way_call(ctx: Context, req: ProxyRequest):
     ctx.generic_send(
         req['serviceName'],
         req['handlerName'],
@@ -48,8 +48,8 @@ class ManyCallRequest(TypedDict):
     oneWayCall: bool
     awaitAtTheEnd: bool
 
-@proxy.handler()
-async def manyCalls(ctx: Context, requests: Iterable[ManyCallRequest]):
+@proxy.handler(name="manyCalls")
+async def many_calls(ctx: Context, requests: Iterable[ManyCallRequest]):
     to_await = []
 
     for req in requests:
