@@ -8,32 +8,16 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""example.py"""
+"""testservices.py"""
 # pylint: disable=C0116
 # pylint: disable=W0613
 
-import restate
 import os
-from counter import counter
-from proxy import proxy
+import restate
+import services
 
-# List of known services
-known_services = [counter, proxy]
+def test_services():
+    names = os.environ.get('SERVICES')
+    return services.services_named(names.split(',')) if names else services.all_services()
 
-# Resolve the SERVICES env variable, if none just use *
-services = "*"
-if os.environ.get('SERVICES') is not None:
-    services = os.environ['SERVICES']
-
-# Resolve services to mount
-known_services_map = dict([
-    (svc.name, svc) for svc in known_services
-])
-mounted_services = []
-if services == "*":
-    mounted_services = list(known_services_map.values())
-else:
-    for svc in services.split(sep=","):
-        mounted_services.append(known_services_map[svc])
-
-app = restate.app(services=mounted_services)
+app = restate.app(services=test_services())

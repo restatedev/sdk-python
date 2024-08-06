@@ -169,3 +169,6 @@ debug/
 
 # Restate data
 restate-data
+
+# Test reports
+test-services/test_report/

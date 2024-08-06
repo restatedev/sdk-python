@@ -28,7 +28,7 @@ async def reset(ctx: ObjectContext):
 
 @counter.handler()
 async def get(ctx: ObjectContext) -> int:
-    c: int = await ctx.get(COUNTER_KEY)
+    c: int | None = await ctx.get(COUNTER_KEY)
     if c is None:
         return 0
     return c
@@ -41,7 +41,7 @@ class CounterUpdateResponse(TypedDict):
 
 @counter.handler()
 async def add(ctx: ObjectContext, addend: int) -> CounterUpdateResponse:
-    old_value: int = await ctx.get(COUNTER_KEY)
+    old_value: int | None = await ctx.get(COUNTER_KEY)
     if old_value is None:
         old_value = 0
     new_value = old_value + addend
@@ -51,7 +51,7 @@ async def add(ctx: ObjectContext, addend: int) -> CounterUpdateResponse:
 
 @counter.handler()
 async def addThenFail(ctx: ObjectContext, addend: int):
-    old_value: int = await ctx.get(COUNTER_KEY)
+    old_value: int | None = await ctx.get(COUNTER_KEY)
     if old_value is None:
         old_value = 0
     new_value = old_value + addend
