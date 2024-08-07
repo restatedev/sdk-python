@@ -2,18 +2,12 @@ exclusions:
   "alwaysSuspending":
   - "dev.restate.sdktesting.tests.AwaitTimeout"
   - "dev.restate.sdktesting.tests.State"
-  - "dev.restate.sdktesting.tests.UserErrors"
   "default":
   - "dev.restate.sdktesting.tests.AwaitTimeout"
-  - "dev.restate.sdktesting.tests.CancelInvocation"
   - "dev.restate.sdktesting.tests.KafkaIngress"
   - "dev.restate.sdktesting.tests.State"
-  - "dev.restate.sdktesting.tests.UserErrors"
   "lazyState":
   - "dev.restate.sdktesting.tests.State"
   "singleThreadSinglePartition":
   - "dev.restate.sdktesting.tests.AwaitTimeout"
-  - "dev.restate.sdktesting.tests.CancelInvocation"
-  - "dev.restate.sdktesting.tests.KafkaIngress"
   - "dev.restate.sdktesting.tests.State"
-  - "dev.restate.sdktesting.tests.UserErrors"

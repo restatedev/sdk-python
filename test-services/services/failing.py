@@ -60,7 +60,7 @@ async def failing_side_effect_with_eventual_success(ctx: ObjectContext) -> int:
 async def terminally_failing_side_effect(ctx: ObjectContext):
 
     def side_effect():
-        raise TerminalError(message="Terminally failing side effect")
+        raise TerminalError(message="failed side effect")
 
     await ctx.run("sideEffect", side_effect)
     raise ValueError("Should not reach here")

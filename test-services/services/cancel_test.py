@@ -41,7 +41,7 @@ async def verify_test(ctx: ObjectContext) -> bool:
         return False
     return state
 
-
+                                  
 blocking_service = VirtualObject("CancelTestBlockingService")
 
 @blocking_service.handler()
@@ -58,6 +58,6 @@ async def block(ctx: ObjectContext, op: BlockingOperation):
         name, uncompleteable = ctx.awakeable()
         await uncompleteable
 
-@blocking_service.handler(name="isUnblocked")
-async def is_unblocked(ctx: ObjectContext):
+@blocking_service.handler(name="isUnlocked")
+async def is_unlocked(ctx: ObjectContext):
     return None
