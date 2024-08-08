@@ -15,7 +15,7 @@ wrap the restate._internal.PyVM class
 
 from dataclasses import dataclass
 import typing
-from restate._internal import PyVM, PyFailure, PySuspended, PyVoid # pylint: disable=import-error,no-name-in-module
+from restate._internal import PyVM, PyFailure, PySuspended, PyVoid, PyStateKeys # pylint: disable=import-error,no-name-in-module
 
 @dataclass
 class Invocation:
@@ -110,6 +110,9 @@ class VMWrapper:
         if isinstance(result, bytes):
             # success with a non empty value
             return result
+        if isinstance(result, PyStateKeys):
+            # success with state keys
+            return result.keys
         if isinstance(result, PyFailure):
             # a terminal failure
             code = result.code
@@ -178,6 +181,17 @@ class VMWrapper:
             The value associated with the given name.
         """
         return self.vm.sys_get_state(name)
+
+
+    def sys_get_state_keys(self) -> int:
+        """
+        Retrieves all keys.
+
+        Returns:
+            The state keys
+        """
+        return self.vm.sys_get_state_keys()
+
 
     def sys_set_state(self, name: str, value: bytes):
         """

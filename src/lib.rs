@@ -1,14 +1,10 @@
 use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone};
-use restate_sdk_shared_core::{
-    AsyncResultHandle, CoreVM, Failure, Header, IdentityHeaderMap, IdentityVerifier, Input,
-    NonEmptyValue, ResponseHead, RunEnterResult, SuspendedOrVMError, TakeOutputResult, Target,
-    VMError, Value, VM,
-};
+use restate_sdk_shared_core::{AsyncResultHandle, CoreVM, Failure, Header, IdentityVerifier, Input, NonEmptyValue, ResponseHead, RunEnterResult, SuspendedOrVMError, TakeOutputResult, Target, VMError, Value, VM};
 use std::borrow::Cow;
-use std::convert::Infallible;
 use std::time::Duration;
+
 // Data model
 
 #[pyclass]
@@ -101,6 +97,13 @@ impl From<PyFailure> for Failure {
             message: value.message,
         }
     }
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyStateKeys {
+    #[pyo3(get, set)]
+    keys: Vec<String>
 }
 
 #[pyclass]
@@ -233,6 +236,9 @@ impl PyVM {
             Ok(Some(Value::Failure(f))) => {
                 Ok(PyFailure::from(f).into_py(py).into_bound(py).into_any())
             }
+            Ok(Some(Value::StateKeys(keys))) => {
+                Ok(PyStateKeys {keys}.into_py(py).into_bound(py).into_any())
+            }
         }
     }
 
@@ -248,7 +254,17 @@ impl PyVM {
     ) -> Result<PyAsyncResultHandle, PyVMError> {
         self_
             .vm
-            .sys_get_state(key)
+            .sys_state_get(key)
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    fn sys_get_state_keys(
+        mut self_: PyRefMut<'_, Self>,
+    ) -> Result<PyAsyncResultHandle, PyVMError> {
+        self_
+            .vm
+            .sys_state_get_keys()
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -260,16 +276,16 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_set_state(key, buffer.as_bytes().to_vec())
+            .sys_state_set(key, buffer.as_bytes().to_vec())
             .map_err(Into::into)
     }
 
     fn sys_clear_state(mut self_: PyRefMut<'_, Self>, key: String) -> Result<(), PyVMError> {
-        self_.vm.sys_clear_state(key).map_err(Into::into)
+        self_.vm.sys_state_clear(key).map_err(Into::into)
     }
 
     fn sys_clear_all_state(mut self_: PyRefMut<'_, Self>) -> Result<(), PyVMError> {
-        self_.vm.sys_clear_all_state().map_err(Into::into)
+        self_.vm.sys_state_clear_all().map_err(Into::into)
     }
 
     fn sys_sleep(
@@ -484,21 +500,6 @@ struct PyIdentityVerifier {
     verifier: IdentityVerifier,
 }
 
-struct PyIdentityHeaders(Vec<(String, String)>);
-
-impl IdentityHeaderMap for PyIdentityHeaders {
-    type Error = Infallible;
-
-    fn extract(&self, name: &str) -> Result<Option<&str>, Self::Error> {
-        for (k, v) in &self.0 {
-            if k.eq_ignore_ascii_case(name) {
-                return Ok(Some(v));
-            }
-        }
-        Ok(None)
-    }
-}
-
 // Exceptions
 create_exception!(
     restate_sdk_python_core,
@@ -531,7 +532,7 @@ impl PyIdentityVerifier {
     ) -> PyResult<()> {
         self_
             .verifier
-            .verify_identity(&PyIdentityHeaders(headers), &path)
+            .verify_identity(&headers, &path)
             .map_err(|e| IdentityVerificationException::new_err(e.to_string()))
     }
 }
@@ -549,6 +550,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFailure>()?;
     m.add_class::<PyInput>()?;
     m.add_class::<PyVoid>()?;
+    m.add_class::<PyStateKeys>()?;
     m.add_class::<PySuspended>()?;
     m.add_class::<PyVM>()?;
     m.add_class::<PyIdentityVerifier>()?;
