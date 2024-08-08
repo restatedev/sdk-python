@@ -205,7 +205,7 @@ class ServerInvocationContext(ObjectContext):
         return await_point() # do not await here, the caller will do it.
 
     def state_keys(self) -> Awaitable[List[str]]:
-        raise NotImplementedError
+        return self.create_poll_coroutine(self.vm.sys_get_state_keys()) # type: ignore
 
     def set(self, name: str, value: T, serde: Serde[T] = JsonSerde()) -> None:
         """Set the value associated with the given name."""

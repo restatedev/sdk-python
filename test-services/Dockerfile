@@ -4,7 +4,7 @@ FROM ghcr.io/pyo3/maturin AS build-sdk
 
 WORKDIR /usr/src/app
 
-COPY --exclude=test-services/ . .
+COPY . .
 
 RUN maturin build --out dist --interpreter python3.12
 
