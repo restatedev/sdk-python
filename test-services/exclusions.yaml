@@ -3,7 +3,6 @@ exclusions:
   - "dev.restate.sdktesting.tests.AwaitTimeout"
   "default":
   - "dev.restate.sdktesting.tests.AwaitTimeout"
-  - "dev.restate.sdktesting.tests.KafkaIngress"
   "lazyState": []
   "singleThreadSinglePartition":
   - "dev.restate.sdktesting.tests.AwaitTimeout"
