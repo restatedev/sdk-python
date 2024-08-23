@@ -12,7 +12,7 @@
 
 from datetime import timedelta
 import inspect
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, cast
 import typing
 import traceback
 
@@ -230,13 +230,13 @@ class ServerInvocationContext(ObjectContext):
     async def run(self,
                   name: str,
                   action: Callable[[], T] | Callable[[], Awaitable[T]],
-                  serde: Optional[Serde[T]] = JsonSerde()) -> T | None:
+                  serde: Optional[Serde[T]] = JsonSerde()) -> T:
         assert serde is not None
         res = self.vm.sys_run_enter(name)
         if isinstance(res, Failure):
             raise TerminalError(res.message, res.code)
         if isinstance(res, bytes):
-            return serde.deserialize(res)
+            return cast(T, serde.deserialize(res))
         # the side effect was not executed before, so we need to execute it now
         assert res is None
         try:
