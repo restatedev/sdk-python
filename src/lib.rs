@@ -1,9 +1,15 @@
 use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone};
-use restate_sdk_shared_core::{AsyncResultHandle, CoreVM, Failure, Header, IdentityVerifier, Input, NonEmptyValue, ResponseHead, RunEnterResult, SuspendedOrVMError, TakeOutputResult, Target, VMError, Value, VM};
+use restate_sdk_shared_core::{
+    AsyncResultHandle, CoreVM, Failure, Header, IdentityVerifier, Input, NonEmptyValue,
+    ResponseHead, RunEnterResult, SuspendedOrVMError, TakeOutputResult, Target, VMError, Value, VM,
+};
 use std::borrow::Cow;
 use std::time::Duration;
+
+// Current crate version
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Data model
 
@@ -103,7 +109,7 @@ impl From<PyFailure> for Failure {
 #[derive(Clone)]
 struct PyStateKeys {
     #[pyo3(get, set)]
-    keys: Vec<String>
+    keys: Vec<String>,
 }
 
 #[pyclass]
@@ -237,7 +243,7 @@ impl PyVM {
                 Ok(PyFailure::from(f).into_py(py).into_bound(py).into_any())
             }
             Ok(Some(Value::StateKeys(keys))) => {
-                Ok(PyStateKeys {keys}.into_py(py).into_bound(py).into_any())
+                Ok(PyStateKeys { keys }.into_py(py).into_bound(py).into_any())
             }
         }
     }
@@ -259,9 +265,7 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    fn sys_get_state_keys(
-        mut self_: PyRefMut<'_, Self>,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    fn sys_get_state_keys(mut self_: PyRefMut<'_, Self>) -> Result<PyAsyncResultHandle, PyVMError> {
         self_
             .vm
             .sys_state_get_keys()
@@ -563,5 +567,6 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "IdentityVerificationException",
         m.py().get_type_bound::<IdentityVerificationException>(),
     )?;
+    m.add("SDK_VERSION", CURRENT_VERSION)?;
     Ok(())
 }
