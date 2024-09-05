@@ -21,7 +21,7 @@ from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, JsonSerde, Serde
 from restate.server_types import Receive, Send
-from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper
+from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig
 
 
 T = TypeVar('T')
@@ -227,10 +227,13 @@ class ServerInvocationContext(ObjectContext):
         )
 
     # pylint: disable=W0236
+    # pylint: disable=R0914
     async def run(self,
                   name: str,
                   action: Callable[[], T] | Callable[[], Awaitable[T]],
-                  serde: Optional[Serde[T]] = JsonSerde()) -> T:
+                  serde: Optional[Serde[T]] = JsonSerde(),
+                  max_attempts: Optional[int] = None,
+                  max_retry_duration: Optional[timedelta] = None) -> T:
         assert serde is not None
         res = self.vm.sys_run_enter(name)
         if isinstance(res, Failure):
@@ -252,6 +255,20 @@ class ServerInvocationContext(ObjectContext):
             failure = Failure(code=t.status_code, message=t.message)
             handle = self.vm.sys_run_exit_failure(failure)
             await self.create_poll_coroutine(handle)
+            # unreachable
+            assert False
+        # pylint: disable=W0718
+        except Exception as e:
+            if max_attempts is None and max_retry_duration is None:
+                # no retry policy
+                raise e
+            failure = Failure(code=500, message=str(e))
+            max_duration_ms = None if max_retry_duration is None else int(max_retry_duration.total_seconds() * 1000)
+            config = RunRetryConfig(max_attempts=max_attempts, max_duration=max_duration_ms)
+            exit_handle = self.vm.sys_run_exit_transient(failure=failure, attempt_duration_ms=1, config=config)
+            if exit_handle is None:
+                raise e from None # avoid the traceback that says exception was raised while handling another exception
+            await self.create_poll_coroutine(exit_handle)
             # unreachable
             assert False
 

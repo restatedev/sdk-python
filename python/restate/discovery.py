@@ -147,6 +147,6 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
     else:
         protocol_mode = PROTOCOL_MODES[discovered_as]
     return Endpoint(protocolMode=protocol_mode,
-                    minProtocolVersion=1,
-                    maxProtocolVersion=1,
+                    minProtocolVersion=2,
+                    maxProtocolVersion=2,
                     services=services)

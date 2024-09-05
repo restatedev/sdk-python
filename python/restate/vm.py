@@ -15,7 +15,7 @@ wrap the restate._internal.PyVM class
 
 from dataclasses import dataclass
 import typing
-from restate._internal import PyVM, PyFailure, PySuspended, PyVoid, PyStateKeys  # pylint: disable=import-error,no-name-in-module
+from restate._internal import PyVM, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig  # pylint: disable=import-error,no-name-in-module,line-too-long
 
 @dataclass
 class Invocation:
@@ -28,6 +28,14 @@ class Invocation:
     input_buffer: bytes
     key: str
 
+@dataclass
+class RunRetryConfig:
+    """
+    Expo Retry Configuration
+    """
+    initial_interval: typing.Optional[int] = None
+    max_attempts: typing.Optional[int] = None
+    max_duration: typing.Optional[int] = None
 
 @dataclass
 class Failure:
@@ -311,6 +319,24 @@ class VMWrapper:
         """
         res = PyFailure(output.code, output.message)
         return self.vm.sys_run_exit_failure(res)
+
+    # pylint: disable=line-too-long
+    def sys_run_exit_transient(self, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig) -> int | None:
+        """
+        Exit a side effect with a transient Error.
+        This requires a retry policy to be provided.
+        """
+        py_failure = PyFailure(failure.code, failure.message)
+        py_config = PyExponentialRetryConfig(config.initial_interval, config.max_attempts, config.max_duration)
+        try:
+            handle = self.vm.sys_run_exit_failure_transient(py_failure, attempt_duration_ms, py_config)
+            # The VM decided not to retry, therefore we get back an handle that will be resolved
+            # with a terminal failure.
+            return handle
+        # pylint: disable=bare-except
+        except:
+            # The VM decided to retry, therefore we tear down the current execution
+            return None
 
     def sys_end(self):
         """
