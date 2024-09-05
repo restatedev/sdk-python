@@ -19,12 +19,14 @@ from restate.server_context import ServerInvocationContext
 from restate.server_types import Receive, Scope, Send, binary_to_header, header_to_binary
 from restate.vm import VMWrapper
 from restate._internal import PyIdentityVerifier, IdentityVerificationException # pylint: disable=import-error,no-name-in-module
+from restate._internal import SDK_VERSION # pylint: disable=import-error,no-name-in-module
 from restate.aws_lambda import is_running_on_lambda, wrap_asgi_as_lambda_handler
 
+X_RESTATE_SERVER = header_to_binary([("x-restate-server", f"restate-sdk-python/{SDK_VERSION}")])
 
 async def send_status(send, receive, status_code: int):
     """respond with a status code"""
-    await send({'type': 'http.response.start', 'status': status_code})
+    await send({'type': 'http.response.start', 'status': status_code, "headers": X_RESTATE_SERVER})
     # For more info on why this loop, see ServerInvocationContext.leave()
     # pylint: disable=R0801
     while True:
@@ -49,10 +51,12 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
     else:
         discovered_as = "bidi"
     headers, js = compute_discovery_json(endpoint, 1, discovered_as)
+    bin_headers = header_to_binary(headers.items())
+    bin_headers.extend(X_RESTATE_SERVER)
     await send({
         'type': 'http.response.start',
         'status': 200,
-        'headers': header_to_binary(headers.items()),
+        'headers': bin_headers,
         'trailers': False
         })
     await send({
@@ -68,10 +72,12 @@ async def process_invocation_to_completion(vm: VMWrapper,
                                            send: Send):
     """Invoke the user code."""
     status, res_headers = vm.get_response_head()
+    res_bin_headers = header_to_binary(res_headers)
+    res_bin_headers.extend(X_RESTATE_SERVER)
     await send({
         'type': 'http.response.start',
         'status': status,
-        'headers': header_to_binary(res_headers),
+        'headers': res_bin_headers,
         'trailers': False
     })
     assert status == 200

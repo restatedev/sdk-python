@@ -15,7 +15,7 @@ wrap the restate._internal.PyVM class
 
 from dataclasses import dataclass
 import typing
-from restate._internal import PyVM, PyFailure, PySuspended, PyVoid, PyStateKeys # pylint: disable=import-error,no-name-in-module
+from restate._internal import PyVM, PyFailure, PySuspended, PyVoid, PyStateKeys  # pylint: disable=import-error,no-name-in-module
 
 @dataclass
 class Invocation:
@@ -59,7 +59,7 @@ AsyncResultType = typing.Optional[typing.Union[bytes, Failure, NotReady]]
 class VMWrapper:
     """
     A wrapper class for the restate_sdk._internal.PyVM class.
-    It provides a type-friendly interface to our shared vm. 
+    It provides a type-friendly interface to our shared vm.
     """
 
     def __init__(self, headers: typing.List[typing.Tuple[str, str]]):
