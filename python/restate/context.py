@@ -8,6 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
+# pylint: disable=R0913,C0301
 """
 Restate Context
 """
@@ -24,6 +25,7 @@ I = TypeVar('I')
 O = TypeVar('O')
 
 RunAction = Union[Callable[[], T], Callable[[], Awaitable[T]]]
+
 
 @dataclass
 class Request:
@@ -79,7 +81,6 @@ class KeyValueStore(abc.ABC):
     def clear_all(self) -> None:
         """clear all the values in the store."""
 
-
 class Context(abc.ABC):
     """
     Represents the context of the current invocation.
@@ -95,9 +96,21 @@ class Context(abc.ABC):
     def run(self,
             name: str,
             action: RunAction[T],
-            serde: Serde[T] = JsonSerde()) -> Awaitable[T]:
+            serde: Serde[T] = JsonSerde(),
+            max_attempts: typing.Optional[int] = None,
+            max_retry_duration: typing.Optional[timedelta] = None) -> Awaitable[T]:
         """
         Runs the given action with the given name.
+
+        Args:
+            name: The name of the action.
+            action: The action to run.
+            serde: The serialization/deserialization mechanism.
+            max_attempts:   The maximum number of retry attempts to complete the action.
+                            If None, the action will be retried indefinitely, until it succeeds.
+                            Otherwise, the action will be retried until the maximum number of attempts is reached and then it will raise a TerminalError.
+            max_retry_duration: The maximum duration for retrying. If None, the action will be retried indefinitely, until it succeeds.
+                                Otherwise, the action will be retried until the maximum duration is reached and then it will raise a TerminalError.
         """
 
     @abc.abstractmethod

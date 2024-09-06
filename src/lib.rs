@@ -3,7 +3,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone};
 use restate_sdk_shared_core::{
     AsyncResultHandle, CoreVM, Failure, Header, IdentityVerifier, Input, NonEmptyValue,
-    ResponseHead, RunEnterResult, SuspendedOrVMError, TakeOutputResult, Target, VMError, Value, VM,
+    ResponseHead, RetryPolicy, RunEnterResult, RunExitResult, SuspendedOrVMError, TakeOutputResult,
+    Target, VMError, Value, VM,
 };
 use std::borrow::Cow;
 use std::time::Duration;
@@ -87,6 +88,46 @@ impl PyFailure {
     }
 }
 
+#[pyclass]
+#[derive(Clone)]
+struct PyExponentialRetryConfig {
+    #[pyo3(get, set)]
+    initial_interval: Option<u64>,
+    #[pyo3(get, set)]
+    max_attempts: Option<u32>,
+    #[pyo3(get, set)]
+    max_duration: Option<u64>,
+}
+
+#[pymethods]
+impl PyExponentialRetryConfig {
+    #[pyo3(signature = (initial_interval=None, max_attempts=None, max_duration=None))]
+    #[new]
+    fn new(
+        initial_interval: Option<u64>,
+        max_attempts: Option<u32>,
+        max_duration: Option<u64>,
+    ) -> Self {
+        Self {
+            initial_interval,
+            max_attempts,
+            max_duration,
+        }
+    }
+}
+
+impl From<PyExponentialRetryConfig> for RetryPolicy {
+    fn from(value: PyExponentialRetryConfig) -> Self {
+        RetryPolicy::Exponential {
+            initial_interval: Duration::from_millis(value.initial_interval.unwrap_or(10)),
+            max_attempts: value.max_attempts,
+            max_duration: value.max_duration.map(Duration::from_millis),
+            factor: 2.0,
+            max_interval: None,
+        }
+    }
+}
+
 impl From<Failure> for PyFailure {
     fn from(value: Failure) -> Self {
         PyFailure {
@@ -133,7 +174,7 @@ impl From<Input> for PyInput {
             random_seed: value.random_seed,
             key: value.key,
             headers: value.headers.into_iter().map(Into::into).collect(),
-            input: value.input,
+            input: value.input.into(),
         }
     }
 }
@@ -186,7 +227,8 @@ impl PyVM {
     // Notifications
 
     fn notify_input(mut self_: PyRefMut<'_, Self>, buffer: &Bound<'_, PyBytes>) {
-        self_.vm.notify_input(buffer.as_bytes().to_vec());
+        let buf = buffer.as_bytes().to_vec().into();
+        self_.vm.notify_input(buf);
     }
 
     fn notify_input_closed(mut self_: PyRefMut<'_, Self>) {
@@ -195,9 +237,11 @@ impl PyVM {
 
     #[pyo3(signature = (error, description=None))]
     fn notify_error(mut self_: PyRefMut<'_, Self>, error: String, description: Option<String>) {
-        self_.vm.notify_error(
+        CoreVM::notify_error(
+            &mut self_.vm,
             Cow::Owned(error),
             description.map(Cow::Owned).unwrap_or(Cow::Borrowed("")),
+            None,
         );
     }
 
@@ -280,7 +324,7 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_state_set(key, buffer.as_bytes().to_vec())
+            .sys_state_set(key, buffer.as_bytes().to_vec().into())
             .map_err(Into::into)
     }
 
@@ -319,7 +363,7 @@ impl PyVM {
                     handler,
                     key,
                 },
-                buffer.as_bytes().to_vec(),
+                buffer.as_bytes().to_vec().into(),
             )
             .map(Into::into)
             .map_err(Into::into)
@@ -342,7 +386,7 @@ impl PyVM {
                     handler,
                     key,
                 },
-                buffer.as_bytes().to_vec(),
+                buffer.as_bytes().to_vec().into(),
                 delay.map(Duration::from_millis),
             )
             .map_err(Into::into)
@@ -365,7 +409,10 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_complete_awakeable(id, NonEmptyValue::Success(buffer.as_bytes().to_vec()))
+            .sys_complete_awakeable(
+                id,
+                NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),
+            )
             .map_err(Into::into)
     }
 
@@ -409,7 +456,10 @@ impl PyVM {
     ) -> Result<PyAsyncResultHandle, PyVMError> {
         self_
             .vm
-            .sys_complete_promise(key, NonEmptyValue::Success(buffer.as_bytes().to_vec()))
+            .sys_complete_promise(
+                key,
+                NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),
+            )
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -446,7 +496,7 @@ impl PyVM {
             RunEnterResult::Executed(NonEmptyValue::Failure(f)) => {
                 PyFailure::from(f).into_py(py).into_bound(py).into_any()
             }
-            RunEnterResult::NotExecuted => PyNone::get_bound(py).to_owned().into_any(),
+            RunEnterResult::NotExecuted(_retry_info) => PyNone::get_bound(py).to_owned().into_any(),
         })
     }
 
@@ -454,11 +504,13 @@ impl PyVM {
         mut self_: PyRefMut<'_, Self>,
         buffer: &Bound<'_, PyBytes>,
     ) -> Result<PyAsyncResultHandle, PyVMError> {
-        self_
-            .vm
-            .sys_run_exit(NonEmptyValue::Success(buffer.as_bytes().to_vec()))
-            .map(Into::into)
-            .map_err(Into::into)
+        CoreVM::sys_run_exit(
+            &mut self_.vm,
+            RunExitResult::Success(buffer.as_bytes().to_vec().into()),
+            RetryPolicy::None,
+        )
+        .map(Into::into)
+        .map_err(Into::into)
     }
 
     fn sys_run_exit_failure(
@@ -467,7 +519,29 @@ impl PyVM {
     ) -> Result<PyAsyncResultHandle, PyVMError> {
         self_
             .vm
-            .sys_run_exit(NonEmptyValue::Failure(value.into()))
+            .sys_run_exit(
+                RunExitResult::TerminalFailure(value.into()),
+                RetryPolicy::None,
+            )
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    fn sys_run_exit_failure_transient(
+        mut self_: PyRefMut<'_, Self>,
+        value: PyFailure,
+        attempt_duration: u64,
+        config: PyExponentialRetryConfig,
+    ) -> Result<PyAsyncResultHandle, PyVMError> {
+        self_
+            .vm
+            .sys_run_exit(
+                RunExitResult::RetryableFailure {
+                    attempt_duration: Duration::from_millis(attempt_duration),
+                    failure: value.into(),
+                },
+                config.into(),
+            )
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -478,7 +552,7 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_write_output(NonEmptyValue::Success(buffer.as_bytes().to_vec()))
+            .sys_write_output(NonEmptyValue::Success(buffer.as_bytes().to_vec().into()))
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -558,6 +632,8 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySuspended>()?;
     m.add_class::<PyVM>()?;
     m.add_class::<PyIdentityVerifier>()?;
+    m.add_class::<PyExponentialRetryConfig>()?;
+
     m.add("VMException", m.py().get_type_bound::<VMException>())?;
     m.add(
         "IdentityKeyException",
