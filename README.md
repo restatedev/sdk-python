@@ -5,9 +5,6 @@
 
 # Python SDK for restate
 
-> [!WARNING]
-> The Python SDK is currently in active development, and might break across releases.
-
 [Restate](https://restate.dev/) is a system for easily building resilient applications using *distributed durable async/await*. This repository contains the Restate SDK for writing services in **Python**.
 
 ## Community
