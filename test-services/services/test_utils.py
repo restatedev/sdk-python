@@ -12,12 +12,13 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
+import os
 from datetime import timedelta
-from typing import Dict, Any
-import typing
+from typing import (Dict, Iterable, List, Union, TypedDict, Literal, Any)
 from restate import Service, Context
 
-from . import awakable_holder
+from . import list_object
+from . import awakeable_holder
 
 test_utils = Service("TestUtilsService")
 
@@ -37,7 +38,7 @@ async def echo_headers(context: Context) -> Dict[str, str]:
 async def create_awakeable_and_await_it(context: Context, req: Dict[str, Any]) -> Dict[str, Any]:
     name, awakeable = context.awakeable()
 
-    await context.object_call(awakable_holder.hold, key=req["awakeableKey"], arg=name)
+    await context.object_call(awakeable_holder.hold, key=req["awakeableKey"], arg=name)
 
     if "awaitTimeout" not in req:
         return {"type": "result", "value": await awakeable}
@@ -46,7 +47,7 @@ async def create_awakeable_and_await_it(context: Context, req: Dict[str, Any]) -
     raise NotImplementedError()
 
 @test_utils.handler(name="sleepConcurrently")
-async def sleep_concurrently(context: Context, millis_duration: typing.List[int]) -> None:
+async def sleep_concurrently(context: Context, millis_duration: List[int]) -> None:
     timers = [context.sleep(timedelta(milliseconds=duration)) for duration in millis_duration]
 
     for timer in timers:
@@ -65,4 +66,35 @@ async def count_executed_side_effects(context: Context, increments: int) -> int:
         await context.run("count", effect)
 
     return invoked_side_effects
-    
+
+@test_utils.handler(name="getEnvVariable")
+async def get_env_variable(context: Context, env_name: str) -> str:
+    return os.environ.get(env_name, default="")
+
+class CreateAwakeableAndAwaitIt(TypedDict):
+    type: Literal["createAwakeableAndAwaitIt"]
+    awakeableKey: str
+
+class GetEnvVariable(TypedDict):
+    type: Literal["getEnvVariable"]
+    envName: str
+
+Command = Union[
+    CreateAwakeableAndAwaitIt,
+    GetEnvVariable
+]
+
+class InterpretRequest(TypedDict):
+    listName: str
+    commands: Iterable[Command]
+
+@test_utils.handler(name="interpretCommands")
+async def interpret_commands(context: Context, req: InterpretRequest):
+    for cmd in req['commands']:
+        if cmd['type'] == "createAwakeableAndAwaitIt":
+            name, awakeable = context.awakeable()
+            context.object_send(awakeable_holder.hold, key=cmd["awakeableKey"], arg=name)
+            result = await awakeable
+            context.object_send(list_object.append, key=req['listName'], arg=result)
+        elif cmd['type'] == "getEnvVariable":
+            context.object_send(list_object.append, key=req['listName'], arg=os.environ.get(cmd['envName'], default=""))

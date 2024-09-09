@@ -39,23 +39,6 @@ async def failing_call_with_eventual_success(ctx: ObjectContext) -> int:
         return 4
     raise ValueError(f"Failed at attempt: {failures}")
 
-
-side_effect_failures = 0
-
-@failing.handler(name="failingSideEffectWithEventualSuccess")
-async def failing_side_effect_with_eventual_success(ctx: ObjectContext) -> int:
-
-    def side_effect():
-        global side_effect_failures
-        side_effect_failures += 1
-        if side_effect_failures >= 4:
-            side_effect_failures = 0
-            return 4
-        raise ValueError(f"Failed at attempt: {side_effect_failures}")
-
-    return await ctx.run("sideEffect", side_effect) # type: ignore
-
-
 @failing.handler(name="terminallyFailingSideEffect")
 async def terminally_failing_side_effect(ctx: ObjectContext):
 
@@ -64,3 +47,36 @@ async def terminally_failing_side_effect(ctx: ObjectContext):
 
     await ctx.run("sideEffect", side_effect)
     raise ValueError("Should not reach here")
+
+
+eventual_success_side_effects = 0
+
+@failing.handler(name="sideEffectSucceedsAfterGivenAttempts")
+async def side_effect_succeeds_after_given_attempts(ctx: ObjectContext, minimum_attempts: int) -> int:
+
+    def side_effect():
+        global eventual_success_side_effects
+        eventual_success_side_effects += 1
+        if eventual_success_side_effects >= minimum_attempts:
+            return eventual_success_side_effects
+        raise ValueError(f"Failed at attempt: {eventual_success_side_effects}")
+
+    return await ctx.run("sideEffect", side_effect, max_attempts=minimum_attempts + 1) # type: ignore
+
+eventual_failure_side_effects = 0
+
+@failing.handler(name="sideEffectFailsAfterGivenAttempts")
+async def side_effect_fails_after_given_attempts(ctx: ObjectContext, retry_policy_max_retry_count: int) -> int:
+
+    def side_effect():
+        global eventual_failure_side_effects
+        eventual_failure_side_effects += 1
+        raise ValueError(f"Failed at attempt: {eventual_failure_side_effects}")
+
+    try:
+        await ctx.run("sideEffect", side_effect, max_attempts=retry_policy_max_retry_count)
+        raise ValueError("Side effect did not fail.")
+    except TerminalError as t:
+        global eventual_failure_side_effects
+        return eventual_failure_side_effects
+

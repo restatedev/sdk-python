@@ -14,7 +14,7 @@
 
 from restate import Service, Context, VirtualObject, ObjectContext
 
-from . import awakable_holder
+from . import awakeable_holder
 
 kill_runner = Service("KillTestRunner")
 
@@ -27,7 +27,7 @@ kill_singleton = VirtualObject("KillTestSingleton")
 @kill_singleton.handler(name="recursiveCall")
 async def recursive_call(ctx: ObjectContext):
     name, promise = ctx.awakeable()
-    ctx.object_send(awakable_holder.hold, key="kill", arg=name)
+    ctx.object_send(awakeable_holder.hold, key="kill", arg=name)
     await promise
 
     await ctx.object_call(recursive_call, key="", arg=None)

@@ -11,17 +11,17 @@
 from typing import Dict, Union
 from restate import Service, VirtualObject, Workflow
 
-from .counter import counter_object
-from .proxy import proxy
-from .awakable_holder import awakeable_holder
-from. block_and_wait_workflow import workflow
-from .cancel_test import runner, blocking_service
-from .failing import failing
-from .kill_test import kill_runner, kill_singleton
-from .list_object import list_object
-from .map_object import map_object
-from .non_determinism import non_deterministic
-from .test_utils import test_utils
+from .counter import counter_object as s1
+from .proxy import proxy as s2
+from .awakeable_holder import awakeable_holder as s3
+from. block_and_wait_workflow import workflow as s4
+from .cancel_test import runner, blocking_service as s5
+from .failing import failing as s6
+from .kill_test import kill_runner, kill_singleton as s7
+from .list_object import list_object as s8
+from .map_object import map_object as s9
+from .non_determinism import non_deterministic as s10
+from .test_utils import test_utils as s11
 
 def list_services(bindings):
     """List all services in this module"""
