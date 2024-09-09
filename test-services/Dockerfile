@@ -4,7 +4,14 @@ FROM ghcr.io/pyo3/maturin AS build-sdk
 
 WORKDIR /usr/src/app
 
-COPY . .
+COPY src ./src/
+COPY python ./python/
+COPY Cargo.lock .
+COPY Cargo.toml .
+COPY rust-toolchain.toml .
+COPY requirements.txt .
+COPY pyproject.toml .
+COPY LICENSE .
 
 RUN maturin build --out dist --interpreter python3.12
 

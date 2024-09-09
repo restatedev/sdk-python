@@ -18,7 +18,7 @@ from typing import Literal
 from restate import VirtualObject, ObjectContext
 from restate.exceptions import TerminalError
 
-from . import awakable_holder
+from . import awakeable_holder
 
 BlockingOperation = Literal["CALL", "SLEEP", "AWAKEABLE"]
 
@@ -47,7 +47,7 @@ blocking_service = VirtualObject("CancelTestBlockingService")
 @blocking_service.handler()
 async def block(ctx: ObjectContext, op: BlockingOperation):
     name, awakeable = ctx.awakeable()
-    await ctx.object_call(awakable_holder.hold, key="cancel", arg=name)
+    await ctx.object_call(awakeable_holder.hold, key="cancel", arg=name)
     await awakeable
 
     if op == "CALL":
