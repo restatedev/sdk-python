@@ -8,6 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
+# pylint: disable=R0917
 """
 This module defines the Service class for representing a restate service.
 """

@@ -8,6 +8,8 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
+
+# pylint: disable=R0917
 """
 This module contains the definition of the Handler class,
 which is used to define the handlers for the services.

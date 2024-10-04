@@ -8,6 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
+# pylint: disable=R0917
 """This module contains the restate context implementation based on the server"""
 
 from datetime import timedelta

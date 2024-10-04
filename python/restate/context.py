@@ -8,7 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-# pylint: disable=R0913,C0301
+# pylint: disable=R0913,C0301,R0917
 """
 Restate Context
 """
