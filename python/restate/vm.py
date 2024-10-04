@@ -11,7 +11,7 @@
 """
 wrap the restate._internal.PyVM class
 """
-# pylint: disable=E1101
+# pylint: disable=E1101,R0917
 
 from dataclasses import dataclass
 import typing
