@@ -46,8 +46,7 @@ jobs:
       - name: Build docker image
         uses: docker/build-push-action@v3
         with:
-          context: test-services/
-          file: "Dockerfile"
+          context: ./test-services/
           push: true
           platforms: linux/arm64,linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
