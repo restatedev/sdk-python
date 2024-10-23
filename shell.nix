@@ -1,7 +1,7 @@
 { pkgs ? import <nixpkgs> {} }:
 
 (pkgs.buildFHSUserEnv {
-  name = "my-python-env";
+  name = "sdk-python";
   targetPkgs = pkgs: (with pkgs; [
     python3
     python3Packages.pip
@@ -10,6 +10,7 @@
 
 		# rust
 		rustup
+		cargo
     clang
     llvmPackages.bintools
     protobuf
@@ -29,6 +30,6 @@
   LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
 
   runScript = ''
-    bash
+		bash
   '';
 }).env
