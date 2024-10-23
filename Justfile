@@ -18,8 +18,8 @@ mypy:
 # Recipe to run pylint for linting
 pylint:
     @echo "Running pylint..."
-    {{python}} -m pylint python/restate
-    {{python}} -m pylint examples/
+    {{python}} -m pylint python/restate --ignore-paths='^.*.?venv.*$'
+    {{python}} -m pylint examples/ --ignore-paths='^.*\.?venv.*$'
 
 test:
     @echo "Running Python tests..."

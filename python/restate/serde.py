@@ -108,6 +108,43 @@ class JsonSerde(Serde[I]):
         return bytes(json.dumps(obj), "utf-8")
 
 
+class PydanticJsonSerde(Serde[I]):
+    """
+    Serde for Pydantic models to/from JSON
+    """
+
+    def __init__(self, model):
+        self.model = model
+
+    def deserialize(self, buf: bytes) -> typing.Optional[I]:
+        """
+        Deserializes a bytearray to a Pydantic model.
+
+        Args:
+            buf (bytearray): The bytearray to deserialize.
+
+        Returns:
+            typing.Optional[I]: The deserialized Pydantic model.
+        """
+        if not buf:
+            return None
+        return self.model.model_validate_json(buf)
+
+    def serialize(self, obj: typing.Optional[I]) -> bytes:
+        """
+        Serializes a Pydantic model to a bytearray.
+
+        Args:
+            obj (I): The Pydantic model to serialize.
+
+        Returns:
+            bytearray: The serialized bytearray.
+        """
+        if obj is None:
+            return bytes()
+        json_str = obj.model_dump_json() # type: ignore[attr-defined]
+        return json_str.encode("utf-8")
+
 def deserialize_json(buf: typing.ByteString) -> typing.Optional[O]:
     """
     Deserializes a bytearray to a JSON object.

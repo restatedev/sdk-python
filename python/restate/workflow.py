@@ -114,8 +114,8 @@ class Workflow:
             def wrapped(*args, **kwargs):
                 return fn(*args, **kwargs)
 
-            arity = len(inspect.signature(fn).parameters)
-            handler = make_handler(self.service_tag, handler_io, name, kind, wrapped, arity)
+            signature = inspect.signature(fn)
+            handler = make_handler(self.service_tag, handler_io, name, kind, wrapped, signature)
             self.handlers[handler.name] = handler
             return wrapped
 

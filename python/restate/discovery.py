@@ -113,6 +113,14 @@ def compute_discovery_json(endpoint: RestateEndpoint,
     headers = {"content-type": "application/vnd.restate.endpointmanifest.v1+json"}
     return (headers, json_str)
 
+def try_extract_json_schema(model: Any) -> typing.Optional[typing.Any]:
+    """
+    Try to extract the JSON schema from a schema object
+    """
+    if model:
+        return model.model_json_schema(mode='serialization')
+    return None
+
 def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal["bidi", "request_response"]) -> Endpoint:
     """
     return restate's discovery object for an endpoint
@@ -131,11 +139,11 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
             # input
             inp = InputPayload(required=False,
                                contentType=handler.handler_io.accept,
-                               jsonSchema=None)
+                               jsonSchema=try_extract_json_schema(handler.handler_io.pydantic_input_model))
             # output
             out = OutputPayload(setContentTypeIfEmpty=False,
                                 contentType=handler.handler_io.content_type,
-                                jsonSchema=None)
+                                jsonSchema=try_extract_json_schema(handler.handler_io.pydantic_output_model))
             # add the handler
             service_handlers.append(Handler(name=handler.name, ty=ty, input=inp, output=out))
 
