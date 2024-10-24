@@ -85,7 +85,7 @@ class VirtualObject:
             def wrapped(*args, **kwargs):
                 return fn(*args, **kwargs)
 
-            signature = inspect.signature(fn)
+            signature = inspect.signature(fn, eval_str=True)
             handler = make_handler(self.service_tag, handler_io, name, kind, wrapped, signature)
             self.handlers[handler.name] = handler
             return wrapped
