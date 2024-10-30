@@ -43,7 +43,7 @@ def try_import_pydantic_base_model():
 
         return Dummy
 
-PYDANTIC_BASE_MODEL = try_import_pydantic_base_model()
+PydanticBaseModel = try_import_pydantic_base_model()
 
 @dataclass
 class ServiceTag:
@@ -82,7 +82,7 @@ def is_pydantic(annotation) -> bool:
     Check if an object is a Pydantic model.
     """
     try:
-        return issubclass(annotation, PYDANTIC_BASE_MODEL)
+        return issubclass(annotation, PydanticBaseModel)
     except TypeError:
         # annotation is not a class or a type
         return False

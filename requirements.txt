@@ -3,3 +3,4 @@ pylint
 hypercorn
 maturin
 pytest
+pydantic
