@@ -25,10 +25,11 @@ case that the restate server understands.
 import json
 import typing
 from enum import Enum
-from typing import Optional, Any, List
+from typing import Optional, Any, List, get_args, get_origin
 
 
 from restate.endpoint import Endpoint as RestateEndpoint
+from restate.handler import TypeHint
 
 class ProtocolMode(Enum):
     BIDI_STREAM = "BIDI_STREAM"
@@ -99,6 +100,49 @@ class PythonClassEncoder(json.JSONEncoder):
             return o.value
         return {key: value for key, value in o.__dict__.items() if value is not None}
 
+
+# pylint: disable=R0911
+def type_hint_to_json_schema(type_hint: Any) -> Any:
+    """
+    Convert a Python type hint to a JSON schema.
+
+    """
+    origin = get_origin(type_hint) or type_hint
+    args = get_args(type_hint)
+    if origin is str:
+        return {"type": "string"}
+    if origin is int:
+        return {"type": "integer"}
+    if origin is float:
+        return {"type": "number"}
+    if origin is bool:
+        return {"type": "boolean"}
+    if origin is list:
+        items = type_hint_to_json_schema(args[0] if args else Any)
+        return {"type": "array", "items": items}
+    if origin is dict:
+        return {
+            "type": "object"
+        }
+    if origin is None:
+        return {"type": "null"}
+    # Default to all valid schema
+    return True
+
+def json_schema_from_type_hint(type_hint: Optional[TypeHint[Any]]) -> Any:
+    """
+    Convert a type hint to a JSON schema.
+    """
+    if not type_hint:
+        return None
+    if not type_hint.annotation:
+        return None
+    if type_hint.is_pydantic:
+        return type_hint.annotation.model_json_schema(mode='serialization') # type: ignore
+    return type_hint_to_json_schema(type_hint.annotation)
+
+
+
 def compute_discovery_json(endpoint: RestateEndpoint,
                            version: int,
                            discovered_as: typing.Literal["bidi", "request_response"]) -> typing.Tuple[typing.Dict[str, str] ,str]:
@@ -113,13 +157,6 @@ def compute_discovery_json(endpoint: RestateEndpoint,
     headers = {"content-type": "application/vnd.restate.endpointmanifest.v1+json"}
     return (headers, json_str)
 
-def try_extract_json_schema(model: Any) -> typing.Optional[typing.Any]:
-    """
-    Try to extract the JSON schema from a schema object
-    """
-    if model:
-        return model.model_json_schema(mode='serialization')
-    return None
 
 def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal["bidi", "request_response"]) -> Endpoint:
     """
@@ -139,11 +176,11 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
             # input
             inp = InputPayload(required=False,
                                contentType=handler.handler_io.accept,
-                               jsonSchema=try_extract_json_schema(handler.handler_io.pydantic_input_model))
+                               jsonSchema=json_schema_from_type_hint(handler.handler_io.input_type))
             # output
             out = OutputPayload(setContentTypeIfEmpty=False,
                                 contentType=handler.handler_io.content_type,
-                                jsonSchema=try_extract_json_schema(handler.handler_io.pydantic_output_model))
+                                jsonSchema=json_schema_from_type_hint(handler.handler_io.output_type))
             # add the handler
             service_handlers.append(Handler(name=handler.name, ty=ty, input=inp, output=out))
 
