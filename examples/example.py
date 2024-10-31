@@ -15,7 +15,8 @@
 from greeter import greeter
 from virtual_object import counter
 from workflow import payment
+from pydantic_greeter import pydantic_greeter
 
 import restate
 
-app = restate.app(services=[greeter, counter, payment])
+app = restate.app(services=[greeter, counter, payment, pydantic_greeter])
