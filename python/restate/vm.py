@@ -15,7 +15,7 @@ wrap the restate._internal.PyVM class
 
 from dataclasses import dataclass
 import typing
-from restate._internal import PyVM, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig  # pylint: disable=import-error,no-name-in-module,line-too-long
+from restate._internal import PyVM, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
 
 @dataclass
 class Invocation:
@@ -60,8 +60,10 @@ class SuspendedException(Exception):
 
 NOT_READY = NotReady()
 SUSPENDED = SuspendedException()
+CANCEL_HANDLE = CANCEL_NOTIFICATION_HANDLE
 
-AsyncResultType = typing.Optional[typing.Union[bytes, Failure, NotReady]]
+NotificationType = typing.Optional[typing.Union[bytes, Failure, NotReady, list[str], str]]
+DoProgressResult = typing.Union[PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoProgressCancelSignalReceived] # pylint: disable=line-too-long
 
 # pylint: disable=too-many-public-methods
 class VMWrapper:
@@ -91,25 +93,33 @@ class VMWrapper:
         """Notify the virtual machine that the input has been closed."""
         self.vm.notify_input_closed()
 
-    def notify_error(self, error: str):
+    def notify_error(self, error: str, stacktrace: str):
         """Notify the virtual machine of an error."""
-        self.vm.notify_error(error)
+        self.vm.notify_error(error, stacktrace)
 
     def take_output(self) -> typing.Optional[bytes]:
         """Take the output from the virtual machine."""
         return self.vm.take_output()
 
-    def notify_await_point(self, handle: int):
-        """Notify the virtual machine of an await point."""
-        self.vm.notify_await_point(handle)
-
     def is_ready_to_execute(self) -> bool:
         """Returns true when the VM is ready to operate."""
         return self.vm.is_ready_to_execute()
 
-    def take_async_result(self, handle: typing.Any) -> AsyncResultType:
+    def is_completed(self, handle: int) -> bool:
+        """Returns true when the notification handle is completed and hasn't been taken yet."""
+        return self.vm.is_completed(handle)
+
+    def do_progress(self, handles: list[int]) -> DoProgressResult:
+        """Do progress with notifications."""
+        result = self.vm.do_progress(handles)
+        if isinstance(result, PySuspended):
+            # the state machine had suspended
+            raise SUSPENDED
+        return result
+
+    def take_notification(self, handle: int) -> NotificationType:
         """Take the result of an asynchronous operation."""
-        result = self.vm.take_async_result(handle)
+        result = self.vm.take_notification(handle)
         if result is None:
             return NOT_READY
         if isinstance(result, PyVoid):
@@ -121,6 +131,9 @@ class VMWrapper:
         if isinstance(result, PyStateKeys):
             # success with state keys
             return result.keys
+        if isinstance(result, str):
+            # success with invocation id
+            return result
         if isinstance(result, PyFailure):
             # a terminal failure
             code = result.code
@@ -244,22 +257,11 @@ class VMWrapper:
         """send an invocation to a service (no response)"""
         self.vm.sys_send(service, handler, parameter, key, delay)
 
-    def sys_run_enter(self, name: str) -> typing.Union[bytes, None, Failure]:
+    def sys_run(self, name: str) -> int:
         """
-        Enter a side effect
-
-        Returns:
-            None if the side effect was not journald.
-            PyFailure if the side effect failed.
-            bytes if the side effect was successful.
+        Register a run
         """
-        result = self.vm.sys_run_enter(name)
-        if result is None:
-            return None
-        if isinstance(result, PyFailure):
-            return Failure(result.code, result.message) # pylint: disable=protected-access
-        assert isinstance(result, bytes)
-        return result
+        return self.vm.sys_run(name)
 
     def sys_awakeable(self) -> typing.Tuple[str, int]:
         """
@@ -280,7 +282,7 @@ class VMWrapper:
         py_failure = PyFailure(failure.code, failure.message)
         self.vm.sys_complete_awakeable_failure(name, py_failure)
 
-    def sys_run_exit_success(self, output: bytes) -> int:
+    def propose_run_completion_success(self, handle: int, output: bytes) -> int:
         """
         Exit a side effect
 
@@ -290,7 +292,7 @@ class VMWrapper:
         Returns:
             handle
         """
-        return self.vm.sys_run_exit_success(output)
+        return self.vm.propose_run_completion_success(handle, output)
 
     def sys_get_promise(self, name: str) -> int:
         """Returns the promise handle"""
@@ -309,7 +311,7 @@ class VMWrapper:
         res = PyFailure(failure.code, failure.message)
         return self.vm.sys_complete_promise_failure(name, res)
 
-    def sys_run_exit_failure(self, output: Failure) -> int:
+    def propose_run_completion_failure(self, handle: int, output: Failure) -> int:
         """
         Exit a side effect
 
@@ -318,10 +320,10 @@ class VMWrapper:
             output: The output of the side effect.
         """
         res = PyFailure(output.code, output.message)
-        return self.vm.sys_run_exit_failure(res)
+        return self.vm.propose_run_completion_failure(handle, res)
 
     # pylint: disable=line-too-long
-    def sys_run_exit_transient(self, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig) -> int | None:
+    def propose_run_completion_transient(self, handle: int, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig) -> int | None:
         """
         Exit a side effect with a transient Error.
         This requires a retry policy to be provided.
@@ -329,7 +331,7 @@ class VMWrapper:
         py_failure = PyFailure(failure.code, failure.message)
         py_config = PyExponentialRetryConfig(config.initial_interval, config.max_attempts, config.max_duration)
         try:
-            handle = self.vm.sys_run_exit_failure_transient(py_failure, attempt_duration_ms, py_config)
+            handle = self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
             # The VM decided not to retry, therefore we get back an handle that will be resolved
             # with a terminal failure.
             return handle

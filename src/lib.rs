@@ -1,12 +1,11 @@
 use pyo3::create_exception;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyNone};
+use pyo3::types::{PyBytes, PyNone, PyString};
 use restate_sdk_shared_core::{
-    AsyncResultHandle, CoreVM, Header, IdentityVerifier, Input, NonEmptyValue, ResponseHead,
-    RetryPolicy, RunEnterResult, RunExitResult, SuspendedOrVMError, TakeOutputResult, Target,
-    TerminalFailure, VMOptions, Value, VM,
+    CallHandle, CoreVM, DoProgressResponse, Error, Header, IdentityVerifier, Input, NonEmptyValue,
+    NotificationHandle, ResponseHead, RetryPolicy, RunExitResult, SuspendedOrVMError,
+    TakeOutputResult, Target, TerminalFailure, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
 };
-use std::borrow::Cow;
 use std::time::{Duration, SystemTime};
 
 // Current crate version
@@ -63,7 +62,7 @@ fn take_output_result_into_py(
     }
 }
 
-type PyAsyncResultHandle = u32;
+type PyNotificationHandle = u32;
 
 #[pyclass]
 struct PyVoid;
@@ -85,12 +84,6 @@ impl PyFailure {
     #[new]
     fn new(code: u16, message: String) -> PyFailure {
         Self { code, message }
-    }
-}
-
-impl Into<restate_sdk_shared_core::Error> for PyFailure {
-    fn into(self) -> restate_sdk_shared_core::Error {
-        restate_sdk_shared_core::Error::new(self.code, self.message)
     }
 }
 
@@ -152,6 +145,12 @@ impl From<PyFailure> for TerminalFailure {
     }
 }
 
+impl From<PyFailure> for Error {
+    fn from(value: PyFailure) -> Self {
+        Self::new(value.code, value.message)
+    }
+}
+
 #[pyclass]
 #[derive(Clone)]
 struct PyStateKeys {
@@ -185,10 +184,42 @@ impl From<Input> for PyInput {
     }
 }
 
+#[pyclass]
+struct PyDoProgressReadFromInput;
+
+#[pyclass]
+struct PyDoProgressAnyCompleted;
+
+#[pyclass]
+struct PyDoProgressExecuteRun {
+    #[pyo3(get)]
+    handle: PyNotificationHandle,
+}
+
+#[pyclass]
+struct PyDoProgressCancelSignalReceived;
+
+#[pyclass]
+pub struct PyCallHandle {
+    #[pyo3(get)]
+    invocation_id_handle: PyNotificationHandle,
+    #[pyo3(get)]
+    result_handle: PyNotificationHandle,
+}
+
+impl From<CallHandle> for PyCallHandle {
+    fn from(value: CallHandle) -> Self {
+        PyCallHandle {
+            invocation_id_handle: value.invocation_id_notification_handle.into(),
+            result_handle: value.call_notification_handle.into(),
+        }
+    }
+}
+
 // Errors and Exceptions
 
 #[derive(Debug)]
-struct PyVMError(restate_sdk_shared_core::Error);
+struct PyVMError(Error);
 
 // Python representation of restate_sdk_shared_core::Error
 create_exception!(
@@ -204,8 +235,8 @@ impl From<PyVMError> for PyErr {
     }
 }
 
-impl From<restate_sdk_shared_core::Error> for PyVMError {
-    fn from(value: restate_sdk_shared_core::Error) -> Self {
+impl From<Error> for PyVMError {
+    fn from(value: Error) -> Self {
         PyVMError(value)
     }
 }
@@ -241,13 +272,13 @@ impl PyVM {
         self_.vm.notify_input_closed();
     }
 
-    #[pyo3(signature = (error, description=None))]
-    fn notify_error(mut self_: PyRefMut<'_, Self>, error: String, description: Option<String>) {
-        let mut e = restate_sdk_shared_core::Error::new(500u16, Cow::Owned(error));
-        if let Some(desc) = description {
-            e = e.with_description(desc);
+    #[pyo3(signature = (error, stacktrace=None))]
+    fn notify_error(mut self_: PyRefMut<'_, Self>, error: String, stacktrace: Option<String>) {
+        let mut error = Error::new(restate_sdk_shared_core::error::codes::INTERNAL, error);
+        if let Some(desc) = stacktrace {
+            error = error.with_stacktrace(desc);
         }
-        CoreVM::notify_error(&mut self_.vm, e, None);
+        CoreVM::notify_error(&mut self_.vm, error, None);
     }
 
     // Take(s)
@@ -261,8 +292,48 @@ impl PyVM {
         self_.vm.is_ready_to_execute().map_err(Into::into)
     }
 
-    fn notify_await_point(mut self_: PyRefMut<'_, Self>, handle: PyAsyncResultHandle) {
-        self_.vm.notify_await_point(handle.into())
+    fn is_completed(self_: PyRef<'_, Self>, handle: PyNotificationHandle) -> bool {
+        self_.vm.is_completed(handle.into())
+    }
+
+    fn do_progress(
+        mut self_: PyRefMut<'_, Self>,
+        any_handle: Vec<PyNotificationHandle>,
+    ) -> Result<Bound<'_, PyAny>, PyVMError> {
+        let res = self_.vm.do_progress(
+            any_handle
+                .into_iter()
+                .map(NotificationHandle::from)
+                .collect(),
+        );
+
+        let py = self_.py();
+
+        match res {
+            Err(SuspendedOrVMError::VM(e)) => Err(e.into()),
+            Err(SuspendedOrVMError::Suspended(_)) => {
+                Ok(PySuspended.into_py(py).into_bound(py).into_any())
+            }
+            Ok(DoProgressResponse::AnyCompleted) => Ok(PyDoProgressAnyCompleted
+                .into_py(py)
+                .into_bound(py)
+                .into_any()),
+            Ok(DoProgressResponse::ReadFromInput) => Ok(PyDoProgressReadFromInput
+                .into_py(py)
+                .into_bound(py)
+                .into_any()),
+            Ok(DoProgressResponse::ExecuteRun(handle)) => Ok(PyDoProgressExecuteRun {
+                handle: handle.into(),
+            }
+            .into_py(py)
+            .into_bound(py)
+            .into_any()),
+            Ok(DoProgressResponse::CancelSignalReceived) => Ok(PyDoProgressCancelSignalReceived
+                .into_py(py)
+                .into_bound(py)
+                .into_any()),
+            Ok(DoProgressResponse::WaitingPendingRun) => panic!("Python SDK doesn't support concurrent pending runs, so this is not supposed to happen")
+        }
     }
 
     /// Returns either:
@@ -270,13 +341,15 @@ impl PyVM {
     /// * `PyBytes` in case the async result holds success value
     /// * `PyFailure` in case the async result holds failure value
     /// * `PyVoid` in case the async result holds Void value
+    /// * `PyStateKeys` in case the async result holds StateKeys
+    /// * `PyString` in case the async result holds invocation id
     /// * `PySuspended` in case the state machine is suspended
     /// * `None` in case the async result is not yet present
-    fn take_async_result(
+    fn take_notification(
         mut self_: PyRefMut<'_, Self>,
-        handle: PyAsyncResultHandle,
+        handle: PyNotificationHandle,
     ) -> Result<Bound<'_, PyAny>, PyVMError> {
-        let res = self_.vm.take_async_result(AsyncResultHandle::from(handle));
+        let res = self_.vm.take_notification(NotificationHandle::from(handle));
 
         let py = self_.py();
 
@@ -294,8 +367,8 @@ impl PyVM {
             Ok(Some(Value::StateKeys(keys))) => {
                 Ok(PyStateKeys { keys }.into_py(py).into_bound(py).into_any())
             }
-            Ok(Some(Value::InvocationId(_))) | Ok(Some(Value::CombinatorResult(_))) => {
-                panic!("Unsupported variants, the python SDK doesn't support these features yet!")
+            Ok(Some(Value::InvocationId(invocation_id))) => {
+                Ok(PyString::new_bound(py, &invocation_id).into_any())
             }
         }
     }
@@ -309,7 +382,7 @@ impl PyVM {
     fn sys_get_state(
         mut self_: PyRefMut<'_, Self>,
         key: String,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
             .sys_state_get(key)
@@ -317,7 +390,9 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    fn sys_get_state_keys(mut self_: PyRefMut<'_, Self>) -> Result<PyAsyncResultHandle, PyVMError> {
+    fn sys_get_state_keys(
+        mut self_: PyRefMut<'_, Self>,
+    ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
             .sys_state_get_keys()
@@ -347,7 +422,7 @@ impl PyVM {
     fn sys_sleep(
         mut self_: PyRefMut<'_, Self>,
         millis: u64,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    ) -> Result<PyNotificationHandle, PyVMError> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("Duration since unix epoch cannot fail");
@@ -365,7 +440,7 @@ impl PyVM {
         handler: String,
         buffer: &Bound<'_, PyBytes>,
         key: Option<String>,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    ) -> Result<PyCallHandle, PyVMError> {
         self_
             .vm
             .sys_call(
@@ -390,7 +465,7 @@ impl PyVM {
         buffer: &Bound<'_, PyBytes>,
         key: Option<String>,
         delay: Option<u64>,
-    ) -> Result<(), PyVMError> {
+    ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
             .sys_send(
@@ -409,13 +484,13 @@ impl PyVM {
                         + Duration::from_millis(millis)
                 }),
             )
-            .map(|_| ())
+            .map(|s| s.invocation_id_notification_handle.into())
             .map_err(Into::into)
     }
 
     fn sys_awakeable(
         mut self_: PyRefMut<'_, Self>,
-    ) -> Result<(String, PyAsyncResultHandle), PyVMError> {
+    ) -> Result<(String, PyNotificationHandle), PyVMError> {
         self_
             .vm
             .sys_awakeable()
@@ -451,7 +526,7 @@ impl PyVM {
     fn sys_get_promise(
         mut self_: PyRefMut<'_, Self>,
         key: String,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
             .sys_get_promise(key)
@@ -462,7 +537,7 @@ impl PyVM {
     fn sys_peek_promise(
         mut self_: PyRefMut<'_, Self>,
         key: String,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
             .sys_peek_promise(key)
@@ -474,7 +549,7 @@ impl PyVM {
         mut self_: PyRefMut<'_, Self>,
         key: String,
         buffer: &Bound<'_, PyBytes>,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
             .sys_complete_promise(
@@ -489,7 +564,7 @@ impl PyVM {
         mut self_: PyRefMut<'_, Self>,
         key: String,
         value: PyFailure,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
             .sys_complete_promise(key, NonEmptyValue::Failure(value.into()))
@@ -497,73 +572,60 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    /// Returns either:
-    ///
-    /// * `PyBytes`, in case the run was executed with success
-    /// * `PyFailure`, in case the run was executed with failure
-    /// * `None` in case the run was not executed
-    fn sys_run_enter(
+    /// Returns the associated `PyNotificationHandle`.
+    fn sys_run(
         mut self_: PyRefMut<'_, Self>,
         name: String,
-    ) -> Result<Bound<'_, PyAny>, PyVMError> {
-        let result = self_.vm.sys_run_enter(name)?;
-
-        let py = self_.py();
-
-        Ok(match result {
-            RunEnterResult::Executed(NonEmptyValue::Success(b)) => {
-                PyBytes::new_bound(py, &b).into_any()
-            }
-            RunEnterResult::Executed(NonEmptyValue::Failure(f)) => {
-                PyFailure::from(f).into_py(py).into_bound(py).into_any()
-            }
-            RunEnterResult::NotExecuted(_retry_info) => PyNone::get_bound(py).to_owned().into_any(),
-        })
+    ) -> Result<PyNotificationHandle, PyVMError> {
+        self_.vm.sys_run(name).map(Into::into).map_err(Into::into)
     }
 
-    fn sys_run_exit_success(
+    fn propose_run_completion_success(
         mut self_: PyRefMut<'_, Self>,
+        handle: PyNotificationHandle,
         buffer: &Bound<'_, PyBytes>,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
-        CoreVM::sys_run_exit(
+    ) -> Result<(), PyVMError> {
+        CoreVM::propose_run_completion(
             &mut self_.vm,
+            handle.into(),
             RunExitResult::Success(buffer.as_bytes().to_vec().into()),
             RetryPolicy::None,
         )
-        .map(Into::into)
         .map_err(Into::into)
     }
 
-    fn sys_run_exit_failure(
+    fn propose_run_completion_failure(
         mut self_: PyRefMut<'_, Self>,
+        handle: PyNotificationHandle,
         value: PyFailure,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_run_exit(
+            .propose_run_completion(
+                handle.into(),
                 RunExitResult::TerminalFailure(value.into()),
                 RetryPolicy::None,
             )
-            .map(Into::into)
             .map_err(Into::into)
     }
 
-    fn sys_run_exit_failure_transient(
+    fn propose_run_completion_failure_transient(
         mut self_: PyRefMut<'_, Self>,
+        handle: PyNotificationHandle,
         value: PyFailure,
         attempt_duration: u64,
         config: PyExponentialRetryConfig,
-    ) -> Result<PyAsyncResultHandle, PyVMError> {
+    ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_run_exit(
+            .propose_run_completion(
+                handle.into(),
                 RunExitResult::RetryableFailure {
                     attempt_duration: Duration::from_millis(attempt_duration),
                     error: value.into(),
                 },
                 config.into(),
             )
-            .map(Into::into)
             .map_err(Into::into)
     }
 
@@ -654,6 +716,11 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVM>()?;
     m.add_class::<PyIdentityVerifier>()?;
     m.add_class::<PyExponentialRetryConfig>()?;
+    m.add_class::<PyDoProgressAnyCompleted>()?;
+    m.add_class::<PyDoProgressReadFromInput>()?;
+    m.add_class::<PyDoProgressExecuteRun>()?;
+    m.add_class::<PyDoProgressCancelSignalReceived>()?;
+    m.add_class::<PyCallHandle>()?;
 
     m.add("VMException", m.py().get_type_bound::<VMException>())?;
     m.add(
@@ -665,5 +732,9 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type_bound::<IdentityVerificationException>(),
     )?;
     m.add("SDK_VERSION", CURRENT_VERSION)?;
+    m.add(
+        "CANCEL_NOTIFICATION_HANDLE",
+        PyNotificationHandle::from(CANCEL_NOTIFICATION_HANDLE),
+    )?;
     Ok(())
 }

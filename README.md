@@ -51,13 +51,13 @@ Setup your virtual environment using the tool of your choice, e.g. VirtualEnv:
 
 ```shell
 python3 -m venv .venv
-source venv/bin/activate
+source .venv/bin/activate
 ```
 
-Install `maturin`:
+Install the build tools:
 
 ```shell
-pip install maturin
+pip install -r requirements.txt
 ```
 
 Now build the Rust module and include opt-in additional dev dependencies:
