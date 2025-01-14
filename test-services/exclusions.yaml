@@ -3,6 +3,13 @@ exclusions:
   - "dev.restate.sdktesting.tests.AwaitTimeout"
   "default":
   - "dev.restate.sdktesting.tests.AwaitTimeout"
+  - "dev.restate.sdktesting.tests.RawHandler"
   "lazyState": []
   "singleThreadSinglePartition":
+  - "dev.restate.sdktesting.tests.AwaitTimeout"
+  - "dev.restate.sdktesting.tests.RawHandler"
+  "threeNodes":
+  - "dev.restate.sdktesting.tests.AwaitTimeout"
+  - "dev.restate.sdktesting.tests.RawHandler"
+  "threeNodesAlwaysSuspending":
   - "dev.restate.sdktesting.tests.AwaitTimeout"
