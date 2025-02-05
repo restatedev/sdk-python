@@ -16,6 +16,7 @@ authors = [
 [project.optional-dependencies]
 test = ["pytest", "hypercorn"]
 lint = ["mypy", "pylint"]
+harness = ["testcontainers"]
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]
