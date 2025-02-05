@@ -22,3 +22,9 @@ from .context import WorkflowContext, WorkflowSharedContext
 from .context import DurablePromise
 
 from .endpoint import app
+
+try:
+    from .harness import RestateTestHarness
+except ImportError:
+    # was installed without the test harness optional dependency
+    pass
