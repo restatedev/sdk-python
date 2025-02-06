@@ -89,7 +89,7 @@ class HostProxyContainer(DockerContainer):
         self.with_name(name)
         self.with_exposed_ports(port)
         self.with_network(network)
-        self.with_volume_mapping(host_uds, "/tmp/unix_socket", mode="rw")
+        self.with_volume_mapping(host_uds, "/tmp/unix_socket", mode="z")
         self.with_command(["TCP-LISTEN:9081,reuseaddr,fork", "UNIX-CLIENT:/tmp/unix_socket"])
         self.name = name
         self.port = port
