@@ -49,12 +49,16 @@ class UdsAsgiServer:
         """stop the server"""
         self.stop_event.set()
         if self.thread:
-            self.thread.join(timeout=10)
+            self.thread.join(timeout=1)
             self.thread = None
         self.exit_event.set()
 
     def start(self):
         """start the server"""
+
+        def shutdown_trigger():
+            """trigger the shutdown event"""
+            return self.stop_event.wait()
 
         async def run_asgi():
             """run the asgi app on the given port"""
@@ -69,7 +73,7 @@ class UdsAsgiServer:
                 await serve(self.asgi_app,
                             config=config,
                             mode='asgi',
-                            shutdown_trigger= self.stop_event.wait)
+                            shutdown_trigger=shutdown_trigger)
             except asyncio.CancelledError:
                 print("ASGI server was cancelled", flush=True)
             except Exception as e: # pylint: disable=broad-except
