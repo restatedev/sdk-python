@@ -218,6 +218,6 @@ class RestateTestHarness:
         return False
 
 
-def restate_test_harness(asgi_app) -> RestateTestHarness:
+def test_harness(asgi_app) -> RestateTestHarness:
     """create a test harness for running Restate SDKs"""
     return RestateTestHarness(asgi_app)
