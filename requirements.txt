@@ -4,3 +4,5 @@ hypercorn
 maturin
 pytest
 pydantic
+httpx
+testcontainers
