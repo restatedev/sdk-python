@@ -34,14 +34,14 @@ def run_in_background(coro) -> threading.Thread:
     thread.start()
     return thread
 
-class UdsAsgiServer:
+class AsgiServer:
     """A simple ASGI server that listens on a unix domain socket"""
 
     thread: typing.Optional[threading.Thread] = None
 
-    def __init__(self, asgi_app, host_uds):
+    def __init__(self, asgi_app, bind_address):
         self.asgi_app = asgi_app
-        self.host_uds = host_uds
+        self.bind_address = bind_address
         self.stop_event = asyncio.Event()
         self.exit_event = asyncio.Event()
 
@@ -63,13 +63,13 @@ class UdsAsgiServer:
         async def run_asgi():
             """run the asgi app on the given port"""
             config = Config()
-            config.bind = [f"unix:{self.host_uds}"]
+            config.bind = [self.bind_address]
             config.h2_max_concurrent_streams = 2147483647
             config.keep_alive_max_requests = 2147483647
             config.keep_alive_timeout = 2147483647
 
             try:
-                print(f"Starting ASGI server on port {self.host_uds}", flush=True)
+                print(f"Starting ASGI server on port {self.bind_address}", flush=True)
                 await serve(self.asgi_app,
                             config=config,
                             mode='asgi',
@@ -86,7 +86,7 @@ class UdsAsgiServer:
         return self
 
 class HostProxyContainer(DockerContainer):
-    """create a proxy container that proxies a unix domain socket from the host"""
+    """create a proxy container that proxies a unix domain socket mounted from the host"""
 
     def __init__(self, name, port, host_uds,  network):
         super().__init__("alpine/socat")
@@ -109,7 +109,8 @@ class RestateContainer(DockerContainer):
         super().__init__(image)
         self.with_exposed_ports(8080, 9070)
         self.with_network(network)
-
+        self.with_env('RESTATE_LOG_FILTER', 'restate=info')
+        
     def ingress_url(self):
         """return the URL to access the Restate ingress"""
         return f"http://{self.get_container_host_ip()}:{self.get_exposed_port(8080)}"
@@ -145,7 +146,7 @@ class RestateTestHarness:
     """A test harness for running Restate SDKs"""
     uds_path: typing.Optional[str] = None
     network: typing.Optional[Network] = None
-    server: typing.Optional[UdsAsgiServer] = None
+    server: typing.Optional[AsgiServer] = None
     restate: typing.Optional[RestateContainer] = None
     proxy: typing.Optional[HostProxyContainer] = None
 
@@ -156,11 +157,11 @@ class RestateTestHarness:
     def start(self):
         """start the restate server and the sdk"""
         self.uds_path = f"/tmp/restate-test-{random.randint(1, 1 << 63)}.sock"
-        self.server = UdsAsgiServer(self.asgi_app, self.uds_path).start()
+        self.server = AsgiServer(self.asgi_app, f"unix:{self.uds_path}").start()
 
         self.network = Network().create()
 
-        self.restate = RestateContainer(image="restatedev/restate:1.1",
+        self.restate = RestateContainer(image="restatedev/restate:latest",
                                         network=self.network).start()
 
         self.proxy = HostProxyContainer(name="proxy",
