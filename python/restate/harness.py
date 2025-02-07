@@ -39,6 +39,7 @@ def run_in_background(coro) -> threading.Thread:
     thread.start()
     return thread
 
+
 class BindAddress:
     """A bind address for the ASGI server"""
 
@@ -119,10 +120,20 @@ class AsgiServer:
 class RestateContainer(DockerContainer):
     """Create a Restate container"""
 
+    log_thread: typing.Optional[threading.Thread] = None
+
     def __init__(self, image):
         super().__init__(image)
         self.with_exposed_ports(8080, 9070)
         self.with_env('RESTATE_LOG_FILTER', 'restate=info')
+        self.with_env('RESTATE_BOOTSTRAP_NUM_PARTITIONS', '1')
+        self.with_env('RESTATE_DEFAULT_NUM_PARTITIONS', '1')
+        self.with_env('RESTATE_SHUTDOWN_TIMEOUT', '10s')
+        self.with_env('RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE', '32 MB')
+        self.with_env('RESTATE_WORKER__INVOKER__IN_MEMORY_QUEUE_LENGTH_LIMIT', '64')
+        self.with_env('RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT', '10m')
+        self.with_env('RESTATE_WORKER__INVOKER__ABORT_TIMEOUT', '10m')
+
         self.with_kwargs(extra_hosts={"host.docker.internal" : "host-gateway"})
 
     def ingress_url(self):
@@ -148,16 +159,28 @@ class RestateContainer(DockerContainer):
         self.get_admin_client().get("/health").raise_for_status()
 
 
-    def start(self):
+    def start(self, stream_logs = False):
         """start the container and wait for health checks to pass"""
         super().start()
+
+        def stream_log():
+            for line in self.get_wrapped_container().logs(stream=True):
+                print(line.decode("utf-8"), end="", flush=True)
+
+        if stream_logs:
+            thread = threading.Thread(target=stream_log, daemon=True)
+            thread.start()
+            self.log_thread = thread
+
         self._wait_healthy()
         return self
+
 
 @dataclass
 class TestConfiguration:
     """A configuration for running tests"""
     restate_image: str = "restatedev/restate:latest"
+    stream_logs: bool = False
 
 
 class RestateTestHarness:
@@ -177,7 +200,8 @@ class RestateTestHarness:
         """start the restate server and the sdk"""
         self.bind_address = TcpSocketBindAddress()
         self.server = AsgiServer(self.asgi_app, self.bind_address).start()
-        self.restate = RestateContainer(image=self.config.restate_image).start()
+        self.restate = RestateContainer(image=self.config.restate_image) \
+            .start(self.config.stream_logs)
         try:
             self._register_sdk()
         except Exception as e:
@@ -202,15 +226,10 @@ class RestateTestHarness:
         """terminate the restate server and the sdk"""
         if self.server is not None:
             self.server.stop()
-            self.server = None
-
         if self.restate is not None:
             self.restate.stop()
-            self.restate = None
-
         if self.bind_address is not None:
             self.bind_address.cleanup()
-            self.bind_address = None
 
     def ingress_client(self):
         """return an httpx client to access the restate server's ingress"""
@@ -228,6 +247,12 @@ class RestateTestHarness:
         return False
 
 
-def test_harness(asgi_app, config: typing.Optional[TestConfiguration] = None) -> RestateTestHarness:
+def test_harness(app,
+                 follow_logs: bool = False,
+                 restate_image: str = "restatedev/restate:latest") -> RestateTestHarness:
     """create a test harness for running Restate SDKs"""
-    return RestateTestHarness(asgi_app, config)
+    config = TestConfiguration(
+        restate_image=restate_image,
+        stream_logs=follow_logs,
+    )
+    return RestateTestHarness(app, config)
