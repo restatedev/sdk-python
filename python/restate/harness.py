@@ -11,19 +11,24 @@
 """Test containers based wrapper for the restate server"""
 
 import asyncio
-import pathlib
+from dataclasses import dataclass
 import threading
-import random
 import typing
 from urllib.error import URLError
+import socket
 
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
-from testcontainers.core.network import Network # type: ignore
 from testcontainers.core.container import DockerContainer # type: ignore
 from testcontainers.core.waiting_utils import wait_container_is_ready # type: ignore
 import httpx
 
+
+def find_free_port():
+    """find the next free port to bind to on the host machine"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("0.0.0.0", 0))
+        return s.getsockname()[1]
 
 def run_in_background(coro) -> threading.Thread:
     """run a coroutine in the background"""
@@ -34,12 +39,37 @@ def run_in_background(coro) -> threading.Thread:
     thread.start()
     return thread
 
+class BindAddress:
+    """A bind address for the ASGI server"""
+
+    def get_local_bind_address(self):
+        """return the local bind address for hypercorn to bind to"""
+
+    def get_endpoint_connection_string(self):
+        """return the SDK connection string to be used by restate"""
+
+    def cleanup(self):
+        """cleanup any resources used by the bind address"""
+
+class TcpSocketBindAddress(BindAddress):
+    """Bind a TCP address that listens on a random TCP port"""
+
+    def __init__(self):
+        self.port = find_free_port()
+
+    def get_local_bind_address(self):
+        return f"0.0.0.0:{self.port}"
+
+    def get_endpoint_connection_string(self):
+        return f"http://host.docker.internal:{self.port}"
+
+
 class AsgiServer:
     """A simple ASGI server that listens on a unix domain socket"""
 
     thread: typing.Optional[threading.Thread] = None
 
-    def __init__(self, asgi_app, bind_address):
+    def __init__(self, asgi_app, bind_address: BindAddress):
         self.asgi_app = asgi_app
         self.bind_address = bind_address
         self.stop_event = asyncio.Event()
@@ -63,13 +93,14 @@ class AsgiServer:
         async def run_asgi():
             """run the asgi app on the given port"""
             config = Config()
-            config.bind = [self.bind_address]
             config.h2_max_concurrent_streams = 2147483647
             config.keep_alive_max_requests = 2147483647
             config.keep_alive_timeout = 2147483647
 
+            bind = self.bind_address.get_local_bind_address()
+            config.bind = [bind]
             try:
-                print(f"Starting ASGI server on port {self.bind_address}", flush=True)
+                print(f"Starting ASGI server on {bind}", flush=True)
                 await serve(self.asgi_app,
                             config=config,
                             mode='asgi',
@@ -85,32 +116,15 @@ class AsgiServer:
         self.thread = run_in_background(run_asgi())
         return self
 
-class HostProxyContainer(DockerContainer):
-    """create a proxy container that proxies a unix domain socket mounted from the host"""
-
-    def __init__(self, name, port, host_uds,  network):
-        super().__init__("alpine/socat")
-        self.with_name(name)
-        self.with_exposed_ports(port)
-        self.with_network(network)
-        self.with_volume_mapping(host_uds, "/tmp/unix_socket", mode="z")
-        self.with_command(["TCP-LISTEN:9081,reuseaddr,fork", "UNIX-CLIENT:/tmp/unix_socket"])
-        self.name = name
-        self.port = port
-
-    def connection_string(self):
-        """return the connection string for the proxy"""
-        return f"http://{self.name}:{self.port}"
-
 class RestateContainer(DockerContainer):
     """Create a Restate container"""
 
-    def __init__(self, image, network):
+    def __init__(self, image):
         super().__init__(image)
         self.with_exposed_ports(8080, 9070)
-        self.with_network(network)
         self.with_env('RESTATE_LOG_FILTER', 'restate=info')
-        
+        self.with_kwargs(extra_hosts={"host.docker.internal" : "host-gateway"})
+
     def ingress_url(self):
         """return the URL to access the Restate ingress"""
         return f"http://{self.get_container_host_ip()}:{self.get_exposed_port(8080)}"
@@ -140,34 +154,30 @@ class RestateContainer(DockerContainer):
         self._wait_healthy()
         return self
 
+@dataclass
+class TestConfiguration:
+    """A configuration for running tests"""
+    restate_image: str = "restatedev/restate:latest"
 
 
 class RestateTestHarness:
     """A test harness for running Restate SDKs"""
-    uds_path: typing.Optional[str] = None
-    network: typing.Optional[Network] = None
+    bind_address: typing.Optional[BindAddress] = None
     server: typing.Optional[AsgiServer] = None
     restate: typing.Optional[RestateContainer] = None
-    proxy: typing.Optional[HostProxyContainer] = None
 
-
-    def __init__(self, asgi_app):
+    def __init__(self, asgi_app, config: typing.Optional[TestConfiguration]):
         self.asgi_app = asgi_app
+        if config:
+            self.config = config
+        else:
+            self.config = TestConfiguration()
 
     def start(self):
         """start the restate server and the sdk"""
-        self.uds_path = f"/tmp/restate-test-{random.randint(1, 1 << 63)}.sock"
-        self.server = AsgiServer(self.asgi_app, f"unix:{self.uds_path}").start()
-
-        self.network = Network().create()
-
-        self.restate = RestateContainer(image="restatedev/restate:latest",
-                                        network=self.network).start()
-
-        self.proxy = HostProxyContainer(name="proxy",
-                                        port=9081,
-                                        host_uds=self.uds_path,
-                                        network=self.network).start()
+        self.bind_address = TcpSocketBindAddress()
+        self.server = AsgiServer(self.asgi_app, self.bind_address).start()
+        self.restate = RestateContainer(image=self.config.restate_image).start()
         try:
             self._register_sdk()
         except Exception as e:
@@ -176,10 +186,10 @@ class RestateTestHarness:
 
     def _register_sdk(self):
         """register the sdk with the restate server"""
-        assert self.proxy is not None
+        assert self.bind_address is not None
         assert self.restate is not None
 
-        uri = self.proxy.connection_string()
+        uri = self.bind_address.get_endpoint_connection_string()
         client = self.restate.get_admin_client()
         res = client.post("/deployments",
                           headers={"content-type" : "application/json"},
@@ -198,14 +208,9 @@ class RestateTestHarness:
             self.restate.stop()
             self.restate = None
 
-        if self.proxy is not None:
-            self.proxy.stop()
-            self.proxy = None
-
-        if self.uds_path is not None:
-            pathlib.Path(self.uds_path).unlink(missing_ok=True)
-            self.uds_path = None
-
+        if self.bind_address is not None:
+            self.bind_address.cleanup()
+            self.bind_address = None
 
     def ingress_client(self):
         """return an httpx client to access the restate server's ingress"""
@@ -223,6 +228,6 @@ class RestateTestHarness:
         return False
 
 
-def test_harness(asgi_app) -> RestateTestHarness:
+def test_harness(asgi_app, config: typing.Optional[TestConfiguration] = None) -> RestateTestHarness:
     """create a test harness for running Restate SDKs"""
-    return RestateTestHarness(asgi_app)
+    return RestateTestHarness(asgi_app, config)
