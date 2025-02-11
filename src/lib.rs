@@ -2,12 +2,12 @@ use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone};
 use restate_sdk_shared_core::{
-    AsyncResultHandle, CoreVM, Failure, Header, IdentityVerifier, Input, NonEmptyValue,
-    ResponseHead, RetryPolicy, RunEnterResult, RunExitResult, SuspendedOrVMError, TakeOutputResult,
-    Target, VMError, Value, VM,
+    AsyncResultHandle, CoreVM, Header, IdentityVerifier, Input, NonEmptyValue, ResponseHead,
+    RetryPolicy, RunEnterResult, RunExitResult, SuspendedOrVMError, TakeOutputResult, Target,
+    TerminalFailure, VMOptions, Value, VM,
 };
 use std::borrow::Cow;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 // Current crate version
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -88,6 +88,12 @@ impl PyFailure {
     }
 }
 
+impl Into<restate_sdk_shared_core::Error> for PyFailure {
+    fn into(self) -> restate_sdk_shared_core::Error {
+        restate_sdk_shared_core::Error::new(self.code, self.message)
+    }
+}
+
 #[pyclass]
 #[derive(Clone)]
 struct PyExponentialRetryConfig {
@@ -128,8 +134,8 @@ impl From<PyExponentialRetryConfig> for RetryPolicy {
     }
 }
 
-impl From<Failure> for PyFailure {
-    fn from(value: Failure) -> Self {
+impl From<TerminalFailure> for PyFailure {
+    fn from(value: TerminalFailure) -> Self {
         PyFailure {
             code: value.code,
             message: value.message,
@@ -137,9 +143,9 @@ impl From<Failure> for PyFailure {
     }
 }
 
-impl From<PyFailure> for Failure {
+impl From<PyFailure> for TerminalFailure {
     fn from(value: PyFailure) -> Self {
-        Failure {
+        TerminalFailure {
             code: value.code,
             message: value.message,
         }
@@ -182,9 +188,9 @@ impl From<Input> for PyInput {
 // Errors and Exceptions
 
 #[derive(Debug)]
-struct PyVMError(VMError);
+struct PyVMError(restate_sdk_shared_core::Error);
 
-// Python representation of VMError
+// Python representation of restate_sdk_shared_core::Error
 create_exception!(
     restate_sdk_python_core,
     VMException,
@@ -198,8 +204,8 @@ impl From<PyVMError> for PyErr {
     }
 }
 
-impl From<VMError> for PyVMError {
-    fn from(value: VMError) -> Self {
+impl From<restate_sdk_shared_core::Error> for PyVMError {
+    fn from(value: restate_sdk_shared_core::Error) -> Self {
         PyVMError(value)
     }
 }
@@ -216,7 +222,7 @@ impl PyVM {
     #[new]
     fn new(headers: Vec<(String, String)>) -> Result<Self, PyVMError> {
         Ok(Self {
-            vm: CoreVM::new(headers)?,
+            vm: CoreVM::new(headers, VMOptions::default())?,
         })
     }
 
@@ -237,12 +243,11 @@ impl PyVM {
 
     #[pyo3(signature = (error, description=None))]
     fn notify_error(mut self_: PyRefMut<'_, Self>, error: String, description: Option<String>) {
-        CoreVM::notify_error(
-            &mut self_.vm,
-            Cow::Owned(error),
-            description.map(Cow::Owned).unwrap_or(Cow::Borrowed("")),
-            None,
-        );
+        let mut e = restate_sdk_shared_core::Error::new(500u16, Cow::Owned(error));
+        if let Some(desc) = description {
+            e = e.with_description(desc);
+        }
+        CoreVM::notify_error(&mut self_.vm, e, None);
     }
 
     // Take(s)
@@ -288,6 +293,9 @@ impl PyVM {
             }
             Ok(Some(Value::StateKeys(keys))) => {
                 Ok(PyStateKeys { keys }.into_py(py).into_bound(py).into_any())
+            }
+            Ok(Some(Value::InvocationId(_))) | Ok(Some(Value::CombinatorResult(_))) => {
+                panic!("Unsupported variants, the python SDK doesn't support these features yet!")
             }
         }
     }
@@ -340,9 +348,12 @@ impl PyVM {
         mut self_: PyRefMut<'_, Self>,
         millis: u64,
     ) -> Result<PyAsyncResultHandle, PyVMError> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("Duration since unix epoch cannot fail");
         self_
             .vm
-            .sys_sleep(Duration::from_millis(millis))
+            .sys_sleep(now + Duration::from_millis(millis), Some(now))
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -362,6 +373,8 @@ impl PyVM {
                     service,
                     handler,
                     key,
+                    idempotency_key: None,
+                    headers: vec![],
                 },
                 buffer.as_bytes().to_vec().into(),
             )
@@ -385,10 +398,13 @@ impl PyVM {
                     service,
                     handler,
                     key,
+                    idempotency_key: None,
+                    headers: vec![],
                 },
                 buffer.as_bytes().to_vec().into(),
                 delay.map(Duration::from_millis),
             )
+            .map(|_| ())
             .map_err(Into::into)
     }
 
@@ -538,7 +554,7 @@ impl PyVM {
             .sys_run_exit(
                 RunExitResult::RetryableFailure {
                     attempt_duration: Duration::from_millis(attempt_duration),
-                    failure: value.into(),
+                    error: value.into(),
                 },
                 config.into(),
             )
