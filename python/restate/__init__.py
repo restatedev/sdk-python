@@ -26,5 +26,9 @@ from .endpoint import app
 try:
     from .harness import test_harness
 except ImportError:
-    # was installed without the test harness optional dependency
-    pass
+    # we don't have the appropriate dependencies installed
+
+    # pylint: disable=unused-argument, redefined-outer-name
+    def test_harness(app, follow_logs = False, restate_image = ""): # type: ignore
+        """a dummy harness constructor to raise ImportError"""
+        raise ImportError("Install restate-sdk[harness] to use this feature")
