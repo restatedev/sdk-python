@@ -348,12 +348,12 @@ impl PyVM {
         mut self_: PyRefMut<'_, Self>,
         millis: u64,
     ) -> Result<PyAsyncResultHandle, PyVMError> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("Duration since unix epoch cannot fail");
         self_
             .vm
-            .sys_sleep(
-                Duration::from_millis(millis),
-                None,
-            )
+            .sys_sleep(now + Duration::from_millis(millis), Some(now))
             .map(Into::into)
             .map_err(Into::into)
     }
