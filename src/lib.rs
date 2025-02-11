@@ -1,7 +1,11 @@
 use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone};
-use restate_sdk_shared_core::{AsyncResultHandle, CoreVM, Header, IdentityVerifier, Input, NonEmptyValue, ResponseHead, RetryPolicy, RunEnterResult, RunExitResult, SuspendedOrVMError, TakeOutputResult, Target, TerminalFailure, VMOptions, Value, VM};
+use restate_sdk_shared_core::{
+    AsyncResultHandle, CoreVM, Header, IdentityVerifier, Input, NonEmptyValue, ResponseHead,
+    RetryPolicy, RunEnterResult, RunExitResult, SuspendedOrVMError, TakeOutputResult, Target,
+    TerminalFailure, VMOptions, Value, VM,
+};
 use std::borrow::Cow;
 use std::time::{Duration, SystemTime};
 
@@ -239,18 +243,11 @@ impl PyVM {
 
     #[pyo3(signature = (error, description=None))]
     fn notify_error(mut self_: PyRefMut<'_, Self>, error: String, description: Option<String>) {
-        let mut e = restate_sdk_shared_core::Error::new(
-            500u16,
-            Cow::Owned(error)
-        );
+        let mut e = restate_sdk_shared_core::Error::new(500u16, Cow::Owned(error));
         if let Some(desc) = description {
             e = e.with_description(desc);
         }
-        CoreVM::notify_error(
-            &mut self_.vm,
-            e,
-            None
-        );
+        CoreVM::notify_error(&mut self_.vm, e, None);
     }
 
     // Take(s)
@@ -297,7 +294,9 @@ impl PyVM {
             Ok(Some(Value::StateKeys(keys))) => {
                 Ok(PyStateKeys { keys }.into_py(py).into_bound(py).into_any())
             }
-            Ok(Some(Value::InvocationId(_))) | Ok(Some(Value::CombinatorResult(_))) => panic!("Unsupported variants, the python SDK doesn't support these features yet!")
+            Ok(Some(Value::InvocationId(_))) | Ok(Some(Value::CombinatorResult(_))) => {
+                panic!("Unsupported variants, the python SDK doesn't support these features yet!")
+            }
         }
     }
 
@@ -351,7 +350,10 @@ impl PyVM {
     ) -> Result<PyAsyncResultHandle, PyVMError> {
         self_
             .vm
-            .sys_sleep(Duration::from_millis(millis), SystemTime::UNIX_EPOCH.elapsed().ok())
+            .sys_sleep(
+                Duration::from_millis(millis),
+                None,
+            )
             .map(Into::into)
             .map_err(Into::into)
     }

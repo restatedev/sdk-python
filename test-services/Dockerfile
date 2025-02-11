@@ -27,4 +27,5 @@ COPY test-services/ .
 EXPOSE 9080
 
 ENV RESTATE_CORE_LOG=debug
+ENV RUST_BACKTRACE=1
 CMD ["hypercorn", "testservices:app", "--config", "hypercorn-config.toml"]
