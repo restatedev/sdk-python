@@ -345,3 +345,7 @@ class VMWrapper:
         It calls the `sys_end` method of the `vm` object.
         """
         self.vm.sys_end()
+
+    def is_processing(self) -> bool:
+        """Returns true if the VM is processing, and false if it is replaying execution"""
+        return self.vm.is_processing()

@@ -587,6 +587,10 @@ impl PyVM {
     fn sys_end(mut self_: PyRefMut<'_, Self>) -> Result<(), PyVMError> {
         self_.vm.sys_end().map(Into::into).map_err(Into::into)
     }
+
+    fn is_processing(self_: PyRef<'_, Self>) -> bool {
+        self_.vm.is_processing()
+    }
 }
 
 #[pyclass]
