@@ -402,7 +402,12 @@ impl PyVM {
                     headers: vec![],
                 },
                 buffer.as_bytes().to_vec().into(),
-                delay.map(Duration::from_millis),
+                delay.map(|millis| {
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .expect("Duration since unix epoch cannot fail")
+                        + Duration::from_millis(millis)
+                }),
             )
             .map(|_| ())
             .map_err(Into::into)
