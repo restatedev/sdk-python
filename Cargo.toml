@@ -14,4 +14,4 @@ doc = false
 [dependencies]
 pyo3 = { version = "0.22.6", features = ["extension-module"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-restate-sdk-shared-core = { version = "0.2.0", features = ["request_identity", "sha2_random_seed"] }
+restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core.git", branch = "main", features = ["request_identity", "sha2_random_seed"] }
