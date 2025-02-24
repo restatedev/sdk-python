@@ -17,10 +17,11 @@ import typing
 import random
 
 
-from restate.context import ObjectContext, ObjectSharedContext
+from restate.context import Context, ObjectContext, ObjectSharedContext
 from restate.exceptions import TerminalError
 from restate.object import VirtualObject
 from restate.serde import JsonSerde
+
 import restate
 
 SET_STATE = 1
@@ -49,6 +50,75 @@ CALL_NEXT_LAYER_OBJECT = 19
 # pylint: disable=C0301
 # pylint: disable=R0914, R0912, R0915, R0913
 
+
+helper = restate.Service("ServiceInterpreterHelper")
+
+@helper.handler()
+async def ping(ctx: Context) -> None: # pylint: disable=unused-argument
+    pass
+
+@helper.handler()
+async def echo(ctx: Context, parameters: str) -> str: # pylint: disable=unused-argument
+    return parameters
+
+@helper.handler(name = "echoLater")
+async def echo_later(ctx: Context, parameter: dict[str, typing.Any]) -> str:
+    await ctx.sleep(timedelta(milliseconds=parameter['sleep']))
+    return parameter['parameter']
+
+@helper.handler(name="terminalFailure")
+async def terminal_failure(ctx: Context) -> str:
+    raise TerminalError("bye")
+
+@helper.handler(name="incrementIndirectly")
+async def increment_indirectly(ctx: Context, parameter) -> None:
+
+    layer = parameter['layer']
+    key = parameter['key']
+
+    program = {
+        "commands": [
+            {
+                "kind": INCREMENT_STATE_COUNTER,
+            },
+        ],
+    }
+
+    program_bytes = json.dumps(program).encode('utf-8')
+
+    ctx.generic_send(f"ObjectInterpreterL{layer}", "interpret", program_bytes, key)
+
+@helper.handler(name="resolveAwakeable")
+async def resolve_awakeable(ctx: Context, aid: str) -> None:
+    ctx.resolve_awakeable(aid, "ok")
+
+@helper.handler(name="rejectAwakeable")
+async def reject_awakeable(ctx: Context, aid: str) -> None:
+    ctx.reject_awakeable(aid, "error")
+
+@helper.handler(name="incrementViaAwakeableDance")
+async def increment_via_awakeable_dance(ctx: Context, input: dict[str, typing.Any]) -> None:
+    tx_promise_id = input['txPromiseId']
+    layer = input['interpreter']['layer']
+    key = input['interpreter']['key']
+
+    aid, promise = ctx.awakeable()
+    ctx.resolve_awakeable(tx_promise_id, aid)
+    await promise
+
+    program = {
+        "commands": [
+            {
+                "kind": INCREMENT_STATE_COUNTER,
+            },
+        ],
+    }
+
+    program_bytes = json.dumps(program).encode('utf-8')
+
+    ctx.generic_send(f"ObjectInterpreterL{layer}", "interpret", program_bytes, key)
+
+
 class SupportService:
 
     def __init__(self, ctx: ObjectContext) -> None:
@@ -76,7 +146,7 @@ class SupportService:
 
     async def echo_later(self, parameter: str, sleep: int) -> str:
         arg = {"parameter": parameter, "sleep": sleep}
-        return await self.call(method="echo_later", arg=arg)
+        return await self.call(method="echoLater", arg=arg)
 
     async def terminal_failure(self) -> str:
         return await self.call(method="terminalFailure", arg=None)
@@ -117,7 +187,6 @@ async def interpreter(layer: int,
     coros: dict[int,
                 typing.Tuple[typing.Any, typing.Awaitable[typing.Any]]] = {}
     for i, command in enumerate(program['commands']):
-        print(f"{ctx.request().id} {ctx.key()} {id(ctx)} COMMAND {i} {command}", flush=True)
         command_type = command['kind']
         if command_type == SET_STATE:
             ctx.set(f"key-{command['key']}", f"value-{command['key']}")
@@ -172,10 +241,7 @@ async def interpreter(layer: int,
 
             expected, coro = coros[index]
             del coros[index]
-            print(f"AWAITING {index} {coro}", flush=True)
             result = await coro
-            print (f"AWAITED {index} {result}", flush=True)
-            print(f"EXPECTED {result} {expected}", flush=True)
             if result != expected:
                 raise TerminalError(f"Expected {expected} but got {result}")
         elif command_type == RESOLVE_AWAKEABLE:
@@ -198,22 +264,25 @@ async def interpreter(layer: int,
             js_program = json.dumps(program)
             raw_js_program = js_program.encode('utf-8')
             promise = ctx.generic_call(next_layer, "interpret", raw_js_program, key)
-            print(f"Storing coro {i} {promise}", flush=True)
             coros[i] = (b'', promise)
         else:
             raise ValueError(f"Unknown command type: {command_type}")
-        print(f"{ctx.request().id} {ctx.key()} {id(ctx)} DONE command {i}", flush=True)
-    print("DONE " + str(len(program['commands'])) , flush=True)
 
-layer_0 = VirtualObject("ObjectInterpreterL0")
+def make_layer(i):
+    layer = VirtualObject(f"ObjectInterpreterL{i}")
 
-@layer_0.handler()
-async def interpret(ctx: ObjectContext, program: Program) -> None:
-    await interpreter(0, ctx, program)
+    @layer.handler()
+    async def interpret(ctx: ObjectContext, program: Program) -> None:
+        await interpreter(0, ctx, program)
 
-@layer_0.handler(kind="shared")
-async def counter(ctx: ObjectSharedContext) -> int:
-    return await ctx.get("counter") or 0
+    @layer.handler(kind="shared")
+    async def counter(ctx: ObjectSharedContext) -> int:
+        return await ctx.get("counter") or 0
+
+    return layer
 
 
-app = restate.app(services=[layer_0])
+layer_0 = make_layer(0)
+layer_1 = make_layer(1)
+layer_2 = make_layer(2)
+
