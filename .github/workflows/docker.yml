@@ -13,7 +13,7 @@ env:
   GHCR_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
-  build-node-services-docker-image:
+  build-python-services-docker-image:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
