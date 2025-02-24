@@ -186,6 +186,17 @@ async def interpreter(layer: int,
     service = SupportService(ctx)
     coros: dict[int,
                 typing.Tuple[typing.Any, typing.Awaitable[typing.Any]]] = {}
+
+    async def await_promise(index: int) -> None:
+        if index not in coros:
+            return
+
+        expected, coro = coros[index]
+        del coros[index]
+        result = await coro
+        if result != expected:
+            raise TerminalError(f"Expected {expected} but got {result}")
+
     for i, command in enumerate(program['commands']):
         command_type = command['kind']
         if command_type == SET_STATE:
@@ -236,14 +247,7 @@ async def interpreter(layer: int,
             await service.increment_indirectly(layer=layer, key=ctx.key())
         elif command_type == AWAIT_PROMISE:
             index = command['index']
-            if index not in coros:
-                continue
-
-            expected, coro = coros[index]
-            del coros[index]
-            result = await coro
-            if result != expected:
-                raise TerminalError(f"Expected {expected} but got {result}")
+            await await_promise(index)
         elif command_type == RESOLVE_AWAKEABLE:
             name, promise = ctx.awakeable()
             coros[i] = ("ok", promise)
@@ -267,13 +271,14 @@ async def interpreter(layer: int,
             coros[i] = (b'', promise)
         else:
             raise ValueError(f"Unknown command type: {command_type}")
-
+        await await_promise(i)
+        
 def make_layer(i):
     layer = VirtualObject(f"ObjectInterpreterL{i}")
 
     @layer.handler()
     async def interpret(ctx: ObjectContext, program: Program) -> None:
-        await interpreter(0, ctx, program)
+        await interpreter(i, ctx, program)
 
     @layer.handler(kind="shared")
     async def counter(ctx: ObjectSharedContext) -> int:
