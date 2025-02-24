@@ -193,7 +193,11 @@ async def interpreter(layer: int,
 
         expected, coro = coros[index]
         del coros[index]
-        result = await coro
+        try:
+            result = await coro
+        except TerminalError:
+            result = "rejected"
+
         if result != expected:
             raise TerminalError(f"Expected {expected} but got {result}")
 
@@ -272,7 +276,7 @@ async def interpreter(layer: int,
         else:
             raise ValueError(f"Unknown command type: {command_type}")
         await await_promise(i)
-        
+
 def make_layer(i):
     layer = VirtualObject(f"ObjectInterpreterL{i}")
 
@@ -290,4 +294,3 @@ def make_layer(i):
 layer_0 = make_layer(0)
 layer_1 = make_layer(1)
 layer_2 = make_layer(2)
-
