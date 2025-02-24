@@ -1,6 +1,6 @@
 { pkgs ? import <nixpkgs> {} }:
 
-(pkgs.buildFHSUserEnv {
+(pkgs.buildFHSEnv {
   name = "sdk-python";
   targetPkgs = pkgs: (with pkgs; [
     python3
