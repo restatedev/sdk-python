@@ -26,5 +26,4 @@ if __name__ == "__main__":
     import asyncio
     conf = hypercorn.Config()
     conf.bind = ["0.0.0.0:9080"]
-    coro = hypercorn.asyncio.serve(app, conf)
-    asyncio.run(coro)
+    asyncio.run(hypercorn.asyncio.serve(app, conf))
