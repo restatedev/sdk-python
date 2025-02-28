@@ -20,3 +20,11 @@ from pydantic_greeter import pydantic_greeter
 import restate
 
 app = restate.app(services=[greeter, counter, payment, pydantic_greeter])
+
+if __name__ == "__main__":
+    import hypercorn
+    import asyncio
+    conf = hypercorn.Config()
+    conf.bind = ["0.0.0.0:9080"]
+    coro = hypercorn.asyncio.serve(app, conf)
+    asyncio.run(coro)
