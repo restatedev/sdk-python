@@ -175,7 +175,9 @@ async def invoke_handler(handler: Handler[I, O], ctx: Any, in_buffer: bytes) -> 
     """
     Invoke the handler with the given context and input.
     """
-    if handler.arity == 2:
+    if handler.arity > 2:
+        raise ValueError(f"Expected num of args for handler {handler.name}: 1-2. Received: {handler.arity}")
+    elif handler.arity == 2:
         try:
             in_arg = handler.handler_io.input_serde.deserialize(in_buffer) # type: ignore
         except Exception as e:
