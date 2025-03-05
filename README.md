@@ -17,6 +17,9 @@
 
 ## Using the SDK
 
+**Prerequisites**:
+- Python >= v3.11
+
 To use this SDK, add the dependency to your project:
 
 ```shell
