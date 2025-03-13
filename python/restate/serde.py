@@ -13,6 +13,21 @@ import abc
 import json
 import typing
 
+def try_import_pydantic_base_model():
+    """
+    Try to import PydanticBaseModel from Pydantic.
+    """
+    try:
+        from pydantic import BaseModel # type: ignore # pylint: disable=import-outside-toplevel
+        return BaseModel
+    except ImportError:
+        class Dummy: # pylint: disable=too-few-public-methods
+            """a dummy class to use when Pydantic is not available"""
+
+        return Dummy
+
+PydanticBaseModel = try_import_pydantic_base_model()
+
 T = typing.TypeVar('T')
 I = typing.TypeVar('I')
 O = typing.TypeVar('O')
@@ -106,6 +121,51 @@ class JsonSerde(Serde[I]):
             return bytes()
 
         return bytes(json.dumps(obj), "utf-8")
+
+class GeneralSerde(Serde[I]):
+    """
+    A general serializer/deserializer that first checks if the object is a Pydantic BaseModel.
+    If so, it uses the model's native JSON dumping method.
+    Otherwise, it defaults to using the standard JSON library.
+    """
+
+    def deserialize(self, buf: bytes) -> typing.Optional[I]:
+        """
+        Deserializes a byte array into a Python object.
+
+        Args:
+            buf (bytes): The byte array to deserialize.
+
+        Returns:
+            Optional[I]: The resulting Python object, or None if the input is empty.
+        """
+        print("Deserializing using GeneralSerde")
+        if not buf:
+            return None
+        print(f"json.loads(buf): {json.loads(buf)}")
+        return json.loads(buf)
+
+    def serialize(self, obj: typing.Optional[I]) -> bytes:
+        """
+        Serializes a Python object into a byte array.
+        If the object is a Pydantic BaseModel, uses its model_dump_json method.
+
+        Args:
+            obj (Optional[I]): The Python object to serialize.
+
+        Returns:
+            bytes: The serialized byte array.
+        """
+        
+        if obj is None:
+            return bytes()
+
+        if isinstance(obj, PydanticBaseModel):
+            # Use the Pydantic-specific serialization
+            return obj.model_dump_json().encode("utf-8")  # type: ignore[attr-defined]
+
+        # Fallback to standard JSON serialization
+        return json.dumps(obj).encode("utf-8")
 
 
 class PydanticJsonSerde(Serde[I]):

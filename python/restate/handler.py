@@ -17,10 +17,10 @@ which is used to define the handlers for the services.
 
 from dataclasses import dataclass
 from inspect import Signature
-from typing import Any, Callable, Awaitable, Generic, Literal, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Generic, Literal, Optional, TypeVar
 
 from restate.exceptions import TerminalError
-from restate.serde import JsonSerde, Serde, PydanticJsonSerde
+from restate.serde import GeneralSerde, PydanticBaseModel, PydanticJsonSerde, Serde
 
 I = TypeVar('I')
 O = TypeVar('O')
@@ -28,22 +28,6 @@ T = TypeVar('T')
 
 # we will use this symbol to store the handler in the function
 RESTATE_UNIQUE_HANDLER_SYMBOL = str(object())
-
-
-def try_import_pydantic_base_model():
-    """
-    Try to import PydanticBaseModel from Pydantic.
-    """
-    try:
-        from pydantic import BaseModel # type: ignore # pylint: disable=import-outside-toplevel
-        return BaseModel
-    except ImportError:
-        class Dummy: # pylint: disable=too-few-public-methods
-            """a dummy class to use when Pydantic is not available"""
-
-        return Dummy
-
-PydanticBaseModel = try_import_pydantic_base_model()
 
 @dataclass
 class ServiceTag:
@@ -103,7 +87,7 @@ def extract_io_type_hints(handler_io: HandlerIO[I, O], signature: Signature):
 
     if is_pydantic(annotation):
         handler_io.input_type.is_pydantic = True
-        if isinstance(handler_io.input_serde, JsonSerde): # type: ignore
+        if isinstance(handler_io.input_serde, GeneralSerde): # type: ignore
             handler_io.input_serde = PydanticJsonSerde(annotation)
 
     annotation = signature.return_annotation
@@ -111,7 +95,7 @@ def extract_io_type_hints(handler_io: HandlerIO[I, O], signature: Signature):
 
     if is_pydantic(annotation):
         handler_io.output_type.is_pydantic=True
-        if isinstance(handler_io.output_serde, JsonSerde): # type: ignore
+        if isinstance(handler_io.output_serde, GeneralSerde): # type: ignore
             handler_io.output_serde = PydanticJsonSerde(annotation)
 
 @dataclass
@@ -138,6 +122,11 @@ def make_handler(service_tag: ServiceTag,
                  signature: Signature) -> Handler[I, O]:
     """
     Factory function to create a handler.
+
+    Note:
+        This function mutates the `handler_io` parameter by updating its type hints
+        and serdes based on the function signature. Callers should be aware that the
+        passed `handler_io` instance will be modified.
     """
     # try to deduce the handler name
     handler_name = name
@@ -150,7 +139,7 @@ def make_handler(service_tag: ServiceTag,
         raise ValueError("Handler must have at least one parameter")
 
     arity = len(signature.parameters)
-    extract_io_type_hints(handler_io, signature)
+    extract_io_type_hints(handler_io, signature) # mutates handler_io
 
     handler = Handler[I, O](service_tag,
                             handler_io,
