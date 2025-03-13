@@ -11,6 +11,7 @@
 # pylint: disable=R0917
 """This module contains the restate context implementation based on the server"""
 
+import asyncio
 from datetime import timedelta
 import inspect
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
@@ -263,7 +264,8 @@ class ServerInvocationContext(ObjectContext):
             if inspect.iscoroutinefunction(action):
                 action_result = await action() # type: ignore
             else:
-                action_result = action()
+                action_result = await asyncio.to_thread(action)
+
             buffer = serde.serialize(action_result)
             self.vm.propose_run_completion_success(handle, buffer)
         except TerminalError as t:
