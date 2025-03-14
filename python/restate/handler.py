@@ -20,7 +20,7 @@ from inspect import Signature
 from typing import Any, Awaitable, Callable, Generic, Literal, Optional, TypeVar
 
 from restate.exceptions import TerminalError
-from restate.serde import GeneralSerde, PydanticBaseModel, PydanticJsonSerde, Serde
+from restate.serde import GeneralSerde, JsonSerde, PydanticBaseModel, PydanticJsonSerde, Serde
 
 I = TypeVar('I')
 O = TypeVar('O')
@@ -87,7 +87,7 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
 
     if is_pydantic(annotation):
         handler_io.input_type.is_pydantic = True
-        if isinstance(handler_io.input_serde, GeneralSerde): # type: ignore
+        if isinstance(handler_io.input_serde, (GeneralSerde, JsonSerde)):  # type: ignore
             handler_io.input_serde = PydanticJsonSerde(annotation)
 
     annotation = signature.return_annotation

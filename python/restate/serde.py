@@ -139,10 +139,8 @@ class GeneralSerde(Serde[I]):
         Returns:
             Optional[I]: The resulting Python object, or None if the input is empty.
         """
-        print("Deserializing using GeneralSerde")
         if not buf:
             return None
-        print(f"json.loads(buf): {json.loads(buf)}")
         return json.loads(buf)
 
     def serialize(self, obj: typing.Optional[I]) -> bytes:
