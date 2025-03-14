@@ -72,7 +72,7 @@ def is_pydantic(annotation) -> bool:
         return False
 
 
-def extract_io_type_hints(handler_io: HandlerIO[I, O], signature: Signature):
+def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Signature):
     """
     Augment handler_io with additional information about the input and output types.
 
@@ -122,11 +122,6 @@ def make_handler(service_tag: ServiceTag,
                  signature: Signature) -> Handler[I, O]:
     """
     Factory function to create a handler.
-
-    Note:
-        This function mutates the `handler_io` parameter by updating its type hints
-        and serdes based on the function signature. Callers should be aware that the
-        passed `handler_io` instance will be modified.
     """
     # try to deduce the handler name
     handler_name = name
@@ -139,7 +134,7 @@ def make_handler(service_tag: ServiceTag,
         raise ValueError("Handler must have at least one parameter")
 
     arity = len(signature.parameters)
-    extract_io_type_hints(handler_io, signature) # mutates handler_io
+    update_handler_io_with_type_hints(handler_io, signature) # mutates handler_io
 
     handler = Handler[I, O](service_tag,
                             handler_io,
