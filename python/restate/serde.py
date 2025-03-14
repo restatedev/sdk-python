@@ -156,7 +156,7 @@ class GeneralSerde(Serde[I]):
         Returns:
             bytes: The serialized byte array.
         """
-        
+
         if obj is None:
             return bytes()
 
