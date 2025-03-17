@@ -17,7 +17,7 @@ which is used to define the handlers for the services.
 
 from dataclasses import dataclass
 from inspect import Signature
-from typing import Any, Callable, Awaitable, Generic, Literal, Optional, TypeVar
+from typing import Any, Callable, Awaitable, Dict, Generic, Literal, Optional, TypeVar
 
 from restate.exceptions import TerminalError
 from restate.serde import JsonSerde, Serde, PydanticJsonSerde
@@ -52,6 +52,8 @@ class ServiceTag:
     """
     kind: Literal["object", "service", "workflow"]
     name: str
+    description: Optional[str] = None
+    metadata: Optional[Dict[str, str]] = None
 
 @dataclass
 class TypeHint(Generic[T]):
@@ -114,6 +116,7 @@ def extract_io_type_hints(handler_io: HandlerIO[I, O], signature: Signature):
         if isinstance(handler_io.output_serde, JsonSerde): # type: ignore
             handler_io.output_serde = PydanticJsonSerde(annotation)
 
+# pylint: disable=R0902
 @dataclass
 class Handler(Generic[I, O]):
     """
@@ -125,6 +128,8 @@ class Handler(Generic[I, O]):
     name: str
     fn: Callable[[Any, I], Awaitable[O]] | Callable[[Any], Awaitable[O]]
     arity: int
+    description: Optional[str] = None
+    metadata: Optional[Dict[str, str]] = None
 
 
 # disable too many arguments warning
@@ -135,7 +140,9 @@ def make_handler(service_tag: ServiceTag,
                  name: str | None,
                  kind: Optional[Literal["exclusive", "shared", "workflow"]],
                  wrapped: Any,
-                 signature: Signature) -> Handler[I, O]:
+                 signature: Signature,
+                 description: Optional[str] = None,
+                 metadata: Optional[Dict[str, str]] = None) -> Handler[I, O]:
     """
     Factory function to create a handler.
     """
@@ -152,12 +159,14 @@ def make_handler(service_tag: ServiceTag,
     arity = len(signature.parameters)
     extract_io_type_hints(handler_io, signature)
 
-    handler = Handler[I, O](service_tag,
-                            handler_io,
-                            kind,
-                            handler_name,
-                            wrapped,
-                            arity)
+    handler = Handler[I, O](service_tag=service_tag,
+                            handler_io=handler_io,
+                            kind=kind,
+                            name=handler_name,
+                            fn=wrapped,
+                            arity=arity,
+                            description=description,
+                            metadata=metadata)
 
     vars(wrapped)[RESTATE_UNIQUE_HANDLER_SYMBOL] = handler
     return handler

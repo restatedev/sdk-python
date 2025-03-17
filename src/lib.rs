@@ -433,13 +433,14 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    #[pyo3(signature = (service, handler, buffer, key=None))]
+    #[pyo3(signature = (service, handler, buffer, key=None, idempotency_key=None))]
     fn sys_call(
         mut self_: PyRefMut<'_, Self>,
         service: String,
         handler: String,
         buffer: &Bound<'_, PyBytes>,
         key: Option<String>,
+        idempotency_key: Option<String>,
     ) -> Result<PyCallHandle, PyVMError> {
         self_
             .vm
@@ -448,7 +449,7 @@ impl PyVM {
                     service,
                     handler,
                     key,
-                    idempotency_key: None,
+                    idempotency_key,
                     headers: vec![],
                 },
                 buffer.as_bytes().to_vec().into(),
@@ -457,7 +458,7 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    #[pyo3(signature = (service, handler, buffer, key=None, delay=None))]
+    #[pyo3(signature = (service, handler, buffer, key=None, delay=None, idempotency_key=None))]
     fn sys_send(
         mut self_: PyRefMut<'_, Self>,
         service: String,
@@ -465,6 +466,7 @@ impl PyVM {
         buffer: &Bound<'_, PyBytes>,
         key: Option<String>,
         delay: Option<u64>,
+        idempotency_key: Option<String>, 
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
@@ -473,7 +475,7 @@ impl PyVM {
                     service,
                     handler,
                     key,
-                    idempotency_key: None,
+                    idempotency_key,
                     headers: vec![],
                 },
                 buffer.as_bytes().to_vec().into(),
@@ -580,6 +582,13 @@ impl PyVM {
         self_.vm.sys_run(name).map(Into::into).map_err(Into::into)
     }
 
+    fn sys_cancel(
+        mut self_: PyRefMut<'_, Self>,
+        invocation_id: String,
+    ) -> Result<(), PyVMError> {
+        self_.vm.sys_cancel_invocation(invocation_id).map_err(Into::into)
+    }
+
     fn propose_run_completion_success(
         mut self_: PyRefMut<'_, Self>,
         handle: PyNotificationHandle,
@@ -647,6 +656,17 @@ impl PyVM {
         self_
             .vm
             .sys_write_output(NonEmptyValue::Failure(value.into()))
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    fn attach_invocation(
+        mut self_: PyRefMut<'_, Self>,
+        invocation_id: String,
+    ) -> Result<PyNotificationHandle, PyVMError> {
+        self_
+            .vm
+            .sys_attach_invocation(restate_sdk_shared_core::AttachInvocationTarget::InvocationId(invocation_id))
             .map(Into::into)
             .map_err(Into::into)
     }
