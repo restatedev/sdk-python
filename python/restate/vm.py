@@ -347,3 +347,9 @@ class VMWrapper:
         It calls the `sys_end` method of the `vm` object.
         """
         self.vm.sys_end()
+
+    def sys_cancel(self, invocation_id: str):
+        """
+        Cancel a running invocation
+        """
+        self.vm.sys_cancel(invocation_id)

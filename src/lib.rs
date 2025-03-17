@@ -580,6 +580,13 @@ impl PyVM {
         self_.vm.sys_run(name).map(Into::into).map_err(Into::into)
     }
 
+    fn sys_cancel(
+        mut self_: PyRefMut<'_, Self>,
+        invocation_id: String,
+    ) -> Result<(), PyVMError> {
+        self_.vm.sys_cancel_invocation(invocation_id).map_err(Into::into)
+    }
+
     fn propose_run_completion_success(
         mut self_: PyRefMut<'_, Self>,
         handle: PyNotificationHandle,

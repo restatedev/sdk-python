@@ -222,6 +222,12 @@ class Context(abc.ABC):
         Rejects the awakeable with the given name.
         """
 
+    @abc.abstractmethod
+    def cancel(self, invocation_id: str):
+        """
+        Cancels the invocation with the given id.
+        """
+
 
 class ObjectContext(Context, KeyValueStore):
     """
