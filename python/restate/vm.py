@@ -12,6 +12,7 @@
 wrap the restate._internal.PyVM class
 """
 # pylint: disable=E1101,R0917
+# pylint: disable=too-many-arguments
 
 from dataclasses import dataclass
 import typing
