@@ -253,9 +253,12 @@ class VMWrapper:
                  handler: str,
                  parameter: bytes,
                  key: typing.Optional[str] = None,
-                 delay: typing.Optional[int] = None) -> None:
-        """send an invocation to a service (no response)"""
-        self.vm.sys_send(service, handler, parameter, key, delay)
+                 delay: typing.Optional[int] = None) -> int:
+        """
+        send an invocation to a service, and return the handle
+        to the promise that will resolve with the invocation id
+        """
+        return self.vm.sys_send(service, handler, parameter, key, delay)
 
     def sys_run(self, name: str) -> int:
         """

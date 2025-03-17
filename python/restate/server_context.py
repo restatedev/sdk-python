@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, ObjectContext, Request
+from restate.context import DurablePromise, ObjectContext, Request, SendHandle
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, JsonSerde, Serde
@@ -35,6 +35,26 @@ O = TypeVar('O')
 
 # disable line too long
 # pylint: disable=C0301
+
+# disable too few public methods
+# pylint: disable=R0903
+
+class ServerSendHandle(SendHandle):
+    """This class implements the send API"""
+    _invocation_id: typing.Optional[str]
+
+    def __init__(self, context, handle: int) -> None:
+        self.handle = handle
+        self.context = context
+        self._invocation_id = None
+
+    async def invocation_id(self) -> str:
+        """Get the invocation id."""
+        if self._invocation_id is not None:
+            return self._invocation_id
+        res = await self.context.create_poll_or_cancel_coroutine(self.handle)
+        self._invocation_id = res
+        return res
 
 async def async_value(n: Callable[[], T]) -> T:
     """convert a simple value to a coroutine."""
@@ -317,7 +337,7 @@ class ServerInvocationContext(ObjectContext):
                 parameter: I,
                 key: Optional[str] = None,
                 send_delay: Optional[timedelta] = None,
-                send: bool = False) -> Awaitable[O] | None:
+                send: bool = False) -> Awaitable[O] | SendHandle:
         """Make an RPC call to the given handler"""
         target_handler = handler_from_callable(tpe)
         service=target_handler.service_tag.name
@@ -335,16 +355,16 @@ class ServerInvocationContext(ObjectContext):
                  output_serde: Serde[O],
                  key: Optional[str] = None,
                  send_delay: Optional[timedelta] = None,
-                 send: bool = False) -> Awaitable[O] | None:
+                 send: bool = False) -> Awaitable[O] | SendHandle:
         """Make an RPC call to the given handler"""
         parameter = input_serde.serialize(input_param)
         if send_delay:
             ms = int(send_delay.total_seconds() * 1000)
-            self.vm.sys_send(service, handler, parameter, key, delay=ms)
-            return None
+            send_handle = self.vm.sys_send(service, handler, parameter, key, delay=ms)
+            return ServerSendHandle(self, send_handle)
         if send:
-            self.vm.sys_send(service, handler, parameter, key)
-            return None
+            send_handle = self.vm.sys_send(service, handler, parameter, key)
+            return ServerSendHandle(self, send_handle)
 
         handle = self.vm.sys_call(service=service,
                                   handler=handler,
@@ -362,11 +382,13 @@ class ServerInvocationContext(ObjectContext):
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I) -> Awaitable[O]:
         coro = self.do_call(tpe, arg)
-        assert coro is not None
-        return coro
+        assert coro is not SendHandle
+        return coro # type: ignore
 
-    def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None) -> None:
-        self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay, send=True)
+    def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None) -> SendHandle:
+        send = self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay, send=True)
+        assert send is SendHandle
+        return send # type: ignore
 
     def object_call(self,
                     tpe: Callable[[Any, I],Awaitable[O]],
@@ -375,11 +397,13 @@ class ServerInvocationContext(ObjectContext):
                     send_delay: Optional[timedelta] = None,
                     send: bool = False) -> Awaitable[O]:
         coro = self.do_call(tpe, arg, key, send_delay, send)
-        assert coro is not None
-        return coro
+        assert coro is not SendHandle
+        return coro # type: ignore
 
-    def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
-        self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay, send=True)
+    def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> SendHandle:
+        send = self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay, send=True)
+        assert send is SendHandle
+        return send # type: ignore
 
     def workflow_call(self,
                         tpe: Callable[[Any, I], Awaitable[O]],
@@ -387,14 +411,16 @@ class ServerInvocationContext(ObjectContext):
                         arg: I) -> Awaitable[O]:
         return self.object_call(tpe, key, arg)
 
-    def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
-        return self.object_send(tpe, key, arg, send_delay)
+    def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> SendHandle:
+        send = self.object_send(tpe, key, arg, send_delay)
+        assert send is SendHandle
+        return send # type: ignore
 
     def generic_call(self, service: str, handler: str, arg: bytes, key: str | None = None) -> Awaitable[bytes]:
         serde = BytesSerde()
         return self.do_raw_call(service, handler, arg, serde, serde, key) # type: ignore
 
-    def generic_send(self, service: str, handler: str, arg: bytes, key: str | None = None, send_delay: timedelta | None = None) -> None:
+    def generic_send(self, service: str, handler: str, arg: bytes, key: str | None = None, send_delay: timedelta | None = None) -> SendHandle:
         serde = BytesSerde()
         return self.do_raw_call(service, handler, arg, serde, serde , key, send_delay, True) # type: ignore
 
