@@ -353,3 +353,9 @@ class VMWrapper:
         Cancel a running invocation
         """
         self.vm.sys_cancel(invocation_id)
+
+    def attach_invocation(self, invocation_id: str) -> int:
+        """
+        Attach to an invocation
+        """
+        return self.vm.attach_invocation(invocation_id)

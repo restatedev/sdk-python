@@ -228,6 +228,12 @@ class Context(abc.ABC):
         Cancels the invocation with the given id.
         """
 
+    @abc.abstractmethod
+    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> T:
+        """
+        Attaches the invocation with the given id.
+        """
+
 
 class ObjectContext(Context, KeyValueStore):
     """

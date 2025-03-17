@@ -658,6 +658,17 @@ impl PyVM {
             .map_err(Into::into)
     }
 
+    fn attach_invocation(
+        mut self_: PyRefMut<'_, Self>,
+        invocation_id: String,
+    ) -> Result<PyNotificationHandle, PyVMError> {
+        self_
+            .vm
+            .sys_attach_invocation(restate_sdk_shared_core::AttachInvocationTarget::InvocationId(invocation_id))
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     fn sys_end(mut self_: PyRefMut<'_, Self>) -> Result<(), PyVMError> {
         self_.vm.sys_end().map(Into::into).map_err(Into::into)
     }

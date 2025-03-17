@@ -436,3 +436,18 @@ class ServerInvocationContext(ObjectContext):
         if invocation_id is None:
             raise ValueError("invocation_id cannot be None")
         self.vm.sys_cancel(invocation_id)
+
+    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> T:
+        if invocation_id is None:
+            raise ValueError("invocation_id cannot be None")
+        assert serde is not None
+        handle = self.vm.attach_invocation(invocation_id)
+        coro = self.create_poll_or_cancel_coroutine(handle)
+
+        async def await_point():
+            """Wait for this handle to be resolved."""
+            res = await coro
+            assert res is not None
+            return serde.deserialize(res)
+
+        return await_point()
