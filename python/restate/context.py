@@ -134,7 +134,8 @@ class Context(abc.ABC):
     @abc.abstractmethod
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
-                     arg: I) -> Awaitable[O]:
+                     arg: I,
+                     idempotency_key: str | None = None) -> Awaitable[O]:
         """
         Invokes the given service with the given argument.
         """
@@ -145,6 +146,7 @@ class Context(abc.ABC):
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I,
                      send_delay: Optional[timedelta] = None,
+                     idempotency_key: str | None = None,
                      ) -> SendHandle:
         """
         Invokes the given service with the given argument.
@@ -154,7 +156,9 @@ class Context(abc.ABC):
     def object_call(self,
                     tpe: Callable[[Any, I], Awaitable[O]],
                     key: str,
-                    arg: I) -> Awaitable[O]:
+                    arg: I,
+                    idempotency_key: str | None = None,
+                    ) -> Awaitable[O]:
         """
         Invokes the given object with the given argument.
         """
@@ -165,6 +169,7 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     send_delay: Optional[timedelta] = None,
+                    idempotency_key: str | None = None,
                     ) -> SendHandle:
         """
         Send a message to an object with the given argument.
@@ -174,7 +179,9 @@ class Context(abc.ABC):
     def workflow_call(self,
                     tpe: Callable[[Any, I], Awaitable[O]],
                     key: str,
-                    arg: I) -> Awaitable[O]:
+                    arg: I,
+                    idempotency_key: str | None = None,
+                    ) -> Awaitable[O]:
         """
         Invokes the given workflow with the given argument.
         """
@@ -185,6 +192,7 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     send_delay: Optional[timedelta] = None,
+                    idempotency_key: str | None = None,
                     ) -> SendHandle:
         """
         Send a message to an object with the given argument.
@@ -196,7 +204,8 @@ class Context(abc.ABC):
                      service: str,
                      handler: str,
                      arg: bytes,
-                     key: Optional[str] = None)  -> Awaitable[bytes]:
+                     key: Optional[str] = None,
+                     idempotency_key: str | None = None)  -> Awaitable[bytes]:
         """
         Invokes the given generic service/handler with the given argument.
         """
@@ -207,7 +216,9 @@ class Context(abc.ABC):
                      handler: str,
                      arg: bytes,
                      key: Optional[str] = None,
-                     send_delay: Optional[timedelta] = None) -> SendHandle:
+                     send_delay: Optional[timedelta] = None,
+                     idempotency_key: str | None = None,
+                    ) -> SendHandle:
         """
         Send a message to a generic service/handler with the given argument.
         """

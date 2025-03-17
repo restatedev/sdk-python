@@ -243,9 +243,11 @@ class VMWrapper:
                  service: str,
                  handler: str,
                  parameter: bytes,
-                 key: typing.Optional[str] = None):
+                 key: typing.Optional[str] = None,
+                 idempotency_key: typing.Optional[str] = None
+                 ):
         """Call a service"""
-        return self.vm.sys_call(service, handler, parameter, key)
+        return self.vm.sys_call(service, handler, parameter, key, idempotency_key)
 
     # pylint: disable=too-many-arguments
     def sys_send(self,
@@ -253,12 +255,14 @@ class VMWrapper:
                  handler: str,
                  parameter: bytes,
                  key: typing.Optional[str] = None,
-                 delay: typing.Optional[int] = None) -> int:
+                 delay: typing.Optional[int] = None,
+                 idempotency_key: typing.Optional[str] = None
+                 ) -> int:
         """
         send an invocation to a service, and return the handle
         to the promise that will resolve with the invocation id
         """
-        return self.vm.sys_send(service, handler, parameter, key, delay)
+        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key)
 
     def sys_run(self, name: str) -> int:
         """
