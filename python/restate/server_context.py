@@ -389,7 +389,7 @@ class ServerInvocationContext(ObjectContext):
     def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None) -> SendHandle:
         send = self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay, send=True)
         assert isinstance(send, SendHandle)
-        return send 
+        return send
 
     def object_call(self,
                     tpe: Callable[[Any, I],Awaitable[O]],
@@ -399,7 +399,7 @@ class ServerInvocationContext(ObjectContext):
                     send: bool = False) -> Awaitable[O]:
         coro = self.do_call(tpe, arg, key, send_delay, send)
         assert not isinstance(coro, SendHandle)
-        return coro 
+        return coro
 
     def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> SendHandle:
         send = self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay, send=True)
