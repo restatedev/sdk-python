@@ -383,13 +383,13 @@ class ServerInvocationContext(ObjectContext):
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I) -> Awaitable[O]:
         coro = self.do_call(tpe, arg)
-        assert coro is not SendHandle
-        return coro # type: ignore
+        assert not isinstance(coro, SendHandle)
+        return coro
 
     def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None) -> SendHandle:
         send = self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay, send=True)
-        assert send is SendHandle
-        return send # type: ignore
+        assert isinstance(send, SendHandle)
+        return send 
 
     def object_call(self,
                     tpe: Callable[[Any, I],Awaitable[O]],
@@ -398,13 +398,13 @@ class ServerInvocationContext(ObjectContext):
                     send_delay: Optional[timedelta] = None,
                     send: bool = False) -> Awaitable[O]:
         coro = self.do_call(tpe, arg, key, send_delay, send)
-        assert coro is not SendHandle
-        return coro # type: ignore
+        assert not isinstance(coro, SendHandle)
+        return coro 
 
     def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> SendHandle:
         send = self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay, send=True)
-        assert send is SendHandle
-        return send # type: ignore
+        assert isinstance(send, SendHandle)
+        return send
 
     def workflow_call(self,
                         tpe: Callable[[Any, I], Awaitable[O]],
@@ -414,8 +414,8 @@ class ServerInvocationContext(ObjectContext):
 
     def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> SendHandle:
         send = self.object_send(tpe, key, arg, send_delay)
-        assert send is SendHandle
-        return send # type: ignore
+        assert isinstance(send, SendHandle)
+        return send
 
     def generic_call(self, service: str, handler: str, arg: bytes, key: str | None = None) -> Awaitable[bytes]:
         serde = BytesSerde()
