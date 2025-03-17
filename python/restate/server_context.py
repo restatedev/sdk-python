@@ -44,6 +44,7 @@ class ServerSendHandle(SendHandle):
     _invocation_id: typing.Optional[str]
 
     def __init__(self, context, handle: int) -> None:
+        super().__init__()
         self.handle = handle
         self.context = context
         self._invocation_id = None
