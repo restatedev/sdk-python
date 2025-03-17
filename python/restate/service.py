@@ -19,7 +19,7 @@ import inspect
 import typing
 
 from restate.serde import Serde, JsonSerde
-from .handler import Handler, HandlerIO, ServiceTag, make_handler
+from restate.handler import Handler, HandlerIO, ServiceTag, make_handler
 
 I = typing.TypeVar('I')
 O = typing.TypeVar('O')
@@ -39,8 +39,10 @@ class Service:
         name (str): The name of the service.
     """
 
-    def __init__(self, name: str) -> None:
-        self.service_tag = ServiceTag("service", name)
+    def __init__(self, name: str,
+                 description: typing.Optional[str] = None,
+                 metadata: typing.Optional[typing.Dict[str, str]] = None) -> None:
+        self.service_tag = ServiceTag("service", name, description, metadata)
         self.handlers: typing.Dict[str, Handler] = {}
 
     @property
@@ -55,7 +57,8 @@ class Service:
                 accept: str = "application/json",
                 content_type: str = "application/json",
                 input_serde: Serde[I] = JsonSerde[I](), # type: ignore
-                output_serde: Serde[O] = JsonSerde[O]()) -> typing.Callable: # type: ignore
+                output_serde: Serde[O] = JsonSerde[O](), # type: ignore
+                metadata: typing.Optional[typing.Dict[str, str]] = None) -> typing.Callable:
         """
         Decorator for defining a handler function.
 
@@ -85,7 +88,7 @@ class Service:
                 return fn(*args, **kwargs)
 
             signature = inspect.signature(fn, eval_str=True)
-            handler = make_handler(self.service_tag, handler_io, name, None, wrapped, signature)
+            handler = make_handler(self.service_tag, handler_io, name, None, wrapped, signature, inspect.getdoc(fn), metadata)
             self.handlers[handler.name] = handler
             return wrapped
 

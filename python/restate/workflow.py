@@ -19,7 +19,7 @@ import inspect
 import typing
 
 from restate.serde import Serde, JsonSerde
-from .handler import HandlerIO, ServiceTag, make_handler
+from restate.handler import Handler, HandlerIO, ServiceTag, make_handler
 
 I = typing.TypeVar('I')
 O = typing.TypeVar('O')
@@ -42,8 +42,10 @@ class Workflow:
         name (str): The name of the object.
     """
 
-    def __init__(self, name):
-        self.service_tag = ServiceTag("workflow", name)
+    handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
+
+    def __init__(self, name, description: typing.Optional[str] = None, metadata: typing.Optional[typing.Dict[str, str]] = None):
+        self.service_tag = ServiceTag("workflow", name, description, metadata)
         self.handlers = {}
 
     @property
@@ -58,25 +60,28 @@ class Workflow:
             accept: str = "application/json",
             content_type: str = "application/json",
             input_serde: Serde[I] = JsonSerde[I](), # type: ignore
-            output_serde: Serde[O] = JsonSerde[O]()) -> typing.Callable: # type: ignore
+            output_serde: Serde[O] = JsonSerde[O](), # type: ignore
+            metadata: typing.Optional[typing.Dict[str, str]] = None) -> typing.Callable: # type: ignore
         """Mark this handler as a workflow entry point"""
         return self._add_handler(name,
                             kind="workflow",
                              accept=accept,
                              content_type=content_type,
                              input_serde=input_serde,
-                             output_serde=output_serde)
+                             output_serde=output_serde,
+                             metadata=metadata)
 
     def handler(self,
                 name: typing.Optional[str] = None,
                 accept: str = "application/json",
                 content_type: str = "application/json",
                 input_serde: Serde[I] = JsonSerde[I](), # type: ignore
-                output_serde: Serde[O] = JsonSerde[O]()) -> typing.Callable: # type: ignore
+                output_serde: Serde[O] = JsonSerde[O](), # type: ignore
+                metadata: typing.Optional[typing.Dict[str, str]] = None) -> typing.Callable:
         """
         Decorator for defining a handler function.
         """
-        return self._add_handler(name, "shared", accept, content_type, input_serde, output_serde)
+        return self._add_handler(name, "shared", accept, content_type, input_serde, output_serde, metadata)
 
     def _add_handler(self,
                 name: typing.Optional[str] = None,
@@ -84,7 +89,8 @@ class Workflow:
                 accept: str = "application/json",
                 content_type: str = "application/json",
                 input_serde: Serde[I] = JsonSerde[I](), # type: ignore
-                output_serde: Serde[O] = JsonSerde[O]()) -> typing.Callable: # type: ignore
+                output_serde: Serde[O] = JsonSerde[O](), # type: ignore
+                metadata: typing.Optional[typing.Dict[str, str]] = None) -> typing.Callable: # type: ignore
         """
         Decorator for defining a handler function.
 
@@ -94,6 +100,7 @@ class Workflow:
             content_type: The content type of the request. Default "application/json".
             serializer: The serializer function to convert the response object to bytes. 
             deserializer: The deserializer function to convert the request bytes to an object.
+            metadata: An optional dictionary of metadata.
 
         Returns:
             Callable: The decorated function.
@@ -115,7 +122,15 @@ class Workflow:
                 return fn(*args, **kwargs)
 
             signature = inspect.signature(fn, eval_str=True)
-            handler = make_handler(self.service_tag, handler_io, name, kind, wrapped, signature)
+            description = inspect.getdoc(fn)
+            handler = make_handler(service_tag=self.service_tag,
+                                   handler_io=handler_io,
+                                   name=name,
+                                   kind=kind,
+                                   wrapped=wrapped,
+                                   signature=signature,
+                                   description=description,
+                                   metadata=metadata)
             self.handlers[handler.name] = handler
             return wrapped
 

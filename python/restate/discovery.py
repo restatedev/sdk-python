@@ -21,11 +21,13 @@ case that the restate server understands.
 # pylint: disable=C0115
 # pylint: disable=C0103
 # pylint: disable=W0622
+# pylint: disable=R0913,
+# pylint: disable=R0917,
 
 import json
 import typing
 from enum import Enum
-from typing import Optional, Any, List, get_args, get_origin
+from typing import Dict, Optional, Any, List, get_args, get_origin
 
 
 from restate.endpoint import Endpoint as RestateEndpoint
@@ -58,17 +60,21 @@ class OutputPayload:
         self.jsonSchema = jsonSchema
 
 class Handler:
-    def __init__(self, name: str, ty: Optional[ServiceHandlerType] = None, input: Optional[InputPayload] = None, output: Optional[OutputPayload] = None):
+    def __init__(self, name: str, ty: Optional[ServiceHandlerType] = None, input: Optional[InputPayload] = None, output: Optional[OutputPayload] = None, description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None):
         self.name = name
         self.ty = ty
         self.input = input
         self.output = output
+        self.documentation = description
+        self.metadata = metadata
 
 class Service:
-    def __init__(self, name: str, ty: ServiceType, handlers: List[Handler]):
+    def __init__(self, name: str, ty: ServiceType, handlers: List[Handler], description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None):
         self.name = name
         self.ty = ty
         self.handlers = handlers
+        self.documentation = description
+        self.metadata = metadata
 
 class Endpoint:
     def __init__(self, protocolMode: ProtocolMode, minProtocolVersion: int, maxProtocolVersion: int, services: List[Service]):
@@ -182,10 +188,16 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
                                 contentType=handler.handler_io.content_type,
                                 jsonSchema=json_schema_from_type_hint(handler.handler_io.output_type))
             # add the handler
-            service_handlers.append(Handler(name=handler.name, ty=ty, input=inp, output=out))
-
+            service_handlers.append(Handler(name=handler.name,
+                                            ty=ty,
+                                            input=inp,
+                                            output=out,
+                                            description=handler.description,
+                                            metadata=handler.metadata))
         # add the service
-        services.append(Service(name=service.name, ty=service_type, handlers=service_handlers))
+        description = service.service_tag.description
+        metadata = service.service_tag.metadata
+        services.append(Service(name=service.name, ty=service_type, handlers=service_handlers, description=description, metadata=metadata))
 
     if endpoint.protocol:
         protocol_mode = PROTOCOL_MODES[endpoint.protocol]
