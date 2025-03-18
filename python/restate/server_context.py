@@ -24,7 +24,7 @@ from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, JsonSerde, Serde
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
-from restate._internal import PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoProgressCancelSignalReceived # pylint: disable=import-error,no-name-in-module,line-too-long
+from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun # pylint: disable=line-too-long
 
 T = TypeVar('T')
 I = TypeVar('I')
@@ -220,13 +220,13 @@ class ServerInvocationContext(ObjectContext):
 
             # Nothing ready yet, let's try to make some progress
             do_progress_response = self.vm.do_progress([handle])
-            if isinstance(do_progress_response, PyDoProgressAnyCompleted):
+            if isinstance(do_progress_response, DoProgressAnyCompleted):
                 # One of the handles completed, we can continue
                 continue
-            if isinstance(do_progress_response, PyDoProgressCancelSignalReceived):
+            if isinstance(do_progress_response, DoProgressCancelSignalReceived):
                 # Raise cancel signal
                 raise TerminalError("cancelled", 409)
-            if isinstance(do_progress_response, PyDoProgressReadFromInput):
+            if isinstance(do_progress_response, DoProgressReadFromInput):
                 # We need to read from input
                 chunk = await self.receive()
                 if chunk.get('body', None) is not None:
@@ -235,7 +235,7 @@ class ServerInvocationContext(ObjectContext):
                 if not chunk.get('more_body', False):
                     self.vm.notify_input_closed()
                 continue
-            if isinstance(do_progress_response, PyDoProgressExecuteRun):
+            if isinstance(do_progress_response, DoProgressExecuteRun):
                 await self.run_coros_to_execute[do_progress_response.handle]
                 await self.take_and_send_output()
 
