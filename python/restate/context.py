@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union
 import typing
 from datetime import timedelta
-from restate.serde import JsonSerde, Serde
+from restate.serde import DefaultSerde, JsonSerde, Serde
 
 T = TypeVar('T')
 I = TypeVar('I')
@@ -96,7 +96,7 @@ class Context(abc.ABC):
     def run(self,
             name: str,
             action: RunAction[T],
-            serde: Serde[T] = JsonSerde(),
+            serde: Serde[T] = DefaultSerde(),
             max_attempts: typing.Optional[int] = None,
             max_retry_duration: typing.Optional[timedelta] = None) -> Awaitable[T]:
         """

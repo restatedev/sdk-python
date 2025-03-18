@@ -18,7 +18,7 @@ from functools import wraps
 import inspect
 import typing
 
-from restate.serde import Serde, GeneralSerde
+from restate.serde import Serde, DefaultSerde
 from .handler import Handler, HandlerIO, ServiceTag, make_handler
 
 I = typing.TypeVar('I')
@@ -54,8 +54,8 @@ class Service:
                 name: typing.Optional[str] = None,
                 accept: str = "application/json",
                 content_type: str = "application/json",
-                input_serde: Serde[I] = GeneralSerde[I](), # type: ignore
-                output_serde: Serde[O] = GeneralSerde[O]()) -> typing.Callable: # type: ignore
+                input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
+                output_serde: Serde[O] = DefaultSerde[O]()) -> typing.Callable: # type: ignore
         """
         Decorator for defining a handler function.
 

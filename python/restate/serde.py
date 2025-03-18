@@ -122,11 +122,25 @@ class JsonSerde(Serde[I]):
 
         return bytes(json.dumps(obj), "utf-8")
 
-class GeneralSerde(Serde[I]):
+class DefaultSerde(Serde[I]):
     """
-    A general serializer/deserializer that first checks if the object is a Pydantic BaseModel.
-    If so, it uses the model's native JSON dumping method.
-    Otherwise, it defaults to using the standard JSON library.
+    The default serializer/deserializer used when no explicit type hints are provided.
+
+    Behavior:
+    - Serialization:
+        - If the object is an instance of Pydantic's `BaseModel`, it uses `model_dump_json()` for serialization.
+        - Otherwise, it falls back to `json.dumps()`.
+    - Deserialization:
+        - Uses `json.loads()` to convert byte arrays into Python objects.
+        - Does **not** automatically reconstruct Pydantic models; deserialized objects remain as generic JSON structures (dicts, lists, etc.).
+
+    Serde Selection:
+    - When using the `@handler` decorator, if a function's type hints specify a Pydantic model, 
+      `PydanticJsonSerde` is automatically selected instead of `DefaultSerde`.
+    - `DefaultSerde` is only used if no explicit type hints are provided.
+
+    This serde ensures compatibility with both structured (Pydantic) and unstructured JSON data, 
+    while allowing automatic serde selection based on type hints.
     """
 
     def deserialize(self, buf: bytes) -> typing.Optional[I]:

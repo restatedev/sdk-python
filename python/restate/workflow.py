@@ -18,7 +18,7 @@ from functools import wraps
 import inspect
 import typing
 
-from restate.serde import Serde, GeneralSerde
+from restate.serde import DefaultSerde, Serde
 from .handler import HandlerIO, ServiceTag, make_handler
 
 I = typing.TypeVar('I')
@@ -57,8 +57,8 @@ class Workflow:
             name: typing.Optional[str] = None,
             accept: str = "application/json",
             content_type: str = "application/json",
-            input_serde: Serde[I] = GeneralSerde[I](), # type: ignore
-            output_serde: Serde[O] = GeneralSerde[O]()) -> typing.Callable: # type: ignore
+            input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
+            output_serde: Serde[O] = DefaultSerde[O]()) -> typing.Callable: # type: ignore
         """Mark this handler as a workflow entry point"""
         return self._add_handler(name,
                             kind="workflow",
@@ -71,8 +71,8 @@ class Workflow:
                 name: typing.Optional[str] = None,
                 accept: str = "application/json",
                 content_type: str = "application/json",
-                input_serde: Serde[I] = GeneralSerde[I](), # type: ignore
-                output_serde: Serde[O] = GeneralSerde[O]()) -> typing.Callable: # type: ignore
+                input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
+                output_serde: Serde[O] = DefaultSerde[O]()) -> typing.Callable: # type: ignore
         """
         Decorator for defining a handler function.
         """
@@ -83,8 +83,8 @@ class Workflow:
                 kind: typing.Literal["workflow", "shared", "exclusive"] = "shared",
                 accept: str = "application/json",
                 content_type: str = "application/json",
-                input_serde: Serde[I] = GeneralSerde[I](), # type: ignore
-                output_serde: Serde[O] = GeneralSerde[O]()) -> typing.Callable: # type: ignore
+                input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
+                output_serde: Serde[O] = DefaultSerde[O]()) -> typing.Callable: # type: ignore
         """
         Decorator for defining a handler function.
 
