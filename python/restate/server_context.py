@@ -166,7 +166,7 @@ class ServerInvocationContext(ObjectContext):
         self.attempt_headers = attempt_headers
         self.send = send
         self.receive = receive
-        self.run_coros_to_execute: dict[int, Awaitable[typing.Union[bytes | Failure]]] = {}
+        self.run_coros_to_execute: dict[int,  Callable[[], Awaitable[typing.Union[bytes | Failure]]]] = {}
 
     async def enter(self):
         """Invoke the user code."""
@@ -272,7 +272,7 @@ class ServerInvocationContext(ObjectContext):
                     self.vm.notify_input_closed()
                 continue
             if isinstance(do_progress_response, DoProgressExecuteRun):
-                await self.run_coros_to_execute[do_progress_response.handle]
+                await self.run_coros_to_execute[do_progress_response.handle]()
                 await self.take_and_send_output()
 
 
@@ -371,7 +371,7 @@ class ServerInvocationContext(ObjectContext):
 
         # Register closure to run
         # TODO: use thunk to avoid coro leak warning.
-        self.run_coros_to_execute[handle] = self.create_run_coroutine(handle, action, serde, max_attempts, max_retry_duration)
+        self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, action, serde, max_attempts, max_retry_duration)
 
         # Prepare response coroutine
         return self.create_df(handle, serde) # type: ignore
