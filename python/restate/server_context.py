@@ -39,6 +39,8 @@ O = TypeVar('O')
 # disable too few public methods
 # pylint: disable=R0903
 
+# pylint: disable=W0511
+
 
 class ServerDurableFuture(RestateDurableFuture[T]):
     """This class implements a durable future API"""
@@ -274,7 +276,7 @@ class ServerInvocationContext(ObjectContext):
                 return res
             return serde.deserialize(res)
 
-        return ServerDurableFuture(handle, lambda : transform())
+        return ServerDurableFuture(handle, transform)
 
 
 
@@ -406,7 +408,6 @@ class ServerInvocationContext(ObjectContext):
         # TODO: specialize this future for calls!
         return self.create_df(handle=handle.result_handle, serde=output_serde).with_metadata(invocation_id=handle.invocation_id_handle)
 
-        
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I,
