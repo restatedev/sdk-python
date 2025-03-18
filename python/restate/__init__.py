@@ -19,7 +19,7 @@ from .workflow import Workflow
 # types
 from .context import Context, ObjectContext, ObjectSharedContext
 from .context import WorkflowContext, WorkflowSharedContext
-from .context import DurablePromise
+from .context import DurablePromise, RestateDurableFuture, RestateDurableCallFuture, SendHandle
 
 from .endpoint import app
 
@@ -43,6 +43,9 @@ __all__ = [
     "WorkflowContext",
     "WorkflowSharedContext",
     "DurablePromise",
+    "RestateDurableFuture",
+    "RestateDurableCallFuture",
+    "SendHandle",
     "app",
     "test_harness",
 ]
