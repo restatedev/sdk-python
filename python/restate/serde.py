@@ -128,11 +128,13 @@ class DefaultSerde(Serde[I]):
 
     Behavior:
     - Serialization:
-        - If the object is an instance of Pydantic's `BaseModel`, it uses `model_dump_json()` for serialization.
+        - If the object is an instance of Pydantic's `BaseModel`,
+            it uses `model_dump_json()` for serialization.
         - Otherwise, it falls back to `json.dumps()`.
     - Deserialization:
         - Uses `json.loads()` to convert byte arrays into Python objects.
-        - Does **not** automatically reconstruct Pydantic models; deserialized objects remain as generic JSON structures (dicts, lists, etc.).
+        - Does **not** automatically reconstruct Pydantic models; 
+            deserialized objects remain as generic JSON structures (dicts, lists, etc.).
 
     Serde Selection:
     - When using the `@handler` decorator, if a function's type hints specify a Pydantic model, 
