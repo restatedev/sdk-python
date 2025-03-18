@@ -38,6 +38,19 @@ class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
         pass
 
 
+# pylint: disable=R0903
+class RestateDurableCallFuture(RestateDurableFuture[T]):
+    """
+    Represents a durable call future.
+    """
+
+    @abc.abstractmethod
+    async def invocation_id(self) -> str:
+        """
+        Returns the invocation id of the call.
+        """
+
+
 
 @dataclass
 class Request:
@@ -147,7 +160,7 @@ class Context(abc.ABC):
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I,
-                     idempotency_key: str | None = None) -> RestateDurableFuture[O]:
+                     idempotency_key: str | None = None) -> RestateDurableCallFuture[O]:
         """
         Invokes the given service with the given argument.
         """
@@ -170,7 +183,7 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     idempotency_key: str | None = None,
-                    ) -> RestateDurableFuture[O]:
+                    ) -> RestateDurableCallFuture[O]:
         """
         Invokes the given object with the given argument.
         """
@@ -193,7 +206,7 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     idempotency_key: str | None = None,
-                    ) -> RestateDurableFuture[O]:
+                    ) -> RestateDurableCallFuture[O]:
         """
         Invokes the given workflow with the given argument.
         """
@@ -217,7 +230,7 @@ class Context(abc.ABC):
                      handler: str,
                      arg: bytes,
                      key: Optional[str] = None,
-                     idempotency_key: str | None = None)  -> RestateDurableFuture[bytes]:
+                     idempotency_key: str | None = None)  -> RestateDurableCallFuture[bytes]:
         """
         Invokes the given generic service/handler with the given argument.
         """

@@ -9,6 +9,11 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 # pylint: disable=R0917
+# pylint: disable=R0913
+# pylint: disable=C0301
+# pylint: disable=R0903
+# pylint: disable=W0511
+
 """This module contains the restate context implementation based on the server"""
 
 import asyncio
@@ -18,7 +23,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, ObjectContext, Request, RestateDurableFuture, SendHandle
+from restate.context import DurablePromise, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
@@ -30,37 +35,41 @@ T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
 
-# disable to many arguments
-# pylint: disable=R0913
 
-# disable line too long
-# pylint: disable=C0301
 
-# disable too few public methods
-# pylint: disable=R0903
-
-# pylint: disable=W0511
 
 
 class ServerDurableFuture(RestateDurableFuture[T]):
     """This class implements a durable future API"""
     value: T | None = None
-    metadata: Dict[str, Any] | None = None
 
     def __init__(self, handle: int, factory) -> None:
         super().__init__()
         self.factory = factory
         self.handle = handle
 
-    def with_metadata(self, **metadata) -> 'ServerDurableFuture':
-        """Add metadata to the future."""
-        self.metadata = metadata
-        return self
-
     def __await__(self):
-        print("..........Awaiting............", flush=True)
         task = asyncio.create_task(self.factory())
         return task.__await__()
+
+
+class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T]):
+    """This class implements a durable future but for calls"""
+    _invocation_id: typing.Optional[str] = None
+
+    def __init__(self, result_handle: int,
+                 result_factory,
+                 invocation_id_handle: int,
+                 invocation_id_factory) -> None:
+        super().__init__(result_handle, result_factory)
+        self.invocation_id_handle = invocation_id_handle
+        self.invocation_id_factory = invocation_id_factory
+
+    async def invocation_id(self) -> str:
+        """Get the invocation id."""
+        if self._invocation_id is None:
+            self._invocation_id  = await self.invocation_id_factory()
+        return self._invocation_id
 
 
 class ServerSendHandle(SendHandle):
@@ -280,6 +289,21 @@ class ServerInvocationContext(ObjectContext):
 
 
 
+    def create_call_df(self, handle: int, invocation_id_handle: int, serde: Serde[T] | None = None) -> ServerCallDurableFuture[T]:
+        """Create a durable future."""
+
+        async def transform():
+            res = await self.create_poll_or_cancel_coroutine(handle)
+            if res is None or serde is None:
+                return res
+            return serde.deserialize(res)
+
+        def inv_id_factory():
+            return self.create_poll_or_cancel_coroutine(invocation_id_handle)
+
+        return ServerCallDurableFuture(handle, transform, invocation_id_handle, inv_id_factory)
+
+
     def get(self, name: str, serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[T]]:
         handle = self.vm.sys_get_state(name)
         return self.create_df(handle, serde) # type: ignore
@@ -366,7 +390,7 @@ class ServerInvocationContext(ObjectContext):
                 send: bool = False,
                 idempotency_key: str | None = None,
                 headers: typing.List[typing.Tuple[str, str]] | None = None
-                ) -> RestateDurableFuture[O] | SendHandle:
+                ) -> RestateDurableCallFuture[O] | SendHandle:
         """Make an RPC call to the given handler"""
         target_handler = handler_from_callable(tpe)
         service=target_handler.service_tag.name
@@ -387,7 +411,7 @@ class ServerInvocationContext(ObjectContext):
                  send: bool = False,
                  idempotency_key: str | None = None,
                  headers: typing.List[typing.Tuple[str, str]] | None = None
-                 ) -> RestateDurableFuture[O] | SendHandle:
+                 ) -> RestateDurableCallFuture[O] | SendHandle:
         """Make an RPC call to the given handler"""
         parameter = input_serde.serialize(input_param)
         if send_delay:
@@ -405,15 +429,16 @@ class ServerInvocationContext(ObjectContext):
                                   idempotency_key=idempotency_key,
                                   headers=headers)
 
-        # TODO: specialize this future for calls!
-        return self.create_df(handle=handle.result_handle, serde=output_serde).with_metadata(invocation_id=handle.invocation_id_handle)
+        return self.create_call_df(handle=handle.result_handle,
+                                   invocation_id_handle=handle.invocation_id_handle,
+                                   serde=output_serde)
 
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I,
                      idempotency_key: str | None = None,
                      headers: typing.List[typing.Tuple[str, str]] | None = None
-                     ) -> RestateDurableFuture[O]:
+                     ) -> RestateDurableCallFuture[O]:
         coro = self.do_call(tpe, arg, idempotency_key=idempotency_key, headers=headers)
         assert not isinstance(coro, SendHandle)
         return coro
@@ -429,7 +454,7 @@ class ServerInvocationContext(ObjectContext):
                     arg: I,
                     idempotency_key: str | None = None,
                     headers: typing.List[typing.Tuple[str, str]] | None = None
-                    ) -> RestateDurableFuture[O]:
+                    ) -> RestateDurableCallFuture[O]:
         coro = self.do_call(tpe, arg, key, idempotency_key=idempotency_key, headers=headers)
         assert not isinstance(coro, SendHandle)
         return coro
@@ -445,7 +470,7 @@ class ServerInvocationContext(ObjectContext):
                         arg: I,
                         idempotency_key: str | None = None,
                         headers: typing.List[typing.Tuple[str, str]] | None = None
-                        ) -> RestateDurableFuture[O]:
+                        ) -> RestateDurableCallFuture[O]:
         return self.object_call(tpe, key, arg, idempotency_key=idempotency_key, headers=headers)
 
     def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None, headers: typing.List[typing.Tuple[str, str]] | None = None) -> SendHandle:
@@ -453,7 +478,7 @@ class ServerInvocationContext(ObjectContext):
         assert isinstance(send, SendHandle)
         return send
 
-    def generic_call(self, service: str, handler: str, arg: bytes, key: str | None = None, idempotency_key: str | None = None, headers: typing.List[typing.Tuple[str, str]] | None = None) -> RestateDurableFuture[bytes]:
+    def generic_call(self, service: str, handler: str, arg: bytes, key: str | None = None, idempotency_key: str | None = None, headers: typing.List[typing.Tuple[str, str]] | None = None) -> RestateDurableCallFuture[bytes]:
         serde = BytesSerde()
         call_handle = self.do_raw_call(service=service,
                                 handler=handler,
