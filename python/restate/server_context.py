@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, ObjectContext, Request, SendHandle
+from restate.context import DurablePromise, ObjectContext, Request, RestateDurableFuture, SendHandle
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, JsonSerde, Serde
@@ -39,6 +39,28 @@ O = TypeVar('O')
 # disable too few public methods
 # pylint: disable=R0903
 
+
+class ServerDurableFuture(RestateDurableFuture[T]):
+    """This class implements a durable future API"""
+    value: T | None = None
+    metadata: Dict[str, Any] | None = None
+
+    def __init__(self, handle: int, factory) -> None:
+        super().__init__()
+        self.factory = factory
+        self.handle = handle
+
+    def with_metadata(self, **metadata) -> 'ServerDurableFuture':
+        """Add metadata to the future."""
+        self.metadata = metadata
+        return self
+
+    def __await__(self):
+        print("..........Awaiting............", flush=True)
+        task = asyncio.create_task(self.factory())
+        return task.__await__()
+
+
 class ServerSendHandle(SendHandle):
     """This class implements the send API"""
     _invocation_id: typing.Optional[str]
@@ -56,6 +78,8 @@ class ServerSendHandle(SendHandle):
         res = await self.context.create_poll_or_cancel_coroutine(self.handle)
         self._invocation_id = res
         return res
+
+
 
 async def async_value(n: Callable[[], T]) -> T:
     """convert a simple value to a coroutine."""
@@ -210,6 +234,7 @@ class ServerInvocationContext(ObjectContext):
             raise TerminalError(res.message, res.code)
         return res
 
+
     async def create_poll_or_cancel_coroutine(self, handle) -> bytes | None:
         """Create a coroutine to poll the handle."""
         await self.take_and_send_output()
@@ -240,20 +265,25 @@ class ServerInvocationContext(ObjectContext):
                 await self.take_and_send_output()
 
 
-    def get(self, name: str, serde: Serde[T] = JsonSerde()) -> typing.Awaitable[Optional[Any]]:
-        coro = self.create_poll_or_cancel_coroutine(self.vm.sys_get_state(name))
+    def create_df(self, handle: int, serde: Serde[T] | None = None) -> ServerDurableFuture[T]:
+        """Create a durable future."""
 
-        async def await_point():
-            """Wait for this handle to be resolved."""
-            res = await coro
-            if res is None:
-                return None
+        async def transform():
+            res = await self.create_poll_or_cancel_coroutine(handle)
+            if res is None or serde is None:
+                return res
             return serde.deserialize(res)
 
-        return await_point() # do not await here, the caller will do it.
+        return ServerDurableFuture(handle, lambda : transform())
 
-    def state_keys(self) -> Awaitable[List[str]]:
-        return self.create_poll_or_cancel_coroutine(self.vm.sys_get_state_keys()) # type: ignore
+
+
+    def get(self, name: str, serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[Optional[T]]:
+        handle = self.vm.sys_get_state(name)
+        return self.create_df(handle, serde) # type: ignore
+
+    def state_keys(self) -> RestateDurableFuture[List[str]]:
+        return self.create_df(self.vm.sys_get_state_keys()) # type: ignore
 
     def set(self, name: str, value: T, serde: Serde[T] = JsonSerde()) -> None:
         """Set the value associated with the given name."""
@@ -309,29 +339,22 @@ class ServerInvocationContext(ObjectContext):
                   action: Callable[[], T] | Callable[[], Awaitable[T]],
                   serde: Optional[Serde[T]] = JsonSerde(),
                   max_attempts: Optional[int] = None,
-                  max_retry_duration: Optional[timedelta] = None) -> Awaitable[T]:
+                  max_retry_duration: Optional[timedelta] = None) -> RestateDurableFuture[T]:
         assert serde is not None
         handle = self.vm.sys_run(name)
 
         # Register closure to run
+        # TODO: use thunk to avoid coro leak warning.
         self.run_coros_to_execute[handle] = self.create_run_coroutine(handle, action, serde, max_attempts, max_retry_duration)
 
         # Prepare response coroutine
-        coro = self.create_poll_or_cancel_coroutine(handle)
-        async def await_point():
-            """Wait for this handle to be resolved."""
-            res = await coro
-            if res is None:
-                return None
-            return serde.deserialize(res)
-
-        return await_point() # do not await here, the caller will do it.
+        return self.create_df(handle, serde) # type: ignore
 
 
-    def sleep(self, delta: timedelta) -> Awaitable[None]:
+    def sleep(self, delta: timedelta) -> RestateDurableFuture[None]:
         # convert timedelta to milliseconds
         millis = int(delta.total_seconds() * 1000)
-        return self.create_poll_or_cancel_coroutine(self.vm.sys_sleep(millis)) # type: ignore
+        return self.create_df(self.vm.sys_sleep(millis)) # type: ignore
 
     def do_call(self,
                 tpe: Callable[[Any, I], Awaitable[O]],
@@ -341,7 +364,7 @@ class ServerInvocationContext(ObjectContext):
                 send: bool = False,
                 idempotency_key: str | None = None,
                 headers: typing.List[typing.Tuple[str, str]] | None = None
-                ) -> Awaitable[O] | SendHandle:
+                ) -> RestateDurableFuture[O] | SendHandle:
         """Make an RPC call to the given handler"""
         target_handler = handler_from_callable(tpe)
         service=target_handler.service_tag.name
@@ -362,7 +385,7 @@ class ServerInvocationContext(ObjectContext):
                  send: bool = False,
                  idempotency_key: str | None = None,
                  headers: typing.List[typing.Tuple[str, str]] | None = None
-                 ) -> Awaitable[O] | SendHandle:
+                 ) -> RestateDurableFuture[O] | SendHandle:
         """Make an RPC call to the given handler"""
         parameter = input_serde.serialize(input_param)
         if send_delay:
@@ -380,19 +403,16 @@ class ServerInvocationContext(ObjectContext):
                                   idempotency_key=idempotency_key,
                                   headers=headers)
 
-        async def await_point(s: ServerInvocationContext, h, o: Serde[O]):
-            """Wait for this handle to be resolved, and deserialize the response."""
-            res = await s.create_poll_or_cancel_coroutine(h)
-            return o.deserialize(res) # type: ignore
+        # TODO: specialize this future for calls!
+        return self.create_df(handle=handle.result_handle, serde=output_serde).with_metadata(invocation_id=handle.invocation_id_handle)
 
-        return await_point(self, handle.result_handle, output_serde)
-
+        
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I,
                      idempotency_key: str | None = None,
                      headers: typing.List[typing.Tuple[str, str]] | None = None
-                     ) -> Awaitable[O]:
+                     ) -> RestateDurableFuture[O]:
         coro = self.do_call(tpe, arg, idempotency_key=idempotency_key, headers=headers)
         assert not isinstance(coro, SendHandle)
         return coro
@@ -408,7 +428,7 @@ class ServerInvocationContext(ObjectContext):
                     arg: I,
                     idempotency_key: str | None = None,
                     headers: typing.List[typing.Tuple[str, str]] | None = None
-                    ) -> Awaitable[O]:
+                    ) -> RestateDurableFuture[O]:
         coro = self.do_call(tpe, arg, key, idempotency_key=idempotency_key, headers=headers)
         assert not isinstance(coro, SendHandle)
         return coro
@@ -424,7 +444,7 @@ class ServerInvocationContext(ObjectContext):
                         arg: I,
                         idempotency_key: str | None = None,
                         headers: typing.List[typing.Tuple[str, str]] | None = None
-                        ) -> Awaitable[O]:
+                        ) -> RestateDurableFuture[O]:
         return self.object_call(tpe, key, arg, idempotency_key=idempotency_key, headers=headers)
 
     def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None, headers: typing.List[typing.Tuple[str, str]] | None = None) -> SendHandle:
@@ -432,7 +452,7 @@ class ServerInvocationContext(ObjectContext):
         assert isinstance(send, SendHandle)
         return send
 
-    def generic_call(self, service: str, handler: str, arg: bytes, key: str | None = None, idempotency_key: str | None = None, headers: typing.List[typing.Tuple[str, str]] | None = None) -> Awaitable[bytes]:
+    def generic_call(self, service: str, handler: str, arg: bytes, key: str | None = None, idempotency_key: str | None = None, headers: typing.List[typing.Tuple[str, str]] | None = None) -> RestateDurableFuture[bytes]:
         serde = BytesSerde()
         call_handle = self.do_raw_call(service=service,
                                 handler=handler,
@@ -461,19 +481,10 @@ class ServerInvocationContext(ObjectContext):
         return send_handle
 
     def awakeable(self,
-                  serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:
+                  serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, RestateDurableFuture[Any]]:
         assert serde is not None
         name, handle = self.vm.sys_awakeable()
-        coro = self.create_poll_or_cancel_coroutine(handle)
-
-        async def await_point():
-            """Wait for this handle to be resolved."""
-            res = await coro
-            assert res is not None
-            return serde.deserialize(res)
-
-
-        return name, await_point()
+        return name, self.create_df(handle, serde)
 
     def resolve_awakeable(self,
                           name: str,
@@ -499,17 +510,9 @@ class ServerInvocationContext(ObjectContext):
             raise ValueError("invocation_id cannot be None")
         self.vm.sys_cancel(invocation_id)
 
-    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> T:
+    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[T]:
         if invocation_id is None:
             raise ValueError("invocation_id cannot be None")
         assert serde is not None
         handle = self.vm.attach_invocation(invocation_id)
-        coro = self.create_poll_or_cancel_coroutine(handle)
-
-        async def await_point():
-            """Wait for this handle to be resolved."""
-            res = await coro
-            assert res is not None
-            return serde.deserialize(res)
-
-        return await_point()
+        return self.create_df(handle, serde)

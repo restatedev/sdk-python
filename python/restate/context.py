@@ -27,6 +27,17 @@ O = TypeVar('O')
 RunAction = Union[Callable[[], T], Callable[[], Awaitable[T]]]
 
 
+class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
+    """
+    Represents a durable future.
+    """
+
+    @abc.abstractmethod
+    def __await__(self):
+        pass
+
+
+
 @dataclass
 class Request:
     """
@@ -57,13 +68,13 @@ class KeyValueStore(abc.ABC):
     @abc.abstractmethod
     def get(self,
             name: str,
-            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[Any]]:
+            serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[Optional[Any]]:
         """
         Retrieves the value associated with the given name.
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> Awaitable[List[str]]:
+    def state_keys(self) -> RestateDurableFuture[List[str]]:
         """Returns the list of keys in the store."""
 
     @abc.abstractmethod
@@ -110,7 +121,7 @@ class Context(abc.ABC):
             action: RunAction[T],
             serde: Serde[T] = JsonSerde(),
             max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None) -> Awaitable[T]:
+            max_retry_duration: typing.Optional[timedelta] = None) -> RestateDurableFuture[T]:
         """
         Runs the given action with the given name.
 
@@ -126,7 +137,7 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def sleep(self, delta: timedelta) -> Awaitable[None]:
+    def sleep(self, delta: timedelta) -> RestateDurableFuture[None]:
         """
         Suspends the current invocation for the given duration
         """
@@ -135,7 +146,7 @@ class Context(abc.ABC):
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I,
-                     idempotency_key: str | None = None) -> Awaitable[O]:
+                     idempotency_key: str | None = None) -> RestateDurableFuture[O]:
         """
         Invokes the given service with the given argument.
         """
@@ -158,7 +169,7 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     idempotency_key: str | None = None,
-                    ) -> Awaitable[O]:
+                    ) -> RestateDurableFuture[O]:
         """
         Invokes the given object with the given argument.
         """
@@ -181,7 +192,7 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     idempotency_key: str | None = None,
-                    ) -> Awaitable[O]:
+                    ) -> RestateDurableFuture[O]:
         """
         Invokes the given workflow with the given argument.
         """
@@ -205,7 +216,7 @@ class Context(abc.ABC):
                      handler: str,
                      arg: bytes,
                      key: Optional[str] = None,
-                     idempotency_key: str | None = None)  -> Awaitable[bytes]:
+                     idempotency_key: str | None = None)  -> RestateDurableFuture[bytes]:
         """
         Invokes the given generic service/handler with the given argument.
         """
@@ -225,7 +236,7 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def awakeable(self,
-                  serde: Serde[T] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:
+                  serde: Serde[T] = JsonSerde()) -> typing.Tuple[str, RestateDurableFuture[Any]]:
         """
         Returns the name of the awakeable and the future to be awaited.
         """
@@ -252,7 +263,7 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> T:
+    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[T]:
         """
         Attaches the invocation with the given id.
         """
@@ -282,13 +293,13 @@ class ObjectSharedContext(Context):
     @abc.abstractmethod
     def get(self,
             name: str,
-            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[Any]]:
+            serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[Optional[Any]]:
         """
         Retrieves the value associated with the given name.
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> Awaitable[List[str]]:
+    def state_keys(self) -> RestateDurableFuture[List[str]]:
         """
         Returns the list of keys in the store.
         """
