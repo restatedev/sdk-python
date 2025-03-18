@@ -21,7 +21,7 @@ import traceback
 from restate.context import DurablePromise, ObjectContext, Request, RestateDurableFuture, SendHandle
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
-from restate.serde import BytesSerde, JsonSerde, Serde
+from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
 from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun # pylint: disable=line-too-long
@@ -339,7 +339,7 @@ class ServerInvocationContext(ObjectContext):
     def run(self,
                   name: str,
                   action: Callable[[], T] | Callable[[], Awaitable[T]],
-                  serde: Optional[Serde[T]] = JsonSerde(),
+                  serde: Optional[Serde[T]] = DefaultSerde(),
                   max_attempts: Optional[int] = None,
                   max_retry_duration: Optional[timedelta] = None) -> RestateDurableFuture[T]:
         assert serde is not None

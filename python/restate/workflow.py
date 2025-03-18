@@ -18,7 +18,7 @@ from functools import wraps
 import inspect
 import typing
 
-from restate.serde import Serde, JsonSerde
+from restate.serde import DefaultSerde, Serde
 from restate.handler import Handler, HandlerIO, ServiceTag, make_handler
 
 I = typing.TypeVar('I')
@@ -59,8 +59,8 @@ class Workflow:
             name: typing.Optional[str] = None,
             accept: str = "application/json",
             content_type: str = "application/json",
-            input_serde: Serde[I] = JsonSerde[I](), # type: ignore
-            output_serde: Serde[O] = JsonSerde[O](), # type: ignore
+            input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
+            output_serde: Serde[O] = DefaultSerde[O](), # type: ignore
             metadata: typing.Optional[typing.Dict[str, str]] = None) -> typing.Callable: # type: ignore
         """Mark this handler as a workflow entry point"""
         return self._add_handler(name,
@@ -75,8 +75,8 @@ class Workflow:
                 name: typing.Optional[str] = None,
                 accept: str = "application/json",
                 content_type: str = "application/json",
-                input_serde: Serde[I] = JsonSerde[I](), # type: ignore
-                output_serde: Serde[O] = JsonSerde[O](), # type: ignore
+                input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
+                output_serde: Serde[O] = DefaultSerde[O](), # type: ignore
                 metadata: typing.Optional[typing.Dict[str, str]] = None) -> typing.Callable:
         """
         Decorator for defining a handler function.
@@ -88,8 +88,8 @@ class Workflow:
                 kind: typing.Literal["workflow", "shared", "exclusive"] = "shared",
                 accept: str = "application/json",
                 content_type: str = "application/json",
-                input_serde: Serde[I] = JsonSerde[I](), # type: ignore
-                output_serde: Serde[O] = JsonSerde[O](), # type: ignore
+                input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
+                output_serde: Serde[O] = DefaultSerde[O](), # type: ignore
                 metadata: typing.Optional[typing.Dict[str, str]] = None) -> typing.Callable: # type: ignore
         """
         Decorator for defining a handler function.

@@ -17,7 +17,7 @@ from functools import wraps
 import inspect
 import typing
 
-from restate.serde import Serde, JsonSerde
+from restate.serde import Serde, DefaultSerde
 from restate.handler import Handler, HandlerIO, ServiceTag, make_handler
 
 I = typing.TypeVar('I')
@@ -60,8 +60,8 @@ class VirtualObject:
                 kind: typing.Optional[typing.Literal["exclusive", "shared"]] = "exclusive",
                 accept: str = "application/json",
                 content_type: str = "application/json",
-                input_serde: Serde[I] = JsonSerde[I](), # type: ignore
-                output_serde: Serde[O] = JsonSerde[O](), # type: ignore
+                input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
+                output_serde: Serde[O] = DefaultSerde[O](), # type: ignore
                 metadata: typing.Optional[dict] = None) -> typing.Callable:
         """
         Decorator for defining a handler function.

@@ -13,6 +13,21 @@ import abc
 import json
 import typing
 
+def try_import_pydantic_base_model():
+    """
+    Try to import PydanticBaseModel from Pydantic.
+    """
+    try:
+        from pydantic import BaseModel # type: ignore # pylint: disable=import-outside-toplevel
+        return BaseModel
+    except ImportError:
+        class Dummy: # pylint: disable=too-few-public-methods
+            """a dummy class to use when Pydantic is not available"""
+
+        return Dummy
+
+PydanticBaseModel = try_import_pydantic_base_model()
+
 T = typing.TypeVar('T')
 I = typing.TypeVar('I')
 O = typing.TypeVar('O')
@@ -106,6 +121,65 @@ class JsonSerde(Serde[I]):
             return bytes()
 
         return bytes(json.dumps(obj), "utf-8")
+
+class DefaultSerde(Serde[I]):
+    """
+    The default serializer/deserializer used when no explicit type hints are provided.
+
+    Behavior:
+    - Serialization:
+        - If the object is an instance of Pydantic's `BaseModel`,
+            it uses `model_dump_json()` for serialization.
+        - Otherwise, it falls back to `json.dumps()`.
+    - Deserialization:
+        - Uses `json.loads()` to convert byte arrays into Python objects.
+        - Does **not** automatically reconstruct Pydantic models; 
+            deserialized objects remain as generic JSON structures (dicts, lists, etc.).
+
+    Serde Selection:
+    - When using the `@handler` decorator, if a function's type hints specify a Pydantic model, 
+      `PydanticJsonSerde` is automatically selected instead of `DefaultSerde`.
+    - `DefaultSerde` is only used if no explicit type hints are provided.
+
+    This serde ensures compatibility with both structured (Pydantic) and unstructured JSON data, 
+    while allowing automatic serde selection based on type hints.
+    """
+
+    def deserialize(self, buf: bytes) -> typing.Optional[I]:
+        """
+        Deserializes a byte array into a Python object.
+
+        Args:
+            buf (bytes): The byte array to deserialize.
+
+        Returns:
+            Optional[I]: The resulting Python object, or None if the input is empty.
+        """
+        if not buf:
+            return None
+        return json.loads(buf)
+
+    def serialize(self, obj: typing.Optional[I]) -> bytes:
+        """
+        Serializes a Python object into a byte array.
+        If the object is a Pydantic BaseModel, uses its model_dump_json method.
+
+        Args:
+            obj (Optional[I]): The Python object to serialize.
+
+        Returns:
+            bytes: The serialized byte array.
+        """
+
+        if obj is None:
+            return bytes()
+
+        if isinstance(obj, PydanticBaseModel):
+            # Use the Pydantic-specific serialization
+            return obj.model_dump_json().encode("utf-8")  # type: ignore[attr-defined]
+
+        # Fallback to standard JSON serialization
+        return json.dumps(obj).encode("utf-8")
 
 
 class PydanticJsonSerde(Serde[I]):
