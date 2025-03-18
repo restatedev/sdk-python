@@ -16,7 +16,7 @@ wrap the restate._internal.PyVM class
 
 from dataclasses import dataclass
 import typing
-from restate._internal import PyVM, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
+from restate._internal import PyVM, PyHeader, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
 
 @dataclass
 class Invocation:
@@ -245,10 +245,13 @@ class VMWrapper:
                  handler: str,
                  parameter: bytes,
                  key: typing.Optional[str] = None,
-                 idempotency_key: typing.Optional[str] = None
+                 idempotency_key: typing.Optional[str] = None,
+                 headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None
                  ):
         """Call a service"""
-        return self.vm.sys_call(service, handler, parameter, key, idempotency_key)
+        if headers:
+            headers = [PyHeader(key=h[0], value=h[1]) for h in headers]
+        return self.vm.sys_call(service, handler, parameter, key, idempotency_key, headers)
 
     # pylint: disable=too-many-arguments
     def sys_send(self,
@@ -257,13 +260,16 @@ class VMWrapper:
                  parameter: bytes,
                  key: typing.Optional[str] = None,
                  delay: typing.Optional[int] = None,
-                 idempotency_key: typing.Optional[str] = None
+                 idempotency_key: typing.Optional[str] = None,
+                 headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None
                  ) -> int:
         """
         send an invocation to a service, and return the handle
         to the promise that will resolve with the invocation id
         """
-        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key)
+        if headers:
+            headers = [PyHeader(key=h[0], value=h[1]) for h in headers]
+        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key, headers)
 
     def sys_run(self, name: str) -> int:
         """
