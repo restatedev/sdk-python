@@ -11,13 +11,14 @@
 # pylint: disable=R0917
 """This module contains the restate context implementation based on the server"""
 
+import asyncio
 from datetime import timedelta
 import inspect
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, ObjectContext, Request
+from restate.context import DurablePromise, ObjectContext, Request, SendHandle
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
@@ -34,6 +35,27 @@ O = TypeVar('O')
 
 # disable line too long
 # pylint: disable=C0301
+
+# disable too few public methods
+# pylint: disable=R0903
+
+class ServerSendHandle(SendHandle):
+    """This class implements the send API"""
+    _invocation_id: typing.Optional[str]
+
+    def __init__(self, context, handle: int) -> None:
+        super().__init__()
+        self.handle = handle
+        self.context = context
+        self._invocation_id = None
+
+    async def invocation_id(self) -> str:
+        """Get the invocation id."""
+        if self._invocation_id is not None:
+            return self._invocation_id
+        res = await self.context.create_poll_or_cancel_coroutine(self.handle)
+        self._invocation_id = res
+        return res
 
 async def async_value(n: Callable[[], T]) -> T:
     """convert a simple value to a coroutine."""
@@ -263,7 +285,8 @@ class ServerInvocationContext(ObjectContext):
             if inspect.iscoroutinefunction(action):
                 action_result = await action() # type: ignore
             else:
-                action_result = action()
+                action_result = await asyncio.to_thread(action)
+
             buffer = serde.serialize(action_result)
             self.vm.propose_run_completion_success(handle, buffer)
         except TerminalError as t:
@@ -315,14 +338,15 @@ class ServerInvocationContext(ObjectContext):
                 parameter: I,
                 key: Optional[str] = None,
                 send_delay: Optional[timedelta] = None,
-                send: bool = False) -> Awaitable[O] | None:
+                send: bool = False,
+                idempotency_key: str | None = None) -> Awaitable[O] | SendHandle:
         """Make an RPC call to the given handler"""
         target_handler = handler_from_callable(tpe)
         service=target_handler.service_tag.name
         handler=target_handler.name
         input_serde = target_handler.handler_io.input_serde
         output_serde = target_handler.handler_io.output_serde
-        return self.do_raw_call(service, handler, parameter, input_serde, output_serde, key, send_delay, send)
+        return self.do_raw_call(service, handler, parameter, input_serde, output_serde, key, send_delay, send, idempotency_key)
 
 
     def do_raw_call(self,
@@ -333,21 +357,24 @@ class ServerInvocationContext(ObjectContext):
                  output_serde: Serde[O],
                  key: Optional[str] = None,
                  send_delay: Optional[timedelta] = None,
-                 send: bool = False) -> Awaitable[O] | None:
+                 send: bool = False,
+                 idempotency_key: str | None = None
+                 ) -> Awaitable[O] | SendHandle:
         """Make an RPC call to the given handler"""
         parameter = input_serde.serialize(input_param)
         if send_delay:
             ms = int(send_delay.total_seconds() * 1000)
-            self.vm.sys_send(service, handler, parameter, key, delay=ms)
-            return None
+            send_handle = self.vm.sys_send(service, handler, parameter, key, delay=ms, idempotency_key=idempotency_key)
+            return ServerSendHandle(self, send_handle)
         if send:
-            self.vm.sys_send(service, handler, parameter, key)
-            return None
+            send_handle = self.vm.sys_send(service, handler, parameter, key, idempotency_key=idempotency_key)
+            return ServerSendHandle(self, send_handle)
 
         handle = self.vm.sys_call(service=service,
                                   handler=handler,
                                   parameter=parameter,
-                                  key=key)
+                                  key=key,
+                                  idempotency_key=idempotency_key)
 
         async def await_point(s: ServerInvocationContext, h, o: Serde[O]):
             """Wait for this handle to be resolved, and deserialize the response."""
@@ -358,43 +385,53 @@ class ServerInvocationContext(ObjectContext):
 
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
-                     arg: I) -> Awaitable[O]:
-        coro = self.do_call(tpe, arg)
-        assert coro is not None
+                     arg: I,
+                     idempotency_key: str | None = None
+                     ) -> Awaitable[O]:
+        coro = self.do_call(tpe, arg, idempotency_key=idempotency_key)
+        assert not isinstance(coro, SendHandle)
         return coro
 
-    def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None) -> None:
-        self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay, send=True)
+    def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None) -> SendHandle:
+        send = self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay, send=True, idempotency_key=idempotency_key)
+        assert isinstance(send, SendHandle)
+        return send
 
     def object_call(self,
                     tpe: Callable[[Any, I],Awaitable[O]],
                     key: str,
                     arg: I,
-                    send_delay: Optional[timedelta] = None,
-                    send: bool = False) -> Awaitable[O]:
-        coro = self.do_call(tpe, arg, key, send_delay, send)
-        assert coro is not None
+                    idempotency_key: str | None = None
+                    ) -> Awaitable[O]:
+        coro = self.do_call(tpe, arg, key, idempotency_key=idempotency_key)
+        assert not isinstance(coro, SendHandle)
         return coro
 
-    def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
-        self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay, send=True)
+    def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None) -> SendHandle:
+        send = self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay, send=True, idempotency_key=idempotency_key)
+        assert isinstance(send, SendHandle)
+        return send
 
     def workflow_call(self,
                         tpe: Callable[[Any, I], Awaitable[O]],
                         key: str,
-                        arg: I) -> Awaitable[O]:
-        return self.object_call(tpe, key, arg)
+                        arg: I,
+                        idempotency_key: str | None = None
+                        ) -> Awaitable[O]:
+        return self.object_call(tpe, key, arg, idempotency_key=idempotency_key)
 
-    def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None) -> None:
-        return self.object_send(tpe, key, arg, send_delay)
+    def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None) -> SendHandle:
+        send = self.object_send(tpe, key, arg, send_delay, idempotency_key=idempotency_key)
+        assert isinstance(send, SendHandle)
+        return send
 
-    def generic_call(self, service: str, handler: str, arg: bytes, key: str | None = None) -> Awaitable[bytes]:
+    def generic_call(self, service: str, handler: str, arg: bytes, key: str | None = None, idempotency_key: str | None = None) -> Awaitable[bytes]:
         serde = BytesSerde()
-        return self.do_raw_call(service, handler, arg, serde, serde, key) # type: ignore
+        return self.do_raw_call(service, handler, arg, serde, serde, key, idempotency_key) # type: ignore
 
-    def generic_send(self, service: str, handler: str, arg: bytes, key: str | None = None, send_delay: timedelta | None = None) -> None:
+    def generic_send(self, service: str, handler: str, arg: bytes, key: str | None = None, send_delay: timedelta | None = None, idempotency_key: str | None = None) -> SendHandle:
         serde = BytesSerde()
-        return self.do_raw_call(service, handler, arg, serde, serde , key, send_delay, True) # type: ignore
+        return self.do_raw_call(service, handler, arg, serde, serde , key, send_delay, True, idempotency_key) # type: ignore
 
     def awakeable(self,
                   serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, Awaitable[Any]]:
@@ -428,3 +465,24 @@ class ServerInvocationContext(ObjectContext):
 
     def key(self) -> str:
         return self.invocation.key
+
+    def cancel(self, invocation_id: str):
+        """cancel an existing invocation by id."""
+        if invocation_id is None:
+            raise ValueError("invocation_id cannot be None")
+        self.vm.sys_cancel(invocation_id)
+
+    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> T:
+        if invocation_id is None:
+            raise ValueError("invocation_id cannot be None")
+        assert serde is not None
+        handle = self.vm.attach_invocation(invocation_id)
+        coro = self.create_poll_or_cancel_coroutine(handle)
+
+        async def await_point():
+            """Wait for this handle to be resolved."""
+            res = await coro
+            assert res is not None
+            return serde.deserialize(res)
+
+        return await_point()

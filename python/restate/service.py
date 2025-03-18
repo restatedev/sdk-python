@@ -39,8 +39,10 @@ class Service:
         name (str): The name of the service.
     """
 
-    def __init__(self, name: str) -> None:
-        self.service_tag = ServiceTag("service", name)
+    def __init__(self, name: str,
+                 description: typing.Optional[str] = None,
+                 metadata: typing.Optional[typing.Dict[str, str]] = None) -> None:
+        self.service_tag = ServiceTag("service", name, description, metadata)
         self.handlers: typing.Dict[str, Handler] = {}
 
     @property
@@ -85,7 +87,7 @@ class Service:
                 return fn(*args, **kwargs)
 
             signature = inspect.signature(fn, eval_str=True)
-            handler = make_handler(self.service_tag, handler_io, name, None, wrapped, signature)
+            handler = make_handler(self.service_tag, handler_io, name, None, wrapped, signature, inspect.getdoc(fn), metadata)
             self.handlers[handler.name] = handler
             return wrapped
 

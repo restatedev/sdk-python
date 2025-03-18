@@ -81,6 +81,18 @@ class KeyValueStore(abc.ABC):
     def clear_all(self) -> None:
         """clear all the values in the store."""
 
+# pylint: disable=R0903
+class SendHandle(abc.ABC):
+    """
+    Represents a send operation.
+    """
+
+    @abc.abstractmethod
+    async def invocation_id(self) -> str:
+        """
+        Returns the invocation id of the send operation.
+        """
+
 class Context(abc.ABC):
     """
     Represents the context of the current invocation.
@@ -122,7 +134,8 @@ class Context(abc.ABC):
     @abc.abstractmethod
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
-                     arg: I) -> Awaitable[O]:
+                     arg: I,
+                     idempotency_key: str | None = None) -> Awaitable[O]:
         """
         Invokes the given service with the given argument.
         """
@@ -133,7 +146,8 @@ class Context(abc.ABC):
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I,
                      send_delay: Optional[timedelta] = None,
-                     ) -> None:
+                     idempotency_key: str | None = None,
+                     ) -> SendHandle:
         """
         Invokes the given service with the given argument.
         """
@@ -142,7 +156,9 @@ class Context(abc.ABC):
     def object_call(self,
                     tpe: Callable[[Any, I], Awaitable[O]],
                     key: str,
-                    arg: I) -> Awaitable[O]:
+                    arg: I,
+                    idempotency_key: str | None = None,
+                    ) -> Awaitable[O]:
         """
         Invokes the given object with the given argument.
         """
@@ -153,7 +169,8 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     send_delay: Optional[timedelta] = None,
-                    ) -> None:
+                    idempotency_key: str | None = None,
+                    ) -> SendHandle:
         """
         Send a message to an object with the given argument.
         """
@@ -162,7 +179,9 @@ class Context(abc.ABC):
     def workflow_call(self,
                     tpe: Callable[[Any, I], Awaitable[O]],
                     key: str,
-                    arg: I) -> Awaitable[O]:
+                    arg: I,
+                    idempotency_key: str | None = None,
+                    ) -> Awaitable[O]:
         """
         Invokes the given workflow with the given argument.
         """
@@ -173,7 +192,8 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     send_delay: Optional[timedelta] = None,
-                    ) -> None:
+                    idempotency_key: str | None = None,
+                    ) -> SendHandle:
         """
         Send a message to an object with the given argument.
         """
@@ -184,7 +204,8 @@ class Context(abc.ABC):
                      service: str,
                      handler: str,
                      arg: bytes,
-                     key: Optional[str] = None)  -> Awaitable[bytes]:
+                     key: Optional[str] = None,
+                     idempotency_key: str | None = None)  -> Awaitable[bytes]:
         """
         Invokes the given generic service/handler with the given argument.
         """
@@ -195,7 +216,9 @@ class Context(abc.ABC):
                      handler: str,
                      arg: bytes,
                      key: Optional[str] = None,
-                     send_delay: Optional[timedelta] = None) -> None:
+                     send_delay: Optional[timedelta] = None,
+                     idempotency_key: str | None = None,
+                    ) -> SendHandle:
         """
         Send a message to a generic service/handler with the given argument.
         """
@@ -220,6 +243,18 @@ class Context(abc.ABC):
     def reject_awakeable(self, name: str, failure_message: str, failure_code: int = 500) -> None:
         """
         Rejects the awakeable with the given name.
+        """
+
+    @abc.abstractmethod
+    def cancel(self, invocation_id: str):
+        """
+        Cancels the invocation with the given id.
+        """
+
+    @abc.abstractmethod
+    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> T:
+        """
+        Attaches the invocation with the given id.
         """
 
 

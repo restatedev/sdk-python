@@ -12,6 +12,7 @@
 wrap the restate._internal.PyVM class
 """
 # pylint: disable=E1101,R0917
+# pylint: disable=too-many-arguments
 
 from dataclasses import dataclass
 import typing
@@ -243,9 +244,11 @@ class VMWrapper:
                  service: str,
                  handler: str,
                  parameter: bytes,
-                 key: typing.Optional[str] = None):
+                 key: typing.Optional[str] = None,
+                 idempotency_key: typing.Optional[str] = None
+                 ):
         """Call a service"""
-        return self.vm.sys_call(service, handler, parameter, key)
+        return self.vm.sys_call(service, handler, parameter, key, idempotency_key)
 
     # pylint: disable=too-many-arguments
     def sys_send(self,
@@ -253,9 +256,14 @@ class VMWrapper:
                  handler: str,
                  parameter: bytes,
                  key: typing.Optional[str] = None,
-                 delay: typing.Optional[int] = None) -> None:
-        """send an invocation to a service (no response)"""
-        self.vm.sys_send(service, handler, parameter, key, delay)
+                 delay: typing.Optional[int] = None,
+                 idempotency_key: typing.Optional[str] = None
+                 ) -> int:
+        """
+        send an invocation to a service, and return the handle
+        to the promise that will resolve with the invocation id
+        """
+        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key)
 
     def sys_run(self, name: str) -> int:
         """
@@ -347,3 +355,15 @@ class VMWrapper:
         It calls the `sys_end` method of the `vm` object.
         """
         self.vm.sys_end()
+
+    def sys_cancel(self, invocation_id: str):
+        """
+        Cancel a running invocation
+        """
+        self.vm.sys_cancel(invocation_id)
+
+    def attach_invocation(self, invocation_id: str) -> int:
+        """
+        Attach to an invocation
+        """
+        return self.vm.attach_invocation(invocation_id)

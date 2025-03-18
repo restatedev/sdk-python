@@ -32,3 +32,17 @@ except ImportError:
     def test_harness(app, follow_logs = False, restate_image = ""): # type: ignore
         """a dummy harness constructor to raise ImportError"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
+
+__all__ = [
+    "Service",
+    "VirtualObject",
+    "Workflow",
+    "Context",
+    "ObjectContext",
+    "ObjectSharedContext",
+    "WorkflowContext",
+    "WorkflowSharedContext",
+    "DurablePromise",
+    "app",
+    "test_harness",
+]
