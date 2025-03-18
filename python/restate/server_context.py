@@ -280,11 +280,11 @@ class ServerInvocationContext(ObjectContext):
 
 
 
-    def get(self, name: str, serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[Optional[T]]:
+    def get(self, name: str, serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[T]]:
         handle = self.vm.sys_get_state(name)
         return self.create_df(handle, serde) # type: ignore
 
-    def state_keys(self) -> RestateDurableFuture[List[str]]:
+    def state_keys(self) -> Awaitable[List[str]]:
         return self.create_df(self.vm.sys_get_state_keys()) # type: ignore
 
     def set(self, name: str, value: T, serde: Serde[T] = JsonSerde()) -> None:

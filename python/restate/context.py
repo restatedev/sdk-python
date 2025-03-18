@@ -68,13 +68,13 @@ class KeyValueStore(abc.ABC):
     @abc.abstractmethod
     def get(self,
             name: str,
-            serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[Optional[Any]]:
+            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[Any]]:
         """
         Retrieves the value associated with the given name.
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> RestateDurableFuture[List[str]]:
+    def state_keys(self) -> Awaitable[List[str]]:
         """Returns the list of keys in the store."""
 
     @abc.abstractmethod
