@@ -13,10 +13,11 @@ wrap the restate._internal.PyVM class
 """
 # pylint: disable=E1101,R0917
 # pylint: disable=too-many-arguments
+# pylint: disable=too-few-public-methods
 
 from dataclasses import dataclass
 import typing
-from restate._internal import PyVM, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
+from restate._internal import PyVM, PyHeader, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
 
 @dataclass
 class Invocation:
@@ -64,7 +65,40 @@ SUSPENDED = SuspendedException()
 CANCEL_HANDLE = CANCEL_NOTIFICATION_HANDLE
 
 NotificationType = typing.Optional[typing.Union[bytes, Failure, NotReady, list[str], str]]
-DoProgressResult = typing.Union[PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoProgressCancelSignalReceived] # pylint: disable=line-too-long
+
+class DoProgressAnyCompleted:
+    """
+    Represents a notification that any of the handles has completed.
+    """
+
+class DoProgressReadFromInput:
+    """
+    Represents a notification that the input needs to be read.
+    """
+
+class DoProgressExecuteRun:
+    """
+    Represents a notification that a run needs to be executed.
+    """
+    handle: int
+
+    def __init__(self, handle):
+        self.handle = handle
+
+class DoProgressCancelSignalReceived:
+    """
+    Represents a notification that a cancel signal has been received
+    """
+
+DO_PROGRESS_ANY_COMPLETED = DoProgressAnyCompleted()
+DO_PROGRESS_READ_FROM_INPUT = DoProgressReadFromInput()
+DO_PROGRESS_CANCEL_SIGNAL_RECEIVED = DoProgressCancelSignalReceived()
+
+DoProgressResult = typing.Union[DoProgressAnyCompleted,
+                                DoProgressReadFromInput,
+                                DoProgressExecuteRun,
+                                DoProgressCancelSignalReceived]
+
 
 # pylint: disable=too-many-public-methods
 class VMWrapper:
@@ -114,9 +148,16 @@ class VMWrapper:
         """Do progress with notifications."""
         result = self.vm.do_progress(handles)
         if isinstance(result, PySuspended):
-            # the state machine had suspended
             raise SUSPENDED
-        return result
+        if isinstance(result, PyDoProgressAnyCompleted):
+            return DO_PROGRESS_ANY_COMPLETED
+        if isinstance(result, PyDoProgressReadFromInput):
+            return DO_PROGRESS_READ_FROM_INPUT
+        if isinstance(result, PyDoProgressExecuteRun):
+            return DoProgressExecuteRun(result.handle)
+        if isinstance(result, PyDoProgressCancelSignalReceived):
+            return DO_PROGRESS_CANCEL_SIGNAL_RECEIVED
+        raise ValueError(f"Unknown progress type: {result}")
 
     def take_notification(self, handle: int) -> NotificationType:
         """Take the result of an asynchronous operation."""
@@ -245,10 +286,13 @@ class VMWrapper:
                  handler: str,
                  parameter: bytes,
                  key: typing.Optional[str] = None,
-                 idempotency_key: typing.Optional[str] = None
+                 idempotency_key: typing.Optional[str] = None,
+                 headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None
                  ):
         """Call a service"""
-        return self.vm.sys_call(service, handler, parameter, key, idempotency_key)
+        if headers:
+            headers = [PyHeader(key=h[0], value=h[1]) for h in headers]
+        return self.vm.sys_call(service, handler, parameter, key, idempotency_key, headers)
 
     # pylint: disable=too-many-arguments
     def sys_send(self,
@@ -257,13 +301,16 @@ class VMWrapper:
                  parameter: bytes,
                  key: typing.Optional[str] = None,
                  delay: typing.Optional[int] = None,
-                 idempotency_key: typing.Optional[str] = None
+                 idempotency_key: typing.Optional[str] = None,
+                 headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None
                  ) -> int:
         """
         send an invocation to a service, and return the handle
         to the promise that will resolve with the invocation id
         """
-        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key)
+        if headers:
+            headers = [PyHeader(key=h[0], value=h[1]) for h in headers]
+        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key, headers)
 
     def sys_run(self, name: str) -> int:
         """

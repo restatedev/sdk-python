@@ -22,9 +22,26 @@ struct PyHeader {
     value: String,
 }
 
+#[pymethods]
+impl PyHeader {
+    #[new]
+    fn new(key: String, value: String) -> PyHeader {
+        Self { key, value }
+    }
+}
+
 impl From<Header> for PyHeader {
     fn from(h: Header) -> Self {
         PyHeader {
+            key: h.key.into(),
+            value: h.value.into(),
+        }
+    }
+}
+
+impl From<PyHeader> for Header {
+    fn from(h: PyHeader) -> Self {
+        Header {
             key: h.key.into(),
             value: h.value.into(),
         }
@@ -433,7 +450,7 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    #[pyo3(signature = (service, handler, buffer, key=None, idempotency_key=None))]
+    #[pyo3(signature = (service, handler, buffer, key=None, idempotency_key=None, headers=None))]
     fn sys_call(
         mut self_: PyRefMut<'_, Self>,
         service: String,
@@ -441,6 +458,7 @@ impl PyVM {
         buffer: &Bound<'_, PyBytes>,
         key: Option<String>,
         idempotency_key: Option<String>,
+        headers: Option<Vec<PyHeader>>,
     ) -> Result<PyCallHandle, PyVMError> {
         self_
             .vm
@@ -450,7 +468,11 @@ impl PyVM {
                     handler,
                     key,
                     idempotency_key,
-                    headers: vec![],
+                    headers: headers
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
                 },
                 buffer.as_bytes().to_vec().into(),
             )
@@ -458,7 +480,7 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    #[pyo3(signature = (service, handler, buffer, key=None, delay=None, idempotency_key=None))]
+    #[pyo3(signature = (service, handler, buffer, key=None, delay=None, idempotency_key=None, headers=None))]
     fn sys_send(
         mut self_: PyRefMut<'_, Self>,
         service: String,
@@ -467,6 +489,7 @@ impl PyVM {
         key: Option<String>,
         delay: Option<u64>,
         idempotency_key: Option<String>, 
+        headers: Option<Vec<PyHeader>>,
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
@@ -476,7 +499,11 @@ impl PyVM {
                     handler,
                     key,
                     idempotency_key,
-                    headers: vec![],
+                    headers: headers
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
                 },
                 buffer.as_bytes().to_vec().into(),
                 delay.map(|millis| {
