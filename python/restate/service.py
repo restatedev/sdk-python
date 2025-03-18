@@ -57,7 +57,9 @@ class Service:
                 accept: str = "application/json",
                 content_type: str = "application/json",
                 input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
-                output_serde: Serde[O] = DefaultSerde[O]()) -> typing.Callable: # type: ignore
+                output_serde: Serde[O] = DefaultSerde[O](), # type: ignore
+                metadata: typing.Optional[typing.Dict[str, str]] = None) -> typing.Callable: # type: ignore
+        
         """
         Decorator for defining a handler function.
 
