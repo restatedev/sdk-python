@@ -27,6 +27,7 @@ O = TypeVar('O')
 RunAction = Union[Callable[[], T], Callable[[], Awaitable[T]]]
 
 
+# pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     """
     Represents a durable future.
