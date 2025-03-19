@@ -36,19 +36,29 @@ I = TypeVar('I')
 O = TypeVar('O')
 
 
-
 class ServerDurableFuture(RestateDurableFuture[T]):
     """This class implements a durable future API"""
     value: T | None = None
     error: TerminalError | None = None
     state: typing.Literal["pending", "fulfilled", "rejected"] = "pending"
 
-    def __init__(self, handle: int, factory, ctx: "ServerInvocationContext") -> None:
+    def __init__(self, context: "ServerInvocationContext", handle: int, awaitable_factory) -> None:
         super().__init__()
-        self.factory = factory
-        self.handle = handle
-        self.context = ctx
+        self.context = context
+        self.source_notification_handle = handle
+        self.awaitable_factory = awaitable_factory
         self.state = "pending"
+
+
+    def is_completed(self):
+        match self.state:
+            case "pending":
+                return self.context.vm.is_completed(self.source_notification_handle)
+            case "fulfilled":
+                return True
+            case "rejected":
+                return True
+
 
     def __await__(self):
 
@@ -56,7 +66,7 @@ class ServerDurableFuture(RestateDurableFuture[T]):
             match self.state:
                 case "pending":
                     try:
-                        self.value = await self.factory()
+                        self.value = await self.awaitable_factory()
                         self.state = "fulfilled"
                         return self.value
                     except TerminalError as t:
@@ -71,30 +81,27 @@ class ServerDurableFuture(RestateDurableFuture[T]):
 
 
         return await_point().__await__()
-        #task = asyncio.create_task(self.factory())
-        #return task.__await__()
-
 
 class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T]):
     """This class implements a durable future but for calls"""
     _invocation_id: typing.Optional[str] = None
 
     def __init__(self,
-                 ctx: "ServerInvocationContext",
+                 context: "ServerInvocationContext",
                  result_handle: int,
                  result_factory,
                  invocation_id_handle: int,
                  invocation_id_factory) -> None:
-        super().__init__(result_handle, result_factory, ctx)
+        super().__init__(context, result_handle, result_factory)
         self.invocation_id_handle = invocation_id_handle
         self.invocation_id_factory = invocation_id_factory
+
 
     async def invocation_id(self) -> str:
         """Get the invocation id."""
         if self._invocation_id is None:
             self._invocation_id  = await self.invocation_id_factory()
         return self._invocation_id
-
 
 class ServerSendHandle(SendHandle):
     """This class implements the send API"""
@@ -117,7 +124,6 @@ class ServerSendHandle(SendHandle):
 async def async_value(n: Callable[[], T]) -> T:
     """convert a simple value to a coroutine."""
     return n()
-
 
 class ServerDurablePromise(DurablePromise):
     """This class implements a durable promise API"""
@@ -314,7 +320,7 @@ class ServerInvocationContext(ObjectContext):
                 return res
             return serde.deserialize(res)
 
-        return ServerDurableFuture(handle, transform, self)
+        return ServerDurableFuture(self, handle, transform)
 
 
 
