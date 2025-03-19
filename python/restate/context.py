@@ -34,6 +34,12 @@ class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     """
 
     @abc.abstractmethod
+    def is_completed(self) -> bool:
+        """
+        Returns True if the future is completed, False otherwise.
+        """
+
+    @abc.abstractmethod
     def __await__(self):
         pass
 
