@@ -36,19 +36,43 @@ I = TypeVar('I')
 O = TypeVar('O')
 
 
+
 class ServerDurableFuture(RestateDurableFuture[T]):
     """This class implements a durable future API"""
     value: T | None = None
+    error: TerminalError | None = None
+    state: typing.Literal["pending", "fulfilled", "rejected"] = "pending"
 
     def __init__(self, handle: int, factory, ctx: "ServerInvocationContext") -> None:
         super().__init__()
         self.factory = factory
         self.handle = handle
         self.context = ctx
+        self.state = "pending"
 
     def __await__(self):
-        task = asyncio.create_task(self.factory())
-        return task.__await__()
+
+        async def await_point():
+            match self.state:
+                case "pending":
+                    try:
+                        self.value = await self.factory()
+                        self.state = "fulfilled"
+                        return self.value
+                    except TerminalError as t:
+                        self.error = t
+                        self.state = "rejected"
+                        raise t
+                case "fulfilled":
+                    return self.value
+                case "rejected":
+                    assert self.error is not None
+                    raise self.error
+
+
+        return await_point().__await__()
+        #task = asyncio.create_task(self.factory())
+        #return task.__await__()
 
 
 class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T]):
@@ -89,11 +113,6 @@ class ServerSendHandle(SendHandle):
         res = await self.context.create_poll_or_cancel_coroutine(self.handle)
         self._invocation_id = res
         return res
-
-
-
-
-
 
 async def async_value(n: Callable[[], T]) -> T:
     """convert a simple value to a coroutine."""
