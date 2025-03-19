@@ -24,7 +24,7 @@ from .context import DurablePromise
 from .endpoint import app
 
 try:
-    from .harness import test_harness
+    from .harness import test_harness # type: ignore
 except ImportError:
     # we don't have the appropriate dependencies installed
 

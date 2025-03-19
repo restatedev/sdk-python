@@ -89,7 +89,7 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
 
     if is_pydantic(annotation):
         handler_io.input_type.is_pydantic = True
-        if isinstance(handler_io.input_serde, DefaultSerde):  # type: ignore
+        if isinstance(handler_io.input_serde, DefaultSerde):
             handler_io.input_serde = PydanticJsonSerde(annotation)
 
     annotation = signature.return_annotation
@@ -97,7 +97,7 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
 
     if is_pydantic(annotation):
         handler_io.output_type.is_pydantic=True
-        if isinstance(handler_io.output_serde, DefaultSerde): # type: ignore
+        if isinstance(handler_io.output_serde, DefaultSerde):
             handler_io.output_serde = PydanticJsonSerde(annotation)
 
 # pylint: disable=R0902
@@ -170,11 +170,11 @@ async def invoke_handler(handler: Handler[I, O], ctx: Any, in_buffer: bytes) -> 
     """
     if handler.arity == 2:
         try:
-            in_arg = handler.handler_io.input_serde.deserialize(in_buffer) # type: ignore
+            in_arg = handler.handler_io.input_serde.deserialize(in_buffer)
         except Exception as e:
             raise TerminalError(message=f"Unable to parse an input argument. {e}") from e
         out_arg = await handler.fn(ctx, in_arg) # type: ignore [call-arg, arg-type]
     else:
         out_arg = await handler.fn(ctx) # type: ignore [call-arg]
-    out_buffer = handler.handler_io.output_serde.serialize(out_arg) # type: ignore
+    out_buffer = handler.handler_io.output_serde.serialize(out_arg)
     return bytes(out_buffer)

@@ -19,7 +19,7 @@
 import asyncio
 from datetime import timedelta
 import inspect
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, cast
 import typing
 import traceback
 
@@ -60,7 +60,7 @@ class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T
     def __init__(self, result_handle: int,
                  result_factory,
                  invocation_id_handle: int,
-                 invocation_id_factory) -> None:
+                 invocation_id_factory: Callable[[], Awaitable[bytes | None]]) -> None:
         super().__init__(result_handle, result_factory)
         self.invocation_id_handle = invocation_id_handle
         self.invocation_id_factory = invocation_id_factory
@@ -68,7 +68,10 @@ class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T
     async def invocation_id(self) -> str:
         """Get the invocation id."""
         if self._invocation_id is None:
-            self._invocation_id  = await self.invocation_id_factory()
+            result = await self.invocation_id_factory()
+            self._invocation_id = str(result) if result is not None else None
+        if self._invocation_id is None:
+            raise ValueError("invocation_id is None")
         return self._invocation_id
 
 
@@ -166,7 +169,7 @@ class ServerInvocationContext(ObjectContext):
         self.attempt_headers = attempt_headers
         self.send = send
         self.receive = receive
-        self.run_coros_to_execute: dict[int, Awaitable[typing.Union[bytes | Failure]]] = {}
+        self.run_coros_to_execute: dict[int, Awaitable[bytes | Failure]] = {}
 
     async def enter(self):
         """Invoke the user code."""
@@ -234,19 +237,25 @@ class ServerInvocationContext(ObjectContext):
                 'more_body': True,
             })
 
-    def must_take_notification(self, handle):
-        """Take notification, which must be present"""
+    def must_take_notification(self, handle: int) -> bytes | None:
+        """Take notification, which must be present. It must be either bytes or None"""
         res = self.vm.take_notification(handle)
         if isinstance(res, NotReady):
-            raise ValueError(f"Unexpected value error: {handle}")
+            raise RuntimeError(f"Notification for handle {handle} is not ready. "
+                           "This likely indicates an unexpected async state.")
+
         if res is None:
             return None
         if isinstance(res, Failure):
             raise TerminalError(res.message, res.code)
+        if not isinstance(res, bytes):
+            raise TypeError(f"Unexpected notification type for handle {handle}: {type(res).__name__}. "
+                "Expected bytes or None.")
+
         return res
 
 
-    async def create_poll_or_cancel_coroutine(self, handle) -> bytes | None:
+    async def create_poll_or_cancel_coroutine(self, handle: int) -> bytes | None:
         """Create a coroutine to poll the handle."""
         await self.take_and_send_output()
         while True:
@@ -298,7 +307,7 @@ class ServerInvocationContext(ObjectContext):
                 return res
             return serde.deserialize(res)
 
-        def inv_id_factory():
+        def inv_id_factory()-> Awaitable[typing.Union[bytes, None]]:
             return self.create_poll_or_cancel_coroutine(invocation_id_handle)
 
         return ServerCallDurableFuture(handle, transform, invocation_id_handle, inv_id_factory)
@@ -309,7 +318,7 @@ class ServerInvocationContext(ObjectContext):
         return self.create_df(handle, serde) # type: ignore
 
     def state_keys(self) -> Awaitable[List[str]]:
-        return self.create_df(self.vm.sys_get_state_keys()) # type: ignore
+        return self.create_df(self.vm.sys_get_state_keys())
 
     def set(self, name: str, value: T, serde: Serde[T] = JsonSerde()) -> None:
         """Set the value associated with the given name."""
@@ -338,16 +347,18 @@ class ServerInvocationContext(ObjectContext):
                                    max_retry_duration: Optional[timedelta] = None):
         """Create a coroutine to poll the handle."""
         try:
-            if inspect.iscoroutinefunction(action):
-                action_result = await action() # type: ignore
+            if inspect.iscoroutinefunction(action) or inspect.isawaitable(action):
+                action_result: T = await action()
             else:
-                action_result = await asyncio.to_thread(action)
+                action_result = cast(T, await asyncio.to_thread(action))
 
             buffer = serde.serialize(action_result)
             self.vm.propose_run_completion_success(handle, buffer)
+            return buffer
         except TerminalError as t:
             failure = Failure(code=t.status_code, message=t.message)
             self.vm.propose_run_completion_failure(handle, failure)
+            return failure
         # pylint: disable=W0718
         except Exception as e:
             if max_attempts is None and max_retry_duration is None:
@@ -357,7 +368,7 @@ class ServerInvocationContext(ObjectContext):
             max_duration_ms = None if max_retry_duration is None else int(max_retry_duration.total_seconds() * 1000)
             config = RunRetryConfig(max_attempts=max_attempts, max_duration=max_duration_ms)
             self.vm.propose_run_completion_transient(handle, failure=failure, attempt_duration_ms=1, config=config)
-
+            return failure
     # pylint: disable=W0236
     # pylint: disable=R0914
     def run(self,
@@ -374,13 +385,13 @@ class ServerInvocationContext(ObjectContext):
         self.run_coros_to_execute[handle] = self.create_run_coroutine(handle, action, serde, max_attempts, max_retry_duration)
 
         # Prepare response coroutine
-        return self.create_df(handle, serde) # type: ignore
+        return self.create_df(handle, serde)
 
 
     def sleep(self, delta: timedelta) -> RestateDurableFuture[None]:
         # convert timedelta to milliseconds
         millis = int(delta.total_seconds() * 1000)
-        return self.create_df(self.vm.sys_sleep(millis)) # type: ignore
+        return self.create_df(self.vm.sys_sleep(millis))
 
     def do_call(self,
                 tpe: Callable[[Any, I], Awaitable[O]],

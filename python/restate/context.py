@@ -34,7 +34,7 @@ class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     """
 
     @abc.abstractmethod
-    def __await__(self):
+    def __await__(self) -> typing.Generator[Any, None, T]:
         pass
 
 
