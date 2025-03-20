@@ -101,10 +101,6 @@ class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T
         """Get the invocation id."""
         if self._invocation_id is None:
             self._invocation_id  = await self.invocation_id_factory()
-            # from its logic, invocation_id_factory returns bytes or None, but this function must return a str.
-            # However, this expects a str.
-            # This function is not used anywhere else, so its correctness might not be verified.
-    
 
         if self._invocation_id is None:
             raise ValueError("invocation_id is None")
