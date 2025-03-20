@@ -28,7 +28,7 @@ from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import Receive, Send
-from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
+from restate.vm import Failure, Invocation, NotReady, NotificationType, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
 from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun # pylint: disable=line-too-long
 
 T = TypeVar('T')
@@ -42,7 +42,7 @@ class ServerDurableFuture(RestateDurableFuture[T]):
     error: TerminalError | None = None
     state: typing.Literal["pending", "fulfilled", "rejected"] = "pending"
 
-    def __init__(self, context: "ServerInvocationContext", handle: int, awaitable_factory) -> None:
+    def __init__(self, context: "ServerInvocationContext", handle: int, awaitable_factory: Callable[[], Awaitable[T]]) -> None:
         super().__init__()
         self.context = context
         self.source_notification_handle = handle
@@ -60,7 +60,7 @@ class ServerDurableFuture(RestateDurableFuture[T]):
                 return True
 
 
-    def __await__(self):
+    def __await__(self) -> typing.Generator[Any, Any, T]:
 
         async def await_point():
             match self.state:
@@ -74,6 +74,7 @@ class ServerDurableFuture(RestateDurableFuture[T]):
                         self.state = "rejected"
                         raise t
                 case "fulfilled":
+                    assert self.value is not None
                     return self.value
                 case "rejected":
                     assert self.error is not None
@@ -91,7 +92,7 @@ class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T
                  result_handle: int,
                  result_factory,
                  invocation_id_handle: int,
-                 invocation_id_factory) -> None:
+                 invocation_id_factory: Callable[[], Awaitable[NotificationType]]) -> None:
         super().__init__(context, result_handle, result_factory)
         self.invocation_id_handle = invocation_id_handle
         self.invocation_id_factory = invocation_id_factory
@@ -100,8 +101,12 @@ class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T
     async def invocation_id(self) -> str:
         """Get the invocation id."""
         if self._invocation_id is None:
-            self._invocation_id  = await self.invocation_id_factory()
-
+            res = await self.invocation_id_factory()
+            if isinstance(res, str):
+                self._invocation_id = res
+            else:
+                raise ValueError(f"Unexpected notification type for handle {self.invocation_id_handle}: {type(res).__name__}. "
+                    "Expected str.")
         if self._invocation_id is None:
             raise ValueError("invocation_id is None")
         return self._invocation_id
@@ -147,6 +152,7 @@ class ServerDurablePromise(DurablePromise):
             res = self.server_context.must_take_notification(handle)
             if res is None:
                 return None
+            assert isinstance(res, bytes)
             return serde.deserialize(res)
 
         return await_point()
@@ -185,6 +191,7 @@ class ServerDurablePromise(DurablePromise):
             res = self.server_context.must_take_notification(handle)
             if res is None:
                 return None
+            assert isinstance(res, bytes)
             return serde.deserialize(res)
 
         return await_point()
@@ -278,11 +285,11 @@ class ServerInvocationContext(ObjectContext):
                 'more_body': True,
             })
 
-    def must_take_notification(self, handle: int) -> bytes | None:
+    def must_take_notification(self, handle: int)  -> bytes | None | str | List[str]:
         """Take notification, which must be present. It must be either bytes or None"""
         res = self.vm.take_notification(handle)
         if isinstance(res, NotReady):
-            raise ValueError(f"Notification for handle {handle} is not ready. "
+            raise RuntimeError(f"Notification for handle {handle} is not ready. "
                            "This likely indicates an unexpected async state.")
 
         if res is None:
@@ -316,17 +323,34 @@ class ServerInvocationContext(ObjectContext):
                 await self.take_and_send_output()
 
 
-    def create_df(self, handle: int, serde: Serde[T] | None = None) -> ServerDurableFuture[T]:
-        """Create a durable future."""
+    def create_df(self, handle: int, serde: Serde[T] | None = None) -> ServerDurableFuture[Any]:
+        """Create a durable future for handling asynchronous state operations.
+        
+        This is a general-purpose factory method that creates a future that will resolve
+        to whatever the VM notification system returns for the given handle. The specific 
+        return type depends on the operation that was performed.
+        
+        Args:
+            handle: The notification handle from the VM
+            serde: Optional serializer/deserializer for converting raw bytes to specific types
+                
+        Returns:
+            A durable future that will eventually resolve to the appropriate value.
+            The caller is responsible for knowing what type to expect based on the context.
+        """
 
-        async def transform():
+        async def fetch_result():
             await self.create_poll_or_cancel_coroutine([handle])
             res = self.must_take_notification(handle)
             if res is None or serde is None:
                 return res
-            return serde.deserialize(res)
+            if isinstance(res, bytes):
+                return serde.deserialize(res)
+            if isinstance(res, (str, list)):
+                return res
+            raise ValueError(f"Unexpected notification type for handle {handle}: {type(res).__name__}.")
 
-        return ServerDurableFuture(self, handle, transform)
+        return ServerDurableFuture(self, handle, fetch_result)
 
 
 
@@ -338,9 +362,12 @@ class ServerInvocationContext(ObjectContext):
             res = self.must_take_notification(handle)
             if res is None or serde is None:
                 return res
-            return serde.deserialize(res)
+            if isinstance(res, bytes):
+                return serde.deserialize(res)
+            if isinstance(res, (str, list)):
+                return res
 
-        async def inv_id_factory():
+        async def inv_id_factory() -> NotificationType:
             await self.create_poll_or_cancel_coroutine([invocation_id_handle])
             return self.must_take_notification(invocation_id_handle)
 
@@ -351,7 +378,7 @@ class ServerInvocationContext(ObjectContext):
         handle = self.vm.sys_get_state(name)
         return self.create_df(handle, serde) # type: ignore
 
-    def state_keys(self) -> Awaitable[List[str]]:
+    def state_keys(self) -> RestateDurableFuture[List[str]]:
         return self.create_df(self.vm.sys_get_state_keys())
 
     def set(self, name: str, value: T, serde: Serde[T] = JsonSerde()) -> None:
