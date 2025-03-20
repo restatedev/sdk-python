@@ -282,16 +282,13 @@ class ServerInvocationContext(ObjectContext):
         """Take notification, which must be present. It must be either bytes or None"""
         res = self.vm.take_notification(handle)
         if isinstance(res, NotReady):
-            raise RuntimeError(f"Notification for handle {handle} is not ready. "
+            raise ValueError(f"Notification for handle {handle} is not ready. "
                            "This likely indicates an unexpected async state.")
 
         if res is None:
             return None
         if isinstance(res, Failure):
             raise TerminalError(res.message, res.code)
-        if not isinstance(res, bytes):
-            raise TypeError(f"Unexpected notification type for handle {handle}: {type(res).__name__}. "
-                "Expected bytes or None.")
 
         return res
 
