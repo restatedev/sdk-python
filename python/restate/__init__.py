@@ -19,7 +19,9 @@ from .workflow import Workflow
 # types
 from .context import Context, ObjectContext, ObjectSharedContext
 from .context import WorkflowContext, WorkflowSharedContext
-from .context import DurablePromise
+from .context import DurablePromise, RestateDurableFuture, RestateDurableCallFuture, SendHandle
+from .combinators import wait, gather, as_completed, ALL_COMPLETED, FIRST_COMPLETED
+from .exceptions import TerminalError
 
 from .endpoint import app
 
@@ -43,6 +45,15 @@ __all__ = [
     "WorkflowContext",
     "WorkflowSharedContext",
     "DurablePromise",
+    "RestateDurableFuture",
+    "RestateDurableCallFuture",
+    "SendHandle",
+    "TerminalError",
     "app",
     "test_harness",
+    "wait",
+    "gather",
+    "as_completed",
+    "ALL_COMPLETED",
+    "FIRST_COMPLETED",
 ]
