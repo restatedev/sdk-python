@@ -43,6 +43,12 @@ class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     def __await__(self):
         pass
 
+    @abc.abstractmethod
+    def map_value(self, mapper: Callable[[T], O]) -> 'RestateDurableFuture[O]':
+        """
+        Maps the value of the future using the given function.
+        """
+
 
 # pylint: disable=R0903
 class RestateDurableCallFuture(RestateDurableFuture[T]):
