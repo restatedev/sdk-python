@@ -70,7 +70,7 @@ async def wait_completed(*args: RestateDurableFuture[Any]) -> Tuple[List[Restate
         if f.is_completed():
             completed.append(f)
         else:
-            handles.append(f.source_notification_handle)
+            handles.append(f.handle)
             uncompleted.append(f)
 
     if completed:

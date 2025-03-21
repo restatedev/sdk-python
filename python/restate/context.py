@@ -34,20 +34,8 @@ class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     """
 
     @abc.abstractmethod
-    def is_completed(self) -> bool:
-        """
-        Returns True if the future is completed, False otherwise.
-        """
-
-    @abc.abstractmethod
     def __await__(self):
         pass
-
-    @abc.abstractmethod
-    def map_value(self, mapper: Callable[[T], O]) -> 'RestateDurableFuture[O]':
-        """
-        Maps the value of the future using the given function.
-        """
 
 
 # pylint: disable=R0903
@@ -61,7 +49,6 @@ class RestateDurableCallFuture(RestateDurableFuture[T]):
         """
         Returns the invocation id of the call.
         """
-
 
 
 @dataclass
