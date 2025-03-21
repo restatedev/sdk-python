@@ -133,21 +133,9 @@ class ServerDurablePromise(DurablePromise):
         super().__init__(name=name, serde=JsonSerde() if serde is None else serde)
         self.server_context = server_context
 
-    def value(self) -> Awaitable[Any]:
-        vm: VMWrapper = self.server_context.vm
-        handle = vm.sys_get_promise(self.name)
-        coro =  self.server_context.create_poll_or_cancel_coroutine([handle])
-        serde = self.serde
-        assert serde is not None
-
-        async def await_point():
-            await coro
-            res = self.server_context.must_take_notification(handle)
-            if res is None:
-                return None
-            return serde.deserialize(res)
-
-        return await_point()
+    def value(self) -> RestateDurableFuture[Any]:
+        handle = self.server_context.vm.sys_get_promise(self.name)
+        return self.server_context.create_future(handle, self.serde)
 
     def resolve(self, value: Any) -> Awaitable[None]:
         vm: VMWrapper = self.server_context.vm
@@ -156,10 +144,11 @@ class ServerDurablePromise(DurablePromise):
         handle = vm.sys_complete_promise_success(self.name, value_buffer)
 
         async def await_point():
-            await self.server_context.create_poll_or_cancel_coroutine([handle])
+            if not self.server_context.vm.is_completed(handle):
+                await self.server_context.create_poll_or_cancel_coroutine([handle])
             self.server_context.must_take_notification(handle)
 
-        return await_point()
+        return ServerDurableFuture(self.server_context, handle, await_point)
 
     def reject(self, message: str, code: int = 500) -> Awaitable[None]:
         vm: VMWrapper = self.server_context.vm
@@ -167,10 +156,11 @@ class ServerDurablePromise(DurablePromise):
         handle = vm.sys_complete_promise_failure(self.name, py_failure)
 
         async def await_point():
-            await self.server_context.create_poll_or_cancel_coroutine([handle])
+            if not self.server_context.vm.is_completed(handle):
+                await self.server_context.create_poll_or_cancel_coroutine([handle])
             self.server_context.must_take_notification(handle)
 
-        return await_point()
+        return ServerDurableFuture(self.server_context, handle, await_point)
 
     def peek(self) -> Awaitable[Any | None]:
         vm: VMWrapper = self.server_context.vm
@@ -178,14 +168,7 @@ class ServerDurablePromise(DurablePromise):
         serde = self.serde
         assert serde is not None
 
-        async def await_point():
-            await self.server_context.create_poll_or_cancel_coroutine([handle])
-            res = self.server_context.must_take_notification(handle)
-            if res is None:
-                return None
-            return serde.deserialize(res)
-
-        return await_point()
+        return self.server_context.create_future(handle, serde)
 
 
 # disable too many public method
