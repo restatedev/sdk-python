@@ -23,13 +23,14 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle
+from restate.context import DurablePromise, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle, RestateDurableSleepFuture
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
-from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun # pylint: disable=line-too-long
+from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun
+
 
 T = TypeVar('T')
 I = TypeVar('I')
@@ -79,6 +80,12 @@ class ServerDurableFuture(RestateDurableFuture[T]):
         already has a completion value for it.
         """
         return self.future.done() or self.context.vm.is_completed(self.handle)
+
+    def __await__(self):
+        return self.future.__await__()
+
+class ServerDurableSleepFuture(RestateDurableSleepFuture, ServerDurableFuture[None]):
+    """This class implements a durable sleep future API"""
 
     def __await__(self):
         return self.future.__await__()
@@ -347,6 +354,16 @@ class ServerInvocationContext(ObjectContext):
 
         return ServerDurableFuture(self, handle, transform)
 
+    def create_sleep_future(self, handle: int) -> ServerDurableSleepFuture:
+        """Create a durable sleep future."""
+
+        async def transform():
+            if not self.vm.is_completed(handle):
+                await self.create_poll_or_cancel_coroutine([handle])
+            self.must_take_notification(handle)
+
+        return ServerDurableSleepFuture(self, handle, transform)
+
 
     def create_call_future(self, handle: int, invocation_id_handle: int, serde: Serde[T] | None = None) -> ServerCallDurableFuture[T]:
         """Create a durable future."""
@@ -439,10 +456,10 @@ class ServerInvocationContext(ObjectContext):
         return self.create_future(handle, serde) # type: ignore
 
 
-    def sleep(self, delta: timedelta) -> RestateDurableFuture[None]:
+    def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
         # convert timedelta to milliseconds
         millis = int(delta.total_seconds() * 1000)
-        return self.create_future(self.vm.sys_sleep(millis)) # type: ignore
+        return self.create_sleep_future(self.vm.sys_sleep(millis)) # type: ignore
 
     def do_call(self,
                 tpe: Callable[[Any, I], Awaitable[O]],

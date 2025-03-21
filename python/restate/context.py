@@ -51,6 +51,16 @@ class RestateDurableCallFuture(RestateDurableFuture[T]):
         """
 
 
+class RestateDurableSleepFuture(RestateDurableFuture[None]):
+    """
+    Represents a durable sleep future.
+    """
+
+    @abc.abstractmethod
+    def __await__(self):
+        pass
+
+
 @dataclass
 class Request:
     """
@@ -150,7 +160,7 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def sleep(self, delta: timedelta) -> RestateDurableFuture[None]:
+    def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
         """
         Suspends the current invocation for the given duration
         """
