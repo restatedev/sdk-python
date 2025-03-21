@@ -355,7 +355,7 @@ class DurablePromise(typing.Generic[T]):
         """
 
     @abc.abstractmethod
-    def value(self) -> Awaitable[T]:
+    def value(self) -> RestateDurableFuture[T]:
         """
         Returns the value of the promise if it is resolved, None otherwise.
         """
