@@ -17,54 +17,15 @@ from restate.exceptions import TerminalError
 from restate.context import RestateDurableFuture
 from restate.server_context import ServerDurableFuture, ServerInvocationContext
 
-FIRST_COMPLETED = 1
-ALL_COMPLETED = 2
-
-async def wait(*futures: RestateDurableFuture[Any], mode: int = FIRST_COMPLETED) -> Tuple[List[RestateDurableFuture[Any]], List[RestateDurableFuture[Any]]]:
-    """
-    Blocks until at least one of the futures/all of the futures are completed. 
-
-    Returns a tuple of two lists: the first list contains the futures that are completed,
-    the second list contains the futures that are not completed.
-
-    The mode parameter can be either FIRST_COMPLETED or ALL_COMPLETED.
-    Using FIRST_COMPLETED will return as soon as one of the futures is completed.
-    Using ALL_COMPLETED will return only when all futures are completed.
-
-    examples:
-
-    completed, waiting = await wait(f1, f2, f3, mode=FIRST_COMPLETED)
-    for completed_future in completed:
-        # do something with the completed future
-        print(await completed_future)  # prints the result of the future
-
-    or 
-
-    completed, waiting = await wait(f1, f2, f3, mode=ALL_COMPLETED)
-    assert waiting == []
-
-
-    """
-    assert mode in (FIRST_COMPLETED, ALL_COMPLETED)
-
-    remaining = list(futures)
-    while remaining:
-        completed, waiting = await wait_completed(remaining)
-        if mode == FIRST_COMPLETED:
-            return completed, waiting
-        remaining = waiting
-
-    assert mode == ALL_COMPLETED
-    return list(futures), []
-
 async def gather(*futures: RestateDurableFuture[Any]) -> List[RestateDurableFuture[Any]]:
     """
     Blocks until all futures are completed.
 
     Returns a list of all futures.
     """
-    completed, _ = await wait(*futures, mode=ALL_COMPLETED)
-    return completed
+    async for _ in as_completed(*futures):
+        pass
+    return list(futures)
 
 async def as_completed(*futures: RestateDurableFuture[Any]):
     """
@@ -79,12 +40,12 @@ async def as_completed(*futures: RestateDurableFuture[Any]):
     """
     remaining = list(futures)
     while remaining:
-        completed, waiting = await wait_completed(remaining)
+        completed, waiting = await wait_completed(*remaining)
         for f in completed:
             yield f
         remaining = waiting
 
-async def wait_completed(futures: List[RestateDurableFuture[Any]]) -> Tuple[List[RestateDurableFuture[Any]], List[RestateDurableFuture[Any]]]:
+async def wait_completed(*args: RestateDurableFuture[Any]) -> Tuple[List[RestateDurableFuture[Any]], List[RestateDurableFuture[Any]]]:
     """
     Blocks until at least one of the futures is completed.
 
@@ -95,6 +56,7 @@ async def wait_completed(futures: List[RestateDurableFuture[Any]]) -> Tuple[List
     context: ServerInvocationContext | None = None
     completed = []
     uncompleted = []
+    futures = list(args)
 
     if not futures:
         return [], []
@@ -108,7 +70,7 @@ async def wait_completed(futures: List[RestateDurableFuture[Any]]) -> Tuple[List
         if f.is_completed():
             completed.append(f)
         else:
-            handles.append(f.source_notification_handle)
+            handles.append(f.handle)
             uncompleted.append(f)
 
     if completed:

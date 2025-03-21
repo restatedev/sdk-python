@@ -20,8 +20,8 @@ from .workflow import Workflow
 from .context import Context, ObjectContext, ObjectSharedContext
 from .context import WorkflowContext, WorkflowSharedContext
 from .context import DurablePromise, RestateDurableFuture, RestateDurableCallFuture, SendHandle
-from .combinators import wait, gather, as_completed, ALL_COMPLETED, FIRST_COMPLETED
 from .exceptions import TerminalError
+from .asyncio import as_completed, gather, wait_completed
 
 from .endpoint import app
 
@@ -51,9 +51,7 @@ __all__ = [
     "TerminalError",
     "app",
     "test_harness",
-    "wait",
     "gather",
     "as_completed",
-    "ALL_COMPLETED",
-    "FIRST_COMPLETED",
+    "wait_completed",
 ]
