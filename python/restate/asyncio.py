@@ -27,6 +27,38 @@ async def gather(*futures: RestateDurableFuture[Any]) -> List[RestateDurableFutu
         pass
     return list(futures)
 
+async def select(**kws: RestateDurableFuture[Any]) -> List[Any]:
+    """
+    Blocks until one of the futures is completed.
+
+    Example:
+
+    who, what = await select(car=f1, hotel=f2, flight=f3)
+    if who == "car":
+        print(what)
+    elif who == "hotel":
+        print(what)
+    elif who == "flight":
+        print(what)
+
+    works the best with matching:
+
+    match await select(result=ctx.promise("verify.payment"), timeout=ctx.sleep(timedelta(seconds=10))):
+    case ['result', "approved"]:
+        return { "success" : True }
+    case ['result', "declined"]:
+        raise TerminalError(message="Payment declined", status_code=401)
+    case ['timeout', _]:
+        raise TerminalError(message="Payment verification timed out", status_code=410)
+     
+    """
+    if not kws:
+        raise ValueError("At least one future must be passed.")
+    reverse = { f: key for key, f in kws.items() }
+    async for f in as_completed(*kws.values()):
+        return [reverse[f], await f]
+    assert False, "unreachable"
+
 async def as_completed(*futures: RestateDurableFuture[Any]):
     """
     Returns an iterator that yields the futures as they are completed.

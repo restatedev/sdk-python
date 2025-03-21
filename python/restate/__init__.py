@@ -22,7 +22,7 @@ from .context import WorkflowContext, WorkflowSharedContext
 # pylint: disable=line-too-long
 from .context import DurablePromise, RestateDurableFuture, RestateDurableCallFuture, RestateDurableSleepFuture, SendHandle
 from .exceptions import TerminalError
-from .asyncio import as_completed, gather, wait_completed
+from .asyncio import as_completed, gather, wait_completed, select
 
 from .endpoint import app
 
@@ -56,4 +56,5 @@ __all__ = [
     "gather",
     "as_completed",
     "wait_completed",
+    "select"
 ]
