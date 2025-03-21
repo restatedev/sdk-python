@@ -29,7 +29,7 @@ from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, NotificationType, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
-from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun # pylint: disable=line-too-long
+from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun # pylint: disable=line-too-long
 
 T = TypeVar('T')
 I = TypeVar('I')
@@ -58,6 +58,13 @@ class ServerDurableFuture(RestateDurableFuture[T]):
                 return True
             case "rejected":
                 return True
+
+    def map_value(self, mapper: Callable[[T], O]) -> RestateDurableFuture[O]:
+        """Map the value of the future."""
+        async def mapper_coro():
+            return mapper(await self)
+
+        return ServerDurableFuture(self.context, self.source_notification_handle, mapper_coro)
 
 
     def __await__(self) -> typing.Generator[Any, Any, T]:
@@ -200,6 +207,25 @@ class ServerDurablePromise(DurablePromise):
 # disable too many public method
 # pylint: disable=R0904
 
+class SyncPoint:
+    """
+    This class implements a synchronization point.
+    """
+
+    def __init__(self):
+        self._cond = asyncio.Condition()
+
+    async def wait(self):
+        """Wait for the sync point."""
+        async with self._cond:
+            await self._cond.wait()
+
+    async def arrive(self):
+        """Arrive at the sync point."""
+        async with self._cond:
+            self._cond.notify_all()
+
+# pylint: disable=R0902
 class ServerInvocationContext(ObjectContext):
     """This class implements the context for the restate framework based on the server."""
 
@@ -218,6 +244,7 @@ class ServerInvocationContext(ObjectContext):
         self.send = send
         self.receive = receive
         self.run_coros_to_execute: dict[int, Callable[[], Awaitable[bytes | Failure]]] = {}
+        self.sync_point = SyncPoint()
 
     async def enter(self):
         """Invoke the user code."""
@@ -319,9 +346,18 @@ class ServerInvocationContext(ObjectContext):
                     self.vm.notify_input_closed()
                 continue
             if isinstance(do_progress_response, DoProgressExecuteRun):
-                await self.run_coros_to_execute[do_progress_response.handle]()
-                await self.take_and_send_output()
+                fn = self.run_coros_to_execute[do_progress_response.handle]
+                assert fn is not None
 
+                async def wrapper(f):
+                    await f()
+                    await self.take_and_send_output()
+                    await self.sync_point.arrive()
+
+                asyncio.create_task(wrapper(fn))
+                continue
+            if isinstance(do_progress_response, DoWaitPendingRun):
+                await self.sync_point.wait()
 
     def create_df(self, handle: int, serde: Serde[T] | None = None) -> ServerDurableFuture[Any]:
         """Create a durable future for handling asynchronous state operations.
@@ -442,7 +478,6 @@ class ServerInvocationContext(ObjectContext):
         handle = self.vm.sys_run(name)
 
         # Register closure to run
-        # TODO: use thunk to avoid coro leak warning.
         self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, action, serde, max_attempts, max_retry_duration)
 
         # Prepare response coroutine

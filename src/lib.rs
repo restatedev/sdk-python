@@ -217,6 +217,9 @@ struct PyDoProgressExecuteRun {
 struct PyDoProgressCancelSignalReceived;
 
 #[pyclass]
+struct PyDoWaitForPendingRun;
+
+#[pyclass]
 pub struct PyCallHandle {
     #[pyo3(get)]
     invocation_id_handle: PyNotificationHandle,
@@ -349,7 +352,10 @@ impl PyVM {
                 .into_py(py)
                 .into_bound(py)
                 .into_any()),
-            Ok(DoProgressResponse::WaitingPendingRun) => panic!("Python SDK doesn't support concurrent pending runs, so this is not supposed to happen")
+            Ok(DoProgressResponse::WaitingPendingRun) => Ok(PyDoWaitForPendingRun
+                .into_py(py)
+                .into_bound(py)
+                .into_any()), 
         }
     }
 
@@ -767,6 +773,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDoProgressReadFromInput>()?;
     m.add_class::<PyDoProgressExecuteRun>()?;
     m.add_class::<PyDoProgressCancelSignalReceived>()?;
+    m.add_class::<PyDoWaitForPendingRun>()?;
     m.add_class::<PyCallHandle>()?;
 
     m.add("VMException", m.py().get_type_bound::<VMException>())?;

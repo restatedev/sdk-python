@@ -91,10 +91,13 @@ async def wait_completed(futures: List[RestateDurableFuture[Any]]) -> Tuple[List
     Returns a tuple of two lists: the first list contains the futures that are completed,
     the second list contains the futures that are not completed.
     """
-    if not futures:
-        return [], []
     handles: List[int] = []
     context: ServerInvocationContext | None = None
+    completed = []
+    uncompleted = []
+
+    if not futures:
+        return [], []
     for f in futures:
         if not isinstance(f, ServerDurableFuture):
             raise TerminalError("All futures must SDK created futures.")
@@ -103,17 +106,24 @@ async def wait_completed(futures: List[RestateDurableFuture[Any]]) -> Tuple[List
         elif context is not f.context:
             raise TerminalError("All futures must be created by the same SDK context.")
         if f.is_completed():
-            return [f], []
-        handles.append(f.source_notification_handle)
+            completed.append(f)
+        else:
+            handles.append(f.source_notification_handle)
+            uncompleted.append(f)
 
-    assert context is not None
-    await context.create_poll_or_cancel_coroutine(handles)
+    if completed:
+        # the user had passed some completed futures, so we can return them immediately
+        return completed, uncompleted # type: ignore
+
     completed = []
     uncompleted = []
+    assert context is not None
+    await context.create_poll_or_cancel_coroutine(handles)
+
     for index, handle in enumerate(handles):
         future = futures[index]
         if context.vm.is_completed(handle):
-            completed.append(future)
+            completed.append(future) # type: ignore
         else:
-            uncompleted.append(future)
-    return completed, uncompleted
+            uncompleted.append(future) # type: ignore
+    return completed, uncompleted # type: ignore

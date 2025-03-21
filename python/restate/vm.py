@@ -17,7 +17,7 @@ wrap the restate._internal.PyVM class
 
 from dataclasses import dataclass
 import typing
-from restate._internal import PyVM, PyHeader, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
+from restate._internal import PyVM, PyHeader, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoWaitForPendingRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
 
 @dataclass
 class Invocation:
@@ -90,14 +90,21 @@ class DoProgressCancelSignalReceived:
     Represents a notification that a cancel signal has been received
     """
 
+class DoWaitPendingRun:
+    """
+    Represents a notification that a run is pending
+    """
+
 DO_PROGRESS_ANY_COMPLETED = DoProgressAnyCompleted()
 DO_PROGRESS_READ_FROM_INPUT = DoProgressReadFromInput()
 DO_PROGRESS_CANCEL_SIGNAL_RECEIVED = DoProgressCancelSignalReceived()
+DO_WAIT_PENDING_RUN = DoWaitPendingRun()
 
 DoProgressResult = typing.Union[DoProgressAnyCompleted,
                                 DoProgressReadFromInput,
                                 DoProgressExecuteRun,
-                                DoProgressCancelSignalReceived]
+                                DoProgressCancelSignalReceived,
+                                DoWaitPendingRun]
 
 
 # pylint: disable=too-many-public-methods
@@ -157,6 +164,8 @@ class VMWrapper:
             return DoProgressExecuteRun(result.handle)
         if isinstance(result, PyDoProgressCancelSignalReceived):
             return DO_PROGRESS_CANCEL_SIGNAL_RECEIVED
+        if isinstance(result, PyDoWaitForPendingRun):
+            return DO_WAIT_PENDING_RUN
         raise ValueError(f"Unknown progress type: {result}")
 
     def take_notification(self, handle: int) -> NotificationType:
