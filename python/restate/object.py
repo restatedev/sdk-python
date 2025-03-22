@@ -60,8 +60,8 @@ class VirtualObject:
                 kind: typing.Optional[typing.Literal["exclusive", "shared"]] = "exclusive",
                 accept: str = "application/json",
                 content_type: str = "application/json",
-                input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
-                output_serde: Serde[O] = DefaultSerde[O](), # type: ignore
+                input_serde: Serde[I] = DefaultSerde(),
+                output_serde: Serde[O] = DefaultSerde(),
                 metadata: typing.Optional[dict] = None) -> typing.Callable:
         """
         Decorator for defining a handler function.

@@ -59,9 +59,7 @@ class HTTPResponseBodyEvent(TypedDict):
     more_body: bool
 
 
-ASGIReceiveEvent = Union[
-    HTTPRequestEvent
-]
+ASGIReceiveEvent = HTTPRequestEvent
 
 
 ASGISendEvent = Union[
