@@ -34,20 +34,9 @@ class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     """
 
     @abc.abstractmethod
-    def is_completed(self) -> bool:
-        """
-        Returns True if the future is completed, False otherwise.
-        """
-
-    @abc.abstractmethod
     def __await__(self) -> typing.Generator[Any, Any, T]:
         pass
 
-    @abc.abstractmethod
-    def map_value(self, mapper: Callable[[T], O]) -> 'RestateDurableFuture[O]':
-        """
-        Maps the value of the future using the given function.
-        """
 
 
 # pylint: disable=R0903
@@ -62,6 +51,15 @@ class RestateDurableCallFuture(RestateDurableFuture[T]):
         Returns the invocation id of the call.
         """
 
+
+class RestateDurableSleepFuture(RestateDurableFuture[None]):
+    """
+    Represents a durable sleep future.
+    """
+
+    @abc.abstractmethod
+    def __await__(self) -> typing.Generator[Any, Any, None]:
+        pass
 
 
 @dataclass
@@ -163,7 +161,7 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def sleep(self, delta: timedelta) -> RestateDurableFuture[None]:
+    def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
         """
         Suspends the current invocation for the given duration
         """
@@ -358,7 +356,7 @@ class DurablePromise(typing.Generic[T]):
         """
 
     @abc.abstractmethod
-    def value(self) -> Awaitable[T]:
+    def value(self) -> RestateDurableFuture[T]:
         """
         Returns the value of the promise if it is resolved, None otherwise.
         """

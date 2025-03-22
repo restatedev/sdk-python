@@ -19,122 +19,108 @@
 import asyncio
 from datetime import timedelta
 import inspect
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, cast
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle
+from restate.context import DurablePromise, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle, RestateDurableSleepFuture
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import Receive, Send
-from restate.vm import Failure, Invocation, NotReady, NotificationType, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
-from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun # pylint: disable=line-too-long
+from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
+from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun
+
 
 T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
 
+class LazyFuture:
+    """
+    Creates a task lazily, and allows multiple awaiters to the same coroutine.
+    The async_def will be executed at most 1 times. (0 if __await__ or get() not called) 
+    """
+    __slots__ = ['async_def', 'task']
+
+    def __init__(self, async_def: Callable[[], typing.Coroutine[Any, Any, T]]) -> None:
+        assert async_def is not None
+        self.async_def = async_def
+        self.task: asyncio.Task | None = None
+
+    def done(self):
+        """
+        check if completed
+        """
+        return self.task is not None and self.task.done()
+
+    async def get(self) -> T:
+        """Get the value of the future."""
+        if self.task is None:
+            self.task = asyncio.create_task(self.async_def())
+
+        return await self.task
+
+    def __await__(self):
+        return self.get().__await__()
 
 class ServerDurableFuture(RestateDurableFuture[T]):
     """This class implements a durable future API"""
-    value: T | None = None
-    error: TerminalError | None = None
-    state: typing.Literal["pending", "fulfilled", "rejected"] = "pending"
 
-    def __init__(self, context: "ServerInvocationContext", handle: int, awaitable_factory: Callable[[], Awaitable[T]]) -> None:
+    def __init__(self, context: "ServerInvocationContext", handle: int, async_def) -> None:
         super().__init__()
         self.context = context
-        self.source_notification_handle = handle
-        self.awaitable_factory = awaitable_factory
-        self.state = "pending"
-
+        self.handle = handle
+        self.future = LazyFuture(async_def)
 
     def is_completed(self):
-        match self.state:
-            case "pending":
-                return self.context.vm.is_completed(self.source_notification_handle)
-            case "fulfilled":
-                return True
-            case "rejected":
-                return True
+        """
+        A future is completed, either it was physically completed and its value has been collected.
+        OR it might not yet physically completed (i.e. the async_def didn't finish yet) BUT our VM 
+        already has a completion value for it.
+        """
+        return self.future.done() or self.context.vm.is_completed(self.handle)
 
-    def map_value(self, mapper: Callable[[T], O]) -> RestateDurableFuture[O]:
-        """Map the value of the future."""
-        async def mapper_coro():
-            return mapper(await self)
+    def __await__(self):
+        return self.future.__await__()
 
-        return ServerDurableFuture(self.context, self.source_notification_handle, mapper_coro)
+class ServerDurableSleepFuture(RestateDurableSleepFuture, ServerDurableFuture[None]):
+    """This class implements a durable sleep future API"""
 
-
-    def __await__(self) -> typing.Generator[Any, Any, T]:
-
-        async def await_point():
-            match self.state:
-                case "pending":
-                    try:
-                        self.value = await self.awaitable_factory()
-                        self.state = "fulfilled"
-                        return self.value
-                    except TerminalError as t:
-                        self.error = t
-                        self.state = "rejected"
-                        raise t
-                case "fulfilled":
-                    assert self.value is not None
-                    return self.value
-                case "rejected":
-                    assert self.error is not None
-                    raise self.error
-
-
-        return await_point().__await__()
+    def __await__(self) -> typing.Generator[Any, Any, None]:
+        return self.future.__await__()
 
 class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T]):
     """This class implements a durable future but for calls"""
-    _invocation_id: typing.Optional[str] = None
 
     def __init__(self,
                  context: "ServerInvocationContext",
                  result_handle: int,
-                 result_factory,
-                 invocation_id_handle: int,
-                 invocation_id_factory: Callable[[], Awaitable[NotificationType]]) -> None:
-        super().__init__(context, result_handle, result_factory)
-        self.invocation_id_handle = invocation_id_handle
-        self.invocation_id_factory = invocation_id_factory
-
+                 result_async_def,
+                 invocation_id_async_def) -> None:
+        super().__init__(context, result_handle, result_async_def)
+        self.invocation_id_future = LazyFuture(invocation_id_async_def)
 
     async def invocation_id(self) -> str:
         """Get the invocation id."""
-        if self._invocation_id is None:
-            res = await self.invocation_id_factory()
-            if isinstance(res, str):
-                self._invocation_id = res
-            else:
-                raise ValueError(f"Unexpected notification type for handle {self.invocation_id_handle}: {type(res).__name__}. "
-                    "Expected str.")
-        if self._invocation_id is None:
-            raise ValueError("invocation_id is None")
-        return self._invocation_id
+        return await self.invocation_id_future.get()
 
 class ServerSendHandle(SendHandle):
     """This class implements the send API"""
-    _invocation_id: typing.Optional[str]
 
-    def __init__(self, context, handle: int) -> None:
+    def __init__(self, context: "ServerInvocationContext", handle: int) -> None:
         super().__init__()
-        self.handle = handle
-        self.context = context
-        self._invocation_id = None
+
+        async def coro():
+            if not context.vm.is_completed(handle):
+                await context.create_poll_or_cancel_coroutine([handle])
+            return context.must_take_notification(handle)
+
+        self.future = LazyFuture(coro)
 
     async def invocation_id(self) -> str:
         """Get the invocation id."""
-        if self._invocation_id is not None:
-            return self._invocation_id
-        res = await self.context.create_poll_or_cancel_coroutine(self.handle)
-        self._invocation_id = res
-        return res
+        return await self.future
 
 async def async_value(n: Callable[[], T]) -> T:
     """convert a simple value to a coroutine."""
@@ -147,22 +133,9 @@ class ServerDurablePromise(DurablePromise):
         super().__init__(name=name, serde=JsonSerde() if serde is None else serde)
         self.server_context = server_context
 
-    def value(self) -> Awaitable[Any]:
-        vm: VMWrapper = self.server_context.vm
-        handle = vm.sys_get_promise(self.name)
-        coro =  self.server_context.create_poll_or_cancel_coroutine([handle])
-        serde = self.serde
-        assert serde is not None
-
-        async def await_point():
-            await coro
-            res = self.server_context.must_take_notification(handle)
-            if res is None:
-                return None
-            assert isinstance(res, bytes)
-            return serde.deserialize(res)
-
-        return await_point()
+    def value(self) -> RestateDurableFuture[Any]:
+        handle = self.server_context.vm.sys_get_promise(self.name)
+        return self.server_context.create_future(handle, self.serde)
 
     def resolve(self, value: Any) -> Awaitable[None]:
         vm: VMWrapper = self.server_context.vm
@@ -171,10 +144,11 @@ class ServerDurablePromise(DurablePromise):
         handle = vm.sys_complete_promise_success(self.name, value_buffer)
 
         async def await_point():
-            await self.server_context.create_poll_or_cancel_coroutine([handle])
+            if not self.server_context.vm.is_completed(handle):
+                await self.server_context.create_poll_or_cancel_coroutine([handle])
             self.server_context.must_take_notification(handle)
 
-        return await_point()
+        return ServerDurableFuture(self.server_context, handle, await_point)
 
     def reject(self, message: str, code: int = 500) -> Awaitable[None]:
         vm: VMWrapper = self.server_context.vm
@@ -182,10 +156,11 @@ class ServerDurablePromise(DurablePromise):
         handle = vm.sys_complete_promise_failure(self.name, py_failure)
 
         async def await_point():
-            await self.server_context.create_poll_or_cancel_coroutine([handle])
+            if not self.server_context.vm.is_completed(handle):
+                await self.server_context.create_poll_or_cancel_coroutine([handle])
             self.server_context.must_take_notification(handle)
 
-        return await_point()
+        return ServerDurableFuture(self.server_context, handle, await_point)
 
     def peek(self) -> Awaitable[Any | None]:
         vm: VMWrapper = self.server_context.vm
@@ -193,15 +168,7 @@ class ServerDurablePromise(DurablePromise):
         serde = self.serde
         assert serde is not None
 
-        async def await_point():
-            await self.server_context.create_poll_or_cancel_coroutine([handle])
-            res = self.server_context.must_take_notification(handle)
-            if res is None:
-                return None
-            assert isinstance(res, bytes)
-            return serde.deserialize(res)
-
-        return await_point()
+        return self.server_context.create_future(handle, serde)
 
 
 # disable too many public method
@@ -243,7 +210,7 @@ class ServerInvocationContext(ObjectContext):
         self.attempt_headers = attempt_headers
         self.send = send
         self.receive = receive
-        self.run_coros_to_execute: dict[int, Callable[[], Awaitable[bytes | Failure]]] = {}
+        self.run_coros_to_execute: dict[int,  Callable[[], Awaitable[bytes | Failure]]] = {}
         self.sync_point = SyncPoint()
 
     async def enter(self):
@@ -312,18 +279,15 @@ class ServerInvocationContext(ObjectContext):
                 'more_body': True,
             })
 
-    def must_take_notification(self, handle: int)  -> bytes | None | str | List[str]:
-        """Take notification, which must be present. It must be either bytes or None"""
+    def must_take_notification(self, handle):
+        """Take notification, which must be present"""
         res = self.vm.take_notification(handle)
         if isinstance(res, NotReady):
-            raise RuntimeError(f"Notification for handle {handle} is not ready. "
-                           "This likely indicates an unexpected async state.")
-
+            raise ValueError(f"Unexpected value error: {handle}")
         if res is None:
             return None
         if isinstance(res, Failure):
             raise TerminalError(res.message, res.code)
-
         return res
 
 
@@ -347,6 +311,7 @@ class ServerInvocationContext(ObjectContext):
                 continue
             if isinstance(do_progress_response, DoProgressExecuteRun):
                 fn = self.run_coros_to_execute[do_progress_response.handle]
+                del self.run_coros_to_execute[do_progress_response.handle]
                 assert fn is not None
 
                 async def wrapper(f):
@@ -359,63 +324,45 @@ class ServerInvocationContext(ObjectContext):
             if isinstance(do_progress_response, DoWaitPendingRun):
                 await self.sync_point.wait()
 
-    def create_df(self, handle: int, serde: Serde[T] | None = None) -> ServerDurableFuture[Any]:
-        """Create a durable future for handling asynchronous state operations.
-        
-        This is a general-purpose factory method that creates a future that will resolve
-        to whatever the VM notification system returns for the given handle. The specific 
-        return type depends on the operation that was performed.
-        
-        Args:
-            handle: The notification handle from the VM
-            serde: Optional serializer/deserializer for converting raw bytes to specific types
-                
-        Returns:
-            A durable future that will eventually resolve to the appropriate value.
-            The caller is responsible for knowing what type to expect based on the context.
-        """
-
+    def _create_fetch_result_coroutine(self, handle: int, serde: Serde[T] | None = None):
+        """Create a coroutine that fetches a result from a notification handle."""
         async def fetch_result():
-            await self.create_poll_or_cancel_coroutine([handle])
+            if not self.vm.is_completed(handle):
+                await self.create_poll_or_cancel_coroutine([handle])
             res = self.must_take_notification(handle)
-            if res is None or serde is None:
+            if res is None or serde is None or not isinstance(res, bytes):
                 return res
-            if isinstance(res, bytes):
-                return serde.deserialize(res)
-            if isinstance(res, (str, list)):
-                return res
-            raise ValueError(f"Unexpected notification type for handle {handle}: {type(res).__name__}.")
+            return serde.deserialize(res)
 
-        return ServerDurableFuture(self, handle, fetch_result)
+        return fetch_result
 
+    def create_future(self, handle: int, serde: Serde[T] | None = None) -> ServerDurableFuture[T]:
+        """Create a durable future for handling asynchronous state operations."""
+        return ServerDurableFuture(self, handle, self._create_fetch_result_coroutine(handle, serde))
 
-
-    def create_call_df(self, handle: int, invocation_id_handle: int, serde: Serde[T] | None = None) -> ServerCallDurableFuture[T]:
-        """Create a durable future."""
-
+    def create_sleep_future(self, handle: int) -> ServerDurableSleepFuture:
+        """Create a durable sleep future."""
         async def transform():
-            await self.create_poll_or_cancel_coroutine([handle])
-            res = self.must_take_notification(handle)
-            if res is None or serde is None:
-                return res
-            if isinstance(res, bytes):
-                return serde.deserialize(res)
-            if isinstance(res, (str, list)):
-                return res
+            if not self.vm.is_completed(handle):
+                await self.create_poll_or_cancel_coroutine([handle])
+            self.must_take_notification(handle)
+        return ServerDurableSleepFuture(self, handle, transform)
 
-        async def inv_id_factory() -> NotificationType:
-            await self.create_poll_or_cancel_coroutine([invocation_id_handle])
+    def create_call_future(self, handle: int, invocation_id_handle: int, serde: Serde[T] | None = None) -> ServerCallDurableFuture[T]:
+        """Create a durable future."""
+        async def inv_id_factory():
+            if not self.vm.is_completed(invocation_id_handle):
+                await self.create_poll_or_cancel_coroutine([invocation_id_handle])
             return self.must_take_notification(invocation_id_handle)
 
-        return ServerCallDurableFuture(self, handle, transform, invocation_id_handle, inv_id_factory)
-
+        return ServerCallDurableFuture(self, handle, self._create_fetch_result_coroutine(handle, serde), inv_id_factory)
 
     def get(self, name: str, serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[T]]:
         handle = self.vm.sys_get_state(name)
-        return self.create_df(handle, serde) # type: ignore
+        return self.create_future(handle, serde) # type: ignore
 
     def state_keys(self) -> RestateDurableFuture[List[str]]:
-        return self.create_df(self.vm.sys_get_state_keys())
+        return self.create_future(self.vm.sys_get_state_keys()) # type: ignore
 
     def set(self, name: str, value: T, serde: Serde[T] = JsonSerde()) -> None:
         """Set the value associated with the given name."""
@@ -444,10 +391,10 @@ class ServerInvocationContext(ObjectContext):
                                    max_retry_duration: Optional[timedelta] = None):
         """Create a coroutine to poll the handle."""
         try:
-            if inspect.iscoroutinefunction(action) or inspect.isawaitable(action):
-                action_result: T = await action()
+            if inspect.iscoroutinefunction(action):
+                action_result: T = await action() # type: ignore
             else:
-                action_result = cast(T, await asyncio.to_thread(action))
+                action_result = typing.cast(T, await asyncio.to_thread(action))
 
             buffer = serde.serialize(action_result)
             self.vm.propose_run_completion_success(handle, buffer)
@@ -481,13 +428,13 @@ class ServerInvocationContext(ObjectContext):
         self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, action, serde, max_attempts, max_retry_duration)
 
         # Prepare response coroutine
-        return self.create_df(handle, serde)
+        return self.create_future(handle, serde) # type: ignore
 
 
-    def sleep(self, delta: timedelta) -> RestateDurableFuture[None]:
+    def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
         # convert timedelta to milliseconds
         millis = int(delta.total_seconds() * 1000)
-        return self.create_df(self.vm.sys_sleep(millis))
+        return self.create_sleep_future(self.vm.sys_sleep(millis)) # type: ignore
 
     def do_call(self,
                 tpe: Callable[[Any, I], Awaitable[O]],
@@ -536,7 +483,7 @@ class ServerInvocationContext(ObjectContext):
                                   idempotency_key=idempotency_key,
                                   headers=headers)
 
-        return self.create_call_df(handle=handle.result_handle,
+        return self.create_call_future(handle=handle.result_handle,
                                    invocation_id_handle=handle.invocation_id_handle,
                                    serde=output_serde)
 
@@ -617,7 +564,7 @@ class ServerInvocationContext(ObjectContext):
                   serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, RestateDurableFuture[Any]]:
         assert serde is not None
         name, handle = self.vm.sys_awakeable()
-        return name, self.create_df(handle, serde)
+        return name, self.create_future(handle, serde)
 
     def resolve_awakeable(self,
                           name: str,
@@ -648,4 +595,4 @@ class ServerInvocationContext(ObjectContext):
             raise ValueError("invocation_id cannot be None")
         assert serde is not None
         handle = self.vm.attach_invocation(invocation_id)
-        return self.create_df(handle, serde)
+        return self.create_future(handle, serde)

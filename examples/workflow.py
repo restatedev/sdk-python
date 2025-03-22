@@ -13,9 +13,13 @@
 # pylint: disable=W0613
 # pylint: disable=C0301
 
+from datetime import timedelta
 
 from restate import Workflow, WorkflowContext, WorkflowSharedContext
-from restate.exceptions import TerminalError
+from restate import select
+from restate import TerminalError
+
+TIMEOUT = timedelta(seconds=10)
 
 payment = Workflow("payment")
 
@@ -38,13 +42,17 @@ async def pay(ctx: WorkflowContext, amount: int):
     ctx.set("status", "waiting for the payment provider to approve")
 
     # Wait for the payment to be verified
-    result = await ctx.promise("verify.payment").value()
-    if result == "approved":
-        ctx.set("status", "payment approved")
-        return { "success" : True }
 
-    ctx.set("status", "payment declined")
-    raise TerminalError(message="Payment declined", status_code=401)
+    match await select(result=ctx.promise("verify.payment").value(), timeout=ctx.sleep(TIMEOUT)):
+        case ['result', "approved"]:
+            ctx.set("status", "payment approved")
+            return { "success" : True }
+        case ['result', "declined"]:
+            ctx.set("status", "payment declined")
+            raise TerminalError(message="Payment declined", status_code=401)
+        case ['timeout', _]:
+            ctx.set("status", "payment verification timed out")
+            raise TerminalError(message="Payment verification timed out", status_code=410)
 
 @payment.handler()
 async def payment_verified(ctx: WorkflowSharedContext, result: str):

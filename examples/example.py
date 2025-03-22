@@ -12,14 +12,19 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
+import restate
+
 from greeter import greeter
 from virtual_object import counter
 from workflow import payment
 from pydantic_greeter import pydantic_greeter
+from concurrent_greeter import concurrent_greeter
 
-import restate
-
-app = restate.app(services=[greeter, counter, payment, pydantic_greeter])
+app = restate.app(services=[greeter,
+                            counter,
+                            payment,
+                            pydantic_greeter,
+                            concurrent_greeter])
 
 if __name__ == "__main__":
     import hypercorn
