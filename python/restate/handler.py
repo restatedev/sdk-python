@@ -20,7 +20,7 @@ from inspect import Signature
 from typing import Any, Callable, Awaitable, Dict, Generic, Literal, Optional, TypeVar
 
 from restate.exceptions import TerminalError
-from restate.serde import DefaultSerde, PydanticBaseModel, PydanticJsonSerde, Serde
+from restate.serde import DefaultSerde, PydanticJsonSerde, Serde, is_pydantic
 
 I = TypeVar('I')
 O = TypeVar('O')
@@ -62,16 +62,6 @@ class HandlerIO(Generic[I, O]):
     output_serde: Serde[O]
     input_type: Optional[TypeHint[I]] = None
     output_type: Optional[TypeHint[O]] = None
-
-def is_pydantic(annotation) -> bool:
-    """
-    Check if an object is a Pydantic model.
-    """
-    try:
-        return issubclass(annotation, PydanticBaseModel)
-    except TypeError:
-        # annotation is not a class or a type
-        return False
 
 
 def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Signature):

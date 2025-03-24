@@ -26,7 +26,7 @@ import traceback
 from restate.context import DurablePromise, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle, RestateDurableSleepFuture
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
-from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
+from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde, for_type
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
 from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun
@@ -417,16 +417,20 @@ class ServerInvocationContext(ObjectContext):
     def run(self,
                   name: str,
                   action: Callable[[], T] | Callable[[], Awaitable[T]],
-                  serde: Optional[Serde[T]] = DefaultSerde(),
+                  serde: Serde[T] = DefaultSerde(),
                   max_attempts: Optional[int] = None,
-                  max_retry_duration: Optional[timedelta] = None) -> RestateDurableFuture[T]:
-        assert serde is not None
+                  max_retry_duration: Optional[timedelta] = None,
+                  type_hint: Optional[typing.Type[T]] = None
+                  ) -> RestateDurableFuture[T]:
+
+        if type_hint is not None:
+            serde = for_type(type_hint)
+        elif isinstance(serde, DefaultSerde):
+            signature = inspect.signature(action, eval_str=True)
+            serde = for_type(signature.return_annotation)
+
         handle = self.vm.sys_run(name)
-
-        # Register closure to run
         self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, action, serde, max_attempts, max_retry_duration)
-
-        # Prepare response coroutine
         return self.create_future(handle, serde) # type: ignore
 
 

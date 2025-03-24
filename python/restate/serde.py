@@ -35,14 +35,15 @@ O = typing.TypeVar('O')
 # disable to few parameters
 # pylint: disable=R0903
 
-class SerializerType(typing.Generic[O]):
-    """A type definition for a serializer"""
-    __call__: typing.Callable[[typing.Optional[O]], bytes]
-
-class DeserializerType(typing.Generic[I]):
-    """A type definition for a deserializer"""
-    __call__: typing.Callable[[bytes], typing.Optional[I]]
-
+def is_pydantic(annotation) -> bool:
+    """
+    Check if an object is a Pydantic model.
+    """
+    try:
+        return issubclass(annotation, PydanticBaseModel)
+    except TypeError:
+        # annotation is not a class or a type
+        return False
 
 class Serde(typing.Generic[T], abc.ABC):
     """serializer/deserializer interface."""
@@ -58,7 +59,6 @@ class Serde(typing.Generic[T], abc.ABC):
         """
         Serializes an object to a bytearray.
         """
-
 
 class BytesSerde(Serde[bytes]):
     """A pass-trough serializer/deserializer."""
@@ -219,31 +219,21 @@ class PydanticJsonSerde(Serde[I]):
         json_str = obj.model_dump_json() # type: ignore[attr-defined]
         return json_str.encode("utf-8")
 
-def deserialize_json(buf: typing.ByteString) -> typing.Optional[O]:
+
+def for_type(type_hint: typing.Type[T]) -> Serde[T]:
     """
-    Deserializes a bytearray to a JSON object.
+    Automatically selects a serde based on the type hint.
 
     Args:
-        buf (bytearray): The bytearray to deserialize.
+        type_hint (typing.Type[T]): The type hint to use for serde selection.
 
     Returns:
-        typing.Optional[O]: The deserialized JSON object.
+        Serde[T]: The serde to use for the given type hint.
     """
-    if not buf:
-        return None
-    return json.loads(buf)
-
-def serialize_json(obj: typing.Optional[O]) -> bytes:
-    """
-    Serializes a JSON object to a bytearray.
-
-    Args:
-        obj (O): The JSON object to serialize.
-
-    Returns:
-        bytearray: The serialized bytearray.
-    """
-    if obj is None:
-        return bytes()
-
-    return bytes(json.dumps(obj), "utf-8")
+    if is_pydantic(type_hint):
+        return PydanticJsonSerde(type_hint)
+    if isinstance(type_hint, bytes):
+        return BytesSerde()
+    if isinstance(type_hint, (dict, list, int, float, str, bool)):
+        return JsonSerde()
+    return DefaultSerde()
