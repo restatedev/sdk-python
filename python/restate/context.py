@@ -98,7 +98,7 @@ class KeyValueStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> RestateDurableFuture[List[str]]:
+    def state_keys(self) -> Awaitable[List[str]]:
         """Returns the list of keys in the store."""
 
     @abc.abstractmethod
@@ -323,7 +323,7 @@ class ObjectSharedContext(Context):
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> RestateDurableFuture[List[str]]:
+    def state_keys(self) -> Awaitable[List[str]]:
         """
         Returns the list of keys in the store.
         """

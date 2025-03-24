@@ -210,7 +210,7 @@ class ServerInvocationContext(ObjectContext):
         self.attempt_headers = attempt_headers
         self.send = send
         self.receive = receive
-        self.run_coros_to_execute: dict[int,  Callable[[], Awaitable[bytes | Failure]]] = {}
+        self.run_coros_to_execute: dict[int,  Callable[[], Awaitable[None]]] = {}
         self.sync_point = SyncPoint()
 
     async def enter(self):
@@ -330,9 +330,11 @@ class ServerInvocationContext(ObjectContext):
             if not self.vm.is_completed(handle):
                 await self.create_poll_or_cancel_coroutine([handle])
             res = self.must_take_notification(handle)
-            if res is None or serde is None or not isinstance(res, bytes):
+            if res is None or serde is None:
                 return res
-            return serde.deserialize(res)
+            if isinstance(res, bytes):
+                return serde.deserialize(res)
+            return res
 
         return fetch_result
 
@@ -361,8 +363,8 @@ class ServerInvocationContext(ObjectContext):
         handle = self.vm.sys_get_state(name)
         return self.create_future(handle, serde) # type: ignore
 
-    def state_keys(self) -> RestateDurableFuture[List[str]]:
-        return self.create_future(self.vm.sys_get_state_keys()) # type: ignore
+    def state_keys(self) -> Awaitable[List[str]]:
+        return self.create_future(self.vm.sys_get_state_keys())
 
     def set(self, name: str, value: T, serde: Serde[T] = JsonSerde()) -> None:
         """Set the value associated with the given name."""
@@ -398,11 +400,9 @@ class ServerInvocationContext(ObjectContext):
 
             buffer = serde.serialize(action_result)
             self.vm.propose_run_completion_success(handle, buffer)
-            return buffer
         except TerminalError as t:
             failure = Failure(code=t.status_code, message=t.message)
             self.vm.propose_run_completion_failure(handle, failure)
-            return failure
         # pylint: disable=W0718
         except Exception as e:
             if max_attempts is None and max_retry_duration is None:
@@ -412,7 +412,6 @@ class ServerInvocationContext(ObjectContext):
             max_duration_ms = None if max_retry_duration is None else int(max_retry_duration.total_seconds() * 1000)
             config = RunRetryConfig(max_attempts=max_attempts, max_duration=max_duration_ms)
             self.vm.propose_run_completion_transient(handle, failure=failure, attempt_duration_ms=1, config=config)
-            return failure
     # pylint: disable=W0236
     # pylint: disable=R0914
     def run(self,
