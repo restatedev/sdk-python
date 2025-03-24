@@ -34,8 +34,9 @@ class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     """
 
     @abc.abstractmethod
-    def __await__(self):
+    def __await__(self) -> typing.Generator[Any, Any, T]:
         pass
+
 
 
 # pylint: disable=R0903
@@ -57,7 +58,7 @@ class RestateDurableSleepFuture(RestateDurableFuture[None]):
     """
 
     @abc.abstractmethod
-    def __await__(self):
+    def __await__(self) -> typing.Generator[Any, Any, None]:
         pass
 
 
@@ -322,7 +323,7 @@ class ObjectSharedContext(Context):
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> RestateDurableFuture[List[str]]:
+    def state_keys(self) -> Awaitable[List[str]]:
         """
         Returns the list of keys in the store.
         """

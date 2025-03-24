@@ -10,6 +10,7 @@
 #
 """Test containers based wrapper for the restate server"""
 
+import abc
 import asyncio
 from dataclasses import dataclass
 import threading
@@ -40,15 +41,18 @@ def run_in_background(coro) -> threading.Thread:
     return thread
 
 
-class BindAddress:
+class BindAddress(abc.ABC):
     """A bind address for the ASGI server"""
 
-    def get_local_bind_address(self):
+    @abc.abstractmethod
+    def get_local_bind_address(self) -> str:
         """return the local bind address for hypercorn to bind to"""
 
-    def get_endpoint_connection_string(self):
+    @abc.abstractmethod
+    def get_endpoint_connection_string(self) -> str:
         """return the SDK connection string to be used by restate"""
 
+    @abc.abstractmethod
     def cleanup(self):
         """cleanup any resources used by the bind address"""
 
@@ -58,11 +62,14 @@ class TcpSocketBindAddress(BindAddress):
     def __init__(self):
         self.port = find_free_port()
 
-    def get_local_bind_address(self):
+    def get_local_bind_address(self) -> str:
         return f"0.0.0.0:{self.port}"
 
-    def get_endpoint_connection_string(self):
+    def get_endpoint_connection_string(self) -> str:
         return f"http://host.docker.internal:{self.port}"
+
+    def cleanup(self):
+        pass
 
 
 class AsgiServer:

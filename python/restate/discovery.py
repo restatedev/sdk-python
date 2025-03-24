@@ -144,7 +144,7 @@ def json_schema_from_type_hint(type_hint: Optional[TypeHint[Any]]) -> Any:
     if not type_hint.annotation:
         return None
     if type_hint.is_pydantic:
-        return type_hint.annotation.model_json_schema(mode='serialization') # type: ignore
+        return type_hint.annotation.model_json_schema(mode='serialization')
     return type_hint_to_json_schema(type_hint.annotation)
 
 
