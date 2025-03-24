@@ -145,19 +145,25 @@ class Context(abc.ABC):
             action: RunAction[T],
             serde: Serde[T] = DefaultSerde(),
             max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None) -> RestateDurableFuture[T]:
+            max_retry_duration: typing.Optional[timedelta] = None,
+            type_hint: Optional[typing.Type[T]] = None
+            ) -> RestateDurableFuture[T]:
         """
         Runs the given action with the given name.
 
         Args:
             name: The name of the action.
             action: The action to run.
-            serde: The serialization/deserialization mechanism.
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type. 
+                    See also 'type_hint'.
             max_attempts:   The maximum number of retry attempts to complete the action.
                             If None, the action will be retried indefinitely, until it succeeds.
                             Otherwise, the action will be retried until the maximum number of attempts is reached and then it will raise a TerminalError.
             max_retry_duration: The maximum duration for retrying. If None, the action will be retried indefinitely, until it succeeds.
                                 Otherwise, the action will be retried until the maximum duration is reached and then it will raise a TerminalError.
+            type_hint: The type hint of the return value of the action.
+                        This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer. 
+
         """
 
     @abc.abstractmethod
