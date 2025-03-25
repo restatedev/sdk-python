@@ -24,7 +24,7 @@ T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
 
-RunAction = Union[Callable[[], T], Callable[[], Awaitable[T]]]
+RunAction = Union[Callable[..., T], Callable[..., Awaitable[T]]]
 
 
 # pylint: disable=R0903
@@ -154,7 +154,8 @@ class Context(abc.ABC):
             serde: Serde[T] = DefaultSerde(),
             max_attempts: typing.Optional[int] = None,
             max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None
+            type_hint: Optional[typing.Type[T]] = None,
+            args: Optional[typing.Tuple[Any, ...]] = None,
             ) -> RestateDurableFuture[T]:
         """
         Runs the given action with the given name.
