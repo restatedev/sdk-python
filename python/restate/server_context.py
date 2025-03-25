@@ -19,6 +19,7 @@
 import asyncio
 from datetime import timedelta
 import inspect
+import functools
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
@@ -397,7 +398,8 @@ class ServerInvocationContext(ObjectContext):
                                    action: Callable[[], T] | Callable[[], Awaitable[T]],
                                    serde: Serde[T],
                                    max_attempts: Optional[int] = None,
-                                   max_retry_duration: Optional[timedelta] = None):
+                                   max_retry_duration: Optional[timedelta] = None,
+                                   ):
         """Create a coroutine to poll the handle."""
         try:
             if inspect.iscoroutinefunction(action):
@@ -423,11 +425,12 @@ class ServerInvocationContext(ObjectContext):
     # pylint: disable=R0914
     def run(self,
                   name: str,
-                  action: Callable[[], T] | Callable[[], Awaitable[T]],
+                  action: Callable[..., T] | Callable[..., Awaitable[T]],
                   serde: Serde[T] = DefaultSerde(),
                   max_attempts: Optional[int] = None,
                   max_retry_duration: Optional[timedelta] = None,
-                  type_hint: Optional[typing.Type[T]] = None
+                  type_hint: Optional[typing.Type[T]] = None,
+                  args: Optional[typing.Tuple[Any, ...]] = None
                   ) -> RestateDurableFuture[T]:
 
         if isinstance(serde, DefaultSerde):
@@ -435,8 +438,16 @@ class ServerInvocationContext(ObjectContext):
                 signature = inspect.signature(action, eval_str=True)
                 type_hint = signature.return_annotation
             serde = serde.with_maybe_type(type_hint)
+
         handle = self.vm.sys_run(name)
-        self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, action, serde, max_attempts, max_retry_duration)
+
+        if args is not None:
+            noargs_action = functools.partial(action, *args)
+        else:
+            # todo: we can also verify by looking at the signature that there are no missing parameters
+            noargs_action = action # type: ignore
+
+        self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, noargs_action, serde, max_attempts, max_retry_duration)
         return self.create_future(handle, serde) # type: ignore
 
 
