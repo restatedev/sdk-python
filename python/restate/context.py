@@ -94,7 +94,7 @@ class KeyValueStore(abc.ABC):
             name: str,
             serde: Serde[T] = DefaultSerde(),
             type_hint: Optional[typing.Type[T]] = None
-            ) -> Awaitable[Optional[T]]:
+            ) -> Awaitable[Optional[Any]]:
         """
         Retrieves the value associated with the given name.
 
@@ -337,7 +337,7 @@ class ObjectSharedContext(Context):
             name: str,
             serde: Serde[T] = DefaultSerde(),
             type_hint: Optional[typing.Type[T]] = None
-            ) -> RestateDurableFuture[Optional[T]]:
+            ) -> RestateDurableFuture[Optional[Any]]:
         """
         Retrieves the value associated with the given name.
 
