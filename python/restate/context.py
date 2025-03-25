@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union
 import typing
 from datetime import timedelta
-from restate.serde import DefaultSerde, JsonSerde, Serde
+from restate.serde import DefaultSerde, Serde
 
 T = TypeVar('T')
 I = TypeVar('I')
@@ -92,9 +92,17 @@ class KeyValueStore(abc.ABC):
     @abc.abstractmethod
     def get(self,
             name: str,
-            serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[Any]]:
+            serde: Serde[T] = DefaultSerde(),
+            type_hint: Optional[typing.Type[T]] = None
+            ) -> Awaitable[Optional[Any]]:
         """
         Retrieves the value associated with the given name.
+
+        Args:
+            name: The state name
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type. 
+                    See also 'type_hint'.
+            type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer. 
         """
 
     @abc.abstractmethod
@@ -105,7 +113,7 @@ class KeyValueStore(abc.ABC):
     def set(self,
             name: str,
             value: T,
-            serde: Serde[T] = JsonSerde()) -> None:
+            serde: Serde[T] = DefaultSerde()) -> None:
         """set the value associated with the given name."""
 
     @abc.abstractmethod
@@ -266,7 +274,9 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def awakeable(self,
-                  serde: Serde[T] = JsonSerde()) -> typing.Tuple[str, RestateDurableFuture[Any]]:
+                  serde: Serde[T] = DefaultSerde(),
+                  type_hint: Optional[typing.Type[T]] = None
+                  ) -> typing.Tuple[str, RestateDurableFuture[Any]]:
         """
         Returns the name of the awakeable and the future to be awaited.
         """
@@ -275,7 +285,7 @@ class Context(abc.ABC):
     def resolve_awakeable(self,
                           name: str,
                           value: I,
-                          serde: Serde[I] = JsonSerde()) -> None:
+                          serde: Serde[I] = DefaultSerde()) -> None:
         """
         Resolves the awakeable with the given name.
         """
@@ -293,7 +303,9 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[T]:
+    def attach_invocation(self, invocation_id: str, serde: Serde[T] = DefaultSerde(),
+                          type_hint: typing.Optional[typing.Type[T]] = None
+                          ) -> RestateDurableFuture[T]:
         """
         Attaches the invocation with the given id.
         """
@@ -323,9 +335,17 @@ class ObjectSharedContext(Context):
     @abc.abstractmethod
     def get(self,
             name: str,
-            serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[Optional[Any]]:
+            serde: Serde[T] = DefaultSerde(),
+            type_hint: Optional[typing.Type[T]] = None
+            ) -> RestateDurableFuture[Optional[Any]]:
         """
         Retrieves the value associated with the given name.
+
+        Args:
+            name: The state name
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type. 
+                    See also 'type_hint'.
+            type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer. 
         """
 
     @abc.abstractmethod
@@ -339,7 +359,7 @@ class DurablePromise(typing.Generic[T]):
     Represents a durable promise.
     """
 
-    def __init__(self, name: str, serde: Serde[T] = JsonSerde()) -> None:
+    def __init__(self, name: str, serde: Serde[T] = DefaultSerde()) -> None:
         self.name = name
         self.serde = serde
 
@@ -373,7 +393,7 @@ class WorkflowContext(ObjectContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = JsonSerde()) -> DurablePromise[Any]:
+    def promise(self, name: str, serde: Serde[T] = DefaultSerde()) -> DurablePromise[Any]:
         """
         Returns a durable promise with the given name.
         """
@@ -384,7 +404,7 @@ class WorkflowSharedContext(ObjectSharedContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = JsonSerde()) -> DurablePromise[Any]:
+    def promise(self, name: str, serde: Serde[T] = DefaultSerde()) -> DurablePromise[Any]:
         """
         Returns a durable promise with the given name.
         """

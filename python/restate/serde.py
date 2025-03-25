@@ -145,6 +145,17 @@ class DefaultSerde(Serde[I]):
     while allowing automatic serde selection based on type hints.
     """
 
+    def __init__(self, type_hint: typing.Optional[typing.Type[I]] = None):
+        super().__init__()
+        self.type_hint = type_hint
+
+    def with_maybe_type(self, type_hint: typing.Type[I] | None = None) -> "DefaultSerde[I]":
+        """
+        Sets the type hint for the serde.
+        """
+        self.type_hint = type_hint
+        return self
+
     def deserialize(self, buf: bytes) -> typing.Optional[I]:
         """
         Deserializes a byte array into a Python object.
@@ -157,6 +168,8 @@ class DefaultSerde(Serde[I]):
         """
         if not buf:
             return None
+        if is_pydantic(self.type_hint):
+            return self.type_hint.model_validate_json(buf) # type: ignore
         return json.loads(buf)
 
     def serialize(self, obj: typing.Optional[I]) -> bytes:
@@ -174,11 +187,9 @@ class DefaultSerde(Serde[I]):
         if obj is None:
             return bytes()
 
-        if isinstance(obj, PydanticBaseModel):
-            # Use the Pydantic-specific serialization
+        if is_pydantic(self.type_hint):
             return obj.model_dump_json().encode("utf-8")  # type: ignore[attr-defined]
 
-        # Fallback to standard JSON serialization
         return json.dumps(obj).encode("utf-8")
 
 
@@ -218,22 +229,3 @@ class PydanticJsonSerde(Serde[I]):
             return bytes()
         json_str = obj.model_dump_json() # type: ignore[attr-defined]
         return json_str.encode("utf-8")
-
-
-def for_type(type_hint: typing.Type[T]) -> Serde[T]:
-    """
-    Automatically selects a serde based on the type hint.
-
-    Args:
-        type_hint (typing.Type[T]): The type hint to use for serde selection.
-
-    Returns:
-        Serde[T]: The serde to use for the given type hint.
-    """
-    if is_pydantic(type_hint):
-        return PydanticJsonSerde(type_hint)
-    if isinstance(type_hint, bytes):
-        return BytesSerde()
-    if isinstance(type_hint, (dict, list, int, float, str, bool)):
-        return JsonSerde()
-    return DefaultSerde()

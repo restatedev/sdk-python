@@ -26,7 +26,7 @@ import traceback
 from restate.context import DurablePromise, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle, RestateDurableSleepFuture
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
-from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde, for_type
+from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import Receive, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
 from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun
@@ -130,7 +130,7 @@ class ServerDurablePromise(DurablePromise):
     """This class implements a durable promise API"""
 
     def __init__(self, server_context: "ServerInvocationContext", name, serde) -> None:
-        super().__init__(name=name, serde=JsonSerde() if serde is None else serde)
+        super().__init__(name=name, serde=DefaultSerde() if serde is None else serde)
         self.server_context = server_context
 
     def value(self) -> RestateDurableFuture[Any]:
@@ -359,15 +359,22 @@ class ServerInvocationContext(ObjectContext):
 
         return ServerCallDurableFuture(self, handle, self._create_fetch_result_coroutine(handle, serde), inv_id_factory)
 
-    def get(self, name: str, serde: Serde[T] = JsonSerde()) -> Awaitable[Optional[T]]:
+    def get(self, name: str,
+            serde: Serde[T] = DefaultSerde(),
+            type_hint: Optional[typing.Type[T]] = None
+            ) -> Awaitable[Optional[T]]:
         handle = self.vm.sys_get_state(name)
+        if isinstance(serde, DefaultSerde):
+            serde = serde.with_maybe_type(type_hint)
         return self.create_future(handle, serde) # type: ignore
 
     def state_keys(self) -> Awaitable[List[str]]:
         return self.create_future(self.vm.sys_get_state_keys())
 
-    def set(self, name: str, value: T, serde: Serde[T] = JsonSerde()) -> None:
+    def set(self, name: str, value: T, serde: Serde[T] = DefaultSerde()) -> None:
         """Set the value associated with the given name."""
+        if isinstance(serde, DefaultSerde):
+            serde = serde.with_maybe_type(type(value))
         buffer = serde.serialize(value)
         self.vm.sys_set_state(name, bytes(buffer))
 
@@ -423,12 +430,11 @@ class ServerInvocationContext(ObjectContext):
                   type_hint: Optional[typing.Type[T]] = None
                   ) -> RestateDurableFuture[T]:
 
-        if type_hint is not None:
-            serde = for_type(type_hint)
-        elif isinstance(serde, DefaultSerde):
-            signature = inspect.signature(action, eval_str=True)
-            serde = for_type(signature.return_annotation)
-
+        if isinstance(serde, DefaultSerde):
+            if type_hint is None:
+                signature = inspect.signature(action, eval_str=True)
+                type_hint = signature.return_annotation
+            serde = serde.with_maybe_type(type_hint)
         handle = self.vm.sys_run(name)
         self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, action, serde, max_attempts, max_retry_duration)
         return self.create_future(handle, serde) # type: ignore
@@ -564,16 +570,20 @@ class ServerInvocationContext(ObjectContext):
         return send_handle
 
     def awakeable(self,
-                  serde: typing.Optional[Serde[I]] = JsonSerde()) -> typing.Tuple[str, RestateDurableFuture[Any]]:
-        assert serde is not None
+                  serde: Serde[I] = DefaultSerde(),
+                  type_hint: Optional[typing.Type[I]] = None
+                  ) -> typing.Tuple[str, RestateDurableFuture[Any]]:
+        if isinstance(serde, DefaultSerde):
+            serde = serde.with_maybe_type(type_hint)
         name, handle = self.vm.sys_awakeable()
         return name, self.create_future(handle, serde)
 
     def resolve_awakeable(self,
                           name: str,
                           value: I,
-                          serde: typing.Optional[Serde[I]] = JsonSerde()) -> None:
-        assert serde is not None
+                          serde: Serde[I] = DefaultSerde()) -> None:
+        if isinstance(serde, DefaultSerde):
+            serde = serde.with_maybe_type(type(value))
         buf = serde.serialize(value)
         self.vm.sys_resolve_awakeable(name, buf)
 
@@ -593,9 +603,12 @@ class ServerInvocationContext(ObjectContext):
             raise ValueError("invocation_id cannot be None")
         self.vm.sys_cancel(invocation_id)
 
-    def attach_invocation(self, invocation_id: str, serde: Serde[T] = JsonSerde()) -> RestateDurableFuture[T]:
+    def attach_invocation(self, invocation_id: str, serde: Serde[T] = DefaultSerde(),
+                          type_hint: Optional[typing.Type[T]] = None
+                          ) -> RestateDurableFuture[T]:
         if invocation_id is None:
             raise ValueError("invocation_id cannot be None")
-        assert serde is not None
+        if isinstance(serde, DefaultSerde):
+            serde = serde.with_maybe_type(type_hint)
         handle = self.vm.attach_invocation(invocation_id)
         return self.create_future(handle, serde)
