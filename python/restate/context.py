@@ -94,9 +94,15 @@ class KeyValueStore(abc.ABC):
             name: str,
             serde: Serde[T] = DefaultSerde(),
             type_hint: Optional[typing.Type[T]] = None
-            ) -> Awaitable[Optional[Any]]:
+            ) -> Awaitable[Optional[T]]:
         """
         Retrieves the value associated with the given name.
+
+        Args:
+            name: The state name
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type. 
+                    See also 'type_hint'.
+            type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer. 
         """
 
     @abc.abstractmethod
@@ -331,9 +337,15 @@ class ObjectSharedContext(Context):
             name: str,
             serde: Serde[T] = DefaultSerde(),
             type_hint: Optional[typing.Type[T]] = None
-            ) -> RestateDurableFuture[Optional[Any]]:
+            ) -> RestateDurableFuture[Optional[T]]:
         """
         Retrieves the value associated with the given name.
+
+        Args:
+            name: The state name
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type. 
+                    See also 'type_hint'.
+            type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer. 
         """
 
     @abc.abstractmethod

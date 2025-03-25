@@ -25,4 +25,5 @@ async def increment(ctx: ObjectContext, value: int) -> int:
 
 @counter.handler(kind="shared")
 async def count(ctx: ObjectSharedContext) -> int:
-    return await ctx.get("counter") or 0
+    n = await ctx.get("counter", type_hint=int) or 0
+    return n
