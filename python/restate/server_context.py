@@ -416,11 +416,13 @@ class ServerInvocationContext(ObjectContext):
         except Exception as e:
             if max_attempts is None and max_retry_duration is None:
                 # no retry policy
-                raise e
-            failure = Failure(code=500, message=str(e))
-            max_duration_ms = None if max_retry_duration is None else int(max_retry_duration.total_seconds() * 1000)
-            config = RunRetryConfig(max_attempts=max_attempts, max_duration=max_duration_ms)
-            self.vm.propose_run_completion_transient(handle, failure=failure, attempt_duration_ms=1, config=config)
+                # todo: log the error
+                self.vm.notify_error(repr(e), traceback.format_exc())
+            else:
+                failure = Failure(code=500, message=str(e))
+                max_duration_ms = None if max_retry_duration is None else int(max_retry_duration.total_seconds() * 1000)
+                config = RunRetryConfig(max_attempts=max_attempts, max_duration=max_duration_ms)
+                self.vm.propose_run_completion_transient(handle, failure=failure, attempt_duration_ms=1, config=config)
     # pylint: disable=W0236
     # pylint: disable=R0914
     def run(self,
