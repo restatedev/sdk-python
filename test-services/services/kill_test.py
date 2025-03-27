@@ -12,25 +12,25 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
-from restate import Service, Context, VirtualObject, ObjectContext
+from restate import VirtualObject, ObjectContext
 
 from . import awakeable_holder
 
-kill_runner = Service("KillTestRunner")
+kill_runner = VirtualObject("KillTestRunner")
 
 @kill_runner.handler(name="startCallTree")
-async def start_call_tree(ctx: Context):
-    await ctx.object_call(recursive_call, key="", arg=None)
+async def start_call_tree(ctx: ObjectContext):
+    await ctx.object_call(recursive_call, key=ctx.key(), arg=None)
 
 kill_singleton = VirtualObject("KillTestSingleton")
 
 @kill_singleton.handler(name="recursiveCall")
 async def recursive_call(ctx: ObjectContext):
     name, promise = ctx.awakeable()
-    ctx.object_send(awakeable_holder.hold, key="kill", arg=name)
+    ctx.object_send(awakeable_holder.hold, key=ctx.key(), arg=name)
     await promise
 
-    await ctx.object_call(recursive_call, key="", arg=None)
+    await ctx.object_call(recursive_call, key=ctx.key(), arg=None)
 
 @kill_singleton.handler(name="isUnlocked")
 async def is_unlocked(ctx: ObjectContext):

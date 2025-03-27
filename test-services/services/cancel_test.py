@@ -27,7 +27,7 @@ runner = VirtualObject("CancelTestRunner")
 @runner.handler(name="startTest")
 async def start_test(ctx: ObjectContext, op: BlockingOperation):
     try:
-        await ctx.object_call(block, key="", arg=op)
+        await ctx.object_call(block, key=ctx.key(), arg=op)
     except TerminalError as t:
         if t.status_code == 409:
             ctx.set("state", True)
@@ -47,11 +47,11 @@ blocking_service = VirtualObject("CancelTestBlockingService")
 @blocking_service.handler()
 async def block(ctx: ObjectContext, op: BlockingOperation):
     name, awakeable = ctx.awakeable()
-    await ctx.object_call(awakeable_holder.hold, key="cancel", arg=name)
+    await ctx.object_call(awakeable_holder.hold, key=ctx.key(), arg=name)
     await awakeable
 
     if op == "CALL":
-        await ctx.object_call(block, key="", arg=op)
+        await ctx.object_call(block, key=ctx.key(), arg=op)
     elif op == "SLEEP":
         await ctx.sleep(timedelta(days=1024))
     elif op == "AWAKEABLE":
