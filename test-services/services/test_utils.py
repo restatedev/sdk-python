@@ -16,9 +16,7 @@ import os
 from datetime import timedelta
 from typing import (Dict, Iterable, List, Union, TypedDict, Literal, Any)
 from restate import Service, Context
-
-from . import list_object
-from . import awakeable_holder
+from restate.serde import BytesSerde
 
 test_utils = Service("TestUtilsService")
 
@@ -33,6 +31,10 @@ async def uppercase_echo(context: Context, input: str) -> str:
 @test_utils.handler(name="echoHeaders")
 async def echo_headers(context: Context) -> Dict[str, str]:
     return context.request().headers
+
+@test_utils.handler(name="rawEcho", accept="*/*", content_type="application/octet-stream", input_serde=BytesSerde(), output_serde=BytesSerde())
+async def raw_echo(context: Context, input: bytes) -> bytes:
+    return input
 
 @test_utils.handler(name="sleepConcurrently")
 async def sleep_concurrently(context: Context, millis_duration: List[int]) -> None:

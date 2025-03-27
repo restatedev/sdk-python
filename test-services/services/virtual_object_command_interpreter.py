@@ -15,19 +15,19 @@
 import os
 from datetime import timedelta
 from typing import (Dict, Iterable, List, Union, TypedDict, Literal, Any)
-from restate import VirtualObject, ObjectSharedContext, ObjectContext
-from restate import select
+from restate import VirtualObject, ObjectSharedContext, ObjectContext, RestateDurableFuture, RestateDurableSleepFuture
+from restate import select, wait_completed, as_completed
 from restate.exceptions import TerminalError
 
 virtual_object_command_interpreter = VirtualObject("VirtualObjectCommandInterpreter")
 
 @virtual_object_command_interpreter.handler(name="getResults", kind="shared")
 async def get_results(ctx: ObjectSharedContext) -> List[str]:
-    return ctx.get("results") or []
+    return (await ctx.get("results")) or []
 
 @virtual_object_command_interpreter.handler(name="hasAwakeable", kind="shared")
 async def has_awakeable(ctx: ObjectSharedContext, awk_key: str) -> bool:
-    awk_id = ctx.get("awk-" + awk_key)
+    awk_id = await ctx.get("awk-" + awk_key)
     if awk_id:
         return True
     return False
@@ -96,17 +96,29 @@ class InterpretRequest(TypedDict):
 
 @virtual_object_command_interpreter.handler(name="resolveAwakeable", kind="shared")
 async def resolve_awakeable(ctx: ObjectSharedContext, req: ResolveAwakeable) -> bool:
-    awk_id = ctx.get("awk-" + req.awakeableKey)
+    awk_id = await ctx.get("awk-" + req['awakeableKey'])
     if not awk_id:
         raise TerminalError(message="No awakeable is registered")
-    ctx.resolve_awakeable(awk_id, req.value)
+    ctx.resolve_awakeable(awk_id, req['value'])
 
 @virtual_object_command_interpreter.handler(name="rejectAwakeable", kind="shared")
 async def reject_awakeable(ctx: ObjectSharedContext, req: RejectAwakeable) -> bool:
-    awk_id = ctx.get("awk-" + req.awakeableKey)
+    awk_id = await ctx.get("awk-" + req['awakeableKey'])
     if not awk_id:
         raise TerminalError(message="No awakeable is registered")
-    ctx.reject_awakeable(awk_id, req.reason)
+    ctx.reject_awakeable(awk_id, req['reason'])
+
+def to_durable_future(ctx: ObjectContext, cmd: AwaitableCommand) -> RestateDurableFuture[Any]:
+    if cmd['type'] == "createAwakeable":
+        awk_id, awakeable = ctx.awakeable()
+        ctx.set("awk-" + cmd['awakeableKey'], awk_id)
+        return awakeable
+    elif cmd['type'] == "sleep":
+        return ctx.sleep(timedelta(milliseconds=cmd['timeoutMillis']))
+    elif cmd['type'] == "runThrowTerminalException":
+        def side_effect(reason):
+            raise TerminalError(message=reason)
+        return ctx.run("run should fail command", side_effect, args=(cmd['reason']))
 
 @virtual_object_command_interpreter.handler(name="interpretCommands")
 async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
@@ -115,8 +127,8 @@ async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
     for cmd in req['commands']:
         if cmd['type'] == "awaitAwakeableOrTimeout":
             awk_id, awakeable = ctx.awakeable()
-            ctx.get("awk-" + cmd.awakeableKey, awk_id)
-            match await select(awakeable=awakeable, timeout=ctx.sleep(timedelta(milliseconds=cmd.timeoutMillis))):
+            ctx.set("awk-" + cmd['awakeableKey'], awk_id)
+            match await select(awakeable=awakeable, timeout=ctx.sleep(timedelta(milliseconds=cmd['timeoutMillis']))):
                 case ['awakeable', awk_res]:
                     result = awk_res
                 case ['timeout', _]:
@@ -129,8 +141,40 @@ async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
             result = ""
         elif cmd['type'] == "getEnvVariable":
             result = await ctx.run("get_env", lambda: os.environ.get(cmd['envName'], default=""))
+        elif cmd['type'] == "awaitOne":
+            awaitable = to_durable_future(ctx, cmd['command'])
+            # We need this dance because the Python SDK doesn't support .map on futures
+            if isinstance(awaitable, RestateDurableSleepFuture):
+                await awaitable
+                result = "sleep"
+            else:
+                result = await awaitable
+        elif cmd['type'] == "awaitAny":
+            futures = [to_durable_future(ctx, c) for c in cmd['commands']]
+            done, pending = await wait_completed(*futures)
+            done_fut = done[0]
+            # We need this dance because the Python SDK doesn't support .map on futures
+            if isinstance(done_fut, RestateDurableSleepFuture):
+                await done_fut
+                result = "sleep"
+            else:
+                result = await done_fut
+        elif cmd['type'] == "awaitAnySuccessful":
+            futures = [to_durable_future(ctx, c) for c in cmd['commands']]
+            async for done_fut in as_completed(*futures):
+                try:
+                    # We need this dance because the Python SDK doesn't support .map on futures
+                    if isinstance(done_fut, RestateDurableSleepFuture):
+                        await done_fut
+                        result = "sleep"
+                        break
+                    else:
+                        result = await done_fut
+                        break
+                except TerminalError as t:
+                    pass
 
-        last_results = get_results(ctx)
+        last_results = await get_results(ctx)
         last_results.append(result)
         ctx.set("results", last_results)
 

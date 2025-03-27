@@ -30,12 +30,13 @@ class ProxyRequest(TypedDict):
 
 @proxy.handler()
 async def call(ctx: Context, req: ProxyRequest) -> Iterable[int]:
-    return list(await ctx.generic_call(
+    response = await ctx.generic_call(
         req['serviceName'],
         req['handlerName'],
         bytes(req['message']),
         req.get('virtualObjectKey'),
-        req.get('idempotencyKey')))
+        req.get('idempotencyKey'))
+    return list(response)
 
 
 @proxy.handler(name="oneWayCall")
@@ -48,8 +49,8 @@ async def one_way_call(ctx: Context, req: ProxyRequest) -> str:
         req['handlerName'],
         bytes(req['message']),
         req.get('virtualObjectKey'),
-        send_delay,
-        req.get('idempotencyKey')
+        send_delay=send_delay,
+        idempotency_key=req.get('idempotencyKey')
     )
     invocation_id = await handle.invocation_id()
     return invocation_id
@@ -74,8 +75,8 @@ async def many_calls(ctx: Context, requests: Iterable[ManyCallRequest]):
                 req['proxyRequest']['handlerName'],
                 bytes(req['proxyRequest']['message']),
                 req['proxyRequest'].get('virtualObjectKey'),
-                send_delay,
-                req['proxyRequest'].get('idempotencyKey')
+                send_delay=send_delay,
+                idempotency_key=req['proxyRequest'].get('idempotencyKey')
             )
         else:
             awaitable = ctx.generic_call(
@@ -83,7 +84,7 @@ async def many_calls(ctx: Context, requests: Iterable[ManyCallRequest]):
                 req['proxyRequest']['handlerName'],
                 bytes(req['proxyRequest']['message']),
                 req['proxyRequest'].get('virtualObjectKey'),
-                req['proxyRequest'].get('idempotencyKey'))
+                idempotency_key=req['proxyRequest'].get('idempotencyKey'))
             if req['awaitAtTheEnd']:
                 to_await.append(awaitable)
 
