@@ -22,6 +22,7 @@ from .list_object import list_object as s8
 from .map_object import map_object as s9
 from .non_determinism import non_deterministic as s10
 from .test_utils import test_utils as s11
+from .virtual_object_command_interpreter import virtual_object_command_interpreter as s16
 
 from .interpreter import layer_0 as s12
 from .interpreter import layer_1 as s13

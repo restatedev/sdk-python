@@ -11,7 +11,7 @@ docker build . -f test-services/Dockerfile -t restatedev/test-services
 
 * Run the tests (requires JVM >= 17):
 ```shell
-java -jar restate-sdk-test-suite.jar run --exclusions-file exclusions.yaml restatedev/test-services
+java -jar restate-sdk-test-suite.jar run --exclusions-file test-services/exclusions.yaml restatedev/test-services
 ```
 
 ## To debug a single test:
