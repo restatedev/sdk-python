@@ -55,6 +55,6 @@ async def greet(ctx: Context, req: GreetingRequest) -> Greeting:
         if isinstance(f, RestateDurableCallFuture):
             inv = await f.invocation_id()
             print(f"Canceling {inv}", flush=True)
-            ctx.cancel(inv)
+            ctx.cancel_invocation(inv)
 
     return Greeting(message=f"Hello {req.name}!")

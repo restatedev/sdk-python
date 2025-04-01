@@ -610,7 +610,7 @@ class ServerInvocationContext(ObjectContext):
     def key(self) -> str:
         return self.invocation.key
 
-    def cancel(self, invocation_id: str):
+    def cancel_invocation(self, invocation_id: str):
         """cancel an existing invocation by id."""
         if invocation_id is None:
             raise ValueError("invocation_id cannot be None")

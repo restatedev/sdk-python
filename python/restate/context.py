@@ -298,7 +298,7 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def cancel(self, invocation_id: str):
+    def cancel_invocation(self, invocation_id: str):
         """
         Cancels the invocation with the given id.
         """
