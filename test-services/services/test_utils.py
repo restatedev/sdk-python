@@ -59,4 +59,4 @@ async def count_executed_side_effects(context: Context, increments: int) -> int:
 
 @test_utils.handler(name="cancelInvocation")
 async def cancel_invocation(context: Context, invocation_id: str) -> None:
-    context.cancel(invocation_id)
+    context.cancel_invocation(invocation_id)
