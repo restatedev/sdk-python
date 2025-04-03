@@ -65,6 +65,22 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
         'more_body': False,
     })
 
+async def send_health_check(send: Send):
+    """respond with an health check"""
+    headers = header_to_binary([("content-type", "application/json")])
+    headers.extend(X_RESTATE_SERVER)
+    await send({
+        'type': 'http.response.start',
+        'status': 200,
+        'headers': headers,
+        'trailers': False
+    })
+    await send({
+        'type': 'http.response.body',
+        'body': b'{"status":"ok"}',
+        'more_body': False,
+    })
+
 async def process_invocation_to_completion(vm: VMWrapper,
                                            handler,
                                            attempt_headers: Dict[str, str],
@@ -134,6 +150,11 @@ def asgi_app(endpoint: Endpoint):
 
             request_path = scope['path']
             assert isinstance(request_path, str)
+
+            # Health check
+            if request_path == '/health':
+                await send_health_check(send)
+                return
 
             # Verify Identity
             assert not isinstance(scope['headers'], str)
