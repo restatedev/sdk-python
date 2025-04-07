@@ -46,6 +46,7 @@ class TypeHint(Generic[T]):
     """
     annotation: Optional[T] = None
     is_pydantic: bool = False
+    is_void: bool = False
 
 @dataclass
 class HandlerIO(Generic[I, O]):
@@ -74,21 +75,28 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
     * capture any Pydantic models (to be used later at discovery)
     * replace the default json serializer (is unchanged by a user) with a Pydantic serde
     """
-    annotation = list(signature.parameters.values())[-1].annotation
-    handler_io.input_type = TypeHint(annotation=annotation, is_pydantic=False)
-
-    if is_pydantic(annotation):
-        handler_io.input_type.is_pydantic = True
-        if isinstance(handler_io.input_serde, DefaultSerde):
-            handler_io.input_serde = PydanticJsonSerde(annotation)
+    params = list(signature.parameters.values())
+    if len(params) == 1:
+        # if there is only one parameter, it is the context.
+        handler_io.input_type = TypeHint(is_void=True)
+    else:
+        annotation = params[-1].annotation
+        handler_io.input_type = TypeHint(annotation=annotation, is_pydantic=False)
+        if is_pydantic(annotation):
+            handler_io.input_type.is_pydantic = True
+            if isinstance(handler_io.input_serde, DefaultSerde):
+                handler_io.input_serde = PydanticJsonSerde(annotation)
 
     annotation = signature.return_annotation
-    handler_io.output_type = TypeHint(annotation=annotation, is_pydantic=False)
-
-    if is_pydantic(annotation):
-        handler_io.output_type.is_pydantic=True
-        if isinstance(handler_io.output_serde, DefaultSerde):
-            handler_io.output_serde = PydanticJsonSerde(annotation)
+    if annotation is None or annotation is Signature.empty:
+        # if there is no return annotation, we assume it is void
+        handler_io.output_type = TypeHint(is_void=True)
+    else:
+        handler_io.output_type = TypeHint(annotation=annotation, is_pydantic=False)
+        if is_pydantic(annotation):
+            handler_io.output_type.is_pydantic=True
+            if isinstance(handler_io.output_serde, DefaultSerde):
+                handler_io.output_serde = PydanticJsonSerde(annotation)
 
 # pylint: disable=R0902
 @dataclass

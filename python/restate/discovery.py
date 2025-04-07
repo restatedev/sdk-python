@@ -54,13 +54,13 @@ class InputPayload:
         self.jsonSchema = jsonSchema
 
 class OutputPayload:
-    def __init__(self, contentType: str, setContentTypeIfEmpty: bool, jsonSchema: Optional[Any] = None):
+    def __init__(self, setContentTypeIfEmpty: bool, contentType: Optional[str] = None, jsonSchema: Optional[Any] = None):
         self.contentType = contentType
         self.setContentTypeIfEmpty = setContentTypeIfEmpty
         self.jsonSchema = jsonSchema
 
 class Handler:
-    def __init__(self, name: str, ty: Optional[ServiceHandlerType] = None, input: Optional[InputPayload] = None, output: Optional[OutputPayload] = None, description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None):
+    def __init__(self, name: str, ty: Optional[ServiceHandlerType] = None, input: Optional[InputPayload | Dict[str, str]] = None, output: Optional[OutputPayload] = None, description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None):
         self.name = name
         self.ty = ty
         self.input = input
@@ -180,13 +180,20 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
             else:
                 ty = None
             # input
-            inp = InputPayload(required=False,
-                               contentType=handler.handler_io.accept,
-                               jsonSchema=json_schema_from_type_hint(handler.handler_io.input_type))
+            inp: Optional[InputPayload | Dict[str, str]] = None
+            if handler.handler_io.input_type and handler.handler_io.input_type.is_void:
+                inp = {}
+            else:
+                inp =InputPayload(required=False,
+                                   contentType=handler.handler_io.accept,
+                                   jsonSchema=json_schema_from_type_hint(handler.handler_io.input_type))
             # output
-            out = OutputPayload(setContentTypeIfEmpty=False,
-                                contentType=handler.handler_io.content_type,
-                                jsonSchema=json_schema_from_type_hint(handler.handler_io.output_type))
+            if handler.handler_io.output_type and handler.handler_io.output_type.is_void:
+                out = OutputPayload(setContentTypeIfEmpty=False)
+            else:
+                out = OutputPayload(setContentTypeIfEmpty=False,
+                                    contentType=handler.handler_io.content_type,
+                                    jsonSchema=json_schema_from_type_hint(handler.handler_io.output_type))
             # add the handler
             service_handlers.append(Handler(name=handler.name,
                                             ty=ty,

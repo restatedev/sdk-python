@@ -40,10 +40,10 @@ async def failing_call_with_eventual_success(ctx: ObjectContext) -> int:
     raise ValueError(f"Failed at attempt: {failures}")
 
 @failing.handler(name="terminallyFailingSideEffect")
-async def terminally_failing_side_effect(ctx: ObjectContext):
+async def terminally_failing_side_effect(ctx: ObjectContext, error_message: str):
 
     def side_effect():
-        raise TerminalError(message="failed side effect")
+        raise TerminalError(message=error_message)
 
     await ctx.run("sideEffect", side_effect)
     raise ValueError("Should not reach here")
