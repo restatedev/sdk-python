@@ -24,7 +24,7 @@ T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
 
-RunAction = Union[Callable[..., T], Callable[..., Awaitable[T]]]
+RunAction = Union[Callable[..., Awaitable[T]], Callable[..., T]]
 
 
 # pylint: disable=R0903
