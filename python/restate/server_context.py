@@ -106,11 +106,22 @@ class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T
         """Get the invocation id."""
         return await self.invocation_id_future.get()
 
+    async def cancel_invocation(self) -> None:
+        """
+        Cancels the invocation.
+
+        Just a utility shortcut to:
+        .. code-block:: python
+
+            await ctx.cancel_invocation(await f.invocation_id())
+        """
+
 class ServerSendHandle(SendHandle):
     """This class implements the send API"""
 
     def __init__(self, context: "ServerInvocationContext", handle: int) -> None:
         super().__init__()
+        self.context = context
 
         async def coro():
             if not context.vm.is_completed(handle):
@@ -122,6 +133,11 @@ class ServerSendHandle(SendHandle):
     async def invocation_id(self) -> str:
         """Get the invocation id."""
         return await self.future
+
+    async def cancel_invocation(self) -> None:
+        """Cancel the invocation."""
+        invocation_id = await self.invocation_id()
+        self.context.cancel_invocation(invocation_id)
 
 async def async_value(n: Callable[[], T]) -> T:
     """convert a simple value to a coroutine."""
