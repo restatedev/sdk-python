@@ -51,6 +51,17 @@ class RestateDurableCallFuture(RestateDurableFuture[T]):
         Returns the invocation id of the call.
         """
 
+    @abc.abstractmethod
+    async def cancel_invocation(self) -> None:
+        """
+        Cancels the invocation.
+
+        Just a utility shortcut to:
+        .. code-block:: python
+
+            await ctx.cancel_invocation(await f.invocation_id())
+        """
+
 
 class RestateDurableSleepFuture(RestateDurableFuture[None]):
     """
@@ -134,6 +145,17 @@ class SendHandle(abc.ABC):
     async def invocation_id(self) -> str:
         """
         Returns the invocation id of the send operation.
+        """
+
+    @abc.abstractmethod
+    async def cancel_invocation(self) -> None:
+        """
+        Cancels the invocation.
+
+        Just a utility shortcut to:
+        .. code-block:: python
+
+            await ctx.cancel_invocation(await f.invocation_id())
         """
 
 class Context(abc.ABC):

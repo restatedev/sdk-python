@@ -13,48 +13,50 @@
 # pylint: disable=W0613
 # pylint: disable=C0115
 # pylint: disable=R0903
+# pylint: disable=C0301
 
-from datetime import timedelta
+import typing
 
 from pydantic import BaseModel
-from restate import Service, Context
-from restate import wait_completed, RestateDurableSleepFuture, RestateDurableCallFuture
-
-from greeter import greet as g
+from restate import wait_completed, Service, Context
 
 # models
 class GreetingRequest(BaseModel):
     name: str
 
 class Greeting(BaseModel):
-    message: str
+    messages: typing.List[str]
 
-# service
+class Message(BaseModel):
+    role: str
+    content: str
 
 concurrent_greeter = Service("concurrent_greeter")
 
-
 @concurrent_greeter.handler()
 async def greet(ctx: Context, req: GreetingRequest) -> Greeting:
-    g1 = ctx.service_call(g, arg="1")
-    g2 = ctx.service_call(g, arg="2")
-    g3 = ctx.sleep(timedelta(milliseconds=100))
+    claude_sonnet.as_handler(ctx)
+    claude = ctx.service_call(claude_sonnet, arg=Message(role="user", content=f"please greet {req.name}"))
+    openai = ctx.service_call(open_ai, arg=Message(role="user", content=f"please greet {req.name}"))
 
-    done, pending = await wait_completed(g1, g2, g3)
+    pending, done = await wait_completed(claude, openai)
 
-    for f in done:
-        if isinstance(f, RestateDurableSleepFuture):
-            print("Timeout :(x", flush=True)
-        elif isinstance(f, RestateDurableCallFuture):
-            # the result should be ready.
-            print(await f)
-    #
-    # let's cancel the pending calls then
-    #
+    # collect the completed greetings
+    greetings = [await f for f in done]
+
+    # cancel the pending calls
     for f in pending:
-        if isinstance(f, RestateDurableCallFuture):
-            inv = await f.invocation_id()
-            print(f"Canceling {inv}", flush=True)
-            ctx.cancel_invocation(inv)
+        await f.cancel_invocation() # type: ignore
 
-    return Greeting(message=f"Hello {req.name}!")
+    return Greeting(messages=greetings)
+
+
+# not really interesting, just for this demo:
+
+@concurrent_greeter.handler()
+async def claude_sonnet(ctx: Context, req: Message) -> str:
+    return f"Bonjour {req.content[13:]}!"
+
+@concurrent_greeter.handler()
+async def open_ai(ctx: Context, req: Message) -> str:
+    return f"Hello {req.content[13:]}!"
