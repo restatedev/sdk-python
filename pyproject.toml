@@ -17,6 +17,7 @@ authors = [
 test = ["pytest", "hypercorn"]
 lint = ["mypy", "pylint"]
 harness = ["testcontainers", "hypercorn", "httpx"]
+serde = ["dacite", "pydantic"]
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]

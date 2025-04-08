@@ -13,6 +13,8 @@ import abc
 import json
 import typing
 
+from dataclasses import asdict, is_dataclass
+
 def try_import_pydantic_base_model():
     """
     Try to import PydanticBaseModel from Pydantic.
@@ -26,7 +28,39 @@ def try_import_pydantic_base_model():
 
         return Dummy
 
+def try_import_from_dacite():
+    """
+    Try to import from_dict from dacite.
+    """
+    try:
+        from dacite import from_dict # type: ignore # pylint: disable=import-outside-toplevel
+
+        return asdict, from_dict
+
+    except ImportError:
+
+        def to_dict(obj):
+            """a dummy function when dacite is not available"""
+            raise RuntimeError("Trying to deserialize into a @dataclass." \
+            "Please add the optional dependencies needed." \
+            "use pip install restate-sdk[serde] "
+            "or" \
+            " pip install restate-sdk[all] to install all dependencies.")
+
+
+        def from_dict(a,b): # pylint: disable=too-few-public-methods,unused-argument
+            """a dummy function when dacite is not available"""
+
+            raise RuntimeError("Trying to deserialize into a @dataclass." \
+            "Please add the optional dependencies needed." \
+            "use pip install restate-sdk[serde] "
+            "or" \
+            " pip install restate-sdk[all] to install all dependencies.")
+
+        return to_dict, from_dict
+
 PydanticBaseModel = try_import_pydantic_base_model()
+DaciteToDict, DaciteFromDict = try_import_from_dacite()
 
 T = typing.TypeVar('T')
 I = typing.TypeVar('I')
@@ -170,6 +204,9 @@ class DefaultSerde(Serde[I]):
             return None
         if is_pydantic(self.type_hint):
             return self.type_hint.model_validate_json(buf) # type: ignore
+        if is_dataclass(self.type_hint):
+            data = json.loads(buf)
+            return DaciteFromDict(self.type_hint, data)
         return json.loads(buf)
 
     def serialize(self, obj: typing.Optional[I]) -> bytes:
@@ -183,13 +220,13 @@ class DefaultSerde(Serde[I]):
         Returns:
             bytes: The serialized byte array.
         """
-
         if obj is None:
             return bytes()
-
         if is_pydantic(self.type_hint):
             return obj.model_dump_json().encode("utf-8")  # type: ignore[attr-defined]
-
+        if is_dataclass(obj):
+            data = DaciteToDict(obj) # type: ignore
+            return json.dumps(data).encode("utf-8")
         return json.dumps(obj).encode("utf-8")
 
 
