@@ -35,7 +35,6 @@ concurrent_greeter = Service("concurrent_greeter")
 
 @concurrent_greeter.handler()
 async def greet(ctx: Context, req: GreetingRequest) -> Greeting:
-    claude_sonnet.as_handler(ctx)
     claude = ctx.service_call(claude_sonnet, arg=Message(role="user", content=f"please greet {req.name}"))
     openai = ctx.service_call(open_ai, arg=Message(role="user", content=f"please greet {req.name}"))
 
