@@ -451,7 +451,7 @@ impl PyVM {
             .expect("Duration since unix epoch cannot fail");
         self_
             .vm
-            .sys_sleep(now + Duration::from_millis(millis), Some(now))
+            .sys_sleep(String::default(), now + Duration::from_millis(millis), Some(now))
             .map(Into::into)
             .map_err(Into::into)
     }
