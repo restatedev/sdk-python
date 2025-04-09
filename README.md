@@ -87,7 +87,7 @@ Pull latest main:
 git checkout main && git pull
 ```
 
-Update module version in `Cargo.toml`, commit it. Then push tag, e.g.:
+**Update module version in `Cargo.toml` and run a local build to update the `Cargo.lock` too**, commit it. Then push tag, e.g.:
 
 ```
 git tag -m "Release v0.1.0" v0.1.0
