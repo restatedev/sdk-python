@@ -118,7 +118,7 @@ def to_durable_future(ctx: ObjectContext, cmd: AwaitableCommand) -> RestateDurab
     elif cmd['type'] == "runThrowTerminalException":
         def side_effect(reason):
             raise TerminalError(message=reason)
-        return ctx.run("run should fail command", side_effect, args=(cmd['reason']))
+        return ctx.run("run should fail command", side_effect, args=(cmd['reason'],))
 
 @virtual_object_command_interpreter.handler(name="interpretCommands")
 async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
@@ -140,7 +140,8 @@ async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
             reject_awakeable(ctx, cmd)
             result = ""
         elif cmd['type'] == "getEnvVariable":
-            result = await ctx.run("get_env", lambda: os.environ.get(cmd['envName'], default=""))
+            env_name = cmd['envName']
+            result = await ctx.run("get_env", lambda e=env_name: os.environ.get(e, ""))
         elif cmd['type'] == "awaitOne":
             awaitable = to_durable_future(ctx, cmd['command'])
             # We need this dance because the Python SDK doesn't support .map on futures
