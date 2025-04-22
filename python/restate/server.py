@@ -11,7 +11,7 @@
 """This module contains the ASGI server for the restate framework."""
 
 import asyncio
-from typing import Dict, Literal
+from typing import Dict, TypedDict, Literal
 import traceback
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
@@ -135,6 +135,33 @@ async def process_invocation_to_completion(vm: VMWrapper,
 class LifeSpanNotImplemented(ValueError):
     """Signal to the asgi server that we didn't implement lifespans"""
 
+
+class ParsedPath(TypedDict):
+    """Parsed path from the request."""
+    type: Literal["invocation", "health", "discover", "unknown"]
+    service: str | None
+    handler: str | None
+
+def parse_path(request: str) -> ParsedPath:
+    """Parse the path from the request."""
+    # The following routes are possible
+    # $mountpoint/health
+    # $mountpoint/discover
+    # $mountpoint/invoke/:service/:handler
+    # as we don't know the mountpoint, we need to check the path carefully
+    fragments = request.rsplit('/', 4)
+    # /invoke/:service/:handler
+    if len(fragments) >= 3 and fragments[-3] == 'invoke':
+        return { "type": "invocation" , "handler" : fragments[-1], "service" : fragments[-2] }
+    # /health
+    if fragments[-1] == 'health':
+        return { "type": "health", "service": None, "handler": None }
+    # /discover
+    if fragments[-1] == 'discover':
+        return { "type": "discover" , "service": None, "handler": None }
+    # anything other than invoke is 404
+    return { "type": "unknown" , "service": None, "handler": None }
+
 def asgi_app(endpoint: Endpoint):
     """Create an ASGI-3 app for the given endpoint."""
 
@@ -150,9 +177,10 @@ def asgi_app(endpoint: Endpoint):
 
             request_path = scope['path']
             assert isinstance(request_path, str)
+            request: ParsedPath = parse_path(request_path)
 
             # Health check
-            if request_path == '/health':
+            if request['type'] == 'health':
                 await send_health_check(send)
                 return
 
@@ -168,16 +196,17 @@ def asgi_app(endpoint: Endpoint):
                 return
 
             # might be a discovery request
-            if request_path == '/discover':
+            if request['type'] == 'discover':
                 await send_discovery(scope, send, endpoint)
                 return
             # anything other than invoke is 404
-            if not request_path.startswith('/invoke/'):
+            if request['type'] == 'unknown':
                 await send404(send, receive)
                 return
-            # path is of the form: /invoke/:service/:handler
-            # strip "/invoke/" (= strlen 8) and split the service and handler
-            service_name, handler_name = request_path[8:].split('/')
+            assert request['type'] == 'invocation'
+            assert request['service'] is not None
+            assert request['handler'] is not None
+            service_name, handler_name = request['service'], request['handler']
             service = endpoint.services.get(service_name)
             if not service:
                 await send404(send, receive)
