@@ -185,10 +185,15 @@ class DefaultSerde(Serde[I]):
 
     def with_maybe_type(self, type_hint: typing.Type[I] | None = None) -> "DefaultSerde[I]":
         """
-        Sets the type hint for the serde.
+        Returns a new instance of DefaultSerde with the provided type hint.
+        This is useful for creating a serde that is specific to a certain type.
+        NOTE: This method does not modify the current instance.
+        Args:
+            type_hint (Type[I] | None): The type hint to use for serialization/deserialization.
+        Returns:
+            DefaultSerde[I]: A new instance of DefaultSerde with the provided type hint.
         """
-        self.type_hint = type_hint
-        return self
+        return DefaultSerde(type_hint)
 
     def deserialize(self, buf: bytes) -> typing.Optional[I]:
         """
