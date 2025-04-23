@@ -79,9 +79,9 @@ class Request:
     Represents an ingress request.
 
     Attributes:
-        id: The unique identifier of the request.
-        headers: The headers of the request.
-        attempt_headers: The attempt headers of the request.
+        id (str): The unique identifier of the request.
+        headers (dict[str, str]): The headers of the request.
+        attempt_headers (dict[str, str]): The attempt headers of the request.
         body (bytes): The body of the request.
     """
     id: str
