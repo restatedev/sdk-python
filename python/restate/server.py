@@ -126,11 +126,15 @@ async def process_invocation_to_completion(vm: VMWrapper,
     try:
         await context.enter()
     except asyncio.exceptions.CancelledError:
+        context.on_attempt_finished()
         raise
     # pylint: disable=W0718
     except Exception:
         traceback.print_exc()
-    await context.leave()
+    try:
+        await context.leave()
+    finally:
+        context.on_attempt_finished()
 
 class LifeSpanNotImplemented(ValueError):
     """Signal to the asgi server that we didn't implement lifespans"""

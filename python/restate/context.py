@@ -72,6 +72,31 @@ class RestateDurableSleepFuture(RestateDurableFuture[None]):
     def __await__(self) -> typing.Generator[Any, Any, None]:
         pass
 
+class AttemptFinishedEvent(abc.ABC):
+    """
+    Represents an attempt finished event.
+
+    This event is used to signal that an attempt has finished (either successfully or with an error), and it is now
+    safe to cleanup any attempt related resources, such as pending ctx.run() 3rd party calls, or any other resources that
+    are only valid for the duration of the attempt.
+
+    An attempt is considered finished when either the connection to the restate server is closed, the invocation is completed, or a transient
+    error occurs.
+    """
+
+    @abc.abstractmethod
+    def is_set(self) -> bool:
+        """
+        Returns True if the event is set, False otherwise.
+        """
+
+
+    @abc.abstractmethod
+    async def wait(self):
+        """
+        Waits for the event to be set.
+        """
+
 
 @dataclass
 class Request:
@@ -83,11 +108,13 @@ class Request:
         headers (dict[str, str]): The headers of the request.
         attempt_headers (dict[str, str]): The attempt headers of the request.
         body (bytes): The body of the request.
+        attempt_finished_event (AttemptFinishedEvent): The teardown event of the request.
     """
     id: str
     headers: Dict[str, str]
     attempt_headers: Dict[str,str]
     body: bytes
+    attempt_finished_event: AttemptFinishedEvent
 
 
 class KeyValueStore(abc.ABC):
@@ -157,6 +184,7 @@ class SendHandle(abc.ABC):
 
             await ctx.cancel_invocation(await f.invocation_id())
         """
+
 
 class Context(abc.ABC):
     """

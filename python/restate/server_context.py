@@ -24,7 +24,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle, RestateDurableSleepFuture
+from restate.context import DurablePromise, AttemptFinishedEvent, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle, RestateDurableSleepFuture
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
@@ -36,6 +36,24 @@ from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, D
 T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
+
+
+class ServerTeardownEvent(AttemptFinishedEvent):
+    """
+    This class implements the teardown event for the server.
+    """
+
+    def __init__(self, event: asyncio.Event) -> None:
+        super().__init__()
+        self.event = event
+
+    def is_set(self):
+        return self.event.is_set()
+
+    async def wait(self):
+        """Wait for the event to be set."""
+        await self.event.wait()
+
 
 class LazyFuture:
     """
@@ -229,6 +247,7 @@ class ServerInvocationContext(ObjectContext):
         self.receive = receive
         self.run_coros_to_execute: dict[int,  Callable[[], Awaitable[None]]] = {}
         self.sync_point = SyncPoint()
+        self.request_finished_event = asyncio.Event()
 
     async def enter(self):
         """Invoke the user code."""
@@ -285,6 +304,12 @@ class ServerInvocationContext(ObjectContext):
             'body': b'',
             'more_body': False,
         })
+        # notify to any holder of the abort signal that we are done
+
+    def on_attempt_finished(self):
+        """Notify the attempt finished event."""
+        self.request_finished_event.set()
+
 
     async def take_and_send_output(self):
         """Take output from state machine and send it"""
@@ -407,6 +432,7 @@ class ServerInvocationContext(ObjectContext):
             headers=dict(self.invocation.headers),
             attempt_headers=self.attempt_headers,
             body=self.invocation.input_buffer,
+            attempt_finished_event=ServerTeardownEvent(self.request_finished_event),
         )
 
     async def create_run_coroutine(self,
