@@ -184,7 +184,7 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
             if handler.handler_io.input_type and handler.handler_io.input_type.is_void:
                 inp = {}
             else:
-                inp =InputPayload(required=False,
+                inp = InputPayload(required=False,
                                    contentType=handler.handler_io.accept,
                                    jsonSchema=json_schema_from_type_hint(handler.handler_io.input_type))
             # output

@@ -15,7 +15,7 @@ from typing import Dict, TypedDict, Literal
 import traceback
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
-from restate.server_context import ServerInvocationContext
+from restate.server_context import ServerInvocationContext, DisconnectedException
 from restate.server_types import Receive, Scope, Send, binary_to_header, header_to_binary
 from restate.vm import VMWrapper
 from restate._internal import PyIdentityVerifier, IdentityVerificationException # pylint: disable=import-error,no-name-in-module
@@ -81,6 +81,7 @@ async def send_health_check(send: Send):
         'more_body': False,
     })
 
+
 async def process_invocation_to_completion(vm: VMWrapper,
                                            handler,
                                            attempt_headers: Dict[str, str],
@@ -126,11 +127,19 @@ async def process_invocation_to_completion(vm: VMWrapper,
     try:
         await context.enter()
     except asyncio.exceptions.CancelledError:
+        context.on_attempt_finished()
         raise
+    except DisconnectedException:
+        # The client disconnected before we could send the response
+        context.on_attempt_finished()
+        return
     # pylint: disable=W0718
     except Exception:
         traceback.print_exc()
-    await context.leave()
+    try:
+        await context.leave()
+    finally:
+        context.on_attempt_finished()
 
 class LifeSpanNotImplemented(ValueError):
     """Signal to the asgi server that we didn't implement lifespans"""

@@ -24,7 +24,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle, RestateDurableSleepFuture
+from restate.context import DurablePromise, AttemptFinishedEvent, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle, RestateDurableSleepFuture
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
@@ -36,6 +36,34 @@ from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, D
 T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
+
+class DisconnectedException(Exception):
+    """
+    This exception is raised when the connection to the restate server is lost.
+    This can be due to a network error or a long inactivity timeout.
+    The restate-server will automatically retry the attempt.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Disconnected. The connection to the restate server was lost. Restate will retry the attempt.")
+
+
+class ServerTeardownEvent(AttemptFinishedEvent):
+    """
+    This class implements the teardown event for the server.
+    """
+
+    def __init__(self, event: asyncio.Event) -> None:
+        super().__init__()
+        self.event = event
+
+    def is_set(self):
+        return self.event.is_set()
+
+    async def wait(self):
+        """Wait for the event to be set."""
+        await self.event.wait()
+
 
 class LazyFuture:
     """
@@ -184,7 +212,6 @@ class ServerDurablePromise(DurablePromise):
         handle = vm.sys_peek_promise(self.name)
         serde = self.serde
         assert serde is not None
-
         return self.server_context.create_future(handle, serde)
 
 
@@ -229,6 +256,7 @@ class ServerInvocationContext(ObjectContext):
         self.receive = receive
         self.run_coros_to_execute: dict[int,  Callable[[], Awaitable[None]]] = {}
         self.sync_point = SyncPoint()
+        self.request_finished_event = asyncio.Event()
 
     async def enter(self):
         """Invoke the user code."""
@@ -244,6 +272,8 @@ class ServerInvocationContext(ObjectContext):
         # pylint: disable=W0718
         except SuspendedException:
             pass
+        except DisconnectedException:
+            raise
         except Exception as e:
             stacktrace = '\n'.join(traceback.format_exception(e))
             self.vm.notify_error(repr(e), stacktrace)
@@ -285,6 +315,23 @@ class ServerInvocationContext(ObjectContext):
             'body': b'',
             'more_body': False,
         })
+        # notify to any holder of the abort signal that we are done
+
+    def on_attempt_finished(self):
+        """Notify the attempt finished event."""
+        self.request_finished_event.set()
+
+
+    async def receive_and_notify_input(self):
+        """Receive input from the state machine."""
+        chunk = await self.receive()
+        if chunk.get('type') == 'http.request':
+            assert isinstance(chunk['body'], bytes)
+            self.vm.notify_input(chunk['body'])
+        if not chunk.get('more_body', False):
+            self.vm.notify_input_closed()
+        if chunk.get('type') == 'http.disconnect':
+            raise DisconnectedException()
 
     async def take_and_send_output(self):
         """Take output from state machine and send it"""
@@ -319,12 +366,7 @@ class ServerInvocationContext(ObjectContext):
             if isinstance(do_progress_response, DoProgressCancelSignalReceived):
                 raise TerminalError("cancelled", 409)
             if isinstance(do_progress_response, DoProgressReadFromInput):
-                chunk = await self.receive()
-                if chunk.get('body', None) is not None:
-                    assert isinstance(chunk['body'], bytes)
-                    self.vm.notify_input(chunk['body'])
-                if not chunk.get('more_body', False):
-                    self.vm.notify_input_closed()
+                await self.receive_and_notify_input()
                 continue
             if isinstance(do_progress_response, DoProgressExecuteRun):
                 fn = self.run_coros_to_execute[do_progress_response.handle]
@@ -339,7 +381,14 @@ class ServerInvocationContext(ObjectContext):
                 asyncio.create_task(wrapper(fn))
                 continue
             if isinstance(do_progress_response, DoWaitPendingRun):
-                await self.sync_point.wait()
+                sync_task = asyncio.create_task(self.sync_point.wait())
+                read_task = asyncio.create_task(self.receive_and_notify_input())
+                done, _ = await asyncio.wait([sync_task, read_task], return_when=asyncio.FIRST_COMPLETED)
+                if read_task in done:
+                    _ = read_task.result() # rethrow any exception
+                if sync_task in done:
+                    continue
+
 
     def _create_fetch_result_coroutine(self, handle: int, serde: Serde[T] | None = None):
         """Create a coroutine that fetches a result from a notification handle."""
@@ -407,6 +456,7 @@ class ServerInvocationContext(ObjectContext):
             headers=dict(self.invocation.headers),
             attempt_headers=self.attempt_headers,
             body=self.invocation.input_buffer,
+            attempt_finished_event=ServerTeardownEvent(self.request_finished_event),
         )
 
     async def create_run_coroutine(self,
