@@ -143,6 +143,8 @@ class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T
 
             await ctx.cancel_invocation(await f.invocation_id())
         """
+        inv = await self.invocation_id()
+        self.context.cancel_invocation(inv)
 
 class ServerSendHandle(SendHandle):
     """This class implements the send API"""
@@ -242,26 +244,27 @@ class Tasks:
     """
 
     def __init__(self) -> None:
-        self.tasks: List[asyncio.Future] = []
+        self.tasks: set[asyncio.Future] = set()
 
     def add(self, task: asyncio.Future):
         """Add a task to the list."""
-        self.tasks.append(task)
+        self.tasks.add(task)
 
         def safe_remove(_):
             """Remove the task from the list."""
             try:
                 self.tasks.remove(task)
-            except ValueError:
+            except KeyError:
                 pass
 
         task.add_done_callback(safe_remove)
 
     def cancel(self):
         """Cancel all tasks in the list."""
-        for task in self.tasks:
-            task.cancel()
+        to_cancel = list(self.tasks)
         self.tasks.clear()
+        for task in to_cancel:
+            task.cancel()
 
 # pylint: disable=R0902
 class ServerInvocationContext(ObjectContext):
