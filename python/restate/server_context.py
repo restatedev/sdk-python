@@ -257,6 +257,12 @@ class Tasks:
                 self.tasks.remove(task)
             except KeyError:
                 pass
+            try:
+                # this will raise if the task was cancelled
+                _ = task.result()
+            # pylint: disable=W0718
+            except Exception:
+                pass
 
         task.add_done_callback(safe_remove)
 
