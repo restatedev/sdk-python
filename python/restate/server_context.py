@@ -227,15 +227,21 @@ class SyncPoint:
 
     def __init__(self):
         self._cond = asyncio.Condition()
+        self.seq = 0
 
-    async def wait(self):
-        """Wait for the sync point."""
+    def current_state(self) -> int:
+        """Get the current state of the sync point."""
+        return self.seq
+
+    async def wait_after(self, state: int):
+        """Wait for the sync point to pass the given state. (see current_state())"""
         async with self._cond:
-            await self._cond.wait()
+            await self._cond.wait_for(lambda: self.seq > state)
 
     async def arrive(self):
         """Arrive at the sync point."""
         async with self._cond:
+            self.seq += 1
             self._cond.notify_all()
 
 class Tasks:
@@ -249,15 +255,14 @@ class Tasks:
     def add(self, task: asyncio.Future):
         """Add a task to the list."""
         self.tasks.add(task)
+        task.add_done_callback(self.remove)
 
-        def safe_remove(_):
-            """Remove the task from the list."""
-            try:
-                self.tasks.remove(task)
-            except KeyError:
-                pass
-
-        task.add_done_callback(safe_remove)
+    def remove(self, task: asyncio.Future):
+        """Remove a task from the list."""
+        try:
+            self.tasks.remove(task)
+        except KeyError:
+            pass
 
     def cancel(self):
         """Cancel all tasks in the list."""
@@ -359,7 +364,7 @@ class ServerInvocationContext(ObjectContext):
 
 
     async def receive_and_notify_input(self):
-        """Receive input from the state machine."""
+        """Receive input and pass to the state machine."""
         chunk = await self.receive()
         if chunk.get('type') == 'http.request':
             assert isinstance(chunk['body'], bytes)
@@ -418,15 +423,21 @@ class ServerInvocationContext(ObjectContext):
                 self.tasks.add(task)
                 continue
             if isinstance(do_progress_response, DoWaitPendingRun):
-                sync_task = asyncio.create_task(self.sync_point.wait())
-                read_task = asyncio.create_task(self.receive_and_notify_input())
-                self.tasks.add(sync_task)
-                self.tasks.add(read_task)
-                done, _ = await asyncio.wait([sync_task, read_task], return_when=asyncio.FIRST_COMPLETED)
-                if read_task in done:
-                    _ = read_task.result() # rethrow any exception
-                if sync_task in done:
-                    continue
+                # the state machine told us that there is ctx.run action that is currently running
+                # and it wants us to wait for it to finish.
+                # while under GIL (and on a single thread in asyncio) we grab a sequence number (just a counter)
+                # from the sync point, and then we wait for someone to notify us that the run is done.
+                state = self.sync_point.current_state()
+                try:
+                    async with asyncio.TaskGroup() as tg:
+                        read_task = tg.create_task(self.receive_and_notify_input())
+                        sync_task = tg.create_task(self.sync_point.wait_after(state))
+                        await asyncio.wait([sync_task, read_task], return_when=asyncio.FIRST_COMPLETED)
+                        continue
+                except* DisconnectedException as ve:
+                    for e in ve.exceptions: # pylint: disable=E1101
+                        # unwrap the disconnected exception
+                        raise e from ve
 
 
     def _create_fetch_result_coroutine(self, handle: int, serde: Serde[T] | None = None):
