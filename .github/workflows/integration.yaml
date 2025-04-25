@@ -109,3 +109,4 @@ jobs:
           serviceContainerImage: "restatedev/test-services-python"
           exclusionsFile: "test-services/exclusions.yaml"
           testArtifactOutput: "sdk-python-integration-test-report"
+          serviceContainerEnvFile: "test-services/.env"
