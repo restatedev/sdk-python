@@ -40,9 +40,14 @@ class Scope(TypedDict):
     state: NotRequired[Dict[str, Any]]
     extensions: Optional[Dict[str, Dict[object, object]]]
 
+class RestateEvent(TypedDict):
+    """An event that represents a run completion"""
+    type: Literal["restate.run_completed"]
+    data: Optional[Dict[str, Any]]
+
 class HTTPRequestEvent(TypedDict):
     """ASGI Request event"""
-    type: Literal["http.request", "restate.run_completed"]
+    type: Literal["http.request"]
     body: bytes
     more_body: bool
 
@@ -91,38 +96,35 @@ def binary_to_header(headers: Iterable[Tuple[bytes, bytes]]) -> List[Tuple[str, 
 class ReceiveChannel:
     """ASGI receive channel."""
 
-    def __init__(self, receive: Receive):
-        self.queue = asyncio.Queue[ASGIReceiveEvent]()
+    def __init__(self, receive: Receive) -> None:
+        self._queue = asyncio.Queue[Union[ASGIReceiveEvent, RestateEvent]]()
 
         async def loop():
             """Receive loop."""
             while True:
                 event = await receive()
-                await self.queue.put(event)
+                await self._queue.put(event)
                 if event.get('type') == 'http.disconnect':
                     break
 
-        self.task = asyncio.create_task(loop())
+        self._task = asyncio.create_task(loop())
 
-    async def rx(self) -> ASGIReceiveEvent:
+    async def __call__(self) -> ASGIReceiveEvent | RestateEvent:
         """Get the next message."""
-        what = await self.queue.get()
-        self.queue.task_done()
+        what = await self._queue.get()
+        self._queue.task_done()
         return what
 
-    async def __call__(self):
-        """Get the next message."""
-        return await self.rx()
-
-    async def tx(self, what: ASGIReceiveEvent):
+    async def enqueue_restate_event(self, what: RestateEvent):
         """Add a message."""
-        await self.queue.put(what)
+        await self._queue.put(what)
 
     async def close(self):
         """Close the channel."""
-        if self.task and not self.task.done():
-            self.task.cancel()
-            try:
-                await self.task
-            except asyncio.CancelledError:
-                pass
+        if self._task.done():
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
