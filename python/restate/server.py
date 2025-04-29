@@ -107,8 +107,9 @@ async def process_invocation_to_completion(vm: VMWrapper,
             # everything ends here really ...
             return
         if message.get('type') == 'http.request':
-            assert isinstance(message['body'], bytes)
-            vm.notify_input(message['body'])
+            body = message.get('body', None)
+            assert isinstance(body, bytes)
+            vm.notify_input(body)
         if not message.get('more_body', False):
             vm.notify_input_closed()
             break

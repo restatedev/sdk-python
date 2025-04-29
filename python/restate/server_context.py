@@ -386,7 +386,7 @@ class ServerInvocationContext(ObjectContext):
                 async def wrapper(f):
                     await f()
                     await self.take_and_send_output()
-                    await self.receive.tx({ 'type' : 'restate.run_completed', 'body' : bytes(), 'more_body' : True})
+                    await self.receive.enqueue_restate_event({ 'type' : 'restate.run_completed', 'data': None})
 
                 task = asyncio.create_task(wrapper(fn))
                 self.tasks.add(task)
@@ -398,8 +398,9 @@ class ServerInvocationContext(ObjectContext):
                 if chunk.get('type') == 'http.disconnect':
                     raise DisconnectedException()
                 if chunk.get('body', None) is not None:
-                    assert isinstance(chunk['body'], bytes)
-                    self.vm.notify_input(chunk['body'])
+                    body = chunk.get('body')
+                    assert isinstance(body, bytes)
+                    self.vm.notify_input(body)
                 if not chunk.get('more_body', False):
                     self.vm.notify_input_closed()
 
