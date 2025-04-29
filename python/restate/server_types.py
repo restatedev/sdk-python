@@ -14,6 +14,7 @@ This module contains the ASGI types definitions.
 :see: https://github.com/django/asgiref/blob/main/asgiref/typing.py
 """
 
+import asyncio
 from typing import (Awaitable, Callable, Dict, Iterable, List,
                     Tuple, Union, TypedDict, Literal, Optional, NotRequired, Any)
 
@@ -41,7 +42,7 @@ class Scope(TypedDict):
 
 class HTTPRequestEvent(TypedDict):
     """ASGI Request event"""
-    type: Literal["http.request"]
+    type: Literal["http.request", "restate.run_completed"]
     body: bytes
     more_body: bool
 
@@ -86,3 +87,42 @@ def header_to_binary(headers: Iterable[Tuple[str, str]]) -> List[Tuple[bytes, by
 def binary_to_header(headers: Iterable[Tuple[bytes, bytes]]) -> List[Tuple[str, str]]:
     """Convert a list of binary headers to a list of headers."""
     return [ (k.decode('utf-8'), v.decode('utf-8')) for k,v in headers ]
+
+class ReceiveChannel:
+    """ASGI receive channel."""
+
+    def __init__(self, receive: Receive):
+        self.queue = asyncio.Queue[ASGIReceiveEvent]()
+
+        async def loop():
+            """Receive loop."""
+            while True:
+                event = await receive()
+                await self.queue.put(event)
+                if event.get('type') == 'http.disconnect':
+                    break
+
+        self.task = asyncio.create_task(loop())
+
+    async def rx(self) -> ASGIReceiveEvent:
+        """Get the next message."""
+        what = await self.queue.get()
+        self.queue.task_done()
+        return what
+
+    async def __call__(self):
+        """Get the next message."""
+        return await self.rx()
+
+    async def tx(self, what: ASGIReceiveEvent):
+        """Add a message."""
+        await self.queue.put(what)
+
+    async def close(self):
+        """Close the channel."""
+        if self.task and not self.task.done():
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass

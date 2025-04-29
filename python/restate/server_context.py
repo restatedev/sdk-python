@@ -29,7 +29,7 @@ from restate.context import DurablePromise, AttemptFinishedEvent, ObjectContext,
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
-from restate.server_types import Receive, Send
+from restate.server_types import ReceiveChannel, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
 from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun
 
@@ -220,25 +220,6 @@ class ServerDurablePromise(DurablePromise):
 # disable too many public method
 # pylint: disable=R0904
 
-class SyncPoint:
-    """
-    This class implements a synchronization point.
-    """
-
-    def __init__(self) -> None:
-        self.cond: asyncio.Event | None = None
-
-    def awaiter(self):
-        """Wait for the sync point."""
-        if self.cond is None:
-            self.cond = asyncio.Event()
-        return self.cond.wait()
-
-    async def arrive(self):
-        """arrive at the sync point."""
-        if self.cond is not None:
-            self.cond.set()
-
 class Tasks:
     """
     This class implements a list of tasks.
@@ -284,7 +265,8 @@ class ServerInvocationContext(ObjectContext):
                  invocation: Invocation,
                  attempt_headers: Dict[str, str],
                  send: Send,
-                 receive: Receive) -> None:
+                 receive: ReceiveChannel
+                 ) -> None:
         super().__init__()
         self.vm = vm
         self.handler = handler
@@ -293,7 +275,6 @@ class ServerInvocationContext(ObjectContext):
         self.send = send
         self.receive = receive
         self.run_coros_to_execute: dict[int,  Callable[[], Awaitable[None]]] = {}
-        self.sync_point = SyncPoint()
         self.request_finished_event = asyncio.Event()
         self.tasks = Tasks()
 
@@ -365,18 +346,6 @@ class ServerInvocationContext(ObjectContext):
             # ignore the cancelled error
             pass
 
-
-    async def receive_and_notify_input(self):
-        """Receive input from the state machine."""
-        chunk = await self.receive()
-        if chunk.get('type') == 'http.disconnect':
-            raise DisconnectedException()
-        if chunk.get('body', None) is not None:
-            assert isinstance(chunk['body'], bytes)
-            self.vm.notify_input(chunk['body'])
-        if not chunk.get('more_body', False):
-            self.vm.notify_input_closed()
-
     async def take_and_send_output(self):
         """Take output from state machine and send it"""
         output = self.vm.take_output()
@@ -417,21 +386,22 @@ class ServerInvocationContext(ObjectContext):
                 async def wrapper(f):
                     await f()
                     await self.take_and_send_output()
-                    await self.sync_point.arrive()
+                    await self.receive.tx({ 'type' : 'restate.run_completed', 'body' : bytes(), 'more_body' : True})
 
                 task = asyncio.create_task(wrapper(fn))
                 self.tasks.add(task)
                 continue
             if isinstance(do_progress_response, (DoWaitPendingRun, DoProgressReadFromInput)):
-                sync_task = asyncio.create_task(self.sync_point.awaiter())
-                self.tasks.add(sync_task)
-
-                read_task = asyncio.create_task(self.receive_and_notify_input())
-                self.tasks.add(read_task)
-
-                done, _ = await asyncio.wait([sync_task, read_task], return_when=asyncio.FIRST_COMPLETED)
-                if read_task in done:
-                    _ = read_task.result() # propagate exception
+                chunk = await self.receive()
+                if chunk.get('type') == 'restate.run_completed':
+                    continue
+                if chunk.get('type') == 'http.disconnect':
+                    raise DisconnectedException()
+                if chunk.get('body', None) is not None:
+                    assert isinstance(chunk['body'], bytes)
+                    self.vm.notify_input(chunk['body'])
+                if not chunk.get('more_body', False):
+                    self.vm.notify_input_closed()
 
     def _create_fetch_result_coroutine(self, handle: int, serde: Serde[T] | None = None):
         """Create a coroutine that fetches a result from a notification handle."""

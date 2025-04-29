@@ -16,7 +16,7 @@ import traceback
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
 from restate.server_context import ServerInvocationContext, DisconnectedException
-from restate.server_types import Receive, Scope, Send, binary_to_header, header_to_binary
+from restate.server_types import Receive, ReceiveChannel, Scope, Send, binary_to_header, header_to_binary # pylint: disable=line-too-long
 from restate.vm import VMWrapper
 from restate._internal import PyIdentityVerifier, IdentityVerificationException # pylint: disable=import-error,no-name-in-module
 from restate._internal import SDK_VERSION # pylint: disable=import-error,no-name-in-module
@@ -85,7 +85,7 @@ async def send_health_check(send: Send):
 async def process_invocation_to_completion(vm: VMWrapper,
                                            handler,
                                            attempt_headers: Dict[str, str],
-                                           receive: Receive,
+                                           receive: ReceiveChannel,
                                            send: Send):
     """Invoke the user code."""
     status, res_headers = vm.get_response_head()
@@ -171,6 +171,7 @@ def parse_path(request: str) -> ParsedPath:
     # anything other than invoke is 404
     return { "type": "unknown" , "service": None, "handler": None }
 
+
 def asgi_app(endpoint: Endpoint):
     """Create an ASGI-3 app for the given endpoint."""
 
@@ -201,7 +202,7 @@ def asgi_app(endpoint: Endpoint):
                 identity_verifier.verify(request_headers, request_path)
             except IdentityVerificationException:
                 # Identify verification failed, send back unauthorized and close
-                await send_status(send, receive,401)
+                await send_status(send, receive, 401)
                 return
 
             # might be a discovery request
@@ -228,11 +229,15 @@ def asgi_app(endpoint: Endpoint):
             # At this point we have a valid handler.
             # Let us setup restate's execution context for this invocation and handler.
             #
-            await process_invocation_to_completion(VMWrapper(request_headers),
-                                                   handler,
-                                                   dict(request_headers),
-                                                   receive,
-                                                   send)
+            receive_channel = ReceiveChannel(receive)
+            try:
+                await process_invocation_to_completion(VMWrapper(request_headers),
+                                                           handler,
+                                                           dict(request_headers),
+                                                           receive_channel,
+                                                           send)
+            finally:
+                await receive_channel.close()
         except LifeSpanNotImplemented as e:
             raise e
         except Exception as e:
