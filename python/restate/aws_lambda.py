@@ -87,16 +87,19 @@ def request_to_receive(req: RestateLambdaRequest) -> Receive:
         "type": "http.request",
         "body": body,
         "more_body": False
+    },
+    {
+        "type": "http.request",
+        "body": b'',
+        "more_body": False
     }])
 
     async def recv() -> HTTPRequestEvent:
         if len(events) != 0:
-            return events.pop()
-        return {
-            "type": "http.request",
-            "body": b'',
-            "more_body": False
-        }
+            return events.pop(0)
+        # If we are out of events, return a future that will never complete
+        f = asyncio.Future[HTTPRequestEvent]()
+        return await f
 
     return recv
 
