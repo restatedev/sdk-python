@@ -318,14 +318,7 @@ class ServerInvocationContext(ObjectContext):
         # {'type': 'http.request', 'body': b'', 'more_body': True}
         # {'type': 'http.request', 'body': b'', 'more_body': False}
         # {'type': 'http.disconnect'}
-        while True:
-            event = await self.receive()
-            if event is None:
-                break
-            if event.get('type') == 'http.disconnect':
-                break
-            if event.get('type') == 'http.request' and event.get('more_body', False) is False:
-                break
+        await self.receive.block_until_http_input_closed()
         # finally, we close our side
         # it is important to do it, after the other side has closed his side,
         # because some asgi servers (like hypercorn) will remove the stream

@@ -98,14 +98,19 @@ class ReceiveChannel:
 
     def __init__(self, receive: Receive) -> None:
         self._queue = asyncio.Queue[Union[ASGIReceiveEvent, RestateEvent]]()
+        self._http_input_closed = asyncio.Event()
+        self._disconnected = asyncio.Event()
 
         async def loop():
             """Receive loop."""
-            while True:
+            while not self._disconnected.is_set():
                 event = await receive()
+                if event.get('type') == 'http.request' and not event.get('more_body', False):
+                    self._http_input_closed.set()
+                elif event.get('type') == 'http.disconnect':
+                    self._http_input_closed.set()
+                    self._disconnected.set()
                 await self._queue.put(event)
-                if event.get('type') == 'http.disconnect':
-                    break
 
         self._task = asyncio.create_task(loop())
 
@@ -115,12 +120,18 @@ class ReceiveChannel:
         self._queue.task_done()
         return what
 
+    async def block_until_http_input_closed(self) -> None:
+        """Wait until the HTTP input is closed"""
+        await self._http_input_closed.wait()
+
     async def enqueue_restate_event(self, what: RestateEvent):
         """Add a message."""
         await self._queue.put(what)
 
     async def close(self):
         """Close the channel."""
+        self._http_input_closed.set()
+        self._disconnected.set()
         if self._task.done():
             return
         self._task.cancel()
