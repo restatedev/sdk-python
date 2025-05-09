@@ -132,15 +132,15 @@ class KeyValueStore(abc.ABC):
             name: str,
             serde: Serde[T] = DefaultSerde(),
             type_hint: Optional[typing.Type[T]] = None
-            ) -> Awaitable[Optional[Any]]:
+            ) -> Awaitable[Optional[T]]:
         """
         Retrieves the value associated with the given name.
 
         Args:
             name: The state name
-            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type. 
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
                     See also 'type_hint'.
-            type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer. 
+            type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
         """
 
     @abc.abstractmethod
@@ -213,7 +213,7 @@ class Context(abc.ABC):
         Args:
             name: The name of the action.
             action: The action to run.
-            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type. 
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
                     See also 'type_hint'.
             max_attempts:   The maximum number of retry attempts to complete the action.
                             If None, the action will be retried indefinitely, until it succeeds.
@@ -221,7 +221,7 @@ class Context(abc.ABC):
             max_retry_duration: The maximum duration for retrying. If None, the action will be retried indefinitely, until it succeeds.
                                 Otherwise, the action will be retried until the maximum duration is reached and then it will raise a TerminalError.
             type_hint: The type hint of the return value of the action.
-                        This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer. 
+                        This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
 
         """
 
@@ -394,9 +394,9 @@ class ObjectSharedContext(Context):
 
         Args:
             name: The state name
-            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type. 
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
                     See also 'type_hint'.
-            type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer. 
+            type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
         """
 
     @abc.abstractmethod
