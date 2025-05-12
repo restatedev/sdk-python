@@ -216,6 +216,9 @@ class ServerDurablePromise(DurablePromise):
         assert serde is not None
         return self.server_context.create_future(handle, serde)
 
+    def __await__(self):
+        return self.value().__await__()
+
 
 # disable too many public method
 # pylint: disable=R0904
@@ -684,8 +687,10 @@ class ServerInvocationContext(ObjectContext):
     def reject_awakeable(self, name: str, failure_message: str, failure_code: int = 500) -> None:
         return self.vm.sys_reject_awakeable(name, Failure(code=failure_code, message=failure_message))
 
-    def promise(self, name: str, serde: typing.Optional[Serde[T]] = JsonSerde()) -> DurablePromise[Any]:
+    def promise(self, name: str, serde: typing.Optional[Serde[T]] = JsonSerde(), type_hint: Optional[typing.Type[T]] = None) -> DurablePromise[T]:
         """Create a durable promise."""
+        if isinstance(serde, DefaultSerde):
+            serde = serde.with_maybe_type(type_hint)
         return ServerDurablePromise(self, name, serde)
 
     def key(self) -> str:
