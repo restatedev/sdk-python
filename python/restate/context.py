@@ -438,13 +438,19 @@ class DurablePromise(typing.Generic[T]):
         Returns the value of the promise if it is resolved, None otherwise.
         """
 
+    @abc.abstractmethod
+    def __await__(self) -> typing.Generator[Any, Any, T]:
+        """
+        Returns the value of the promise. This is a shortcut for calling value() and awaiting it. 
+        """
+
 class WorkflowContext(ObjectContext):
     """
     Represents the context of the current workflow invocation.
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = DefaultSerde()) -> DurablePromise[T]:
+    def promise(self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None) -> DurablePromise[T]:
         """
         Returns a durable promise with the given name.
         """
@@ -455,7 +461,7 @@ class WorkflowSharedContext(ObjectSharedContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = DefaultSerde()) -> DurablePromise[T]:
+    def promise(self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None) -> DurablePromise[T]:
         """
         Returns a durable promise with the given name.
         """

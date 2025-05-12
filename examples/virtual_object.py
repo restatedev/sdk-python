@@ -18,7 +18,7 @@ counter = VirtualObject("counter")
 
 @counter.handler()
 async def increment(ctx: ObjectContext, value: int) -> int:
-    n = await ctx.get("counter") or 0
+    n = await ctx.get("counter", type_hint=int) or 0
     n += value
     ctx.set("counter", n)
     return n

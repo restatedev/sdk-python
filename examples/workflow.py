@@ -56,5 +56,5 @@ async def pay(ctx: WorkflowContext, amount: int):
 
 @payment.handler()
 async def payment_verified(ctx: WorkflowSharedContext, result: str):
-    promise = ctx.promise("verify.payment")
+    promise = ctx.promise("verify.payment", type_hint=str)
     await promise.resolve(result)
