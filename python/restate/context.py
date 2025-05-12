@@ -327,7 +327,7 @@ class Context(abc.ABC):
     def awakeable(self,
                   serde: Serde[T] = DefaultSerde(),
                   type_hint: Optional[typing.Type[T]] = None
-                  ) -> typing.Tuple[str, RestateDurableFuture[Any]]:
+                  ) -> typing.Tuple[str, RestateDurableFuture[T]]:
         """
         Returns the name of the awakeable and the future to be awaited.
         """
@@ -388,7 +388,7 @@ class ObjectSharedContext(Context):
             name: str,
             serde: Serde[T] = DefaultSerde(),
             type_hint: Optional[typing.Type[T]] = None
-            ) -> RestateDurableFuture[Optional[Any]]:
+            ) -> RestateDurableFuture[Optional[T]]:
         """
         Retrieves the value associated with the given name.
 
@@ -444,7 +444,7 @@ class WorkflowContext(ObjectContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = DefaultSerde()) -> DurablePromise[Any]:
+    def promise(self, name: str, serde: Serde[T] = DefaultSerde()) -> DurablePromise[T]:
         """
         Returns a durable promise with the given name.
         """
@@ -455,7 +455,7 @@ class WorkflowSharedContext(ObjectSharedContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = DefaultSerde()) -> DurablePromise[Any]:
+    def promise(self, name: str, serde: Serde[T] = DefaultSerde()) -> DurablePromise[T]:
         """
         Returns a durable promise with the given name.
         """
