@@ -15,7 +15,7 @@ Restate Context
 
 import abc
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, overload
 import typing
 from datetime import timedelta
 from restate.serde import DefaultSerde, Serde
@@ -24,8 +24,9 @@ T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
 
+SyncRunAction = Callable[..., T]
+AsyncRunAction = Callable[..., Awaitable[T]]
 RunAction = Union[Callable[..., Awaitable[T]], Callable[..., T]]
-
 
 # pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
@@ -195,6 +196,64 @@ class Context(abc.ABC):
     def request(self) -> Request:
         """
         Returns the request object.
+        """
+
+    @overload
+    @abc.abstractmethod
+    def run(self,
+            name: str,
+            action: SyncRunAction[T],
+            serde: Serde[T] = DefaultSerde(),
+            max_attempts: typing.Optional[int] = None,
+            max_retry_duration: typing.Optional[timedelta] = None,
+            type_hint: Optional[typing.Type[T]] = None,
+            args: Optional[typing.Tuple[Any, ...]] = None,
+            ) -> RestateDurableFuture[T]:
+        """
+        Runs the given action with the given name.
+
+        Args:
+            name: The name of the action.
+            action: The action to run.
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
+                    See also 'type_hint'.
+            max_attempts:   The maximum number of retry attempts to complete the action.
+                            If None, the action will be retried indefinitely, until it succeeds.
+                            Otherwise, the action will be retried until the maximum number of attempts is reached and then it will raise a TerminalError.
+            max_retry_duration: The maximum duration for retrying. If None, the action will be retried indefinitely, until it succeeds.
+                                Otherwise, the action will be retried until the maximum duration is reached and then it will raise a TerminalError.
+            type_hint: The type hint of the return value of the action.
+                        This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
+
+        """
+
+    @overload
+    @abc.abstractmethod
+    def run(self,
+            name: str,
+            action: AsyncRunAction[T],
+            serde: Serde[T] = DefaultSerde(),
+            max_attempts: typing.Optional[int] = None,
+            max_retry_duration: typing.Optional[timedelta] = None,
+            type_hint: Optional[typing.Type[T]] = None,
+            args: Optional[typing.Tuple[Any, ...]] = None,
+            ) -> RestateDurableFuture[T]:
+        """
+        Runs the given coroutine action with the given name.
+
+        Args:
+            name: The name of the action.
+            action: The action to run.
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
+                    See also 'type_hint'.
+            max_attempts:   The maximum number of retry attempts to complete the action.
+                            If None, the action will be retried indefinitely, until it succeeds.
+                            Otherwise, the action will be retried until the maximum number of attempts is reached and then it will raise a TerminalError.
+            max_retry_duration: The maximum duration for retrying. If None, the action will be retried indefinitely, until it succeeds.
+                                Otherwise, the action will be retried until the maximum duration is reached and then it will raise a TerminalError.
+            type_hint: The type hint of the return value of the action.
+                        This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
+
         """
 
     @abc.abstractmethod
