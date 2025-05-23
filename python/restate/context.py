@@ -15,7 +15,7 @@ Restate Context
 
 import abc
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, overload
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine, overload
 import typing
 from datetime import timedelta
 from restate.serde import DefaultSerde, Serde
@@ -24,9 +24,7 @@ T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
 
-SyncRunAction = Callable[..., T]
-AsyncRunAction = Callable[..., Awaitable[T]]
-RunAction = Union[Callable[..., Awaitable[T]], Callable[..., T]]
+RunAction = Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]]
 
 # pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
@@ -202,7 +200,7 @@ class Context(abc.ABC):
     @abc.abstractmethod
     def run(self,
             name: str,
-            action: SyncRunAction[T],
+            action: Callable[..., Coroutine[Any, Any,T]],
             serde: Serde[T] = DefaultSerde(),
             max_attempts: typing.Optional[int] = None,
             max_retry_duration: typing.Optional[timedelta] = None,
@@ -231,7 +229,7 @@ class Context(abc.ABC):
     @abc.abstractmethod
     def run(self,
             name: str,
-            action: AsyncRunAction[T],
+            action: Callable[..., T],
             serde: Serde[T] = DefaultSerde(),
             max_attempts: typing.Optional[int] = None,
             max_retry_duration: typing.Optional[timedelta] = None,

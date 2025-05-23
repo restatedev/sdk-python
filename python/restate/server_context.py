@@ -25,7 +25,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, AttemptFinishedEvent, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, SendHandle, RestateDurableSleepFuture
+from restate.context import DurablePromise, AttemptFinishedEvent, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, RunAction, SendHandle, RestateDurableSleepFuture
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
@@ -66,7 +66,7 @@ class ServerTeardownEvent(AttemptFinishedEvent):
         await self.event.wait()
 
 
-class LazyFuture:
+class LazyFuture(typing.Generic[T]):
     """
     Creates a task lazily, and allows multiple awaiters to the same coroutine.
     The async_def will be executed at most 1 times. (0 if __await__ or get() not called) 
@@ -76,7 +76,7 @@ class LazyFuture:
     def __init__(self, async_def: Callable[[], typing.Coroutine[Any, Any, T]]) -> None:
         assert async_def is not None
         self.async_def = async_def
-        self.task: asyncio.Task | None = None
+        self.task: asyncio.Task[T] | None = None
 
     def done(self):
         """
@@ -141,10 +141,10 @@ class ServerCallDurableFuture(RestateDurableCallFuture[T], ServerDurableFuture[T
         Just a utility shortcut to:
         .. code-block:: python
 
-            await ctx.cancel_invocation(await f.invocation_id())
+           ctx.cancel_invocation(await f.invocation_id())
         """
         inv = await self.invocation_id()
-        await self.context.cancel_invocation(inv)
+        self.context.cancel_invocation(inv)
 
 class ServerSendHandle(SendHandle):
     """This class implements the send API"""
@@ -153,10 +153,11 @@ class ServerSendHandle(SendHandle):
         super().__init__()
         self.context = context
 
-        async def coro():
+        async def coro() -> str:
             if not context.vm.is_completed(handle):
                 await context.create_poll_or_cancel_coroutine([handle])
-            return context.must_take_notification(handle)
+            invocation_id = context.must_take_notification(handle)
+            return typing.cast(str, invocation_id)
 
         self.future = LazyFuture(coro)
 
@@ -472,7 +473,7 @@ class ServerInvocationContext(ObjectContext):
     # pylint: disable=R0914
     async def create_run_coroutine(self,
                                    handle: int,
-                                   action: Callable[[], T] | Callable[[], Awaitable[T]],
+                                   action: RunAction[T],
                                    serde: Serde[T],
                                    max_attempts: Optional[int] = None,
                                    max_retry_duration: Optional[timedelta] = None,
@@ -511,7 +512,7 @@ class ServerInvocationContext(ObjectContext):
     # pylint: disable=R0914
     def run(self,
                   name: str,
-                  action: Callable[..., T] | Callable[..., Awaitable[T]],
+                  action: RunAction[T],
                   serde: Serde[T] = DefaultSerde(),
                   max_attempts: Optional[int] = None,
                   max_retry_duration: Optional[timedelta] = None,
@@ -532,7 +533,6 @@ class ServerInvocationContext(ObjectContext):
         else:
             # todo: we can also verify by looking at the signature that there are no missing parameters
             noargs_action = action # type: ignore
-
         self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, noargs_action, serde, max_attempts, max_retry_duration)
         return self.create_future(handle, serde) # type: ignore
 
