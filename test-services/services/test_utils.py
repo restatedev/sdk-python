@@ -12,9 +12,8 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
-import os
 from datetime import timedelta
-from typing import (Dict, Iterable, List, Union, TypedDict, Literal, Any)
+from typing import Dict, List
 from restate import Service, Context
 from restate.serde import BytesSerde
 
