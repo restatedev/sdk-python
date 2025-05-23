@@ -14,7 +14,7 @@
 
 import os
 from datetime import timedelta
-from typing import (Dict, Iterable, List, Union, TypedDict, Literal, Any)
+from typing import Iterable, List, Union, TypedDict, Literal, Any
 from restate import VirtualObject, ObjectSharedContext, ObjectContext, RestateDurableFuture, RestateDurableSleepFuture
 from restate import select, wait_completed, as_completed
 from restate.exceptions import TerminalError
@@ -22,7 +22,7 @@ from restate.exceptions import TerminalError
 virtual_object_command_interpreter = VirtualObject("VirtualObjectCommandInterpreter")
 
 @virtual_object_command_interpreter.handler(name="getResults", kind="shared")
-async def get_results(ctx: ObjectSharedContext) -> List[str]:
+async def get_results(ctx: ObjectSharedContext | ObjectContext) -> List[str]:
     return (await ctx.get("results")) or []
 
 @virtual_object_command_interpreter.handler(name="hasAwakeable", kind="shared")
@@ -95,14 +95,14 @@ class InterpretRequest(TypedDict):
     commands: Iterable[Command]
 
 @virtual_object_command_interpreter.handler(name="resolveAwakeable", kind="shared")
-async def resolve_awakeable(ctx: ObjectSharedContext, req: ResolveAwakeable) -> bool:
+async def resolve_awakeable(ctx: ObjectSharedContext | ObjectContext, req: ResolveAwakeable):
     awk_id = await ctx.get("awk-" + req['awakeableKey'])
     if not awk_id:
         raise TerminalError(message="No awakeable is registered")
     ctx.resolve_awakeable(awk_id, req['value'])
 
 @virtual_object_command_interpreter.handler(name="rejectAwakeable", kind="shared")
-async def reject_awakeable(ctx: ObjectSharedContext, req: RejectAwakeable) -> bool:
+async def reject_awakeable(ctx: ObjectSharedContext | ObjectContext, req: RejectAwakeable):
     awk_id = await ctx.get("awk-" + req['awakeableKey'])
     if not awk_id:
         raise TerminalError(message="No awakeable is registered")
@@ -118,7 +118,8 @@ def to_durable_future(ctx: ObjectContext, cmd: AwaitableCommand) -> RestateDurab
     elif cmd['type'] == "runThrowTerminalException":
         def side_effect(reason):
             raise TerminalError(message=reason)
-        return ctx.run("run should fail command", side_effect, args=(cmd['reason'],))
+        res = ctx.run("run should fail command", side_effect, args=(cmd['reason'],))
+        return res
 
 @virtual_object_command_interpreter.handler(name="interpretCommands")
 async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
@@ -134,10 +135,10 @@ async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
                 case ['timeout', _]:
                     raise TerminalError(message="await-timeout", status_code=500)
         elif cmd['type'] == "resolveAwakeable":
-            resolve_awakeable(ctx, cmd)
+            await resolve_awakeable(ctx, cmd)
             result = ""
         elif cmd['type'] == "rejectAwakeable":
-            reject_awakeable(ctx, cmd)
+            await reject_awakeable(ctx, cmd)
             result = ""
         elif cmd['type'] == "getEnvVariable":
             env_name = cmd['envName']
@@ -152,7 +153,7 @@ async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
                 result = await awaitable
         elif cmd['type'] == "awaitAny":
             futures = [to_durable_future(ctx, c) for c in cmd['commands']]
-            done, pending = await wait_completed(*futures)
+            done, _ = await wait_completed(*futures)
             done_fut = done[0]
             # We need this dance because the Python SDK doesn't support .map on futures
             if isinstance(done_fut, RestateDurableSleepFuture):
@@ -169,10 +170,9 @@ async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
                         await done_fut
                         result = "sleep"
                         break
-                    else:
-                        result = await done_fut
-                        break
-                except TerminalError as t:
+                    result = await done_fut
+                    break
+                except TerminalError:
                     pass
 
         last_results = await get_results(ctx)

@@ -25,7 +25,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 import typing
 import traceback
 
-from restate.context import DurablePromise, AttemptFinishedEvent, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, RunAction, SendHandle, RestateDurableSleepFuture
+from restate.context import DurablePromise, AttemptFinishedEvent, HandlerType, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, RunAction, SendHandle, RestateDurableSleepFuture
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
@@ -543,7 +543,7 @@ class ServerInvocationContext(ObjectContext):
         return self.create_sleep_future(self.vm.sys_sleep(millis)) # type: ignore
 
     def do_call(self,
-                tpe: Callable[[Any, I], Awaitable[O]],
+                tpe: HandlerType[I, O],
                 parameter: I,
                 key: Optional[str] = None,
                 send_delay: Optional[timedelta] = None,
@@ -598,7 +598,7 @@ class ServerInvocationContext(ObjectContext):
                                    serde=output_serde)
 
     def service_call(self,
-                     tpe: Callable[[Any, I], Awaitable[O]],
+                     tpe: HandlerType[I, O],
                      arg: I,
                      idempotency_key: str | None = None,
                      headers: typing.Dict[str, str] | None = None
@@ -608,13 +608,13 @@ class ServerInvocationContext(ObjectContext):
         return coro
 
 
-    def service_send(self, tpe: Callable[[Any, I], Awaitable[O]], arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None, headers: typing.Dict[str, str] | None = None) -> SendHandle:
+    def service_send(self, tpe: HandlerType[I, O], arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None, headers: typing.Dict[str, str] | None = None) -> SendHandle:
         send = self.do_call(tpe=tpe, parameter=arg, send_delay=send_delay, send=True, idempotency_key=idempotency_key, headers=headers)
         assert isinstance(send, SendHandle)
         return send
 
     def object_call(self,
-                    tpe: Callable[[Any, I],Awaitable[O]],
+                    tpe: HandlerType[I, O],
                     key: str,
                     arg: I,
                     idempotency_key: str | None = None,
@@ -624,13 +624,13 @@ class ServerInvocationContext(ObjectContext):
         assert not isinstance(coro, SendHandle)
         return coro
 
-    def object_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None, headers: typing.Dict[str, str] | None = None) -> SendHandle:
+    def object_send(self, tpe: HandlerType[I, O], key: str, arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None, headers: typing.Dict[str, str] | None = None) -> SendHandle:
         send = self.do_call(tpe=tpe, key=key, parameter=arg, send_delay=send_delay, send=True, idempotency_key=idempotency_key, headers=headers)
         assert isinstance(send, SendHandle)
         return send
 
     def workflow_call(self,
-                        tpe: Callable[[Any, I], Awaitable[O]],
+                        tpe: HandlerType[I, O],
                         key: str,
                         arg: I,
                         idempotency_key: str | None = None,
@@ -638,7 +638,7 @@ class ServerInvocationContext(ObjectContext):
                         ) -> RestateDurableCallFuture[O]:
         return self.object_call(tpe, key, arg, idempotency_key=idempotency_key, headers=headers)
 
-    def workflow_send(self, tpe: Callable[[Any, I], Awaitable[O]], key: str, arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None, headers: typing.Dict[str, str] | None = None) -> SendHandle:
+    def workflow_send(self, tpe: HandlerType[I, O], key: str, arg: I, send_delay: timedelta | None = None, idempotency_key: str | None = None, headers: typing.Dict[str, str] | None = None) -> SendHandle:
         send = self.object_send(tpe, key, arg, send_delay, idempotency_key=idempotency_key, headers=headers)
         assert isinstance(send, SendHandle)
         return send

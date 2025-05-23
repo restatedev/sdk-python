@@ -25,6 +25,7 @@ I = TypeVar('I')
 O = TypeVar('O')
 
 RunAction = Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]]
+HandlerType = Union[Callable[[Any, I], Awaitable[O]], Callable[[Any], Awaitable[O]]]
 
 # pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
@@ -290,7 +291,7 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def service_call(self,
-                     tpe: Callable[[Any, I], Awaitable[O]],
+                     tpe: HandlerType[I, O],
                      arg: I,
                      idempotency_key: str | None = None,
                      headers: typing.Dict[str, str] | None = None
@@ -302,7 +303,7 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def service_send(self,
-                     tpe: Callable[[Any, I], Awaitable[O]],
+                     tpe: HandlerType[I, O],
                      arg: I,
                      send_delay: Optional[timedelta] = None,
                      idempotency_key: str | None = None,
@@ -314,7 +315,7 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def object_call(self,
-                    tpe: Callable[[Any, I], Awaitable[O]],
+                    tpe: HandlerType[I, O],
                     key: str,
                     arg: I,
                     idempotency_key: str | None = None,
@@ -326,7 +327,7 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def object_send(self,
-                    tpe: Callable[[Any, I], Awaitable[O]],
+                    tpe: HandlerType[I, O],
                     key: str,
                     arg: I,
                     send_delay: Optional[timedelta] = None,
@@ -339,7 +340,7 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def workflow_call(self,
-                    tpe: Callable[[Any, I], Awaitable[O]],
+                    tpe: HandlerType[I, O],
                     key: str,
                     arg: I,
                     idempotency_key: str | None = None,
@@ -351,7 +352,7 @@ class Context(abc.ABC):
 
     @abc.abstractmethod
     def workflow_send(self,
-                    tpe: Callable[[Any, I], Awaitable[O]],
+                    tpe: HandlerType[I, O],
                     key: str,
                     arg: I,
                     send_delay: Optional[timedelta] = None,

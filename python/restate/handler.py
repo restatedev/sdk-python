@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from inspect import Signature
 from typing import Any, Callable, Awaitable, Dict, Generic, Literal, Optional, TypeVar
 
+from restate.context import HandlerType
 from restate.exceptions import TerminalError
 from restate.serde import DefaultSerde, PydanticJsonSerde, Serde, is_pydantic
 
@@ -153,7 +154,7 @@ def make_handler(service_tag: ServiceTag,
     vars(wrapped)[RESTATE_UNIQUE_HANDLER_SYMBOL] = handler
     return handler
 
-def handler_from_callable(wrapper: Callable[[Any, I], Awaitable[O]]) -> Handler[I, O]:
+def handler_from_callable(wrapper: HandlerType[I, O]) -> Handler[I, O]:
     """
     Get the handler from the callable.
     """
