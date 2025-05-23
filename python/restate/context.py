@@ -292,7 +292,9 @@ class Context(abc.ABC):
     def service_call(self,
                      tpe: Callable[[Any, I], Awaitable[O]],
                      arg: I,
-                     idempotency_key: str | None = None) -> RestateDurableCallFuture[O]:
+                     idempotency_key: str | None = None,
+                     headers: typing.Dict[str, str] | None = None
+                     ) -> RestateDurableCallFuture[O]:
         """
         Invokes the given service with the given argument.
         """
@@ -304,6 +306,7 @@ class Context(abc.ABC):
                      arg: I,
                      send_delay: Optional[timedelta] = None,
                      idempotency_key: str | None = None,
+                     headers: typing.Dict[str, str] | None = None
                      ) -> SendHandle:
         """
         Invokes the given service with the given argument.
@@ -315,6 +318,7 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     idempotency_key: str | None = None,
+                    headers: typing.Dict[str, str] | None = None
                     ) -> RestateDurableCallFuture[O]:
         """
         Invokes the given object with the given argument.
@@ -327,6 +331,7 @@ class Context(abc.ABC):
                     arg: I,
                     send_delay: Optional[timedelta] = None,
                     idempotency_key: str | None = None,
+                    headers: typing.Dict[str, str] | None = None
                     ) -> SendHandle:
         """
         Send a message to an object with the given argument.
@@ -338,6 +343,7 @@ class Context(abc.ABC):
                     key: str,
                     arg: I,
                     idempotency_key: str | None = None,
+                    headers: typing.Dict[str, str] | None = None
                     ) -> RestateDurableCallFuture[O]:
         """
         Invokes the given workflow with the given argument.
@@ -350,6 +356,7 @@ class Context(abc.ABC):
                     arg: I,
                     send_delay: Optional[timedelta] = None,
                     idempotency_key: str | None = None,
+                    headers: typing.Dict[str, str] | None = None
                     ) -> SendHandle:
         """
         Send a message to an object with the given argument.
@@ -362,7 +369,9 @@ class Context(abc.ABC):
                      handler: str,
                      arg: bytes,
                      key: Optional[str] = None,
-                     idempotency_key: str | None = None)  -> RestateDurableCallFuture[bytes]:
+                     idempotency_key: str | None = None,
+                     headers: typing.Dict[str, str] | None = None
+                     )  -> RestateDurableCallFuture[bytes]:
         """
         Invokes the given generic service/handler with the given argument.
         """
@@ -375,6 +384,7 @@ class Context(abc.ABC):
                      key: Optional[str] = None,
                      send_delay: Optional[timedelta] = None,
                      idempotency_key: str | None = None,
+                     headers: typing.Dict[str, str] | None = None
                     ) -> SendHandle:
         """
         Send a message to a generic service/handler with the given argument.
