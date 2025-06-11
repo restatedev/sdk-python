@@ -8,4 +8,12 @@ if [ -n "$MAX_CONCURRENT_STREAMS" ]; then
     mv hypercorn-config.toml.new hypercorn-config.toml
 fi
 
+if [ -n "$RESTATE_LOGGING" ]; then
+    # unification of the RESTATE_LOGGING environment variable
+    # which is also used by the node-test-services.
+    #
+    # Set by the e2e-verification-runner
+    export RESTATE_CORE_LOG=$RESTATE_LOGGING
+fi
+
 python3 -m hypercorn testservices:app --config hypercorn-config.toml --bind "0.0.0.0:${PORT}"
