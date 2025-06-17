@@ -16,6 +16,7 @@ which is used to define the handlers for the services.
 """
 
 from dataclasses import dataclass
+from datetime import timedelta
 from inspect import Signature
 from typing import Any, Callable, Awaitable, Dict, Generic, Literal, Optional, TypeVar
 
@@ -104,6 +105,23 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
 class Handler(Generic[I, O]):
     """
     Represents a handler for a service.
+
+    Attributes:
+        service_tag: The service tag for the handler.
+        handler_io: The input/output configuration for the handler.
+        kind: The kind of handler (exclusive, shared, workflow).
+        name: The name of the handler.
+        fn: The handler function.
+        arity: The number of parameters in the handler function.
+        description: Documentation for this handler definition.
+        metadata: Custom metadata for this handler definition.
+        inactivity_timeout: Inactivity timeout duration.
+        abort_timeout: Abort timeout duration.
+        journal_retention: Journal retention duration.
+        idempotency_retention: Idempotency retention duration.
+        workflow_retention: Workflow completion retention duration.
+        enable_lazy_state: If true, lazy state is enabled.
+        ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
     """
     service_tag: ServiceTag
     handler_io: HandlerIO[I, O]
@@ -113,11 +131,18 @@ class Handler(Generic[I, O]):
     arity: int
     description: Optional[str] = None
     metadata: Optional[Dict[str, str]] = None
+    inactivity_timeout: Optional[timedelta] = None
+    abort_timeout: Optional[timedelta] = None
+    journal_retention: Optional[timedelta] = None
+    idempotency_retention: Optional[timedelta] = None
+    workflow_retention: Optional[timedelta] = None
+    enable_lazy_state: Optional[bool] = None
+    ingress_private: Optional[bool] = None
 
 
 # disable too many arguments warning
 # pylint: disable=R0913
-
+# pylint: disable=R0914
 def make_handler(service_tag: ServiceTag,
                  handler_io: HandlerIO[I, O],
                  name: str | None,
@@ -125,9 +150,33 @@ def make_handler(service_tag: ServiceTag,
                  wrapped: Any,
                  signature: Signature,
                  description: Optional[str] = None,
-                 metadata: Optional[Dict[str, str]] = None) -> Handler[I, O]:
+                 metadata: Optional[Dict[str, str]] = None,
+                 inactivity_timeout: Optional[timedelta] = None,
+                 abort_timeout: Optional[timedelta] = None,
+                 journal_retention: Optional[timedelta] = None,
+                 idempotency_retention: Optional[timedelta] = None,
+                 workflow_retention: Optional[timedelta] = None,
+                 enable_lazy_state: Optional[bool] = None,
+                 ingress_private: Optional[bool] = None) -> Handler[I, O]:
     """
     Factory function to create a handler.
+
+    Args:
+        service_tag: The service tag for the handler.
+        handler_io: The input/output configuration for the handler.
+        name: The name of the handler.
+        kind: The kind of handler (exclusive, shared, workflow).
+        wrapped: The wrapped function.
+        signature: The signature of the function.
+        description: Documentation for this handler definition.
+        metadata: Custom metadata for this handler definition.
+        inactivity_timeout: Inactivity timeout duration.
+        abort_timeout: Abort timeout duration.
+        journal_retention: Journal retention duration.
+        idempotency_retention: Idempotency retention duration.
+        workflow_retention: Workflow completion retention duration.
+        enable_lazy_state: If true, lazy state is enabled.
+        ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
     """
     # try to deduce the handler name
     handler_name = name
@@ -149,7 +198,14 @@ def make_handler(service_tag: ServiceTag,
                             fn=wrapped,
                             arity=arity,
                             description=description,
-                            metadata=metadata)
+                            metadata=metadata,
+                            inactivity_timeout=inactivity_timeout,
+                            abort_timeout=abort_timeout,
+                            journal_retention=journal_retention,
+                            idempotency_retention=idempotency_retention,
+                            workflow_retention=workflow_retention,
+                            enable_lazy_state=enable_lazy_state,
+                            ingress_private=ingress_private)
 
     vars(wrapped)[RESTATE_UNIQUE_HANDLER_SYMBOL] = handler
     return handler

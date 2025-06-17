@@ -60,21 +60,36 @@ class OutputPayload:
         self.jsonSchema = jsonSchema
 
 class Handler:
-    def __init__(self, name: str, ty: Optional[ServiceHandlerType] = None, input: Optional[InputPayload | Dict[str, str]] = None, output: Optional[OutputPayload] = None, description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None):
+    # pylint: disable=R0902
+    def __init__(self, name: str, ty: Optional[ServiceHandlerType] = None, input: Optional[InputPayload | Dict[str, str]] = None, output: Optional[OutputPayload] = None, description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None, inactivityTimeout: Optional[int] = None, abortTimeout: Optional[int] = None, journalRetention: Optional[int] = None, idempotencyRetention: Optional[int] = None, workflowCompletionRetention: Optional[int] = None, enableLazyState: Optional[bool] = None, ingressPrivate: Optional[bool] = None):
         self.name = name
         self.ty = ty
         self.input = input
         self.output = output
         self.documentation = description
         self.metadata = metadata
+        self.inactivityTimeout = inactivityTimeout
+        self.abortTimeout = abortTimeout
+        self.journalRetention = journalRetention
+        self.idempotencyRetention = idempotencyRetention
+        self.workflowCompletionRetention = workflowCompletionRetention
+        self.enableLazyState = enableLazyState
+        self.ingressPrivate = ingressPrivate
 
 class Service:
-    def __init__(self, name: str, ty: ServiceType, handlers: List[Handler], description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None):
+    # pylint: disable=R0902
+    def __init__(self, name: str, ty: ServiceType, handlers: List[Handler], description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None, inactivityTimeout: Optional[int] = None, abortTimeout: Optional[int] = None, journalRetention: Optional[int] = None, idempotencyRetention: Optional[int] = None, enableLazyState: Optional[bool] = None, ingressPrivate: Optional[bool] = None):
         self.name = name
         self.ty = ty
         self.handlers = handlers
         self.documentation = description
         self.metadata = metadata
+        self.inactivityTimeout = inactivityTimeout
+        self.abortTimeout = abortTimeout
+        self.journalRetention = journalRetention
+        self.idempotencyRetention = idempotencyRetention
+        self.enableLazyState = enableLazyState
+        self.ingressPrivate = ingressPrivate
 
 class Endpoint:
     def __init__(self, protocolMode: ProtocolMode, minProtocolVersion: int, maxProtocolVersion: int, services: List[Service]):
@@ -148,20 +163,51 @@ def json_schema_from_type_hint(type_hint: Optional[TypeHint[Any]]) -> Any:
     return type_hint_to_json_schema(type_hint.annotation)
 
 
-
+# pylint: disable=R0912
 def compute_discovery_json(endpoint: RestateEndpoint,
                            version: int,
-                           discovered_as: typing.Literal["bidi", "request_response"]) -> typing.Tuple[typing.Dict[str, str] ,str]:
+                           discovered_as: typing.Literal["bidi", "request_response"]) -> str:
     """
-    return restate's discovery object as JSON 
+    return restate's discovery object as JSON
     """
-    if version != 1:
-        raise ValueError(f"Unsupported protocol version {version}")
 
     ep = compute_discovery(endpoint, discovered_as)
+
+    # Validate that new discovery fields aren't used with older protocol versions
+    if version <= 2:
+        # Check for new discovery fields in version 3 that shouldn't be used in version 2 or lower
+        for service in ep.services:
+            if service.inactivityTimeout is not None:
+                raise ValueError("inactivityTimeout is only supported in discovery protocol version 3")
+            if service.abortTimeout is not None:
+                raise ValueError("abortTimeout is only supported in discovery protocol version 3")
+            if service.idempotencyRetention is not None:
+                raise ValueError("idempotencyRetention is only supported in discovery protocol version 3")
+            if service.journalRetention is not None:
+                raise ValueError("journalRetention is only supported in discovery protocol version 3")
+            if service.enableLazyState is not None:
+                raise ValueError("enableLazyState is only supported in discovery protocol version 3")
+            if service.ingressPrivate is not None:
+                raise ValueError("ingressPrivate is only supported in discovery protocol version 3")
+
+            for handler in service.handlers:
+                if handler.inactivityTimeout is not None:
+                    raise ValueError("inactivityTimeout is only supported in discovery protocol version 3")
+                if handler.abortTimeout is not None:
+                    raise ValueError("abortTimeout is only supported in discovery protocol version 3")
+                if handler.idempotencyRetention is not None:
+                    raise ValueError("idempotencyRetention is only supported in discovery protocol version 3")
+                if handler.journalRetention is not None:
+                    raise ValueError("journalRetention is only supported in discovery protocol version 3")
+                if handler.workflowCompletionRetention is not None:
+                    raise ValueError("workflowCompletionRetention is only supported in discovery protocol version 3")
+                if handler.enableLazyState is not None:
+                    raise ValueError("enableLazyState is only supported in discovery protocol version 3")
+                if handler.ingressPrivate is not None:
+                    raise ValueError("ingressPrivate is only supported in discovery protocol version 3")
+
     json_str = json.dumps(ep, cls=PythonClassEncoder, allow_nan=False)
-    headers = {"content-type": "application/vnd.restate.endpointmanifest.v1+json"}
-    return (headers, json_str)
+    return json_str
 
 
 def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal["bidi", "request_response"]) -> Endpoint:
@@ -200,11 +246,28 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
                                             input=inp,
                                             output=out,
                                             description=handler.description,
-                                            metadata=handler.metadata))
+                                            metadata=handler.metadata,
+                                            inactivityTimeout=int(handler.inactivity_timeout.total_seconds() * 1000) if handler.inactivity_timeout else None,
+                                            abortTimeout=int(handler.abort_timeout.total_seconds() * 1000) if handler.abort_timeout else None,
+                                            journalRetention=int(handler.journal_retention.total_seconds() * 1000) if handler.journal_retention else None,
+                                            idempotencyRetention=int(handler.idempotency_retention.total_seconds() * 1000) if handler.idempotency_retention else None,
+                                            workflowCompletionRetention=int(handler.workflow_retention.total_seconds() * 1000) if handler.workflow_retention else None,
+                                            enableLazyState=handler.enable_lazy_state,
+                                            ingressPrivate=handler.ingress_private))
         # add the service
         description = service.service_tag.description
         metadata = service.service_tag.metadata
-        services.append(Service(name=service.name, ty=service_type, handlers=service_handlers, description=description, metadata=metadata))
+        services.append(Service(name=service.name,
+                               ty=service_type,
+                               handlers=service_handlers,
+                               description=description,
+                               metadata=metadata,
+                               inactivityTimeout=int(service.inactivity_timeout.total_seconds() * 1000) if service.inactivity_timeout else None,
+                               abortTimeout=int(service.abort_timeout.total_seconds() * 1000) if service.abort_timeout else None,
+                               journalRetention=int(service.journal_retention.total_seconds() * 1000) if service.journal_retention else None,
+                               idempotencyRetention=int(service.idempotency_retention.total_seconds() * 1000) if service.idempotency_retention else None,
+                               enableLazyState=service.enable_lazy_state if hasattr(service, 'enable_lazy_state') else None,
+                               ingressPrivate=service.ingress_private))
 
     if endpoint.protocol:
         protocol_mode = PROTOCOL_MODES[endpoint.protocol]
