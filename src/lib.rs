@@ -3,8 +3,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone, PyString};
 use restate_sdk_shared_core::{
     CallHandle, CoreVM, DoProgressResponse, Error, Header, IdentityVerifier, Input, NonEmptyValue,
-    NotificationHandle, ResponseHead, RetryPolicy, RunExitResult, SuspendedOrVMError,
-    TakeOutputResult, Target, TerminalFailure, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
+    NotificationHandle, ResponseHead, RetryPolicy, RunExitResult, TakeOutputResult, Target,
+    TerminalFailure, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
 };
 use std::time::{Duration, SystemTime};
 
@@ -330,10 +330,10 @@ impl PyVM {
         let py = self_.py();
 
         match res {
-            Err(SuspendedOrVMError::VM(e)) => Err(e.into()),
-            Err(SuspendedOrVMError::Suspended(_)) => {
+            Err(e) if e.is_suspended_error() => {
                 Ok(PySuspended.into_py(py).into_bound(py).into_any())
             }
+            Err(e) => Err(e.into()),
             Ok(DoProgressResponse::AnyCompleted) => Ok(PyDoProgressAnyCompleted
                 .into_py(py)
                 .into_bound(py)
@@ -352,10 +352,9 @@ impl PyVM {
                 .into_py(py)
                 .into_bound(py)
                 .into_any()),
-            Ok(DoProgressResponse::WaitingPendingRun) => Ok(PyDoWaitForPendingRun
-                .into_py(py)
-                .into_bound(py)
-                .into_any()), 
+            Ok(DoProgressResponse::WaitingPendingRun) => {
+                Ok(PyDoWaitForPendingRun.into_py(py).into_bound(py).into_any())
+            }
         }
     }
 
@@ -377,10 +376,10 @@ impl PyVM {
         let py = self_.py();
 
         match res {
-            Err(SuspendedOrVMError::VM(e)) => Err(e.into()),
-            Err(SuspendedOrVMError::Suspended(_)) => {
+            Err(e) if e.is_suspended_error() => {
                 Ok(PySuspended.into_py(py).into_bound(py).into_any())
             }
+            Err(e) => Err(e.into()),
             Ok(None) => Ok(PyNone::get_bound(py).to_owned().into_any()),
             Ok(Some(Value::Void)) => Ok(PyVoid.into_py(py).into_bound(py).into_any()),
             Ok(Some(Value::Success(b))) => Ok(PyBytes::new_bound(py, &b).into_any()),
@@ -451,7 +450,11 @@ impl PyVM {
             .expect("Duration since unix epoch cannot fail");
         self_
             .vm
-            .sys_sleep(String::default(), now + Duration::from_millis(millis), Some(now))
+            .sys_sleep(
+                String::default(),
+                now + Duration::from_millis(millis),
+                Some(now),
+            )
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -494,7 +497,7 @@ impl PyVM {
         buffer: &Bound<'_, PyBytes>,
         key: Option<String>,
         delay: Option<u64>,
-        idempotency_key: Option<String>, 
+        idempotency_key: Option<String>,
         headers: Option<Vec<PyHeader>>,
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
@@ -615,11 +618,11 @@ impl PyVM {
         self_.vm.sys_run(name).map(Into::into).map_err(Into::into)
     }
 
-    fn sys_cancel(
-        mut self_: PyRefMut<'_, Self>,
-        invocation_id: String,
-    ) -> Result<(), PyVMError> {
-        self_.vm.sys_cancel_invocation(invocation_id).map_err(Into::into)
+    fn sys_cancel(mut self_: PyRefMut<'_, Self>, invocation_id: String) -> Result<(), PyVMError> {
+        self_
+            .vm
+            .sys_cancel_invocation(invocation_id)
+            .map_err(Into::into)
     }
 
     fn propose_run_completion_success(
@@ -699,7 +702,9 @@ impl PyVM {
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
-            .sys_attach_invocation(restate_sdk_shared_core::AttachInvocationTarget::InvocationId(invocation_id))
+            .sys_attach_invocation(
+                restate_sdk_shared_core::AttachInvocationTarget::InvocationId(invocation_id),
+            )
             .map(Into::into)
             .map_err(Into::into)
     }
