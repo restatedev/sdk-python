@@ -3,7 +3,7 @@
 [![Discord](https://img.shields.io/discord/1128210118216007792?logo=discord)](https://discord.gg/skW3AZ6uGd)
 [![Twitter](https://img.shields.io/twitter/follow/restatedev.svg?style=social&label=Follow)](https://twitter.com/intent/follow?screen_name=restatedev)
 
-# Python SDK for restate
+# Restate Python SDK
 
 [Restate](https://restate.dev/) is a system for easily building resilient applications using *distributed durable async/await*. This repository contains the Restate SDK for writing services in **Python**.
 
@@ -32,12 +32,14 @@ The Python SDK is currently in active development, and might break across releas
 
 The compatibility with Restate is described in the following table:
 
-| Restate Server\sdk-python | 0.0 - 0.2 | 0.3 - 0.5 | 0.6 - 0.7 |
-|---------------------------|-----------|-----------|-----------|
-| 1.0                       | ✅         | ❌         | ❌         |
-| 1.1                       | ✅         | ✅         | ❌         |
-| 1.2                       | ✅         | ✅         | ❌         |
-| 1.3                       | ✅         | ✅         | ✅         |
+| Restate Server\sdk-python | 0.0 - 0.2 | 0.3 - 0.5 | 0.6 - 0.7 | 0.8              |
+|---------------------------|-----------|-----------|-----------|------------------|
+| 1.0                       | ✅         | ❌         | ❌         | ❌                |
+| 1.1 - 1.2                 | ✅         | ✅         | ❌         | ❌                |
+| 1.3                       | ✅         | ✅         | ✅         | ✅ <sup>(1)</sup> |
+| 1.4                       | ✅         | ✅         | ✅         | ✅                |
+
+<sup>(1)</sup> **Note** The new Service/Object/Workflow constructor fields and the decorator fields `inactivity_timeout`, `abort_timeout`, `journal_retention`, `idempotency_retention`, `ingress_private`, `workflow_retention` work only from Restate 1.4 onward. Check the in-code documentation for more details.
 
 ## Contributing
 
