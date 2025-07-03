@@ -21,17 +21,18 @@ import contextvars
 from datetime import timedelta
 import inspect
 import functools
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine
 import typing
 import traceback
 
-from restate.context import DurablePromise, AttemptFinishedEvent, HandlerType, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, RunAction, SendHandle, RestateDurableSleepFuture
+from restate.context import DurablePromise, AttemptFinishedEvent, HandlerType, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, RunAction, SendHandle, RestateDurableSleepFuture, RunOptions, P
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import ReceiveChannel, Send
 from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
 from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun
+import typing_extensions
 
 
 T = TypeVar('T')
@@ -510,6 +511,7 @@ class ServerInvocationContext(ObjectContext):
                 self.vm.propose_run_completion_transient(handle, failure=failure, attempt_duration_ms=1, config=config)
     # pylint: disable=W0236
     # pylint: disable=R0914
+    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     def run(self,
                   name: str,
                   action: RunAction[T],
@@ -535,6 +537,28 @@ class ServerInvocationContext(ObjectContext):
             noargs_action = action # type: ignore
         self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, noargs_action, serde, max_attempts, max_retry_duration)
         return self.create_future(handle, serde) # type: ignore
+
+    def run_typed(
+        self,
+        name: str,
+        action:  Union[Callable[P, T], Callable[P, Coroutine[Any, Any, T]]],
+        options: RunOptions[T] = RunOptions(),
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> RestateDurableFuture[T]:
+        if isinstance(options.serde, DefaultSerde):
+            if options.type_hint is None:
+                signature = inspect.signature(action, eval_str=True)
+                options.type_hint = signature.return_annotation
+            options.serde = options.serde.with_maybe_type(options.type_hint)
+        
+        handle = self.vm.sys_run(name)
+
+        func = functools.partial(action, *args, **kwargs)
+        self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, func, options.serde, options.max_attempts, options.max_retry_duration)
+        return self.create_future(handle, options.serde) 
+
 
 
     def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
