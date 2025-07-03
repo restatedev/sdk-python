@@ -49,6 +49,13 @@ class RunOptions(typing.Generic[T]):
     type_hint: Optional[typing.Type[T]] = None
     """The type hint of the return value of the action. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer."""
 
+@dataclass
+class RunOptions(typing.Generic[T]):
+    serde: Serde[T] = DefaultSerde()
+    max_attempts: Optional[int] = None
+    max_retry_duration: Optional[timedelta] = None
+    type_hint: Optional[typing.Type[T]] = None
+
 # pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     """
@@ -223,16 +230,16 @@ class Context(abc.ABC):
     @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @overload
     @abc.abstractmethod
-    def run(self,
+    def run_typed(self,
             name: str,
-            action: Callable[..., Coroutine[Any, Any,T]],
-            serde: Serde[T] = DefaultSerde(),
-            max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None,
-            args: Optional[typing.Tuple[Any, ...]] = None,
+            action: Callable[P, Coroutine[Any, Any,T]],
+            options: RunOptions[T] = RunOptions(),
+            /,
+            *args: P.args,
+            **kwargs: P.kwargs,
             ) -> RestateDurableFuture[T]:
         """
+        Typed version of run that provides type hints for the function arguments.
         Runs the given action with the given name.
 
         Args:
@@ -253,16 +260,16 @@ class Context(abc.ABC):
     @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @overload
     @abc.abstractmethod
-    def run(self,
+    def run_typed(self,
             name: str,
-            action: Callable[..., T],
-            serde: Serde[T] = DefaultSerde(),
-            max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None,
-            args: Optional[typing.Tuple[Any, ...]] = None,
+            action: Callable[P, T],
+            options: RunOptions[T] = RunOptions(),
+            /,
+            *args: P.args,
+            **kwargs: P.kwargs,
             ) -> RestateDurableFuture[T]:
         """
+        Typed version of run that provides type hints for the function arguments.
         Runs the given coroutine action with the given name.
 
         Args:
@@ -282,16 +289,16 @@ class Context(abc.ABC):
 
     @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @abc.abstractmethod
-    def run(self,
+    def run_typed(self,
             name: str,
-            action: RunAction[T],
-            serde: Serde[T] = DefaultSerde(),
-            max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None,
-            args: Optional[typing.Tuple[Any, ...]] = None,
+            action: Union[Callable[P, Coroutine[Any, Any, T]], Callable[P, T]],
+            options: RunOptions[T] = RunOptions(),
+            /,
+            *args: P.args,
+            **kwargs: P.kwargs,
             ) -> RestateDurableFuture[T]:
         """
+        Typed version of run that provides type hints for the function arguments.
         Runs the given action with the given name.
 
         Args:
