@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine, overload, ParamSpec
 import typing
 from datetime import timedelta
+
+import typing_extensions
 from restate.serde import DefaultSerde, Serde
 
 T = TypeVar('T')
@@ -26,6 +28,7 @@ O = TypeVar('O')
 P = ParamSpec('P')
 
 HandlerType = Union[Callable[[Any, I], Awaitable[O]], Callable[[Any], Awaitable[O]]]
+RunAction = Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]]
 
 @dataclass
 class RunOptions(typing.Generic[T]):
@@ -203,6 +206,97 @@ class Context(abc.ABC):
         """
         Returns the request object.
         """
+
+
+    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead")
+    @overload
+    @abc.abstractmethod
+    def run(self,
+            name: str,
+            action: Callable[..., Coroutine[Any, Any,T]],
+            serde: Serde[T] = DefaultSerde(),
+            max_attempts: typing.Optional[int] = None,
+            max_retry_duration: typing.Optional[timedelta] = None,
+            type_hint: Optional[typing.Type[T]] = None,
+            args: Optional[typing.Tuple[Any, ...]] = None,
+            ) -> RestateDurableFuture[T]:
+        """
+        Runs the given action with the given name.
+
+        Args:
+            name: The name of the action.
+            action: The action to run.
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
+                    See also 'type_hint'.
+            max_attempts:   The maximum number of retry attempts to complete the action.
+                            If None, the action will be retried indefinitely, until it succeeds.
+                            Otherwise, the action will be retried until the maximum number of attempts is reached and then it will raise a TerminalError.
+            max_retry_duration: The maximum duration for retrying. If None, the action will be retried indefinitely, until it succeeds.
+                                Otherwise, the action will be retried until the maximum duration is reached and then it will raise a TerminalError.
+            type_hint: The type hint of the return value of the action.
+                        This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
+
+        """
+
+    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead")
+    @overload
+    @abc.abstractmethod
+    def run(self,
+            name: str,
+            action: Callable[..., T],
+            serde: Serde[T] = DefaultSerde(),
+            max_attempts: typing.Optional[int] = None,
+            max_retry_duration: typing.Optional[timedelta] = None,
+            type_hint: Optional[typing.Type[T]] = None,
+            args: Optional[typing.Tuple[Any, ...]] = None,
+            ) -> RestateDurableFuture[T]:
+        """
+        Runs the given coroutine action with the given name.
+
+        Args:
+            name: The name of the action.
+            action: The action to run.
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
+                    See also 'type_hint'.
+            max_attempts:   The maximum number of retry attempts to complete the action.
+                            If None, the action will be retried indefinitely, until it succeeds.
+                            Otherwise, the action will be retried until the maximum number of attempts is reached and then it will raise a TerminalError.
+            max_retry_duration: The maximum duration for retrying. If None, the action will be retried indefinitely, until it succeeds.
+                                Otherwise, the action will be retried until the maximum duration is reached and then it will raise a TerminalError.
+            type_hint: The type hint of the return value of the action.
+                        This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
+
+        """
+
+    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead")
+    @abc.abstractmethod
+    def run(self,
+            name: str,
+            action: RunAction[T],
+            serde: Serde[T] = DefaultSerde(),
+            max_attempts: typing.Optional[int] = None,
+            max_retry_duration: typing.Optional[timedelta] = None,
+            type_hint: Optional[typing.Type[T]] = None,
+            args: Optional[typing.Tuple[Any, ...]] = None,
+            ) -> RestateDurableFuture[T]:
+        """
+        Runs the given action with the given name.
+
+        Args:
+            name: The name of the action.
+            action: The action to run.
+            serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
+                    See also 'type_hint'.
+            max_attempts:   The maximum number of retry attempts to complete the action.
+                            If None, the action will be retried indefinitely, until it succeeds.
+                            Otherwise, the action will be retried until the maximum number of attempts is reached and then it will raise a TerminalError.
+            max_retry_duration: The maximum duration for retrying. If None, the action will be retried indefinitely, until it succeeds.
+                                Otherwise, the action will be retried until the maximum duration is reached and then it will raise a TerminalError.
+            type_hint: The type hint of the return value of the action.
+                        This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
+
+        """
+
 
     @overload
     @abc.abstractmethod
