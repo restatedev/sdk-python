@@ -15,7 +15,7 @@ Restate Context
 
 import abc
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine, overload
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine, overload, ParamSpec
 import typing
 from datetime import timedelta
 from restate.serde import DefaultSerde, Serde
@@ -23,9 +23,16 @@ from restate.serde import DefaultSerde, Serde
 T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
+P = ParamSpec('P')
 
-RunAction = Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]]
 HandlerType = Union[Callable[[Any, I], Awaitable[O]], Callable[[Any], Awaitable[O]]]
+
+@dataclass
+class RunOptions(typing.Generic[T]):
+    serde: Serde[T] = DefaultSerde()
+    max_attempts: Optional[int] = None
+    max_retry_duration: Optional[timedelta] = None
+    type_hint: Optional[typing.Type[T]] = None
 
 # pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
@@ -199,16 +206,16 @@ class Context(abc.ABC):
 
     @overload
     @abc.abstractmethod
-    def run(self,
+    def run_typed(self,
             name: str,
-            action: Callable[..., Coroutine[Any, Any,T]],
-            serde: Serde[T] = DefaultSerde(),
-            max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None,
-            args: Optional[typing.Tuple[Any, ...]] = None,
+            action: Callable[P, Coroutine[Any, Any,T]],
+            options: RunOptions[T] = RunOptions(),
+            /,
+            *args: P.args,
+            **kwargs: P.kwargs,
             ) -> RestateDurableFuture[T]:
         """
+        Typed version of run that provides type hints for the function arguments.
         Runs the given action with the given name.
 
         Args:
@@ -228,16 +235,16 @@ class Context(abc.ABC):
 
     @overload
     @abc.abstractmethod
-    def run(self,
+    def run_typed(self,
             name: str,
-            action: Callable[..., T],
-            serde: Serde[T] = DefaultSerde(),
-            max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None,
-            args: Optional[typing.Tuple[Any, ...]] = None,
+            action: Callable[P, T],
+            options: RunOptions[T] = RunOptions(),
+            /,
+            *args: P.args,
+            **kwargs: P.kwargs,
             ) -> RestateDurableFuture[T]:
         """
+        Typed version of run that provides type hints for the function arguments.
         Runs the given coroutine action with the given name.
 
         Args:
@@ -256,16 +263,16 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def run(self,
+    def run_typed(self,
             name: str,
-            action: RunAction[T],
-            serde: Serde[T] = DefaultSerde(),
-            max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None,
-            args: Optional[typing.Tuple[Any, ...]] = None,
+            action: Union[Callable[P, Coroutine[Any, Any, T]], Callable[P, T]],
+            options: RunOptions[T] = RunOptions(),
+            /,
+            *args: P.args,
+            **kwargs: P.kwargs,
             ) -> RestateDurableFuture[T]:
         """
+        Typed version of run that provides type hints for the function arguments.
         Runs the given action with the given name.
 
         Args:
