@@ -552,14 +552,11 @@ class ServerInvocationContext(ObjectContext):
                 signature = inspect.signature(action, eval_str=True)
                 options.type_hint = signature.return_annotation
             options.serde = options.serde.with_maybe_type(options.type_hint)
-        
         handle = self.vm.sys_run(name)
 
         func = functools.partial(action, *args, **kwargs)
         self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, func, options.serde, options.max_attempts, options.max_retry_duration)
-        return self.create_future(handle, options.serde) 
-
-
+        return self.create_future(handle, options.serde)
 
     def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
         # convert timedelta to milliseconds

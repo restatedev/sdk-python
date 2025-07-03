@@ -32,6 +32,10 @@ RunAction = Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]]
 
 @dataclass
 class RunOptions(typing.Generic[T]):
+    """
+    Options for running an action.
+    """
+
     serde: Serde[T] = DefaultSerde()
     """The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
                     See also 'type_hint'."""
