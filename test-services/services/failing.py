@@ -15,6 +15,7 @@
 
 from restate import VirtualObject, ObjectContext
 from restate.exceptions import TerminalError
+from restate import RunOptions
 
 failing = VirtualObject("Failing")
 
@@ -45,7 +46,7 @@ async def terminally_failing_side_effect(ctx: ObjectContext, error_message: str)
     def side_effect():
         raise TerminalError(message=error_message)
 
-    await ctx.run("sideEffect", side_effect)
+    await ctx.run_typed("sideEffect", side_effect)
     raise ValueError("Should not reach here")
 
 
@@ -53,7 +54,6 @@ eventual_success_side_effects = 0
 
 @failing.handler(name="sideEffectSucceedsAfterGivenAttempts")
 async def side_effect_succeeds_after_given_attempts(ctx: ObjectContext, minimum_attempts: int) -> int:
-
     def side_effect():
         global eventual_success_side_effects
         eventual_success_side_effects += 1
@@ -61,7 +61,8 @@ async def side_effect_succeeds_after_given_attempts(ctx: ObjectContext, minimum_
             return eventual_success_side_effects
         raise ValueError(f"Failed at attempt: {eventual_success_side_effects}")
 
-    return await ctx.run("sideEffect", side_effect, max_attempts=minimum_attempts + 1) # type: ignore
+    options: RunOptions[int] = RunOptions(max_attempts=minimum_attempts + 1)
+    return await ctx.run_typed("sideEffect", side_effect, options)
 
 eventual_failure_side_effects = 0
 
@@ -74,7 +75,8 @@ async def side_effect_fails_after_given_attempts(ctx: ObjectContext, retry_polic
         raise ValueError(f"Failed at attempt: {eventual_failure_side_effects}")
 
     try:
-        await ctx.run("sideEffect", side_effect, max_attempts=retry_policy_max_retry_count)
+        options: RunOptions[int] = RunOptions(max_attempts=retry_policy_max_retry_count)
+        await ctx.run_typed("sideEffect", side_effect, options)
         raise ValueError("Side effect did not fail.")
     except TerminalError as t:
         global eventual_failure_side_effects

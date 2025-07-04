@@ -227,7 +227,7 @@ async def interpreter(layer: int,
             coros[i] = (expected, service.echo_later(expected, command['sleep']))
         elif command_type == SIDE_EFFECT:
             expected = f"hello-{i}"
-            result = await ctx.run("sideEffect",  lambda : expected) # pylint: disable=W0640
+            result = await ctx.run_typed("sideEffect", lambda: expected)
             if result != expected:
                 raise TerminalError(f"Expected {expected} but got {result}")
         elif command_type == SLOW_SIDE_EFFECT:
@@ -246,7 +246,7 @@ async def interpreter(layer: int,
                 if bool(random.getrandbits(1)):
                     raise ValueError("Random error")
 
-            await ctx.run("throwingSideEffect", side_effect)
+            await ctx.run_typed("throwingSideEffect", side_effect)
         elif command_type == INCREMENT_STATE_COUNTER_INDIRECTLY:
             await service.increment_indirectly(layer=layer, key=ctx.key())
         elif command_type == AWAIT_PROMISE:

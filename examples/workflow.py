@@ -37,7 +37,7 @@ async def pay(ctx: WorkflowContext, amount: int):
         print("To decline use:")
         print(f"""curl http://localhost:8080/payment/{workflow_key}/payment_verified --json '"declined"' """)
 
-    await ctx.run("payment", payment_gateway)
+    await ctx.run_typed("payment", payment_gateway)
 
     ctx.set("status", "waiting for the payment provider to approve")
 

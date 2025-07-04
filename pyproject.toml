@@ -12,6 +12,10 @@ license = { file = "LICENSE" }
 authors = [
     { name = "Restate Developers", email = "dev@restate.dev" }
 ]
+dependencies = [
+    "typing-extensions>=4.14.0"
+]
+
 
 [project.optional-dependencies]
 test = ["pytest", "hypercorn"]
