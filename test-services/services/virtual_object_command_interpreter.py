@@ -116,9 +116,9 @@ def to_durable_future(ctx: ObjectContext, cmd: AwaitableCommand) -> RestateDurab
     elif cmd['type'] == "sleep":
         return ctx.sleep(timedelta(milliseconds=cmd['timeoutMillis']))
     elif cmd['type'] == "runThrowTerminalException":
-        def side_effect(reason):
+        def side_effect(reason: str):
             raise TerminalError(message=reason)
-        res = ctx.run_typed("run should fail command", side_effect, cmd['reason'])
+        res = ctx.run_typed("run should fail command", side_effect, reason=cmd['reason'])
         return res
 
 @virtual_object_command_interpreter.handler(name="interpretCommands")
