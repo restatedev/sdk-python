@@ -74,8 +74,8 @@ fn take_output_result_into_py(
     take_output_result: TakeOutputResult,
 ) -> Bound<'_, PyAny> {
     match take_output_result {
-        TakeOutputResult::Buffer(b) => PyBytes::new_bound(py, &b).into_any(),
-        TakeOutputResult::EOF => PyNone::get_bound(py).to_owned().into_any(),
+        TakeOutputResult::Buffer(b) => PyBytes::new(py, &b).into_any(),
+        TakeOutputResult::EOF => PyNone::get(py).to_owned().into_any(),
     }
 }
 
@@ -319,7 +319,7 @@ impl PyVM {
     fn do_progress(
         mut self_: PyRefMut<'_, Self>,
         any_handle: Vec<PyNotificationHandle>,
-    ) -> Result<Bound<'_, PyAny>, PyVMError> {
+    ) -> PyResult<Bound<'_, PyAny>> {
         let res = self_.vm.do_progress(
             any_handle
                 .into_iter()
@@ -330,30 +330,26 @@ impl PyVM {
         let py = self_.py();
 
         match res {
-            Err(e) if e.is_suspended_error() => {
-                Ok(PySuspended.into_py(py).into_bound(py).into_any())
+            Err(e) if e.is_suspended_error() => Ok(Bound::new(py, PySuspended)?.into_any()),
+            Err(e) => Err(PyVMError::from(e))?,
+            Ok(DoProgressResponse::AnyCompleted) => {
+                Ok(Bound::new(py, PyDoProgressAnyCompleted)?.into_any())
             }
-            Err(e) => Err(e.into()),
-            Ok(DoProgressResponse::AnyCompleted) => Ok(PyDoProgressAnyCompleted
-                .into_py(py)
-                .into_bound(py)
-                .into_any()),
-            Ok(DoProgressResponse::ReadFromInput) => Ok(PyDoProgressReadFromInput
-                .into_py(py)
-                .into_bound(py)
-                .into_any()),
-            Ok(DoProgressResponse::ExecuteRun(handle)) => Ok(PyDoProgressExecuteRun {
-                handle: handle.into(),
+            Ok(DoProgressResponse::ReadFromInput) => {
+                Ok(Bound::new(py, PyDoProgressReadFromInput)?.into_any())
             }
-            .into_py(py)
-            .into_bound(py)
+            Ok(DoProgressResponse::ExecuteRun(handle)) => Ok(Bound::new(
+                py,
+                PyDoProgressExecuteRun {
+                    handle: handle.into(),
+                },
+            )?
             .into_any()),
-            Ok(DoProgressResponse::CancelSignalReceived) => Ok(PyDoProgressCancelSignalReceived
-                .into_py(py)
-                .into_bound(py)
-                .into_any()),
+            Ok(DoProgressResponse::CancelSignalReceived) => {
+                Ok(Bound::new(py, PyDoProgressCancelSignalReceived)?.into_any())
+            }
             Ok(DoProgressResponse::WaitingPendingRun) => {
-                Ok(PyDoWaitForPendingRun.into_py(py).into_bound(py).into_any())
+                Ok(Bound::new(py, PyDoWaitForPendingRun)?.into_any())
             }
         }
     }
@@ -370,27 +366,23 @@ impl PyVM {
     fn take_notification(
         mut self_: PyRefMut<'_, Self>,
         handle: PyNotificationHandle,
-    ) -> Result<Bound<'_, PyAny>, PyVMError> {
+    ) -> PyResult<Bound<'_, PyAny>> {
         let res = self_.vm.take_notification(NotificationHandle::from(handle));
 
         let py = self_.py();
 
         match res {
-            Err(e) if e.is_suspended_error() => {
-                Ok(PySuspended.into_py(py).into_bound(py).into_any())
-            }
-            Err(e) => Err(e.into()),
-            Ok(None) => Ok(PyNone::get_bound(py).to_owned().into_any()),
-            Ok(Some(Value::Void)) => Ok(PyVoid.into_py(py).into_bound(py).into_any()),
-            Ok(Some(Value::Success(b))) => Ok(PyBytes::new_bound(py, &b).into_any()),
-            Ok(Some(Value::Failure(f))) => {
-                Ok(PyFailure::from(f).into_py(py).into_bound(py).into_any())
-            }
+            Err(e) if e.is_suspended_error() => Ok(Bound::new(py, PySuspended)?.into_any()),
+            Err(e) => Err(PyVMError::from(e))?,
+            Ok(None) => Ok(PyNone::get(py).to_owned().into_any()),
+            Ok(Some(Value::Void)) => Ok(Bound::new(py, PyVoid)?.into_any()),
+            Ok(Some(Value::Success(b))) => Ok(PyBytes::new(py, &b).into_any()),
+            Ok(Some(Value::Failure(f))) => Ok(Bound::new(py, PyFailure::from(f))?.into_any()),
             Ok(Some(Value::StateKeys(keys))) => {
-                Ok(PyStateKeys { keys }.into_py(py).into_bound(py).into_any())
+                Ok(Bound::new(py, PyStateKeys { keys })?.into_any())
             }
             Ok(Some(Value::InvocationId(invocation_id))) => {
-                Ok(PyString::new_bound(py, &invocation_id).into_any())
+                Ok(PyString::new(py, &invocation_id).into_any())
             }
         }
     }
@@ -490,6 +482,7 @@ impl PyVM {
     }
 
     #[pyo3(signature = (service, handler, buffer, key=None, delay=None, idempotency_key=None, headers=None))]
+    #[allow(clippy::too_many_arguments)]
     fn sys_send(
         mut self_: PyRefMut<'_, Self>,
         service: String,
@@ -681,7 +674,6 @@ impl PyVM {
         self_
             .vm
             .sys_write_output(NonEmptyValue::Success(buffer.as_bytes().to_vec().into()))
-            .map(Into::into)
             .map_err(Into::into)
     }
 
@@ -692,7 +684,6 @@ impl PyVM {
         self_
             .vm
             .sys_write_output(NonEmptyValue::Failure(value.into()))
-            .map(Into::into)
             .map_err(Into::into)
     }
 
@@ -710,7 +701,7 @@ impl PyVM {
     }
 
     fn sys_end(mut self_: PyRefMut<'_, Self>) -> Result<(), PyVMError> {
-        self_.vm.sys_end().map(Into::into).map_err(Into::into)
+        self_.vm.sys_end().map_err(Into::into)
     }
 }
 
@@ -781,14 +772,14 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDoWaitForPendingRun>()?;
     m.add_class::<PyCallHandle>()?;
 
-    m.add("VMException", m.py().get_type_bound::<VMException>())?;
+    m.add("VMException", m.py().get_type::<VMException>())?;
     m.add(
         "IdentityKeyException",
-        m.py().get_type_bound::<IdentityKeyException>(),
+        m.py().get_type::<IdentityKeyException>(),
     )?;
     m.add(
         "IdentityVerificationException",
-        m.py().get_type_bound::<IdentityVerificationException>(),
+        m.py().get_type::<IdentityVerificationException>(),
     )?;
     m.add("SDK_VERSION", CURRENT_VERSION)?;
     m.add(
