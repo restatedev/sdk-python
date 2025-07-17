@@ -5,17 +5,20 @@ requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Topic :: Software Development :: Libraries :: Application Frameworks"
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dynamic = ["version"]
-license = { file = "LICENSE" }
-authors = [
-    { name = "Restate Developers", email = "dev@restate.dev" }
-]
-dependencies = [
-    "typing-extensions>=4.14.0"
-]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Restate Developers", email = "dev@restate.dev" }]
+readme = "README.md"
+dependencies = ["typing-extensions>=4.14.0"]
 
+[project.urls]
+Homepage = "https://restate.dev"
+Documentation = "https://docs.restate.dev"
+Source = "https://github.com/restatedev/sdk-python"
+"Bug Tracker" = "https://github.com/restatedev/sdk-python/issues"
 
 [project.optional-dependencies]
 test = ["pytest", "hypercorn"]

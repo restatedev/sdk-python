@@ -12,6 +12,7 @@ COPY rust-toolchain.toml .
 COPY requirements.txt .
 COPY pyproject.toml .
 COPY LICENSE .
+COPY README.md .
 
 RUN maturin build --out dist --interpreter python3.12
 
