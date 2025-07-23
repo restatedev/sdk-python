@@ -11,7 +11,7 @@
 """This module contains the ASGI server for the restate framework."""
 
 import asyncio
-from typing import Any, Dict, TypedDict, Literal
+from typing import Dict, TypedDict, Literal
 import traceback
 import typing
 from restate.discovery import compute_discovery_json
@@ -213,7 +213,13 @@ def parse_path(request: str) -> ParsedPath:
     # anything other than invoke is 404
     return { "type": "unknown" , "service": None, "handler": None }
 
-async def lifespan_processor(scope: Scope, receive: Receive, send: Send, lifespan: LifeSpan) -> None:
+async def lifespan_processor(
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+    lifespan: LifeSpan
+) -> None:
+    """Process lifespan context manager."""
     started = False
     await receive()
     try:
@@ -240,12 +246,11 @@ async def lifespan_processor(scope: Scope, receive: Receive, send: Send, lifespa
                 "message": exc_text
             })
         raise
-    else:
-        await send({
-            "type": "lifespan.shutdown.complete" # type: ignore
-        })
+    await send({
+        "type": "lifespan.shutdown.complete" # type: ignore
+    })
 
-
+# pylint: disable=too-many-return-statements
 def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
     """Create an ASGI-3 app for the given endpoint."""
 
@@ -264,7 +269,6 @@ def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
             request_path = scope['path']
             assert isinstance(request_path, str)
             request: ParsedPath = parse_path(request_path)
-
             # Health check
             if request['type'] == 'health':
                 await send_health_check(send)
@@ -280,7 +284,6 @@ def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
                 # Identify verification failed, send back unauthorized and close
                 await send_status(send, receive, 401)
                 return
-
             # might be a discovery request
             if request['type'] == 'discover':
                 await send_discovery(scope, send, endpoint)

@@ -16,7 +16,8 @@ This module contains the ASGI types definitions.
 
 import asyncio
 from typing import (Awaitable, Callable, Dict, Iterable, List,
-                    Tuple, Union, TypedDict, Literal, Optional, NotRequired, Any, AsyncContextManager)
+                    Tuple, Union, TypedDict, Literal, Optional,
+                    NotRequired, Any, AsyncContextManager)
 
 class ASGIVersions(TypedDict):
     """ASGI Versions"""
@@ -66,7 +67,10 @@ class HTTPResponseBodyEvent(TypedDict):
 
 class LifeSpanEvent(TypedDict):
     """ASGI LifeSpan event"""
-    type: Literal["lifespan.startup.complete", "lifespan.shutdown.complete", "lifespan.startup.failed", "lifespan.shutdown.failed"]
+    type: Literal["lifespan.startup.complete",
+                "lifespan.shutdown.complete",
+                "lifespan.startup.failed",
+                "lifespan.shutdown.failed"]
     message: Optional[str]
 
 
@@ -82,6 +86,8 @@ ASGISendEvent = Union[
 Receive = Callable[[], Awaitable[ASGIReceiveEvent]]
 Send = Callable[[ASGISendEvent], Awaitable[None]]
 
+LifeSpan = Callable[[], AsyncContextManager[Any]]
+
 ASGIApp = Callable[
     [
         Scope,
@@ -90,9 +96,6 @@ ASGIApp = Callable[
     ],
     Awaitable[None],
 ]
-
-LifeSpan = Callable[[], AsyncContextManager[Any]]
-
 def header_to_binary(headers: Iterable[Tuple[str, str]]) -> List[Tuple[bytes, bytes]]:
     """Convert a list of headers to a list of binary headers."""
     return [ (k.encode('utf-8'), v.encode('utf-8')) for k,v in headers ]
