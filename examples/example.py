@@ -12,24 +12,36 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
+import asyncio
+from contextlib import asynccontextmanager
+
 import restate
 
+from concurrent_greeter import concurrent_greeter
 from greeter import greeter
+from pydantic_greeter import pydantic_greeter
 from virtual_object import counter
 from workflow import payment
-from pydantic_greeter import pydantic_greeter
-from concurrent_greeter import concurrent_greeter
+
+
+
+@asynccontextmanager
+async def lifespan_fn():
+    print("perform startup tasks")
+    yield
+    print("perform shutdown tasks")
+    await asyncio.sleep(1)
 
 app = restate.app(services=[greeter,
                             counter,
                             payment,
                             pydantic_greeter,
-                            concurrent_greeter])
+                            concurrent_greeter,
+                            ], lifespan=lifespan_fn)
 
 if __name__ == "__main__":
     import hypercorn
     import hypercorn.asyncio
-    import asyncio
     conf = hypercorn.Config()
     conf.bind = ["0.0.0.0:9080"]
     asyncio.run(hypercorn.asyncio.serve(app, conf))
