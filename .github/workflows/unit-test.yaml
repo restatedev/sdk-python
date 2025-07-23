@@ -25,6 +25,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: Build Rust module
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --out dist --interpreter python${{ matrix.python }}
+          sccache: "true"
+          container: off
       - run: pip install -r requirements.txt
+      - run: pip install dist/*
       - name: Run Unit Tests
         run: python -m pytest tests/ -v
