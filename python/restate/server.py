@@ -217,7 +217,7 @@ def parse_path(request: str) -> ParsedPath:
     # anything other than invoke is 404
     return { "type": "unknown" , "service": None, "handler": None }
 
-async def lifespan_processor(scope: Scope, receive: Receive, send: Send, lifespan) -> None:
+async def lifespan_processor(scope: Scope, receive: Receive, send: Send, lifespan: LifeSpan) -> None:
     started = False
     await receive()
     try:
