@@ -187,10 +187,6 @@ async def process_invocation_to_completion(vm: VMWrapper,
     finally:
         context.on_attempt_finished()
 
-class LifeSpanNotImplemented(ValueError):
-    """Signal to the asgi server that we didn't implement lifespans"""
-
-
 class ParsedPath(TypedDict):
     """Parsed path from the request."""
     type: Literal["invocation", "health", "discover", "unknown"]
