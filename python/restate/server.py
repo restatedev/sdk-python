@@ -314,8 +314,6 @@ def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
                                                            send)
             finally:
                 await receive_channel.close()
-        except LifeSpanNotImplemented as e:
-            raise e
         except Exception as e:
             traceback.print_exc()
             raise e
