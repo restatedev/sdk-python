@@ -12,15 +12,17 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
+import asyncio
+from contextlib import asynccontextmanager
+
 import restate
 
+from concurrent_greeter import concurrent_greeter
 from greeter import greeter
+from pydantic_greeter import pydantic_greeter
 from virtual_object import counter
 from workflow import payment
-from pydantic_greeter import pydantic_greeter
-from concurrent_greeter import concurrent_greeter
-from contextlib import asynccontextmanager
-import asyncio
+
 
 
 @asynccontextmanager
@@ -34,7 +36,7 @@ app = restate.app(services=[greeter,
                             counter,
                             payment,
                             pydantic_greeter,
-                            concurrent_greeter, 
+                            concurrent_greeter,
                             ], lifespan=lifespan_fn)
 
 if __name__ == "__main__":
