@@ -100,7 +100,7 @@ class Endpoint:
 def app(
     services: typing.Iterable[typing.Union[Service, VirtualObject, Workflow]],
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None,
-    identity_keys: typing.Optional[typing.List[str]] = None, 
+    identity_keys: typing.Optional[typing.List[str]] = None,
     lifespan: typing.Optional[LifeSpan] = None):
     """A restate ASGI application that hosts the given services."""
     endpoint = Endpoint()
