@@ -11,12 +11,13 @@
 """This module contains the ASGI server for the restate framework."""
 
 import asyncio
-from typing import Dict, TypedDict, Literal
+from typing import Any, Dict, TypedDict, Literal
 import traceback
+import typing
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
 from restate.server_context import ServerInvocationContext, DisconnectedException
-from restate.server_types import Receive, ReceiveChannel, Scope, Send, binary_to_header, header_to_binary # pylint: disable=line-too-long
+from restate.server_types import Receive, ReceiveChannel, Scope, Send, binary_to_header, header_to_binary, LifeSpan # pylint: disable=line-too-long
 from restate.vm import VMWrapper
 from restate._internal import PyIdentityVerifier, IdentityVerificationException # pylint: disable=import-error,no-name-in-module
 from restate._internal import SDK_VERSION # pylint: disable=import-error,no-name-in-module
@@ -216,8 +217,40 @@ def parse_path(request: str) -> ParsedPath:
     # anything other than invoke is 404
     return { "type": "unknown" , "service": None, "handler": None }
 
+async def lifespan_processor(scope: Scope, receive: Receive, send: Send, lifespan) -> None:
+    started = False
+    await receive()
+    try:
+        async with lifespan() as maybe_state:
+            if maybe_state is not None:
+                if "state" not in scope:
+                    raise RuntimeError("The server does not support state in lifespan")
+                scope["state"] = maybe_state
+            await send({
+                "type": "lifespan.startup.complete", # type: ignore
+            })
+            started = True
+            await receive()
+    except Exception:
+        exc_text = traceback.format_exc()
+        if started:
+            await send({
+                "type": "lifespan.shutdown.failed",
+                "message": exc_text
+            })
+        else:
+            await send({
+                "type": "lifespan.startup.failed",
+                "message": exc_text
+            })
+        raise
+    else:
+        await send({
+            "type": "lifespan.shutdown.complete" # type: ignore
+        })
 
-def asgi_app(endpoint: Endpoint):
+
+def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
     """Create an ASGI-3 app for the given endpoint."""
 
     # Prepare request signer
@@ -225,8 +258,10 @@ def asgi_app(endpoint: Endpoint):
 
     async def app(scope: Scope, receive: Receive, send: Send):
         try:
-            if scope['type'] == 'lifespan':
-                raise LifeSpanNotImplemented()
+            if scope['type'] == 'lifespan' and lifespan is not None:
+                await lifespan_processor(scope, receive, send, lifespan)
+                return
+
             if scope['type'] != 'http':
                 raise NotImplementedError(f"Unknown scope type {scope['type']}")
 
