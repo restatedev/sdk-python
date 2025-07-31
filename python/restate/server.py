@@ -11,6 +11,7 @@
 """This module contains the ASGI server for the restate framework."""
 
 import asyncio
+import inspect
 from typing import Any, Dict, TypedDict, Literal
 import traceback
 import typing
@@ -22,7 +23,6 @@ from restate.vm import VMWrapper
 from restate._internal import PyIdentityVerifier, IdentityVerificationException # pylint: disable=import-error,no-name-in-module
 from restate._internal import SDK_VERSION # pylint: disable=import-error,no-name-in-module
 from restate.aws_lambda import is_running_on_lambda, wrap_asgi_as_lambda_handler
-import inspect
 
 X_RESTATE_SERVER = header_to_binary([("x-restate-server", f"restate-sdk-python/{SDK_VERSION}")])
 
@@ -215,7 +215,8 @@ def parse_path(request: str) -> ParsedPath:
     return { "type": "unknown" , "service": None, "handler": None }
 
 def is_async_context_manager(obj: Any):
-    return (hasattr(obj, '__aenter__') and 
+    """check if passed object is an async context manager"""
+    return (hasattr(obj, '__aenter__') and
             hasattr(obj, '__aexit__') and
             inspect.iscoroutinefunction(obj.__aenter__) and
             inspect.iscoroutinefunction(obj.__aexit__))
