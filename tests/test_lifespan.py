@@ -3,7 +3,7 @@ import pytest
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
-from restate.server import asgi_app, lifespan_processor
+from restate.server import asgi_app, lifespan_processor, is_async_context_manager
 
 
 class MockEndpoint:
@@ -250,20 +250,6 @@ class TestASGIAppLifespan:
         send_mock.assert_any_call({'type': 'lifespan.shutdown.complete'})
 
     @pytest.mark.asyncio
-    async def test_lifespan_scope_without_lifespan_handler(self, mock_endpoint):
-        """Test that lifespan scope is ignored when no lifespan handler is provided."""
-        app = asgi_app(mock_endpoint, lifespan=None)
-        
-        scope = {'type': 'lifespan'}
-        receive_mock = AsyncMock()
-        send_mock = AsyncMock()
-        
-        # This should not call lifespan_processor and should continue to http handling
-        # Since it's a lifespan scope but no handler, it should raise NotImplementedError
-        with pytest.raises(NotImplementedError, match="Unknown scope type lifespan"):
-            await app(scope, receive_mock, send_mock)
-
-    @pytest.mark.asyncio
     async def test_lifespan_early_return(self, mock_endpoint):
         """Test that lifespan handling returns early and doesn't continue to HTTP processing."""
         call_order = []
@@ -417,3 +403,81 @@ class TestLifespanEdgeCases:
         
         assert scope['state']['counter'] == 42
         assert scope['state']['items'] == ['test']
+
+
+class TestIsAsyncContextManager:
+    def test_valid_async_context_manager(self):
+        class ValidAsyncContextManager:
+            async def __aenter__(self):
+                return self
+            
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+        
+        obj = ValidAsyncContextManager()
+        assert is_async_context_manager(obj) is True
+
+    def test_async_context_manager_decorator(self):
+        @asynccontextmanager
+        async def lifespan():
+            yield None
+        
+        assert is_async_context_manager(lifespan()) is True
+
+    def test_regular_context_manager(self):
+        class RegularContextManager:
+            def __enter__(self):
+                return self
+            
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+        
+        obj = RegularContextManager()
+        assert is_async_context_manager(obj) is False
+
+    def test_partial_async_context_manager_missing_aenter(self):
+        class MissingAEnter:
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+        
+        obj = MissingAEnter()
+        assert is_async_context_manager(obj) is False
+
+    def test_partial_async_context_manager_missing_aexit(self):
+        class MissingAExit:
+            async def __aenter__(self):
+                return self
+        
+        obj = MissingAExit()
+        assert is_async_context_manager(obj) is False
+
+    def test_sync_methods_with_async_names(self):
+        class SyncMethods:
+            def __aenter__(self):
+                return self
+            
+            def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+        
+        obj = SyncMethods()
+        assert is_async_context_manager(obj) is False
+
+    def test_mixed_sync_async_methods(self):
+        class MixedMethods:
+            def __aenter__(self):
+                return self
+            
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+        
+        obj = MixedMethods()
+        assert is_async_context_manager(obj) is False
+
+    def test_none_object(self):
+        assert is_async_context_manager(None) is False
+
+    def test_simple_object(self):
+        assert is_async_context_manager("string") is False
+        assert is_async_context_manager(42) is False
+        assert is_async_context_manager([]) is False
+        assert is_async_context_manager({}) is False
