@@ -221,6 +221,7 @@ async def lifespan_processor(
 ) -> None:
     """Process lifespan context manager."""
     started = False
+    assert scope["type"] in ["lifespan", "lifespan.startup", "lifespan.shutdown"]
     await receive()
     try:
         async with lifespan() as maybe_state:

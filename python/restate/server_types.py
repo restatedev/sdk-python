@@ -26,7 +26,7 @@ class ASGIVersions(TypedDict):
 
 class Scope(TypedDict):
     """ASGI Scope"""
-    type: Literal["http", "lifespan"]
+    type: Literal["http", "lifespan", "lifespan.startup", "lifespan.shutdown"]
     asgi: ASGIVersions
     http_version: str
     method: str
