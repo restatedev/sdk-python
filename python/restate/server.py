@@ -260,8 +260,10 @@ def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
 
     async def app(scope: Scope, receive: Receive, send: Send):
         try:
-            if scope['type'] == 'lifespan' and lifespan is not None:
-                await lifespan_processor(scope, receive, send, lifespan)
+            if scope['type'] == 'lifespan':
+                if lifespan is not None:
+                    await lifespan_processor(scope, receive, send, lifespan)
+                    return
                 return
 
             if scope['type'] != 'http':
