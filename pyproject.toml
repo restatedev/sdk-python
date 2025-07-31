@@ -21,7 +21,7 @@ Source = "https://github.com/restatedev/sdk-python"
 "Bug Tracker" = "https://github.com/restatedev/sdk-python/issues"
 
 [project.optional-dependencies]
-test = ["pytest", "hypercorn"]
+test = ["pytest", "hypercorn", "pytest-asyncio==1.1.0"]
 lint = ["mypy", "pylint"]
 harness = ["testcontainers", "hypercorn", "httpx"]
 serde = ["dacite", "pydantic"]
