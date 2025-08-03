@@ -7,3 +7,4 @@ pydantic
 httpx
 testcontainers
 typing-extensions>=4.14.0
+pytest-asyncio==1.1.0

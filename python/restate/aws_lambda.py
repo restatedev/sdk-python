@@ -21,7 +21,7 @@ from restate.server_types import (ASGIApp,
                                   Receive,
                                   HTTPResponseStartEvent,
                                   HTTPResponseBodyEvent,
-                                  HTTPRequestEvent)
+                                  HTTPRequestEvent, Send)
 
 class RestateLambdaRequest(TypedDict):
     """
@@ -162,8 +162,9 @@ def wrap_asgi_as_lambda_handler(asgi_app: ASGIApp) \
         scope = create_scope(event)
         recv = request_to_receive(event)
         send = ResponseCollector()
+        send_typed = cast(Send, send)
 
-        asgi_instance = asgi_app(scope, recv, send)
+        asgi_instance = asgi_app(scope, recv, send_typed)
         asgi_task = loop.create_task(asgi_instance)  # type: ignore[var-annotated, arg-type]
         loop.run_until_complete(asgi_task)
 
