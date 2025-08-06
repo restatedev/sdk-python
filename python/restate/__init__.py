@@ -12,6 +12,8 @@
 Restate SDK for Python
 """
 
+import typing
+
 from .service import Service
 from .object import VirtualObject
 from .workflow import Workflow
@@ -27,6 +29,7 @@ from .asyncio import as_completed, gather, wait_completed, select
 from .endpoint import app
 
 from .logging import getLogger, RestateLoggingFilter
+from .client_types import RestateClient, RestateClientSendHandle
 
 try:
     from .harness import test_harness # type: ignore
@@ -37,6 +40,17 @@ except ImportError:
     def test_harness(app, follow_logs = False, restate_image = ""): # type: ignore
         """a dummy harness constructor to raise ImportError"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
+    
+
+try:
+    from .client import create_client  # type: ignore
+except ImportError:
+    # we don't have the appropriate dependencies installed
+
+    # pylint: disable=unused-argument, redefined-outer-name
+    def create_client(ingress: str, headers: typing.Optional[dict] = None) -> "RestateClient":  # type: ignore
+        """a dummy client constructor to raise ImportError"""
+        raise ImportError("Install restate-sdk[client] to use this feature")
 
 __all__ = [
     "Service",
@@ -56,6 +70,9 @@ __all__ = [
     "TerminalError",
     "app",
     "test_harness",
+    "create_client",
+    "RestateClient",
+    "RestateClientSendHandle",
     "gather",
     "as_completed",
     "wait_completed",

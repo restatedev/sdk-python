@@ -24,6 +24,7 @@ Source = "https://github.com/restatedev/sdk-python"
 test = ["pytest", "hypercorn"]
 lint = ["mypy", "pylint"]
 harness = ["testcontainers", "hypercorn", "httpx"]
+client = ["httpx"]
 serde = ["dacite", "pydantic"]
 
 [build-system]
