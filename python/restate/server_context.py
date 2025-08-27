@@ -386,6 +386,9 @@ class ServerInvocationContext(ObjectContext):
                     await self.take_and_send_output()
                     await self.receive.enqueue_restate_event({ 'type' : 'restate.run_completed', 'data': None})
 
+                # Flush to make sure we send the ctx.run command earlier
+                await self.take_and_send_output()
+
                 task = asyncio.create_task(wrapper(fn))
                 self.tasks.add(task)
                 continue
