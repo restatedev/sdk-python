@@ -11,14 +11,12 @@
 """This module contains the ASGI server for the restate framework."""
 
 import asyncio
-import inspect
-from typing import Any, Dict, TypedDict, Literal
+from typing import Dict, TypedDict, Literal
 import traceback
-import typing
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
 from restate.server_context import ServerInvocationContext, DisconnectedException
-from restate.server_types import Receive, ReceiveChannel, Scope, Send, binary_to_header, header_to_binary, LifeSpan # pylint: disable=line-too-long
+from restate.server_types import Receive, ReceiveChannel, Scope, Send, binary_to_header, header_to_binary # pylint: disable=line-too-long
 from restate.vm import VMWrapper
 from restate._internal import PyIdentityVerifier, IdentityVerificationException # pylint: disable=import-error,no-name-in-module
 from restate._internal import SDK_VERSION # pylint: disable=import-error,no-name-in-module
@@ -188,6 +186,10 @@ async def process_invocation_to_completion(vm: VMWrapper,
     finally:
         context.on_attempt_finished()
 
+class LifeSpanNotImplemented(ValueError):
+    """Signal to the asgi server that we didn't implement lifespans"""
+
+
 class ParsedPath(TypedDict):
     """Parsed path from the request."""
     type: Literal["invocation", "health", "discover", "unknown"]
@@ -214,55 +216,8 @@ def parse_path(request: str) -> ParsedPath:
     # anything other than invoke is 404
     return { "type": "unknown" , "service": None, "handler": None }
 
-def is_async_context_manager(obj: Any):
-    """check if passed object is an async context manager"""
-    return (hasattr(obj, '__aenter__') and
-            hasattr(obj, '__aexit__') and
-            inspect.iscoroutinefunction(obj.__aenter__) and
-            inspect.iscoroutinefunction(obj.__aexit__))
 
-
-async def lifespan_processor(
-    scope: Scope,
-    receive: Receive,
-    send: Send,
-    lifespan: LifeSpan
-) -> None:
-    """Process lifespan context manager."""
-    started = False
-    assert scope["type"] in ["lifespan", "lifespan.startup", "lifespan.shutdown"]
-    assert is_async_context_manager(lifespan()), "lifespan must be an async context manager"
-    await receive()
-    try:
-        async with lifespan() as maybe_state:
-            if maybe_state is not None:
-                if "state" not in scope:
-                    raise RuntimeError("The server does not support state in lifespan")
-                scope["state"] = maybe_state
-            await send({
-                "type": "lifespan.startup.complete", # type: ignore
-            })
-            started = True
-            await receive()
-    except Exception:
-        exc_text = traceback.format_exc()
-        if started:
-            await send({
-                "type": "lifespan.shutdown.failed",
-                "message": exc_text
-            })
-        else:
-            await send({
-                "type": "lifespan.startup.failed",
-                "message": exc_text
-            })
-        raise
-    await send({
-        "type": "lifespan.shutdown.complete" # type: ignore
-    })
-
-# pylint: disable=too-many-return-statements
-def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
+def asgi_app(endpoint: Endpoint):
     """Create an ASGI-3 app for the given endpoint."""
 
     # Prepare request signer
@@ -271,17 +226,14 @@ def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
     async def app(scope: Scope, receive: Receive, send: Send):
         try:
             if scope['type'] == 'lifespan':
-                if lifespan is not None:
-                    await lifespan_processor(scope, receive, send, lifespan)
-                    return
-                return
-
+                raise LifeSpanNotImplemented()
             if scope['type'] != 'http':
                 raise NotImplementedError(f"Unknown scope type {scope['type']}")
 
             request_path = scope['path']
             assert isinstance(request_path, str)
             request: ParsedPath = parse_path(request_path)
+
             # Health check
             if request['type'] == 'health':
                 await send_health_check(send)
@@ -297,6 +249,7 @@ def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
                 # Identify verification failed, send back unauthorized and close
                 await send_status(send, receive, 401)
                 return
+
             # might be a discovery request
             if request['type'] == 'discover':
                 await send_discovery(scope, send, endpoint)
@@ -330,6 +283,8 @@ def asgi_app(endpoint: Endpoint, lifespan: typing.Optional[LifeSpan] = None):
                                                            send)
             finally:
                 await receive_channel.close()
+        except LifeSpanNotImplemented as e:
+            raise e
         except Exception as e:
             traceback.print_exc()
             raise e

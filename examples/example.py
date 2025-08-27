@@ -12,27 +12,24 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
-import asyncio
 import restate
 
-from concurrent_greeter import concurrent_greeter
 from greeter import greeter
-from pydantic_greeter import pydantic_greeter
 from virtual_object import counter
 from workflow import payment
-
-
+from pydantic_greeter import pydantic_greeter
+from concurrent_greeter import concurrent_greeter
 
 app = restate.app(services=[greeter,
                             counter,
                             payment,
                             pydantic_greeter,
-                            concurrent_greeter,
-                            ],)
+                            concurrent_greeter])
 
 if __name__ == "__main__":
     import hypercorn
     import hypercorn.asyncio
+    import asyncio
     conf = hypercorn.Config()
     conf.bind = ["0.0.0.0:9080"]
     asyncio.run(hypercorn.asyncio.serve(app, conf))
