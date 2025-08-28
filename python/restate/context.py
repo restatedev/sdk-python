@@ -237,6 +237,14 @@ class Context(abc.ABC):
         This UUID will be stable across retries and replays.
         """
 
+    @abc.abstractmethod
+    def time(self) -> RestateDurableFuture[float]:
+        """
+        Returns the result of time.time(), durably recorded in the journal.
+
+        This timestamp will be stable across retries and replays.
+        """
+
     @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @overload
     @abc.abstractmethod
