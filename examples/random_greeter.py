@@ -20,7 +20,8 @@ random_greeter = Service("random_greeter")
 async def greet(ctx: Context, name: str) -> str:
 
     # ctx.random() returns a Python Random instance seeded deterministically.
-    # By using ctx.random() you don't write entries in the journal, while getting the same generated values on retries.
+    # By using ctx.random() you don't write entries in the journal,
+    # but you still get the same generated values on retries.
 
     # To generate random numbers
     random_number = ctx.random().randint(0, 100)
@@ -32,4 +33,4 @@ async def greet(ctx: Context, name: str) -> str:
     # As with ctx.random(), this won't write entries in the journal
     random_uuid = ctx.uuid()
 
-    return f"Hello {name} with random number {random_number}, random bytes {random_bytes} and uuid {random_uuid}!"
+    return f"Hello {name} with random number {random_number}, random bytes {random_bytes!r} and uuid {random_uuid}!"
