@@ -187,6 +187,7 @@ class ServerDurablePromise(DurablePromise):
 
     def value(self) -> RestateDurableFuture[Any]:
         handle = self.server_context.vm.sys_get_promise(self.name)
+        update_restate_context_is_replaying(self.server_context.vm)
         return self.server_context.create_future(handle, self.serde)
 
     def resolve(self, value: Any) -> Awaitable[None]:
@@ -194,6 +195,7 @@ class ServerDurablePromise(DurablePromise):
         assert self.serde is not None
         value_buffer = self.serde.serialize(value)
         handle = vm.sys_complete_promise_success(self.name, value_buffer)
+        update_restate_context_is_replaying(self.server_context.vm)
 
         async def await_point():
             if not self.server_context.vm.is_completed(handle):
@@ -206,6 +208,7 @@ class ServerDurablePromise(DurablePromise):
         vm: VMWrapper = self.server_context.vm
         py_failure = Failure(code=code, message=message)
         handle = vm.sys_complete_promise_failure(self.name, py_failure)
+        update_restate_context_is_replaying(self.server_context.vm)
 
         async def await_point():
             if not self.server_context.vm.is_completed(handle):
@@ -217,6 +220,7 @@ class ServerDurablePromise(DurablePromise):
     def peek(self) -> Awaitable[Any | None]:
         vm: VMWrapper = self.server_context.vm
         handle = vm.sys_peek_promise(self.name)
+        update_restate_context_is_replaying(self.server_context.vm)
         serde = self.serde
         assert serde is not None
         return self.server_context.create_future(handle, serde)
@@ -263,6 +267,12 @@ class Tasks:
         for task in to_cancel:
             task.cancel()
 
+restate_context_is_replaying = contextvars.ContextVar('restate_context_is_replaying', default=False)
+
+def update_restate_context_is_replaying(vm: VMWrapper):
+    """Update the context var 'restate_context_is_replaying'. This should be called after each vm.sys_*"""
+    restate_context_is_replaying.set(vm.is_replaying())
+
 # pylint: disable=R0902
 class ServerInvocationContext(ObjectContext):
     """This class implements the context for the restate framework based on the server."""
@@ -289,13 +299,16 @@ class ServerInvocationContext(ObjectContext):
 
     async def enter(self):
         """Invoke the user code."""
+        update_restate_context_is_replaying(self.vm)
         try:
             in_buffer = self.invocation.input_buffer
             out_buffer = await invoke_handler(handler=self.handler, ctx=self, in_buffer=in_buffer)
+            restate_context_is_replaying.set(False)
             self.vm.sys_write_output_success(bytes(out_buffer))
             self.vm.sys_end()
         except TerminalError as t:
             failure = Failure(code=t.status_code, message=t.message)
+            restate_context_is_replaying.set(False)
             self.vm.sys_write_output_failure(failure)
             self.vm.sys_end()
         # pylint: disable=W0718
@@ -341,6 +354,7 @@ class ServerInvocationContext(ObjectContext):
 
     def on_attempt_finished(self):
         """Notify the attempt finished event."""
+        restate_context_is_replaying.set(False)
         self.request_finished_event.set()
         try:
             self.tasks.cancel()
@@ -446,12 +460,15 @@ class ServerInvocationContext(ObjectContext):
             type_hint: Optional[typing.Type[T]] = None
             ) -> Awaitable[Optional[T]]:
         handle = self.vm.sys_get_state(name)
+        update_restate_context_is_replaying(self.vm)
         if isinstance(serde, DefaultSerde):
             serde = serde.with_maybe_type(type_hint)
         return self.create_future(handle, serde) # type: ignore
 
     def state_keys(self) -> Awaitable[List[str]]:
-        return self.create_future(self.vm.sys_get_state_keys())
+        handle = self.vm.sys_get_state_keys()
+        update_restate_context_is_replaying(self.vm)
+        return self.create_future(handle)
 
     def set(self, name: str, value: T, serde: Serde[T] = DefaultSerde()) -> None:
         """Set the value associated with the given name."""
@@ -459,12 +476,15 @@ class ServerInvocationContext(ObjectContext):
             serde = serde.with_maybe_type(type(value))
         buffer = serde.serialize(value)
         self.vm.sys_set_state(name, bytes(buffer))
+        update_restate_context_is_replaying(self.vm)
 
     def clear(self, name: str) -> None:
         self.vm.sys_clear_state(name)
+        update_restate_context_is_replaying(self.vm)
 
     def clear_all(self) -> None:
         self.vm.sys_clear_all_state()
+        update_restate_context_is_replaying(self.vm)
 
     def request(self) -> Request:
         return Request(
@@ -542,6 +562,7 @@ class ServerInvocationContext(ObjectContext):
             serde = serde.with_maybe_type(type_hint)
 
         handle = self.vm.sys_run(name)
+        update_restate_context_is_replaying(self.vm)
 
         if args is not None:
             noargs_action = functools.partial(action, *args)
@@ -566,6 +587,7 @@ class ServerInvocationContext(ObjectContext):
                 options.type_hint = signature.return_annotation
             options.serde = options.serde.with_maybe_type(options.type_hint)
         handle = self.vm.sys_run(name)
+        update_restate_context_is_replaying(self.vm)
 
         func = functools.partial(action, *args, **kwargs)
         self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, func, options.serde, options.max_attempts, options.max_retry_duration)
@@ -574,7 +596,9 @@ class ServerInvocationContext(ObjectContext):
     def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
         # convert timedelta to milliseconds
         millis = int(delta.total_seconds() * 1000)
-        return self.create_sleep_future(self.vm.sys_sleep(millis)) # type: ignore
+        handle = self.vm.sys_sleep(millis)
+        update_restate_context_is_replaying(self.vm)
+        return self.create_sleep_future(handle) # type: ignore
 
     def do_call(self,
                 tpe: HandlerType[I, O],
@@ -615,9 +639,11 @@ class ServerInvocationContext(ObjectContext):
         if send_delay:
             ms = int(send_delay.total_seconds() * 1000)
             send_handle = self.vm.sys_send(service, handler, parameter, key, delay=ms, idempotency_key=idempotency_key, headers=headers_kvs)
+            update_restate_context_is_replaying(self.vm)
             return ServerSendHandle(self, send_handle)
         if send:
             send_handle = self.vm.sys_send(service, handler, parameter, key, idempotency_key=idempotency_key, headers=headers_kvs)
+            update_restate_context_is_replaying(self.vm)
             return ServerSendHandle(self, send_handle)
 
         handle = self.vm.sys_call(service=service,
@@ -626,6 +652,7 @@ class ServerInvocationContext(ObjectContext):
                                   key=key,
                                   idempotency_key=idempotency_key,
                                   headers=headers_kvs)
+        update_restate_context_is_replaying(self.vm)
 
         return self.create_call_future(handle=handle.result_handle,
                                    invocation_id_handle=handle.invocation_id_handle,
@@ -712,6 +739,7 @@ class ServerInvocationContext(ObjectContext):
         if isinstance(serde, DefaultSerde):
             serde = serde.with_maybe_type(type_hint)
         name, handle = self.vm.sys_awakeable()
+        update_restate_context_is_replaying(self.vm)
         return name, self.create_future(handle, serde)
 
     def resolve_awakeable(self,
@@ -722,9 +750,11 @@ class ServerInvocationContext(ObjectContext):
             serde = serde.with_maybe_type(type(value))
         buf = serde.serialize(value)
         self.vm.sys_resolve_awakeable(name, buf)
+        update_restate_context_is_replaying(self.vm)
 
     def reject_awakeable(self, name: str, failure_message: str, failure_code: int = 500) -> None:
-        return self.vm.sys_reject_awakeable(name, Failure(code=failure_code, message=failure_message))
+        self.vm.sys_reject_awakeable(name, Failure(code=failure_code, message=failure_message))
+        update_restate_context_is_replaying(self.vm)
 
     def promise(self, name: str, serde: typing.Optional[Serde[T]] = JsonSerde(), type_hint: Optional[typing.Type[T]] = None) -> DurablePromise[T]:
         """Create a durable promise."""
@@ -740,6 +770,7 @@ class ServerInvocationContext(ObjectContext):
         if invocation_id is None:
             raise ValueError("invocation_id cannot be None")
         self.vm.sys_cancel(invocation_id)
+        update_restate_context_is_replaying(self.vm)
 
     def attach_invocation(self, invocation_id: str, serde: Serde[T] = DefaultSerde(),
                           type_hint: Optional[typing.Type[T]] = None
@@ -749,4 +780,5 @@ class ServerInvocationContext(ObjectContext):
         if isinstance(serde, DefaultSerde):
             serde = serde.with_maybe_type(type_hint)
         handle = self.vm.attach_invocation(invocation_id)
+        update_restate_context_is_replaying(self.vm)
         return self.create_future(handle, serde)
