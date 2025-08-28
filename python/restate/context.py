@@ -14,6 +14,8 @@ Restate Context
 """
 
 import abc
+from random import Random
+from uuid import UUID
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine, overload, ParamSpec
 import typing
@@ -219,6 +221,21 @@ class Context(abc.ABC):
         Returns the request object.
         """
 
+    @abc.abstractmethod
+    def random(self) -> Random:
+        """
+        Returns a Random instance inherently predictable, deterministically seeded by Restate.
+
+        This instance is useful to generate identifiers, idempotency keys, and for uniform sampling from a set of options.
+        """
+
+    @abc.abstractmethod
+    def uuid(self) -> UUID:
+        """
+        Returns a random UUID, deterministically seeded.
+
+        This UUID will be stable across retries and replays.
+        """
 
     @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @overload

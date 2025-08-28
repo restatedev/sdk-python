@@ -18,12 +18,14 @@
 
 import asyncio
 import contextvars
+from random import Random
 from datetime import timedelta
 import inspect
 import functools
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine
 import typing
 import traceback
+from uuid import UUID
 
 from restate.context import DurablePromise, AttemptFinishedEvent, HandlerType, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, RunAction, SendHandle, RestateDurableSleepFuture, RunOptions, P
 from restate.exceptions import TerminalError
@@ -278,6 +280,7 @@ class ServerInvocationContext(ObjectContext):
         self.invocation = invocation
         self.attempt_headers = attempt_headers
         self.send = send
+        self.random_instance = Random(invocation.random_seed)
         self.receive = receive
         self.run_coros_to_execute: dict[int,  Callable[[], Awaitable[None]]] = {}
         self.request_finished_event = asyncio.Event()
@@ -470,6 +473,12 @@ class ServerInvocationContext(ObjectContext):
             body=self.invocation.input_buffer,
             attempt_finished_event=ServerTeardownEvent(self.request_finished_event),
         )
+
+    def random(self) -> Random:
+        return self.random_instance
+
+    def uuid(self) -> UUID:
+        return UUID(int=self.random_instance.getrandbits(128), version=4)
 
     # pylint: disable=R0914
     async def create_run_coroutine(self,

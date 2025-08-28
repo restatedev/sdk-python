@@ -15,12 +15,14 @@
 import restate
 
 from greeter import greeter
+from random_greeter import random_greeter
 from virtual_object import counter
 from workflow import payment
 from pydantic_greeter import pydantic_greeter
 from concurrent_greeter import concurrent_greeter
 
 app = restate.app(services=[greeter,
+                            random_greeter,
                             counter,
                             payment,
                             pydantic_greeter,
