@@ -33,4 +33,7 @@ async def greet(ctx: Context, name: str) -> str:
     # As with ctx.random(), this won't write entries in the journal
     random_uuid = ctx.uuid()
 
-    return f"Hello {name} with random number {random_number}, random bytes {random_bytes!r} and uuid {random_uuid}!"
+    return (f"Hello {name} with "
+            f"random number {random_number}, "
+            f"random bytes {random_bytes!r} "
+            f"and uuid {random_uuid}!")
