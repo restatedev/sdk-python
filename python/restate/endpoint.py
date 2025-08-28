@@ -15,7 +15,6 @@ This module defines the Endpoint class, which serves as a container for all the 
 
 import typing
 
-from restate.server_types import LifeSpan
 from restate.service import Service
 from restate.object import VirtualObject
 from restate.workflow import Workflow
@@ -81,7 +80,7 @@ class Endpoint:
         """Add an identity key to this endpoint."""
         self.identity_keys.append(identity_key)
 
-    def app(self, lifespan: typing.Optional[LifeSpan] = None):
+    def app(self):
         """
         Returns the ASGI application for this endpoint.
 
@@ -95,13 +94,12 @@ class Endpoint:
         # pylint: disable=C0415
         # pylint: disable=R0401
         from restate.server import asgi_app
-        return asgi_app(self, lifespan)
+        return asgi_app(self)
 
 def app(
     services: typing.Iterable[typing.Union[Service, VirtualObject, Workflow]],
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None,
-    identity_keys: typing.Optional[typing.List[str]] = None,
-    lifespan: typing.Optional[LifeSpan] = None):
+    identity_keys: typing.Optional[typing.List[str]] = None):
     """A restate ASGI application that hosts the given services."""
     endpoint = Endpoint()
     if protocol == "bidi":
@@ -113,4 +111,4 @@ def app(
     if identity_keys:
         for key in identity_keys:
             endpoint.identity_key(key)
-    return endpoint.app(lifespan)
+    return endpoint.app()
