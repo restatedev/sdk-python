@@ -26,6 +26,8 @@ from .asyncio import as_completed, gather, wait_completed, select
 
 from .endpoint import app
 
+from .logging import getLogger, RestateLoggingFilter
+
 try:
     from .harness import test_harness # type: ignore
 except ImportError:
@@ -57,5 +59,7 @@ __all__ = [
     "gather",
     "as_completed",
     "wait_completed",
-    "select"
+    "select",
+    "logging",
+    "RestateLoggingFilter"
 ]

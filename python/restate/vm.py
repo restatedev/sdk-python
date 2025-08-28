@@ -423,3 +423,7 @@ class VMWrapper:
         Attach to an invocation
         """
         return self.vm.attach_invocation(invocation_id)
+
+    def is_replaying(self) -> bool:
+        """Returns true if the state machine is replaying."""
+        return self.vm.is_replaying()
