@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Unio
 import typing
 import traceback
 from uuid import UUID
+import time
 
 from restate.context import DurablePromise, AttemptFinishedEvent, HandlerType, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, RunAction, SendHandle, RestateDurableSleepFuture, RunOptions, P
 from restate.exceptions import TerminalError
@@ -479,6 +480,9 @@ class ServerInvocationContext(ObjectContext):
 
     def uuid(self) -> UUID:
         return UUID(int=self.random_instance.getrandbits(128), version=4)
+
+    def time(self) -> RestateDurableFuture[float]:
+        return self.run_typed("timestamp", time.time)
 
     # pylint: disable=R0914
     async def create_run_coroutine(self,

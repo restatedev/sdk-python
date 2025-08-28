@@ -9,6 +9,8 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """example.py"""
+from datetime import datetime
+
 # pylint: disable=C0116
 # pylint: disable=W0613
 
@@ -33,7 +35,21 @@ async def greet(ctx: Context, name: str) -> str:
     # As with ctx.random(), this won't write entries in the journal
     random_uuid = ctx.uuid()
 
+    # To get a timestamp, use ctx.time()
+    # This will record the timestamp in the Restate journal
+    now = await ctx.time()
+
+    # You can convert it to date/datetime using Python's standard library functions, e.g.
+    now_datetime = datetime.fromtimestamp(now)
+
+    # Or to perform a difference:
+    # start = await ctx.time()
+    # # Some code
+    # end = await ctx.time()
+    # delta = datetime.timedelta(seconds=(end-start))
+
     return (f"Hello {name} with "
             f"random number {random_number}, "
             f"random bytes {random_bytes!r} "
-            f"and uuid {random_uuid}!")
+            f"random uuid {random_uuid},"
+            f"now datetime {now_datetime}!")
