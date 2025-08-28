@@ -32,7 +32,7 @@ The Python SDK is currently in active development, and might break across releas
 
 The compatibility with Restate is described in the following table:
 
-| Restate Server\sdk-python | 0.0 - 0.2 | 0.3 - 0.5 | 0.6 - 0.7 | 0.8              |
+| Restate Server\sdk-python | 0.0 - 0.2 | 0.3 - 0.5 | 0.6 - 0.7 | 0.8 - 0.9        |
 |---------------------------|-----------|-----------|-----------|------------------|
 | 1.0                       | ✅         | ❌         | ❌         | ❌                |
 | 1.1 - 1.2                 | ✅         | ✅         | ❌         | ❌                |
