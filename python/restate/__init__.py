@@ -34,7 +34,11 @@ except ImportError:
     # we don't have the appropriate dependencies installed
 
     # pylint: disable=unused-argument, redefined-outer-name
-    def test_harness(app, follow_logs = False, restate_image = ""): # type: ignore
+    def test_harness(app, # type: ignore
+                     follow_logs: bool = False,
+                     restate_image: str = "",
+                     always_replay: bool = False,
+                     disable_retries: bool = False):
         """a dummy harness constructor to raise ImportError"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
 
