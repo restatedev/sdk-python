@@ -129,7 +129,7 @@ class RestateContainer(DockerContainer):
 
     log_thread: typing.Optional[threading.Thread] = None
 
-    def __init__(self, image):
+    def __init__(self, image, always_replay):
         super().__init__(image)
         self.with_exposed_ports(8080, 9070)
         self.with_env('RESTATE_LOG_FILTER', 'restate=info')
@@ -138,7 +138,10 @@ class RestateContainer(DockerContainer):
         self.with_env('RESTATE_SHUTDOWN_TIMEOUT', '10s')
         self.with_env('RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE', '32 MB')
         self.with_env('RESTATE_WORKER__INVOKER__IN_MEMORY_QUEUE_LENGTH_LIMIT', '64')
-        self.with_env('RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT', '10m')
+        if always_replay:
+            self.with_env('RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT', '0s')
+        else:
+            self.with_env('RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT', '10m')
         self.with_env('RESTATE_WORKER__INVOKER__ABORT_TIMEOUT', '10m')
 
         self.with_kwargs(extra_hosts={"host.docker.internal" : "host-gateway"})
@@ -188,6 +191,7 @@ class TestConfiguration:
     """A configuration for running tests"""
     restate_image: str = "restatedev/restate:latest"
     stream_logs: bool = False
+    always_replay: bool = False
 
 
 class RestateTestHarness:
@@ -207,7 +211,9 @@ class RestateTestHarness:
         """start the restate server and the sdk"""
         self.bind_address = TcpSocketBindAddress()
         self.server = AsgiServer(self.asgi_app, self.bind_address).start()
-        self.restate = RestateContainer(image=self.config.restate_image) \
+        self.restate = RestateContainer(
+            image=self.config.restate_image,
+            always_replay=self.config.always_replay) \
             .start(self.config.stream_logs)
         try:
             self._register_sdk()
@@ -256,10 +262,24 @@ class RestateTestHarness:
 
 def test_harness(app,
                  follow_logs: bool = False,
-                 restate_image: str = "restatedev/restate:latest") -> RestateTestHarness:
-    """create a test harness for running Restate SDKs"""
+                 restate_image: str = "restatedev/restate:latest",
+                 always_replay: bool = False) -> RestateTestHarness:
+    """
+    Creates a test harness for running Restate services together with restate-server.
+
+    :param app: The application to be tested using the RestateTestHarness.
+    :param follow_logs: Whether to stream logs for the test process (default is False).
+    :param restate_image: The image name for the restate-server container
+                          (default is "restatedev/restate:latest").
+    :param always_replay: When True, this forces restate-server to always replay
+                          on a suspension point. This is useful to hunt non deterministic bugs
+                          that might prevent your code to replay correctly (default is False).
+    :return: An instance of RestateTestHarness initialized with the provided app and configuration.
+    :rtype: RestateTestHarness
+    """
     config = TestConfiguration(
         restate_image=restate_image,
         stream_logs=follow_logs,
+        always_replay=always_replay
     )
     return RestateTestHarness(app, config)
