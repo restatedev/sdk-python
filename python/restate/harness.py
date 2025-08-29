@@ -129,7 +129,7 @@ class RestateContainer(DockerContainer):
 
     log_thread: typing.Optional[threading.Thread] = None
 
-    def __init__(self, image, always_replay):
+    def __init__(self, image, always_replay, disable_retries):
         super().__init__(image)
         self.with_exposed_ports(8080, 9070)
         self.with_env('RESTATE_LOG_FILTER', 'restate=info')
@@ -143,6 +143,8 @@ class RestateContainer(DockerContainer):
         else:
             self.with_env('RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT', '10m')
         self.with_env('RESTATE_WORKER__INVOKER__ABORT_TIMEOUT', '10m')
+        if disable_retries:
+            self.with_env('RESTATE_WORKER__INVOKER__RETRY_POLICY__TYPE', 'none')
 
         self.with_kwargs(extra_hosts={"host.docker.internal" : "host-gateway"})
 
@@ -192,6 +194,7 @@ class TestConfiguration:
     restate_image: str = "restatedev/restate:latest"
     stream_logs: bool = False
     always_replay: bool = False
+    disable_retries: bool = False
 
 
 class RestateTestHarness:
@@ -213,7 +216,8 @@ class RestateTestHarness:
         self.server = AsgiServer(self.asgi_app, self.bind_address).start()
         self.restate = RestateContainer(
             image=self.config.restate_image,
-            always_replay=self.config.always_replay) \
+            always_replay=self.config.always_replay,
+            disable_retries=self.config.disable_retries) \
             .start(self.config.stream_logs)
         try:
             self._register_sdk()
@@ -263,7 +267,8 @@ class RestateTestHarness:
 def test_harness(app,
                  follow_logs: bool = False,
                  restate_image: str = "restatedev/restate:latest",
-                 always_replay: bool = False) -> RestateTestHarness:
+                 always_replay: bool = False,
+                 disable_retries: bool = False) -> RestateTestHarness:
     """
     Creates a test harness for running Restate services together with restate-server.
 
@@ -274,12 +279,14 @@ def test_harness(app,
     :param always_replay: When True, this forces restate-server to always replay
                           on a suspension point. This is useful to hunt non deterministic bugs
                           that might prevent your code to replay correctly (default is False).
+    :param disable_retries: When True, retries are disabled (default is False).
     :return: An instance of RestateTestHarness initialized with the provided app and configuration.
     :rtype: RestateTestHarness
     """
     config = TestConfiguration(
         restate_image=restate_image,
         stream_logs=follow_logs,
-        always_replay=always_replay
+        always_replay=always_replay,
+        disable_retries=disable_retries
     )
     return RestateTestHarness(app, config)
