@@ -19,6 +19,7 @@ from .workflow import Workflow
 # types
 from .context import Context, ObjectContext, ObjectSharedContext
 from .context import WorkflowContext, WorkflowSharedContext
+from .retry_policy import InvocationRetryPolicy, OnMaxAttempts
 # pylint: disable=line-too-long
 from .context import DurablePromise, RestateDurableFuture, RestateDurableCallFuture, RestateDurableSleepFuture, SendHandle, RunOptions
 from .exceptions import TerminalError
@@ -65,5 +66,7 @@ __all__ = [
     "wait_completed",
     "select",
     "logging",
-    "RestateLoggingFilter"
+    "RestateLoggingFilter",
+    "InvocationRetryPolicy",
+    "OnMaxAttempts"
 ]

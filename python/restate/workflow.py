@@ -20,6 +20,7 @@ import inspect
 import typing
 from datetime import timedelta
 
+from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import DefaultSerde, Serde
 from restate.handler import Handler, HandlerIO, ServiceTag, make_handler
 
@@ -72,6 +73,7 @@ class Workflow:
             HTTP and Kafka ingress, but only from other services.
             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
             otherwise the service discovery will fail.
+        invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
     """
 
     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
@@ -85,7 +87,8 @@ class Workflow:
                  journal_retention: typing.Optional[timedelta] = None,
                  idempotency_retention: typing.Optional[timedelta] = None,
                  enable_lazy_state: typing.Optional[bool] = None,
-                 ingress_private: typing.Optional[bool] = None):
+                 ingress_private: typing.Optional[bool] = None,
+                 invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None):
         self.service_tag = ServiceTag("workflow", name, description, metadata)
         self.handlers = {}
         self.inactivity_timeout = inactivity_timeout
@@ -94,6 +97,7 @@ class Workflow:
         self.idempotency_retention = idempotency_retention
         self.enable_lazy_state = enable_lazy_state
         self.ingress_private = ingress_private
+        self.invocation_retry_policy = invocation_retry_policy
 
     @property
     def name(self):
@@ -114,7 +118,8 @@ class Workflow:
             journal_retention: typing.Optional[timedelta] = None,
             workflow_retention: typing.Optional[timedelta] = None,
             enable_lazy_state: typing.Optional[bool] = None,
-            ingress_private: typing.Optional[bool] = None) -> typing.Callable: # type: ignore
+            ingress_private: typing.Optional[bool] = None,
+            invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None) -> typing.Callable: # type: ignore
         """
         Mark this handler as a workflow entry point.
 
@@ -153,6 +158,7 @@ class Workflow:
                 but only from other services.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
+            invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
         """
         return self._add_handler(name,
                             kind="workflow",
@@ -167,7 +173,8 @@ class Workflow:
                              idempotency_retention=None,
                              workflow_retention=workflow_retention,
                              enable_lazy_state=enable_lazy_state,
-                             ingress_private=ingress_private)
+                             ingress_private=ingress_private,
+                             invocation_retry_policy=invocation_retry_policy)
 
     def handler(self,
                 name: typing.Optional[str] = None,
@@ -181,7 +188,8 @@ class Workflow:
                 journal_retention: typing.Optional[timedelta] = None,
                 idempotency_retention: typing.Optional[timedelta] = None,
                 enable_lazy_state: typing.Optional[bool] = None,
-                ingress_private: typing.Optional[bool] = None) -> typing.Callable:
+                ingress_private: typing.Optional[bool] = None,
+                invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None) -> typing.Callable:
         """
         Decorator for defining a handler function.
 
@@ -220,10 +228,11 @@ class Workflow:
                 but only from other services.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
+            invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
         """
         return self._add_handler(name, "shared", accept, content_type, input_serde, output_serde, metadata,
                                  inactivity_timeout, abort_timeout, journal_retention, idempotency_retention,
-                                 None, enable_lazy_state, ingress_private)
+                                 None, enable_lazy_state, ingress_private, invocation_retry_policy)
 
     # pylint: disable=R0914
     def _add_handler(self,
@@ -240,7 +249,8 @@ class Workflow:
                 idempotency_retention: typing.Optional[timedelta] = None,
                 workflow_retention: typing.Optional[timedelta] = None,
                 enable_lazy_state: typing.Optional[bool] = None,
-                ingress_private: typing.Optional[bool] = None) -> typing.Callable: # type: ignore
+                ingress_private: typing.Optional[bool] = None,
+                invocation_retry_policy: typing.Optional["InvocationRetryPolicy"] = None) -> typing.Callable: # type: ignore
         """
         Decorator for defining a handler function.
 
@@ -283,6 +293,7 @@ class Workflow:
                 but only from other services.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
+            invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
 
         Returns:
             Callable: The decorated function.
@@ -319,7 +330,8 @@ class Workflow:
                                    idempotency_retention=idempotency_retention,
                                    workflow_retention=workflow_retention,
                                    enable_lazy_state=enable_lazy_state,
-                                   ingress_private=ingress_private)
+                                   ingress_private=ingress_private,
+                                   invocation_retry_policy=invocation_retry_policy)
             self.handlers[handler.name] = handler
             return wrapped
 
