@@ -24,7 +24,7 @@ logger = restate.getLogger()
 greeter = Service("greeter", invocation_retry_policy=cast(InvocationRetryPolicy, {
     'max_attempts': 10,
     'on_max_attempts': OnMaxAttempts.PAUSE
-}) )
+}))
 
 @greeter.handler()
 async def greet(ctx: Context, name: str) -> str:

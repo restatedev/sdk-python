@@ -323,11 +323,11 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
                                             workflowCompletionRetention=int(handler.workflow_retention.total_seconds() * 1000) if handler.workflow_retention else None,
                                             enableLazyState=handler.enable_lazy_state,
                                             ingressPrivate=handler.ingress_private,
-                                            retryPolicyInitialInterval=int(handler.invocation_retry_policy.initial_interval.total_seconds() * 1000) if handler.invocation_retry_policy and handler.invocation_retry_policy.initial_interval else None,
-                                            retryPolicyMaxInterval=int(handler.invocation_retry_policy.max_interval.total_seconds() * 1000) if handler.invocation_retry_policy and handler.invocation_retry_policy.max_interval else None,
-                                            retryPolicyMaxAttempts=int(handler.invocation_retry_policy.max_attempts) if handler.invocation_retry_policy and handler.invocation_retry_policy.max_attempts is not None else None,
-                                            retryPolicyExponentiationFactor=float(handler.invocation_retry_policy.exponentiation_factor) if handler.invocation_retry_policy and handler.invocation_retry_policy.exponentiation_factor is not None else None,
-                                            retryPolicyOnMaxAttempts=(handler.invocation_retry_policy.on_max_attempts.value if handler.invocation_retry_policy and handler.invocation_retry_policy.on_max_attempts is not None else None)))
+                                            retryPolicyInitialInterval=int(handler.invocation_retry_policy['initial_interval'].total_seconds() * 1000) if handler.invocation_retry_policy and handler.invocation_retry_policy.get('initial_interval') else None,
+                                            retryPolicyMaxInterval=int(handler.invocation_retry_policy['max_interval'].total_seconds() * 1000) if handler.invocation_retry_policy and handler.invocation_retry_policy.get('max_interval') else None,
+                                            retryPolicyMaxAttempts=int(handler.invocation_retry_policy['max_attempts']) if handler.invocation_retry_policy and handler.invocation_retry_policy.get('max_attempts') is not None else None,
+                                            retryPolicyExponentiationFactor=float(handler.invocation_retry_policy['exponentiation_factor']) if handler.invocation_retry_policy and handler.invocation_retry_policy.get('exponentiation_factor') is not None else None,
+                                            retryPolicyOnMaxAttempts=(handler.invocation_retry_policy['on_max_attempts'].value if handler.invocation_retry_policy and handler.invocation_retry_policy.get('on_max_attempts') is not None else None)))
         # add the service
         description = service.service_tag.description
         metadata = service.service_tag.metadata
@@ -342,11 +342,11 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
                                idempotencyRetention=int(service.idempotency_retention.total_seconds() * 1000) if service.idempotency_retention else None,
                                enableLazyState=service.enable_lazy_state if hasattr(service, 'enable_lazy_state') else None,
                                ingressPrivate=service.ingress_private,
-                               retryPolicyInitialInterval=int(service.invocation_retry_policy.initial_interval.total_seconds() * 1000) if hasattr(service, 'invocation_retry_policy') and service.invocation_retry_policy and service.invocation_retry_policy.initial_interval else None,
-                               retryPolicyMaxInterval=int(service.invocation_retry_policy.max_interval.total_seconds() * 1000) if hasattr(service, 'invocation_retry_policy') and service.invocation_retry_policy and service.invocation_retry_policy.max_interval else None,
-                               retryPolicyMaxAttempts=int(service.invocation_retry_policy.max_attempts) if hasattr(service, 'invocation_retry_policy') and service.invocation_retry_policy and service.invocation_retry_policy.max_attempts is not None else None,
-                               retryPolicyExponentiationFactor=float(service.invocation_retry_policy.exponentiation_factor) if hasattr(service, 'invocation_retry_policy') and service.invocation_retry_policy and service.invocation_retry_policy.exponentiation_factor is not None else None,
-                               retryPolicyOnMaxAttempts=(service.invocation_retry_policy.on_max_attempts.value if hasattr(service, 'invocation_retry_policy') and service.invocation_retry_policy and service.invocation_retry_policy.on_max_attempts is not None else None)))
+                               retryPolicyInitialInterval=int(service.invocation_retry_policy['initial_interval'].total_seconds() * 1000) if service.invocation_retry_policy and service.invocation_retry_policy.get('initial_interval') else None,
+                               retryPolicyMaxInterval=int(service.invocation_retry_policy['max_interval'].total_seconds() * 1000) if service.invocation_retry_policy and service.invocation_retry_policy.get('max_interval') else None,
+                               retryPolicyMaxAttempts=int(service.invocation_retry_policy['max_attempts']) if service.invocation_retry_policy and service.invocation_retry_policy.get('max_attempts') is not None else None,
+                               retryPolicyExponentiationFactor=float(service.invocation_retry_policy['exponentiation_factor']) if service.invocation_retry_policy and service.invocation_retry_policy.get('exponentiation_factor') is not None else None,
+                               retryPolicyOnMaxAttempts=(service.invocation_retry_policy['on_max_attempts'].value if service.invocation_retry_policy and service.invocation_retry_policy.get('on_max_attempts') is not None else None)))
 
     if endpoint.protocol:
         protocol_mode = PROTOCOL_MODES[endpoint.protocol]
