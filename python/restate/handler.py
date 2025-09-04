@@ -20,6 +20,8 @@ from datetime import timedelta
 from inspect import Signature
 from typing import Any, Callable, Awaitable, Dict, Generic, Literal, Optional, TypeVar
 
+from restate.retry_policy import InvocationRetryPolicy
+
 from restate.context import HandlerType
 from restate.exceptions import TerminalError
 from restate.serde import DefaultSerde, PydanticJsonSerde, Serde, is_pydantic
@@ -122,6 +124,7 @@ class Handler(Generic[I, O]):
         workflow_retention: Workflow completion retention duration.
         enable_lazy_state: If true, lazy state is enabled.
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
+        invocation_retry_policy: Optional retry policy configuration applied to this handler.
     """
     service_tag: ServiceTag
     handler_io: HandlerIO[I, O]
@@ -138,6 +141,7 @@ class Handler(Generic[I, O]):
     workflow_retention: Optional[timedelta] = None
     enable_lazy_state: Optional[bool] = None
     ingress_private: Optional[bool] = None
+    invocation_retry_policy: Optional[InvocationRetryPolicy] = None
 
 
 # disable too many arguments warning
@@ -157,7 +161,8 @@ def make_handler(service_tag: ServiceTag,
                  idempotency_retention: Optional[timedelta] = None,
                  workflow_retention: Optional[timedelta] = None,
                  enable_lazy_state: Optional[bool] = None,
-                 ingress_private: Optional[bool] = None) -> Handler[I, O]:
+                 ingress_private: Optional[bool] = None,
+                 invocation_retry_policy: Optional[InvocationRetryPolicy] = None) -> Handler[I, O]:
     """
     Factory function to create a handler.
 
@@ -177,6 +182,8 @@ def make_handler(service_tag: ServiceTag,
         workflow_retention: Workflow completion retention duration.
         enable_lazy_state: If true, lazy state is enabled.
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
+        invocation_retry_policy: Retry policy used by Restate when invoking this handler.
+            NOTE: only supported with restate-server >= 1.5.
     """
     # try to deduce the handler name
     handler_name = name
@@ -205,7 +212,8 @@ def make_handler(service_tag: ServiceTag,
                             idempotency_retention=idempotency_retention,
                             workflow_retention=workflow_retention,
                             enable_lazy_state=enable_lazy_state,
-                            ingress_private=ingress_private)
+                            ingress_private=ingress_private,
+                            invocation_retry_policy=invocation_retry_policy)
 
     vars(wrapped)[RESTATE_UNIQUE_HANDLER_SYMBOL] = handler
     return handler

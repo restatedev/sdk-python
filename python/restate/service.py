@@ -21,6 +21,7 @@ import typing
 from datetime import timedelta
 
 from restate.serde import Serde, DefaultSerde
+from restate.retry_policy import InvocationRetryPolicy
 from .handler import Handler, HandlerIO, ServiceTag, make_handler
 
 I = typing.TypeVar('I')
@@ -31,7 +32,7 @@ O = typing.TypeVar('O')
 # pylint: disable=R0913
 
 # disable line too long warning
-# pylint: disable=C0301
+# pylint: disable=C0301,R0902
 
 class Service:
     """
@@ -65,6 +66,7 @@ class Service:
             HTTP and Kafka ingress, but only from other services.
             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
             otherwise the service discovery will fail.
+        invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this service.
     """
 
     def __init__(self, name: str,
@@ -74,7 +76,8 @@ class Service:
                  abort_timeout: typing.Optional[timedelta] = None,
                  journal_retention: typing.Optional[timedelta] = None,
                  idempotency_retention: typing.Optional[timedelta] = None,
-                 ingress_private: typing.Optional[bool] = None) -> None:
+                 ingress_private: typing.Optional[bool] = None,
+                 invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None) -> None:
         self.service_tag = ServiceTag("service", name, description, metadata)
         self.handlers: typing.Dict[str, Handler] = {}
         self.inactivity_timeout = inactivity_timeout
@@ -82,6 +85,7 @@ class Service:
         self.journal_retention = journal_retention
         self.idempotency_retention = idempotency_retention
         self.ingress_private = ingress_private
+        self.invocation_retry_policy = invocation_retry_policy
 
     @property
     def name(self):
@@ -101,7 +105,8 @@ class Service:
                 abort_timeout: typing.Optional[timedelta] = None,
                 journal_retention: typing.Optional[timedelta] = None,
                 idempotency_retention: typing.Optional[timedelta] = None,
-                ingress_private: typing.Optional[bool] = None) -> typing.Callable:
+                ingress_private: typing.Optional[bool] = None,
+                invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None) -> typing.Callable:
 
         """
         Decorator for defining a handler function.
@@ -138,6 +143,7 @@ class Service:
                 but only from other services.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
+            invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
 
         Returns:
             Callable: The decorated function.
@@ -160,7 +166,7 @@ class Service:
             signature = inspect.signature(fn, eval_str=True)
             handler = make_handler(self.service_tag, handler_io, name, None, wrapped, signature, inspect.getdoc(fn), metadata,
                                    inactivity_timeout, abort_timeout, journal_retention, idempotency_retention,
-                                   None, None, ingress_private)
+                                   None, None, ingress_private, invocation_retry_policy)
             self.handlers[handler.name] = handler
             return wrapped
 
