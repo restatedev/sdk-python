@@ -14,18 +14,12 @@ and discovery protocol v4. Otherwise, service discovery will fail.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
-from enum import Enum
-from typing import Optional, TypedDict
+from typing import Optional, Literal
 
-
-class OnMaxAttempts(str, Enum):
-    """Behavior when reaching max attempts."""
-    PAUSE = "PAUSE"
-    KILL = "KILL"
-
-
-class InvocationRetryPolicy(TypedDict):
+@dataclass
+class InvocationRetryPolicy:
     """
     Retry policy used by Restate when retrying failed handler invocations.
 
@@ -35,11 +29,11 @@ class InvocationRetryPolicy(TypedDict):
       - max_interval: Upper bound for any computed retry delay.
       - max_attempts: Maximum number of attempts before giving up retrying.
             The initial call counts as the first attempt.
-      - on_max_attempts: Behavior when reaching max attempts (PAUSE or KILL).
+      - on_max_attempts: Behavior when reaching max attempts (pause or kill).
     """
 
-    initial_interval: Optional[timedelta]
-    exponentiation_factor: Optional[float]
-    max_interval: Optional[timedelta]
-    max_attempts: Optional[int]
-    on_max_attempts: Optional[OnMaxAttempts]
+    initial_interval: Optional[timedelta] = None
+    exponentiation_factor: Optional[float] = None
+    max_interval: Optional[timedelta] = None
+    max_attempts: Optional[int] = None
+    on_max_attempts: Optional[Literal["pause", "kill"]] = None
