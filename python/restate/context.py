@@ -42,7 +42,7 @@ class RunOptions(typing.Generic[T]):
     """The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
                     See also 'type_hint'."""
     max_attempts: Optional[int] = None
-    """The maximum number of retry attempts to complete the action.
+    """The maximum number of retry attempts, including the initial attempt, to complete the action.
                             If None, the action will be retried indefinitely, until it succeeds.
                             Otherwise, the action will be retried until the maximum number of attempts is reached and then it will raise a TerminalError."""
     max_retry_duration: Optional[timedelta] = None
