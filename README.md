@@ -18,7 +18,7 @@
 ## Using the SDK
 
 **Prerequisites**:
-- Python >= v3.11
+- Python >= v3.10
 
 To use this SDK, add the dependency to your project:
 
