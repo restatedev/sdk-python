@@ -245,8 +245,8 @@ class Context(abc.ABC):
         This timestamp will be stable across retries and replays.
         """
 
-    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @overload
+    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @abc.abstractmethod
     def run(self,
             name: str,
@@ -275,8 +275,8 @@ class Context(abc.ABC):
 
         """
 
-    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @overload
+    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @abc.abstractmethod
     def run(self,
             name: str,

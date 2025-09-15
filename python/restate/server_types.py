@@ -16,7 +16,12 @@ This module contains the ASGI types definitions.
 
 import asyncio
 from typing import (Awaitable, Callable, Dict, Iterable, List,
-                    Tuple, Union, TypedDict, Literal, Optional, NotRequired, Any)
+                    Tuple, Union, TypedDict, Literal, Optional, Any)
+import sys
+if sys.version_info >= (3, 11):
+    from typing import NotRequired
+else:
+    from typing_extensions import NotRequired
 
 class ASGIVersions(TypedDict):
     """ASGI Versions"""
