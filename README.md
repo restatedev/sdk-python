@@ -32,14 +32,18 @@ The Python SDK is currently in active development, and might break across releas
 
 The compatibility with Restate is described in the following table:
 
-| Restate Server\sdk-python | 0.0 - 0.2 | 0.3 - 0.5 | 0.6 - 0.7 | 0.8 - 0.9        |
-|---------------------------|-----------|-----------|-----------|------------------|
-| 1.0                       | ✅         | ❌         | ❌         | ❌                |
-| 1.1 - 1.2                 | ✅         | ✅         | ❌         | ❌                |
-| 1.3                       | ✅         | ✅         | ✅         | ✅ <sup>(1)</sup> |
-| 1.4                       | ✅         | ✅         | ✅         | ✅                |
+| Restate Server\sdk-python | < 0.6            | 0.6 - 0.7 | 0.8 - 0.9        | 0.10             |
+|---------------------------|------------------|-----------|------------------|------------------|
+| < 1.3                     | ✅                | ❌         | ❌                | ❌                |
+| 1.3                       | ✅                | ✅         | ✅ <sup>(1)</sup> | ✅ <sup>(2)</sup> |
+| 1.4                       | ✅                | ✅         | ✅                | ✅ <sup>(2)</sup> |
+| 1.5                       | ⚠ <sup>(3)</sup> | ✅         | ✅                | ✅                |
 
 <sup>(1)</sup> **Note** The new Service/Object/Workflow constructor fields and the decorator fields `inactivity_timeout`, `abort_timeout`, `journal_retention`, `idempotency_retention`, `ingress_private`, `workflow_retention` work only from Restate 1.4 onward. Check the in-code documentation for more details.
+
+<sup>(1)</sup> **Note** The new Service/Object/Workflow constructor field and the decorator field `invocation_retry_policy` works only from Restate 1.4 onward. Check the in-code documentation for more details.
+
+<sup>(3)</sup> **Warning** SDK versions < 0.6 are deprecated, and cannot be registered anymore. Check the [Restate 1.5 release notes](https://github.com/restatedev/restate/releases/tag/v1.5.0) for more info.
 
 ## Contributing
 
