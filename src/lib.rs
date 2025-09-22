@@ -249,7 +249,7 @@ create_exception!(
     restate_sdk_python_core,
     VMException,
     pyo3::exceptions::PyException,
-    "Restate VM exception."
+    "Protocol state machine exception."
 );
 
 impl From<PyVMError> for PyErr {
@@ -761,21 +761,26 @@ impl ErrorFormatter for PythonErrorFormatter {
     fn display_closed_error(&self, f: &mut fmt::Formatter<'_>, event: &str) -> fmt::Result {
         write!(f, "Execution is suspended, but the handler is still attempting to make progress (calling '{event}'). This can happen:
 
-* If the SuspendedException is caught. Make sure you NEVER catch the SuspendedException, e.g. avoid:
+* If you don't need to handle task cancellation, just avoid catch all statements. Don't do:
 try:
   # Code
 except:
-  # This catches all exceptions, including the SuspendedException!
+  # This catches all exceptions, including the asyncio.CancelledError!
+  # '{event}' <- This operation prints this exception
 
-And use instead:
+Do instead:
 try:
   # Code
 except TerminalException:
-  # In Restate handlers you typically want to catch TerminalException
+  # In Restate handlers you typically want to catch TerminalException only
 
-Check https://docs.restate.dev/develop/python/durable-steps#run for more details on run error handling.
+* To catch ctx.run/ctx.run_typed errors, check https://docs.restate.dev/develop/python/durable-steps#run for more details.
 
-* If you use the context after the handler completed, e.g. moving the context to another thread. Check https://docs.restate.dev/develop/python/concurrent-tasks for more details on how to create durable concurrent tasks in Python.")
+* If the asyncio.CancelledError is caught, you must not run any Context operation in the except arm.
+  Check https://docs.python.org/3/library/asyncio-task.html#task-cancellation for more details on task cancellation.
+
+* If you use the context after the handler completed, e.g. moving the context to another thread.
+  Check https://docs.restate.dev/develop/python/concurrent-tasks for more details on how to create durable concurrent tasks in Python.")
     }
 }
 
