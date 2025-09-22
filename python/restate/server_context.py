@@ -33,7 +33,7 @@ from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import ReceiveChannel, Send
-from restate.vm import Failure, Invocation, NotReady, SuspendedException, VMWrapper, RunRetryConfig # pylint: disable=line-too-long
+from restate.vm import Failure, Invocation, NotReady, VMWrapper, RunRetryConfig, Suspended  # pylint: disable=line-too-long
 from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun
 import typing_extensions
 
@@ -160,7 +160,7 @@ class ServerSendHandle(SendHandle):
         async def coro() -> str:
             if not context.vm.is_completed(handle):
                 await context.create_poll_or_cancel_coroutine([handle])
-            invocation_id = context.must_take_notification(handle)
+            invocation_id = await context.must_take_notification(handle)
             return typing.cast(str, invocation_id)
 
         self.future = LazyFuture(coro)
@@ -200,7 +200,7 @@ class ServerDurablePromise(DurablePromise):
         async def await_point():
             if not self.server_context.vm.is_completed(handle):
                 await self.server_context.create_poll_or_cancel_coroutine([handle])
-            self.server_context.must_take_notification(handle)
+            await self.server_context.must_take_notification(handle)
 
         return ServerDurableFuture(self.server_context, handle, await_point)
 
@@ -213,7 +213,7 @@ class ServerDurablePromise(DurablePromise):
         async def await_point():
             if not self.server_context.vm.is_completed(handle):
                 await self.server_context.create_poll_or_cancel_coroutine([handle])
-            self.server_context.must_take_notification(handle)
+            await self.server_context.must_take_notification(handle)
 
         return ServerDurableFuture(self.server_context, handle, await_point)
 
@@ -273,6 +273,19 @@ def update_restate_context_is_replaying(vm: VMWrapper):
     """Update the context var 'restate_context_is_replaying'. This should be called after each vm.sys_*"""
     restate_context_is_replaying.set(vm.is_replaying())
 
+async def cancel_current_task():
+    """Cancel the current task"""
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        # Cancel through asyncio API
+        current_task.cancel(
+            "Cancelled by Restate SDK, you should not call any Context method after this exception is thrown."
+        )
+        # Sleep 0 will pop up the cancellation
+        await asyncio.sleep(0)
+    else:
+        raise asyncio.CancelledError("Cancelled by Restate SDK, you should not call any Context method after this exception is thrown.")
+
 # pylint: disable=R0902
 class ServerInvocationContext(ObjectContext):
     """This class implements the context for the restate framework based on the server."""
@@ -312,7 +325,7 @@ class ServerInvocationContext(ObjectContext):
             self.vm.sys_write_output_failure(failure)
             self.vm.sys_end()
         # pylint: disable=W0718
-        except SuspendedException:
+        except asyncio.CancelledError:
             pass
         except DisconnectedException:
             raise
@@ -372,9 +385,19 @@ class ServerInvocationContext(ObjectContext):
                 'more_body': True,
             })
 
-    def must_take_notification(self, handle):
+    async def must_take_notification(self, handle):
         """Take notification, which must be present"""
         res = self.vm.take_notification(handle)
+        if isinstance(res, Exception):
+            # We might need to write out something at this point.
+            await self.take_and_send_output()
+            # Print this exception, might be relevant for the user
+            traceback.print_exception(res)
+            await cancel_current_task()
+        if isinstance(res, Suspended):
+            # We might need to write out something at this point.
+            await self.take_and_send_output()
+            await cancel_current_task()
         if isinstance(res, NotReady):
             raise ValueError(f"Unexpected value error: {handle}")
         if res is None:
@@ -383,12 +406,21 @@ class ServerInvocationContext(ObjectContext):
             raise TerminalError(res.message, res.code)
         return res
 
-
     async def create_poll_or_cancel_coroutine(self, handles: typing.List[int]) -> None:
         """Create a coroutine to poll the handle."""
         await self.take_and_send_output()
         while True:
             do_progress_response = self.vm.do_progress(handles)
+            if isinstance(do_progress_response, Exception):
+                # We might need to write out something at this point.
+                await self.take_and_send_output()
+                # Print this exception, might be relevant for the user
+                traceback.print_exception(do_progress_response)
+                await cancel_current_task()
+            if isinstance(do_progress_response, Suspended):
+                # We might need to write out something at this point.
+                await self.take_and_send_output()
+                await cancel_current_task()
             if isinstance(do_progress_response, DoProgressAnyCompleted):
                 # One of the handles completed
                 return
@@ -425,7 +457,7 @@ class ServerInvocationContext(ObjectContext):
         async def fetch_result():
             if not self.vm.is_completed(handle):
                 await self.create_poll_or_cancel_coroutine([handle])
-            res = self.must_take_notification(handle)
+            res = await self.must_take_notification(handle)
             if res is None or serde is None:
                 return res
             if isinstance(res, bytes):
@@ -443,7 +475,7 @@ class ServerInvocationContext(ObjectContext):
         async def transform():
             if not self.vm.is_completed(handle):
                 await self.create_poll_or_cancel_coroutine([handle])
-            self.must_take_notification(handle)
+            await self.must_take_notification(handle)
         return ServerDurableSleepFuture(self, handle, transform)
 
     def create_call_future(self, handle: int, invocation_id_handle: int, serde: Serde[T] | None = None) -> ServerCallDurableFuture[T]:
@@ -451,7 +483,7 @@ class ServerInvocationContext(ObjectContext):
         async def inv_id_factory():
             if not self.vm.is_completed(invocation_id_handle):
                 await self.create_poll_or_cancel_coroutine([invocation_id_handle])
-            return self.must_take_notification(invocation_id_handle)
+            return await self.must_take_notification(invocation_id_handle)
 
         return ServerCallDurableFuture(self, handle, self._create_fetch_result_coroutine(handle, serde), inv_id_factory)
 
