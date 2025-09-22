@@ -35,7 +35,6 @@ from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import ReceiveChannel, Send
 from restate.vm import Failure, Invocation, NotReady, VMWrapper, RunRetryConfig, Suspended  # pylint: disable=line-too-long
 from restate.vm import DoProgressAnyCompleted, DoProgressCancelSignalReceived, DoProgressReadFromInput, DoProgressExecuteRun, DoWaitPendingRun
-import typing_extensions
 
 
 T = TypeVar('T')
@@ -576,7 +575,6 @@ class ServerInvocationContext(ObjectContext):
                 self.vm.propose_run_completion_transient(handle, failure=failure, attempt_duration_ms=1, config=config)
     # pylint: disable=W0236
     # pylint: disable=R0914
-    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     def run(self,
                   name: str,
                   action: RunAction[T],

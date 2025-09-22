@@ -21,7 +21,6 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Unio
 import typing
 from datetime import timedelta
 
-import typing_extensions
 from restate.serde import DefaultSerde, Serde
 
 T = TypeVar('T')
@@ -246,7 +245,6 @@ class Context(abc.ABC):
         """
 
     @overload
-    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @abc.abstractmethod
     def run(self,
             name: str,
@@ -259,6 +257,8 @@ class Context(abc.ABC):
             ) -> RestateDurableFuture[T]:
         """
         Runs the given action with the given name.
+
+        DEPRECATED: Use ctx.run_typed instead.
 
         Args:
             name: The name of the action.
@@ -276,7 +276,6 @@ class Context(abc.ABC):
         """
 
     @overload
-    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @abc.abstractmethod
     def run(self,
             name: str,
@@ -289,6 +288,8 @@ class Context(abc.ABC):
             ) -> RestateDurableFuture[T]:
         """
         Runs the given coroutine action with the given name.
+
+        DEPRECATED: Use ctx.run_typed instead.
 
         Args:
             name: The name of the action.
@@ -305,7 +306,6 @@ class Context(abc.ABC):
 
         """
 
-    @typing_extensions.deprecated("`run` is deprecated, use `run_typed` instead for better type safety")
     @abc.abstractmethod
     def run(self,
             name: str,
@@ -318,6 +318,8 @@ class Context(abc.ABC):
             ) -> RestateDurableFuture[T]:
         """
         Runs the given action with the given name.
+
+        DEPRECATED: Use ctx.run_typed instead.
 
         Args:
             name: The name of the action.

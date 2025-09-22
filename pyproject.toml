@@ -12,7 +12,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Restate Developers", email = "dev@restate.dev" }]
 readme = "README.md"
-dependencies = ["typing-extensions>=4.14.0"]
+dependencies = []
 
 [project.urls]
 Homepage = "https://restate.dev"
