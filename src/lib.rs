@@ -1,3 +1,4 @@
+use std::fmt;
 use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone, PyString};
@@ -7,6 +8,7 @@ use restate_sdk_shared_core::{
     TerminalFailure, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
 };
 use std::time::{Duration, SystemTime};
+use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
 
 // Current crate version
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -158,6 +160,7 @@ impl From<PyFailure> for TerminalFailure {
         TerminalFailure {
             code: value.code,
             message: value.message,
+            metadata: vec![],
         }
     }
 }
@@ -751,6 +754,31 @@ impl PyIdentityVerifier {
     }
 }
 
+#[derive(Debug)]
+struct PythonErrorFormatter;
+
+impl ErrorFormatter for PythonErrorFormatter {
+    fn display_closed_error(&self, f: &mut fmt::Formatter<'_>, event: &str) -> fmt::Result {
+        write!(f, "Execution is suspended, but the handler is still attempting to make progress (calling '{event}'). This can happen:
+
+* If the SuspendedException is caught. Make sure you NEVER catch the SuspendedException, e.g. avoid:
+try:
+  # Code
+except:
+  # This catches all exceptions, including the SuspendedException!
+
+And use instead:
+try:
+  # Code
+except TerminalException:
+  # In Restate handlers you typically want to catch TerminalException
+
+Check https://docs.restate.dev/develop/python/durable-steps#run for more details on run error handling.
+
+* If you use the context after the handler completed, e.g. moving the context to another thread. Check https://docs.restate.dev/develop/python/concurrent-tasks for more details on how to create durable concurrent tasks in Python.")
+    }
+}
+
 #[pymodule]
 fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use tracing_subscriber::EnvFilter;
@@ -790,5 +818,9 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "CANCEL_NOTIFICATION_HANDLE",
         PyNotificationHandle::from(CANCEL_NOTIFICATION_HANDLE),
     )?;
+
+    // Set customized error formatter
+    set_error_formatter(PythonErrorFormatter);
+
     Ok(())
 }
