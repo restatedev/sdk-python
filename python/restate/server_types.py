@@ -17,18 +17,13 @@ This module contains the ASGI types definitions.
 import asyncio
 from typing import (Awaitable, Callable, Dict, Iterable, List,
                     Tuple, Union, TypedDict, Literal, Optional, Any)
-import sys
-if sys.version_info >= (3, 11):
-    from typing import NotRequired
-else:
-    from typing_extensions import NotRequired
 
 class ASGIVersions(TypedDict):
     """ASGI Versions"""
     spec_version: str
     version: Union[Literal["2.0"], Literal["3.0"]]
 
-class Scope(TypedDict):
+class Scope(TypedDict, total=False):
     """ASGI Scope"""
     type: Literal["http"]
     asgi: ASGIVersions
@@ -42,7 +37,6 @@ class Scope(TypedDict):
     headers: Iterable[Tuple[bytes, bytes]]
     client: Optional[Tuple[str, int]]
     server: Optional[Tuple[str, Optional[int]]]
-    state: NotRequired[Dict[str, Any]]
     extensions: Optional[Dict[str, Dict[object, object]]]
 
 class RestateEvent(TypedDict):
