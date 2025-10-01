@@ -28,8 +28,6 @@ pip install restate_sdk
 
 ## Versions
 
-The Python SDK is currently in active development, and might break across releases.
-
 The compatibility with Restate is described in the following table:
 
 | Restate Server\sdk-python | < 0.6            | 0.6 - 0.7 | 0.8 - 0.9        | 0.10             |
