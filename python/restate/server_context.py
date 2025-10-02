@@ -533,7 +533,7 @@ class ServerInvocationContext(ObjectContext):
         return UUID(int=self.random_instance.getrandbits(128), version=4)
 
     def time(self) -> RestateDurableFuture[float]:
-        return self.run_typed("timestamp", time.time)
+        return self.run_typed("timestamp", lambda: time.time())
 
     # pylint: disable=R0914
     async def create_run_coroutine(self,
