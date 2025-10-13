@@ -18,6 +18,7 @@
 
 import asyncio
 import contextvars
+import copy
 from random import Random
 from datetime import timedelta
 import inspect
@@ -612,10 +613,12 @@ class ServerInvocationContext(ObjectContext):
         **kwargs: P.kwargs,
     ) -> RestateDurableFuture[T]:
         if isinstance(options.serde, DefaultSerde):
+            # Copy options, as we're going to mutate type_hint and serde
+            options = copy.copy(options)
             if options.type_hint is None:
                 signature = inspect.signature(action, eval_str=True)
                 options.type_hint = signature.return_annotation
-            options.serde = options.serde.with_maybe_type(options.type_hint)
+            options.serde = typing.cast(DefaultSerde, options.serde).with_maybe_type(options.type_hint)
         handle = self.vm.sys_run(name)
         update_restate_context_is_replaying(self.vm)
 
