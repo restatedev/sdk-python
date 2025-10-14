@@ -404,7 +404,7 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
+    def sleep(self, delta: timedelta, name: Optional[str] = None) -> RestateDurableSleepFuture:
         """
         Suspends the current invocation for the given duration
         """

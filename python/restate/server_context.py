@@ -626,10 +626,10 @@ class ServerInvocationContext(ObjectContext):
         self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, func, options.serde, options.max_attempts, options.max_retry_duration)
         return self.create_future(handle, options.serde)
 
-    def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
+    def sleep(self, delta: timedelta, name: Optional[str] = None) -> RestateDurableSleepFuture:
         # convert timedelta to milliseconds
         millis = int(delta.total_seconds() * 1000)
-        handle = self.vm.sys_sleep(millis)
+        handle = self.vm.sys_sleep(millis, name)
         update_restate_context_is_replaying(self.vm)
         return self.create_sleep_future(handle) # type: ignore
 

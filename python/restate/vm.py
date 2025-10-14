@@ -293,9 +293,9 @@ class VMWrapper:
         """Clear the state associated with the given name."""
         self.vm.sys_clear_all_state()
 
-    def sys_sleep(self, millis: int):
+    def sys_sleep(self, millis: int, name: typing.Optional[str] = None):
         """Ask to sleep for a given duration"""
-        return self.vm.sys_sleep(millis)
+        return self.vm.sys_sleep(millis, name)
 
     def sys_call(self,
                  service: str,

@@ -439,6 +439,7 @@ impl PyVM {
     fn sys_sleep(
         mut self_: PyRefMut<'_, Self>,
         millis: u64,
+        name: Option<String>
     ) -> Result<PyNotificationHandle, PyVMError> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -446,7 +447,7 @@ impl PyVM {
         self_
             .vm
             .sys_sleep(
-                String::default(),
+                name.unwrap_or_default(),
                 now + Duration::from_millis(millis),
                 Some(now),
             )
