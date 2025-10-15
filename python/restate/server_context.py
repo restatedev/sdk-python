@@ -408,8 +408,8 @@ class ServerInvocationContext(ObjectContext):
 
     async def create_poll_or_cancel_coroutine(self, handles: typing.List[int]) -> None:
         """Create a coroutine to poll the handle."""
-        await self.take_and_send_output()
         while True:
+            await self.take_and_send_output()
             do_progress_response = self.vm.do_progress(handles)
             if isinstance(do_progress_response, Exception):
                 # We might need to write out something at this point.
@@ -432,9 +432,10 @@ class ServerInvocationContext(ObjectContext):
                 assert fn is not None
 
                 async def wrapper(f):
-                    await f()
-                    await self.take_and_send_output()
-                    await self.receive.enqueue_restate_event({ 'type' : 'restate.run_completed', 'data': None})
+                    try:
+                        await f()
+                    finally:
+                        await self.receive.enqueue_restate_event({ 'type' : 'restate.run_completed', 'data': None})
 
                 task = asyncio.create_task(wrapper(fn))
                 self.tasks.add(task)
