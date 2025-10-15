@@ -408,18 +408,14 @@ class ServerInvocationContext(ObjectContext):
 
     async def create_poll_or_cancel_coroutine(self, handles: typing.List[int]) -> None:
         """Create a coroutine to poll the handle."""
-        await self.take_and_send_output()
         while True:
+            await self.take_and_send_output()
             do_progress_response = self.vm.do_progress(handles)
-            if isinstance(do_progress_response, Exception):
-                # We might need to write out something at this point.
-                await self.take_and_send_output()
+            if isinstance(do_progress_response, BaseException):
                 # Print this exception, might be relevant for the user
                 traceback.print_exception(do_progress_response)
                 await cancel_current_task()
             if isinstance(do_progress_response, Suspended):
-                # We might need to write out something at this point.
-                await self.take_and_send_output()
                 await cancel_current_task()
             if isinstance(do_progress_response, DoProgressAnyCompleted):
                 # One of the handles completed
@@ -432,9 +428,10 @@ class ServerInvocationContext(ObjectContext):
                 assert fn is not None
 
                 async def wrapper(f):
-                    await f()
-                    await self.take_and_send_output()
-                    await self.receive.enqueue_restate_event({ 'type' : 'restate.run_completed', 'data': None})
+                    try:
+                        await f()
+                    finally:
+                        await self.receive.enqueue_restate_event({ 'type' : 'restate.run_completed', 'data': None})
 
                 task = asyncio.create_task(wrapper(fn))
                 self.tasks.add(task)
@@ -543,9 +540,13 @@ class ServerInvocationContext(ObjectContext):
                                    action: RunAction[T],
                                    serde: Serde[T],
                                    max_attempts: Optional[int] = None,
-                                   max_retry_duration: Optional[timedelta] = None,
+                                   max_duration: Optional[timedelta] = None,
+                                   initial_retry_interval: Optional[timedelta] = None,
+                                   max_retry_interval: Optional[timedelta] = None,
+                                   retry_interval_factor: Optional[float] = None,
                                    ):
         """Create a coroutine to poll the handle."""
+        start = time.time()
         try:
             if inspect.iscoroutinefunction(action):
                 action_result: T = await action() # type: ignore
@@ -566,15 +567,20 @@ class ServerInvocationContext(ObjectContext):
             raise e from None
         # pylint: disable=W0718
         except Exception as e:
-            if max_attempts is None and max_retry_duration is None:
-                # no retry policy
-                # todo: log the error
-                self.vm.notify_error(repr(e), traceback.format_exc())
-            else:
-                failure = Failure(code=500, message=str(e))
-                max_duration_ms = None if max_retry_duration is None else int(max_retry_duration.total_seconds() * 1000)
-                config = RunRetryConfig(max_attempts=max_attempts, max_duration=max_duration_ms)
-                self.vm.propose_run_completion_transient(handle, failure=failure, attempt_duration_ms=1, config=config)
+            end = time.time()
+            attempt_duration = int((end - start) * 1000)
+            failure = Failure(code=500, message=str(e))
+            max_duration_ms = None if max_duration is None else int(max_duration.total_seconds() * 1000)
+            initial_retry_interval_ms = None if initial_retry_interval is None else int(initial_retry_interval.total_seconds() * 1000)
+            max_retry_interval_ms = None if max_retry_interval is None else int(max_retry_interval.total_seconds() * 1000)
+            config = RunRetryConfig(
+                max_attempts=max_attempts,
+                max_duration=max_duration_ms,
+                initial_interval=initial_retry_interval_ms,
+                max_interval=max_retry_interval_ms,
+                interval_factor=retry_interval_factor
+            )
+            self.vm.propose_run_completion_transient(handle, failure=failure, attempt_duration_ms=attempt_duration, config=config)
     # pylint: disable=W0236
     # pylint: disable=R0914
     def run(self,
@@ -601,7 +607,7 @@ class ServerInvocationContext(ObjectContext):
         else:
             # todo: we can also verify by looking at the signature that there are no missing parameters
             noargs_action = action # type: ignore
-        self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, noargs_action, serde, max_attempts, max_retry_duration)
+        self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, noargs_action, serde, max_attempts, max_retry_duration, None, None, None)
         return self.create_future(handle, serde) # type: ignore
 
     def run_typed(
@@ -624,7 +630,16 @@ class ServerInvocationContext(ObjectContext):
         update_restate_context_is_replaying(self.vm)
 
         func = functools.partial(action, *args, **kwargs)
-        self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(handle, func, options.serde, options.max_attempts, options.max_retry_duration)
+        self.run_coros_to_execute[handle] = lambda : self.create_run_coroutine(
+            handle,
+            func,
+            options.serde,
+            options.max_attempts,
+            options.max_duration,
+            options.initial_retry_interval,
+            options.max_retry_interval,
+            options.retry_interval_factor
+        )
         return self.create_future(handle, options.serde)
 
     def sleep(self, delta: timedelta, name: Optional[str] = None) -> RestateDurableSleepFuture:

@@ -31,6 +31,7 @@ P = ParamSpec('P')
 HandlerType = Union[Callable[[Any, I], Awaitable[O]], Callable[[Any], Awaitable[O]]]
 RunAction = Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]]
 
+# pylint: disable=R0902
 @dataclass
 class RunOptions(typing.Generic[T]):
     """
@@ -40,15 +41,32 @@ class RunOptions(typing.Generic[T]):
     serde: Serde[T] = DefaultSerde()
     """The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
                     See also 'type_hint'."""
-    max_attempts: Optional[int] = None
-    """The maximum number of retry attempts, including the initial attempt, to complete the action.
-                            If None, the action will be retried indefinitely, until it succeeds.
-                            Otherwise, the action will be retried until the maximum number of attempts is reached and then it will raise a TerminalError."""
-    max_retry_duration: Optional[timedelta] = None
-    """The maximum duration for retrying. If None, the action will be retried indefinitely, until it succeeds.
-                                Otherwise, the action will be retried until the maximum duration is reached and then it will raise a TerminalError."""
     type_hint: Optional[typing.Type[T]] = None
     """The type hint of the return value of the action. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer."""
+    max_attempts: Optional[int] = None
+    """Max number of attempts (including the initial), before giving up.
+
+    When giving up, `ctx.run` will throw a `TerminalError` wrapping the original error message."""
+    max_duration: Optional[timedelta] = None
+    """Max duration of retries, before giving up.
+
+    When giving up, `ctx.run` will throw a `TerminalError` wrapping the original error message."""
+    initial_retry_interval: Optional[timedelta] = None
+    """Initial interval for the first retry attempt.
+    Retry interval will grow by a factor specified in `retry_interval_factor`.
+
+    If any of the other retry related fields is specified, the default for this field is 50 milliseconds, otherwise restate will fallback to the overall invocation retry policy."""
+    max_retry_interval: Optional[timedelta] = None
+    """Max interval between retries.
+    Retry interval will grow by a factor specified in `retry_interval_factor`.
+
+    The default is 10 seconds."""
+    retry_interval_factor: Optional[float] = None
+    """Exponentiation factor to use when computing the next retry delay.
+
+    If any of the other retry related fields is specified, the default for this field is `2`, meaning retry interval will double at each attempt, otherwise restate will fallback to the overall invocation retry policy."""
+    max_retry_duration: Optional[timedelta] = None
+    """Deprecated: Use max_duration instead."""
 
 # pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):

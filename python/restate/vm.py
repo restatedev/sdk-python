@@ -33,11 +33,15 @@ class Invocation:
 @dataclass
 class RunRetryConfig:
     """
-    Expo Retry Configuration
+    Exponential Retry Configuration
+
+    All duration/interval values are in milliseconds.
     """
     initial_interval: typing.Optional[int] = None
     max_attempts: typing.Optional[int] = None
     max_duration: typing.Optional[int] = None
+    max_interval: typing.Optional[int] = None
+    interval_factor: typing.Optional[float] = None
 
 @dataclass
 class Failure:
@@ -394,22 +398,20 @@ class VMWrapper:
         return self.vm.propose_run_completion_failure(handle, res)
 
     # pylint: disable=line-too-long
-    def propose_run_completion_transient(self, handle: int, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig) -> int | None:
+    def propose_run_completion_transient(self, handle: int, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig):
         """
         Exit a side effect with a transient Error.
         This requires a retry policy to be provided.
         """
         py_failure = PyFailure(failure.code, failure.message)
-        py_config = PyExponentialRetryConfig(config.initial_interval, config.max_attempts, config.max_duration)
-        try:
-            handle = self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
-            # The VM decided not to retry, therefore we get back an handle that will be resolved
-            # with a terminal failure.
-            return handle
-        # pylint: disable=bare-except
-        except:
-            # The VM decided to retry, therefore we tear down the current execution
-            return None
+        py_config = PyExponentialRetryConfig(
+            config.initial_interval,
+            config.max_attempts,
+            config.max_duration,
+            config.max_interval,
+            config.interval_factor
+        )
+        self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
 
     def sys_end(self):
         """

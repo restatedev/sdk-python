@@ -9,6 +9,8 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """example.py"""
+from datetime import timedelta
+
 # pylint: disable=C0116
 # pylint: disable=W0613
 # pylint: disable=W0622
@@ -61,7 +63,7 @@ async def side_effect_succeeds_after_given_attempts(ctx: ObjectContext, minimum_
             return eventual_success_side_effects
         raise ValueError(f"Failed at attempt: {eventual_success_side_effects}")
 
-    options: RunOptions[int] = RunOptions(max_attempts=minimum_attempts + 1)
+    options: RunOptions[int] = RunOptions(max_attempts=minimum_attempts + 1, initial_retry_interval=timedelta(milliseconds=1), retry_interval_factor=1.0)
     return await ctx.run_typed("sideEffect", side_effect, options)
 
 eventual_failure_side_effects = 0
@@ -75,7 +77,7 @@ async def side_effect_fails_after_given_attempts(ctx: ObjectContext, retry_polic
         raise ValueError(f"Failed at attempt: {eventual_failure_side_effects}")
 
     try:
-        options: RunOptions[int] = RunOptions(max_attempts=retry_policy_max_retry_count)
+        options: RunOptions[int] = RunOptions(max_attempts=retry_policy_max_retry_count, initial_retry_interval=timedelta(milliseconds=1), retry_interval_factor=1.0)
         await ctx.run_typed("sideEffect", side_effect, options)
         raise ValueError("Side effect did not fail.")
     except TerminalError as t:
