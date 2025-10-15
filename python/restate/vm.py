@@ -398,7 +398,7 @@ class VMWrapper:
         return self.vm.propose_run_completion_failure(handle, res)
 
     # pylint: disable=line-too-long
-    def propose_run_completion_transient(self, handle: int, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig) -> int | None:
+    def propose_run_completion_transient(self, handle: int, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig):
         """
         Exit a side effect with a transient Error.
         This requires a retry policy to be provided.
@@ -411,15 +411,7 @@ class VMWrapper:
             config.max_interval,
             config.interval_factor
         )
-        try:
-            handle = self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
-            # The VM decided not to retry, therefore we get back an handle that will be resolved
-            # with a terminal failure.
-            return handle
-        # pylint: disable=bare-except
-        except:
-            # The VM decided to retry, therefore we tear down the current execution
-            return None
+        self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
 
     def sys_end(self):
         """
