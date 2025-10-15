@@ -33,11 +33,15 @@ class Invocation:
 @dataclass
 class RunRetryConfig:
     """
-    Expo Retry Configuration
+    Exponential Retry Configuration
+
+    All duration/interval values are in milliseconds.
     """
     initial_interval: typing.Optional[int] = None
     max_attempts: typing.Optional[int] = None
     max_duration: typing.Optional[int] = None
+    max_interval: typing.Optional[int] = None
+    interval_factor: typing.Optional[float] = None
 
 @dataclass
 class Failure:
@@ -400,7 +404,13 @@ class VMWrapper:
         This requires a retry policy to be provided.
         """
         py_failure = PyFailure(failure.code, failure.message)
-        py_config = PyExponentialRetryConfig(config.initial_interval, config.max_attempts, config.max_duration)
+        py_config = PyExponentialRetryConfig(
+            config.initial_interval,
+            config.max_attempts,
+            config.max_duration,
+            config.max_interval,
+            config.interval_factor
+        )
         try:
             handle = self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
             # The VM decided not to retry, therefore we get back an handle that will be resolved

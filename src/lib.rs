@@ -115,33 +115,47 @@ struct PyExponentialRetryConfig {
     max_attempts: Option<u32>,
     #[pyo3(get, set)]
     max_duration: Option<u64>,
+    #[pyo3(get, set)]
+    max_interval: Option<u64>,
+    #[pyo3(get, set)]
+    factor: Option<f64>,
 }
 
 #[pymethods]
 impl PyExponentialRetryConfig {
-    #[pyo3(signature = (initial_interval=None, max_attempts=None, max_duration=None))]
+    #[pyo3(signature = (initial_interval=None, max_attempts=None, max_duration=None, max_interval=None, factor=None))]
     #[new]
     fn new(
         initial_interval: Option<u64>,
         max_attempts: Option<u32>,
         max_duration: Option<u64>,
+        max_interval: Option<u64>,
+        factor: Option<f64>,
     ) -> Self {
         Self {
             initial_interval,
             max_attempts,
             max_duration,
+            max_interval,
+            factor,
         }
     }
 }
 
 impl From<PyExponentialRetryConfig> for RetryPolicy {
     fn from(value: PyExponentialRetryConfig) -> Self {
-        RetryPolicy::Exponential {
-            initial_interval: Duration::from_millis(value.initial_interval.unwrap_or(10)),
-            max_attempts: value.max_attempts,
-            max_duration: value.max_duration.map(Duration::from_millis),
-            factor: 2.0,
-            max_interval: None,
+        if value.initial_interval.is_some() || value.max_attempts.is_some() || value.max_duration.is_some() || value.max_interval.is_some() || value.factor.is_some() {
+            // If any of the values are set, then let's create the exponential retry policy
+            RetryPolicy::Exponential {
+                initial_interval: Duration::from_millis(value.initial_interval.unwrap_or(50)),
+                max_attempts: value.max_attempts,
+                max_duration: value.max_duration.map(Duration::from_millis),
+                factor: value.factor.unwrap_or(2.0) as f32,
+                max_interval: value.max_interval.map(Duration::from_millis).or_else(|| Some(Duration::from_secs(10))),
+            }
+        } else {
+            // Let's use retry policy infinite here, which will give back control to the invocation retry policy
+         RetryPolicy::Infinite
         }
     }
 }
