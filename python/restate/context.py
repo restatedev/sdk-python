@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine, overload, ParamSpec
 import typing
 from datetime import timedelta
-import warnings
 
 from restate.serde import DefaultSerde, Serde
 
@@ -67,20 +66,7 @@ class RunOptions(typing.Generic[T]):
 
     If any of the other retry related fields is specified, the default for this field is `2`, meaning retry interval will double at each attempt, otherwise restate will fallback to the overall invocation retry policy."""
     max_retry_duration: Optional[timedelta] = None
-    """Deprecated: Use max_duration instead.
-
-    Max duration of retries, before giving up."""
-
-    def __post_init__(self):
-        """Handle deprecated fields."""
-        if self.max_retry_duration is not None:
-            warnings.warn(
-                "max_retry_duration is deprecated, use max_duration instead",
-                DeprecationWarning,
-                stacklevel=2
-            )
-            if self.max_duration is None:
-                self.max_duration = self.max_retry_duration
+    """Deprecated: Use max_duration instead."""
 
 # pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
