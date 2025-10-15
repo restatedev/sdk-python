@@ -411,15 +411,11 @@ class ServerInvocationContext(ObjectContext):
         while True:
             await self.take_and_send_output()
             do_progress_response = self.vm.do_progress(handles)
-            if isinstance(do_progress_response, Exception):
-                # We might need to write out something at this point.
-                await self.take_and_send_output()
+            if isinstance(do_progress_response, BaseException):
                 # Print this exception, might be relevant for the user
                 traceback.print_exception(do_progress_response)
                 await cancel_current_task()
             if isinstance(do_progress_response, Suspended):
-                # We might need to write out something at this point.
-                await self.take_and_send_output()
                 await cancel_current_task()
             if isinstance(do_progress_response, DoProgressAnyCompleted):
                 # One of the handles completed
