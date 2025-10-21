@@ -30,7 +30,7 @@ pip install restate_sdk
 
 The compatibility with Restate is described in the following table:
 
-| Restate Server\sdk-python | < 0.6            | 0.6 - 0.7 | 0.8 - 0.9        | 0.10             |
+| Restate Server\sdk-python | < 0.6            | 0.6 - 0.7 | 0.8 - 0.9        | 0.10 - 0.11      |
 |---------------------------|------------------|-----------|------------------|------------------|
 | < 1.3                     | ✅                | ❌         | ❌                | ❌                |
 | 1.3                       | ✅                | ✅         | ✅ <sup>(1)</sup> | ✅ <sup>(2)</sup> |
