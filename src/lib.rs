@@ -71,10 +71,10 @@ impl From<ResponseHead> for PyResponseHead {
     }
 }
 
-fn take_output_result_into_py(
-    py: Python,
+fn take_output_result_into_py<'py>(
+    py: Python<'py>,
     take_output_result: TakeOutputResult,
-) -> Bound<'_, PyAny> {
+) -> Bound<'py, PyAny> {
     match take_output_result {
         TakeOutputResult::Buffer(b) => PyBytes::new(py, &b).into_any(),
         TakeOutputResult::EOF => PyNone::get(py).to_owned().into_any(),
@@ -461,7 +461,7 @@ impl PyVM {
     fn sys_sleep(
         mut self_: PyRefMut<'_, Self>,
         millis: u64,
-        name: Option<String>
+        name: Option<String>,
     ) -> Result<PyNotificationHandle, PyVMError> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
