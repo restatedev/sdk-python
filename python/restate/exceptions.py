@@ -17,3 +17,11 @@ class TerminalError(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+class AbortedExecutionException(BaseException):
+    """This exception is raised to indicate that the execution is aborted.
+    You should never catch it!"""
+    def __init__(self) -> None:
+        super().__init__("AbortedExecutionException: You should never catch this exception, "
+                         "and you should not call any Context method "
+                         "after this exception is thrown.")

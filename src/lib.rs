@@ -784,7 +784,7 @@ impl ErrorFormatter for PythonErrorFormatter {
     fn display_closed_error(&self, f: &mut fmt::Formatter<'_>, event: &str) -> fmt::Result {
         write!(f, "Execution is suspended, but the handler is still attempting to make progress (calling '{event}'). This can happen:
 
-* If you don't need to handle task cancellation, just avoid catch all statements. Don't do:
+* If you use catch all statements. Don't do:
 try:
   # Code
 except:
@@ -798,9 +798,6 @@ except TerminalException:
   # In Restate handlers you typically want to catch TerminalException only
 
 * To catch ctx.run/ctx.run_typed errors, check https://docs.restate.dev/develop/python/durable-steps#run for more details.
-
-* If the asyncio.CancelledError is caught, you must not run any Context operation in the except arm.
-  Check https://docs.python.org/3/library/asyncio-task.html#task-cancellation for more details on task cancellation.
 
 * If you use the context after the handler completed, e.g. moving the context to another thread.
   Check https://docs.restate.dev/develop/python/concurrent-tasks for more details on how to create durable concurrent tasks in Python.")
