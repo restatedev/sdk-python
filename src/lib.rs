@@ -784,7 +784,8 @@ impl ErrorFormatter for PythonErrorFormatter {
     fn display_closed_error(&self, f: &mut fmt::Formatter<'_>, event: &str) -> fmt::Result {
         write!(f, "Execution is suspended, but the handler is still attempting to make progress (calling '{event}'). This can happen:
 
-* If you use catch all statements. Don't do:
+* If you use try/catch all statements.
+Don't do:
 try:
   # Code
 except:
@@ -797,7 +798,8 @@ try:
 except TerminalError:
   # In Restate handlers you typically want to catch TerminalError only
 
-* To catch ctx.run/ctx.run_typed errors, check https://docs.restate.dev/develop/python/durable-steps#run for more details.
+Or remove the try/except altogether if you don't need it.
+For further info on error handling, refer to https://docs.restate.dev/develop/python/error-handling
 
 * If you use the context after the handler completed, e.g. moving the context to another thread.
   Check https://docs.restate.dev/develop/python/concurrent-tasks for more details on how to create durable concurrent tasks in Python.")
