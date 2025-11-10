@@ -22,7 +22,7 @@ from .context import WorkflowContext, WorkflowSharedContext
 from .retry_policy import InvocationRetryPolicy
 # pylint: disable=line-too-long
 from .context import DurablePromise, RestateDurableFuture, RestateDurableCallFuture, RestateDurableSleepFuture, SendHandle, RunOptions
-from .exceptions import TerminalError
+from .exceptions import TerminalError, SdkInternalBaseException, is_internal_exception
 from .asyncio import as_completed, gather, wait_completed, select
 
 from .endpoint import app
@@ -67,5 +67,7 @@ __all__ = [
     "select",
     "logging",
     "RestateLoggingFilter",
-    "InvocationRetryPolicy"
+    "InvocationRetryPolicy",
+    "SdkInternalBaseException",
+    "is_internal_exception"
 ]

@@ -788,14 +788,14 @@ impl ErrorFormatter for PythonErrorFormatter {
 try:
   # Code
 except:
-  # This catches all exceptions, including the asyncio.CancelledError!
+  # This catches all exceptions, including the SdkInternalBaseException!
   # '{event}' <- This operation prints this exception
 
 Do instead:
 try:
   # Code
-except TerminalException:
-  # In Restate handlers you typically want to catch TerminalException only
+except TerminalError:
+  # In Restate handlers you typically want to catch TerminalError only
 
 * To catch ctx.run/ctx.run_typed errors, check https://docs.restate.dev/develop/python/durable-steps#run for more details.
 
