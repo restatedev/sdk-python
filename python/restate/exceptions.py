@@ -21,8 +21,8 @@ class TerminalError(Exception):
 
 
 class SdkInternalBaseException(Exception):
-    """This exception is internal and gets raised to indicate that the execution is aborted.
-    You should not catch it. If you need to distinguish with other exceptions, use is_internal_exception."""
+    """This exception is internal, and you should not catch it.
+    If you need to distinguish with other exceptions, use is_internal_exception."""
     def __init__(self, message: str) -> None:
         super().__init__(
             message +
@@ -62,9 +62,9 @@ class SuspendedException(SdkInternalBaseException):
         super().__init__("Invocation got suspended, Restate will resume this invocation when progress can be made.")
 
 class SdkInternalException(SdkInternalBaseException):
-    """This exception is raised to indicate that the execution was aborted due to an internal error."""
+    """This exception is raised to indicate that the execution raised a retryable error."""
     def __init__(self) -> None:
-        super().__init__("Invocation attempt got aborted due to a retryable error.\n"
+        super().__init__("Invocation attempt raised a retryable error.\n"
                          "Restate will retry executing this invocation from the point where it left off.")
 
 
