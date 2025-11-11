@@ -31,26 +31,28 @@ class ProxyRequest(TypedDict):
 @proxy.handler()
 async def call(ctx: Context, req: ProxyRequest) -> Iterable[int]:
     response = await ctx.generic_call(
-        req['serviceName'],
-        req['handlerName'],
-        bytes(req['message']),
-        req.get('virtualObjectKey'),
-        req.get('idempotencyKey'))
+        req["serviceName"],
+        req["handlerName"],
+        bytes(req["message"]),
+        req.get("virtualObjectKey"),
+        req.get("idempotencyKey"),
+    )
     return list(response)
 
 
 @proxy.handler(name="oneWayCall")
 async def one_way_call(ctx: Context, req: ProxyRequest) -> str:
     send_delay = None
-    if req.get('delayMillis'):
-        send_delay = timedelta(milliseconds=req['delayMillis'])
+    delayMillis = req.get("delayMillis")
+    if delayMillis is not None:
+        send_delay = timedelta(milliseconds=delayMillis)
     handle = ctx.generic_send(
-        req['serviceName'],
-        req['handlerName'],
-        bytes(req['message']),
-        req.get('virtualObjectKey'),
+        req["serviceName"],
+        req["handlerName"],
+        bytes(req["message"]),
+        req.get("virtualObjectKey"),
         send_delay=send_delay,
-        idempotency_key=req.get('idempotencyKey')
+        idempotency_key=req.get("idempotencyKey"),
     )
     invocation_id = await handle.invocation_id()
     return invocation_id
@@ -61,31 +63,34 @@ class ManyCallRequest(TypedDict):
     oneWayCall: bool
     awaitAtTheEnd: bool
 
+
 @proxy.handler(name="manyCalls")
 async def many_calls(ctx: Context, requests: Iterable[ManyCallRequest]):
     to_await = []
 
     for req in requests:
-        if req['oneWayCall']:
+        if req["oneWayCall"]:
             send_delay = None
-            if req['proxyRequest'].get('delayMillis'):
-                send_delay = timedelta(milliseconds=req['proxyRequest']['delayMillis'])
+            delayMillis = req["proxyRequest"].get("delayMillis")
+            if delayMillis is not None:
+                send_delay = timedelta(milliseconds=delayMillis)
             ctx.generic_send(
-                req['proxyRequest']['serviceName'],
-                req['proxyRequest']['handlerName'],
-                bytes(req['proxyRequest']['message']),
-                req['proxyRequest'].get('virtualObjectKey'),
+                req["proxyRequest"]["serviceName"],
+                req["proxyRequest"]["handlerName"],
+                bytes(req["proxyRequest"]["message"]),
+                req["proxyRequest"].get("virtualObjectKey"),
                 send_delay=send_delay,
-                idempotency_key=req['proxyRequest'].get('idempotencyKey')
+                idempotency_key=req["proxyRequest"].get("idempotencyKey"),
             )
         else:
             awaitable = ctx.generic_call(
-                req['proxyRequest']['serviceName'],
-                req['proxyRequest']['handlerName'],
-                bytes(req['proxyRequest']['message']),
-                req['proxyRequest'].get('virtualObjectKey'),
-                idempotency_key=req['proxyRequest'].get('idempotencyKey'))
-            if req['awaitAtTheEnd']:
+                req["proxyRequest"]["serviceName"],
+                req["proxyRequest"]["handlerName"],
+                bytes(req["proxyRequest"]["message"]),
+                req["proxyRequest"].get("virtualObjectKey"),
+                idempotency_key=req["proxyRequest"].get("idempotencyKey"),
+            )
+            if req["awaitAtTheEnd"]:
                 to_await.append(awaitable)
 
     for awaitable in to_await:

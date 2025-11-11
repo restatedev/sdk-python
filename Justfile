@@ -1,38 +1,47 @@
-# Justfile 
+# Use UV_PYTHON env variable to select either a python version or 
+# the complete python to your python interpreter 
 
-python := "python3"
+default := "all"
 
-default:
-    @echo "Available recipes:"
-    @echo "  mypy   - Run mypy for type checking"
-    @echo "  pylint - Run pylint for linting"
-    @echo "  test   - Run pytest for testing"
-    @echo "  verify - Run mypy, pylint, test"
+set shell := ["bash", "-c"]
 
-# Recipe to run mypy for type checking
-mypy:
-    @echo "Running mypy..."
-    {{python}} -m mypy --check-untyped-defs --ignore-missing-imports python/restate/
-    {{python}} -m mypy --check-untyped-defs --ignore-missing-imports examples/
+sync:
+    uv sync --all-extras --all-packages
 
-# Recipe to run pylint for linting
-pylint:
-    @echo "Running pylint..."
-    {{python}} -m pylint python/restate --ignore-paths='^.*.?venv.*$'
-    {{python}} -m pylint examples/ --ignore-paths='^.*\.?venv.*$'
+format:
+    uv run ruff format
+    uv run ruff check --fix --fix-only
+
+lint:
+    uv run ruff format --check
+    uv run ruff check
+
+typecheck-pyright:
+    PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright python/
+    PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright examples/ 
+    PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright tests
+    PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright test-services/
+
+typecheck-mypy:
+    uv run -m mypy --check-untyped-defs --ignore-missing-imports python/
+    uv run -m mypy --check-untyped-defs --ignore-missing-imports examples/
+    uv run -m mypy --check-untyped-defs --ignore-missing-imports tests/
+
+typecheck: typecheck-pyright typecheck-mypy
 
 test:
-    @echo "Running Python tests..."
-    {{python}} -m pytest tests/*
+    uv run -m pytest tests/*
+
 
 # Recipe to run both mypy and pylint
-verify: mypy pylint test
+verify: format lint typecheck test
     @echo "Type checking and linting completed successfully."
 
 # Recipe to build the project
 build:
     @echo "Building the project..."
-    maturin build --release
+    #maturin build --release
+    uv build --all-packages
 
 clean:
 	@echo "Cleaning the project"

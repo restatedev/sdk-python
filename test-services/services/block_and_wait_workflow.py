@@ -18,6 +18,7 @@ from restate.exceptions import TerminalError
 
 workflow = Workflow("BlockAndWaitWorkflow")
 
+
 @workflow.main()
 async def run(ctx: WorkflowContext, input: str):
     ctx.set("my-state", input)
@@ -33,6 +34,7 @@ async def run(ctx: WorkflowContext, input: str):
 @workflow.handler()
 async def unblock(ctx: WorkflowSharedContext, output: str):
     await ctx.promise("durable-promise").resolve(output)
+
 
 @workflow.handler(name="getState")
 async def get_state(ctx: WorkflowSharedContext, output: str) -> str | None:

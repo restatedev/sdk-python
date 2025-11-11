@@ -18,11 +18,14 @@ from . import awakeable_holder
 
 kill_runner = VirtualObject("KillTestRunner")
 
+
 @kill_runner.handler(name="startCallTree")
 async def start_call_tree(ctx: ObjectContext):
     await ctx.object_call(recursive_call, key=ctx.key(), arg=None)
 
+
 kill_singleton = VirtualObject("KillTestSingleton")
+
 
 @kill_singleton.handler(name="recursiveCall")
 async def recursive_call(ctx: ObjectContext):
@@ -31,6 +34,7 @@ async def recursive_call(ctx: ObjectContext):
     await promise
 
     await ctx.object_call(recursive_call, key=ctx.key(), arg=None)
+
 
 @kill_singleton.handler(name="isUnlocked")
 async def is_unlocked(ctx: ObjectContext):

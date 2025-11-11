@@ -22,7 +22,7 @@ Source = "https://github.com/restatedev/sdk-python"
 
 [project.optional-dependencies]
 test = ["pytest", "hypercorn"]
-lint = ["mypy", "pylint"]
+lint = ["mypy>=1.11.2", "pyright>=1.1.390", "ruff>=0.6.9"]
 harness = ["testcontainers", "hypercorn", "httpx"]
 serde = ["dacite", "pydantic"]
 
@@ -34,3 +34,21 @@ build-backend = "maturin"
 features = ["pyo3/extension-module"]
 module-name = "restate._internal"
 python-source = "python"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+include = [
+    "python/**/*.py",
+    "examples/**/*.py",
+    "tests/**/*.py",
+    "test-services//**/*.py",
+]
+
+[tool.ruff.lint]
+ignore = ["E741"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+   "ignore:The @wait_container_is_ready decorator is deprecated:DeprecationWarning",
+]

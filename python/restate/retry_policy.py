@@ -12,11 +12,13 @@ Retry policy configuration for handler invocations exposed in the discovery mani
 Note: You can set these fields only if you register this service against restate-server >= 1.5
 and discovery protocol v4. Otherwise, service discovery will fail.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Literal
+
 
 @dataclass
 class InvocationRetryPolicy:

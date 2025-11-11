@@ -11,9 +11,11 @@
 """
 This module contains the logging utilities for restate handlers.
 """
+
 import logging
 
 from .server_context import restate_context_is_replaying
+
 
 # pylint: disable=C0103
 def getLogger(name=None):
@@ -26,6 +28,7 @@ def getLogger(name=None):
     logger = logging.getLogger(name)
     logger.addFilter(RestateLoggingFilter())
     return logger
+
 
 # pylint: disable=R0903
 class RestateLoggingFilter(logging.Filter):

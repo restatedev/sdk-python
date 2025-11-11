@@ -17,6 +17,7 @@ from restate.exceptions import TerminalError
 from restate.context import RestateDurableFuture
 from restate.server_context import ServerDurableFuture, ServerInvocationContext
 
+
 async def gather(*futures: RestateDurableFuture[Any]) -> List[RestateDurableFuture[Any]]:
     """
     Blocks until all futures are completed.
@@ -26,6 +27,7 @@ async def gather(*futures: RestateDurableFuture[Any]) -> List[RestateDurableFutu
     async for _ in as_completed(*futures):
         pass
     return list(futures)
+
 
 async def select(**kws: RestateDurableFuture[Any]) -> List[Any]:
     """
@@ -50,20 +52,21 @@ async def select(**kws: RestateDurableFuture[Any]) -> List[Any]:
         raise TerminalError(message="Payment declined", status_code=401)
     case ['timeout', _]:
         raise TerminalError(message="Payment verification timed out", status_code=410)
-     
+
     """
     if not kws:
         raise ValueError("At least one future must be passed.")
-    reverse = { f: key for key, f in kws.items() }
+    reverse = {f: key for key, f in kws.items()}
     async for f in as_completed(*kws.values()):
         return [reverse[f], await f]
     assert False, "unreachable"
 
+
 async def as_completed(*futures: RestateDurableFuture[Any]):
     """
     Returns an iterator that yields the futures as they are completed.
-    
-    example: 
+
+    example:
 
     async for future in as_completed(f1, f2, f3):
         # do something with the completed future
@@ -77,7 +80,10 @@ async def as_completed(*futures: RestateDurableFuture[Any]):
             yield f
         remaining = waiting
 
-async def wait_completed(*args: RestateDurableFuture[Any]) -> Tuple[List[RestateDurableFuture[Any]], List[RestateDurableFuture[Any]]]:
+
+async def wait_completed(
+    *args: RestateDurableFuture[Any],
+) -> Tuple[List[RestateDurableFuture[Any]], List[RestateDurableFuture[Any]]]:
     """
     Blocks until at least one of the futures is completed.
 
@@ -107,7 +113,7 @@ async def wait_completed(*args: RestateDurableFuture[Any]) -> Tuple[List[Restate
 
     if completed:
         # the user had passed some completed futures, so we can return them immediately
-        return completed, uncompleted # type: ignore
+        return completed, uncompleted  # type: ignore
 
     completed = []
     uncompleted = []
@@ -117,7 +123,7 @@ async def wait_completed(*args: RestateDurableFuture[Any]) -> Tuple[List[Restate
     for index, handle in enumerate(handles):
         future = futures[index]
         if context.vm.is_completed(handle):
-            completed.append(future) # type: ignore
+            completed.append(future)  # type: ignore
         else:
-            uncompleted.append(future) # type: ignore
-    return completed, uncompleted # type: ignore
+            uncompleted.append(future)  # type: ignore
+    return completed, uncompleted  # type: ignore

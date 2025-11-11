@@ -16,12 +16,14 @@ from restate import VirtualObject, ObjectContext, ObjectSharedContext
 
 counter = VirtualObject("counter")
 
+
 @counter.handler()
 async def increment(ctx: ObjectContext, value: int) -> int:
     n = await ctx.get("counter", type_hint=int) or 0
     n += value
     ctx.set("counter", n)
     return n
+
 
 @counter.handler(kind="shared")
 async def count(ctx: ObjectSharedContext) -> int:

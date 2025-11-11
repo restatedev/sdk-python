@@ -24,6 +24,7 @@ BlockingOperation = Literal["CALL", "SLEEP", "AWAKEABLE"]
 
 runner = VirtualObject("CancelTestRunner")
 
+
 @runner.handler(name="startTest")
 async def start_test(ctx: ObjectContext, op: BlockingOperation):
     try:
@@ -34,6 +35,7 @@ async def start_test(ctx: ObjectContext, op: BlockingOperation):
         else:
             raise t
 
+
 @runner.handler(name="verifyTest")
 async def verify_test(ctx: ObjectContext) -> bool:
     state = await ctx.get("state")
@@ -41,8 +43,9 @@ async def verify_test(ctx: ObjectContext) -> bool:
         return False
     return state
 
-                                  
+
 blocking_service = VirtualObject("CancelTestBlockingService")
+
 
 @blocking_service.handler()
 async def block(ctx: ObjectContext, op: BlockingOperation):
@@ -57,6 +60,7 @@ async def block(ctx: ObjectContext, op: BlockingOperation):
     elif op == "AWAKEABLE":
         name, uncompleteable = ctx.awakeable()
         await uncompleteable
+
 
 @blocking_service.handler(name="isUnlocked")
 async def is_unlocked(ctx: ObjectContext):

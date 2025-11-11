@@ -17,11 +17,15 @@ import threading
 import typing
 from urllib.error import URLError
 import socket
+from contextlib import contextmanager
+from warnings import deprecated
 
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
-from testcontainers.core.container import DockerContainer # type: ignore
-from testcontainers.core.waiting_utils import wait_container_is_ready # type: ignore
+from restate.server_types import RestateAppT
+from restate.types import TestHarnessEnvironment
+from testcontainers.core.container import DockerContainer  # type: ignore
+from testcontainers.core.waiting_utils import wait_container_is_ready  # type: ignore
 import httpx
 
 
@@ -31,8 +35,10 @@ def find_free_port():
         s.bind(("0.0.0.0", 0))
         return s.getsockname()[1]
 
+
 def run_in_background(coro) -> threading.Thread:
     """run a coroutine in the background"""
+
     def runner():
         asyncio.run(coro)
 
@@ -55,6 +61,7 @@ class BindAddress(abc.ABC):
     @abc.abstractmethod
     def cleanup(self):
         """cleanup any resources used by the bind address"""
+
 
 class TcpSocketBindAddress(BindAddress):
     """Bind a TCP address that listens on a random TCP port"""
@@ -109,13 +116,10 @@ class AsgiServer:
             config.bind = [bind]
             try:
                 print(f"Starting ASGI server on {bind}", flush=True)
-                await serve(self.asgi_app,
-                            config=config,
-                            mode='asgi',
-                            shutdown_trigger=shutdown_trigger)
+                await serve(self.asgi_app, config=config, mode="asgi", shutdown_trigger=shutdown_trigger)
             except asyncio.CancelledError:
                 print("ASGI server was cancelled", flush=True)
-            except Exception as e: # pylint: disable=broad-except
+            except Exception as e:  # pylint: disable=broad-except
                 print(f"Failed to start the ASGI server: {e}", flush=True)
                 raise e
             finally:
@@ -123,6 +127,7 @@ class AsgiServer:
 
         self.thread = run_in_background(run_asgi())
         return self
+
 
 class RestateContainer(DockerContainer):
     """Create a Restate container"""
@@ -132,21 +137,21 @@ class RestateContainer(DockerContainer):
     def __init__(self, image, always_replay, disable_retries):
         super().__init__(image)
         self.with_exposed_ports(8080, 9070)
-        self.with_env('RESTATE_LOG_FILTER', 'restate=info')
-        self.with_env('RESTATE_BOOTSTRAP_NUM_PARTITIONS', '1')
-        self.with_env('RESTATE_DEFAULT_NUM_PARTITIONS', '1')
-        self.with_env('RESTATE_SHUTDOWN_TIMEOUT', '10s')
-        self.with_env('RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE', '32 MB')
-        self.with_env('RESTATE_WORKER__INVOKER__IN_MEMORY_QUEUE_LENGTH_LIMIT', '64')
+        self.with_env("RESTATE_LOG_FILTER", "restate=info")
+        self.with_env("RESTATE_BOOTSTRAP_NUM_PARTITIONS", "1")
+        self.with_env("RESTATE_DEFAULT_NUM_PARTITIONS", "1")
+        self.with_env("RESTATE_SHUTDOWN_TIMEOUT", "10s")
+        self.with_env("RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE", "32 MB")
+        self.with_env("RESTATE_WORKER__INVOKER__IN_MEMORY_QUEUE_LENGTH_LIMIT", "64")
         if always_replay:
-            self.with_env('RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT', '0s')
+            self.with_env("RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT", "0s")
         else:
-            self.with_env('RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT', '10m')
-        self.with_env('RESTATE_WORKER__INVOKER__ABORT_TIMEOUT', '10m')
+            self.with_env("RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT", "10m")
+        self.with_env("RESTATE_WORKER__INVOKER__ABORT_TIMEOUT", "10m")
         if disable_retries:
-            self.with_env('RESTATE_WORKER__INVOKER__RETRY_POLICY__TYPE', 'none')
+            self.with_env("RESTATE_WORKER__INVOKER__RETRY_POLICY__TYPE", "none")
 
-        self.with_kwargs(extra_hosts={"host.docker.internal" : "host-gateway"})
+        self.with_kwargs(extra_hosts={"host.docker.internal": "host-gateway"})
 
     def ingress_url(self):
         """return the URL to access the Restate ingress"""
@@ -170,8 +175,7 @@ class RestateContainer(DockerContainer):
         self.get_ingress_client().get("/restate/health").raise_for_status()
         self.get_admin_client().get("/health").raise_for_status()
 
-
-    def start(self, stream_logs = False):
+    def start(self, stream_logs=False):
         """start the container and wait for health checks to pass"""
         super().start()
 
@@ -191,6 +195,7 @@ class RestateContainer(DockerContainer):
 @dataclass
 class TestConfiguration:
     """A configuration for running tests"""
+
     restate_image: str = "restatedev/restate:latest"
     stream_logs: bool = False
     always_replay: bool = False
@@ -199,6 +204,7 @@ class TestConfiguration:
 
 class RestateTestHarness:
     """A test harness for running Restate SDKs"""
+
     bind_address: typing.Optional[BindAddress] = None
     server: typing.Optional[AsgiServer] = None
     restate: typing.Optional[RestateContainer] = None
@@ -217,8 +223,8 @@ class RestateTestHarness:
         self.restate = RestateContainer(
             image=self.config.restate_image,
             always_replay=self.config.always_replay,
-            disable_retries=self.config.disable_retries) \
-            .start(self.config.stream_logs)
+            disable_retries=self.config.disable_retries,
+        ).start(self.config.stream_logs)
         try:
             self._register_sdk()
         except Exception as e:
@@ -232,9 +238,7 @@ class RestateTestHarness:
 
         uri = self.bind_address.get_endpoint_connection_string()
         client = self.restate.get_admin_client()
-        res = client.post("/deployments",
-                          headers={"content-type" : "application/json"},
-                          json={"uri": uri})
+        res = client.post("/deployments", headers={"content-type": "application/json"}, json={"uri": uri})
         if not res.is_success:
             msg = f"unable to register the services at {uri} - {res.status_code} {res.text}"
             raise AssertionError(msg)
@@ -254,7 +258,6 @@ class RestateTestHarness:
             raise AssertionError("The Restate server has not been started. Use .start()")
         return self.restate.get_ingress_client()
 
-
     def __enter__(self):
         self.start()
         return self
@@ -264,13 +267,91 @@ class RestateTestHarness:
         return False
 
 
-def test_harness(app,
-                 follow_logs: bool = False,
-                 restate_image: str = "restatedev/restate:latest",
-                 always_replay: bool = False,
-                 disable_retries: bool = False) -> RestateTestHarness:
+@contextmanager
+def create_app_server(
+    app: RestateAppT,
+) -> typing.Generator[str, None, None]:
+    """
+    Creates and starts an ASGI server for the given application.
+
+    :param app: The ASGI application to be served.
+    """
+    bind_address = TcpSocketBindAddress()
+    server = AsgiServer(app, bind_address).start()
+    try:
+        yield bind_address.get_endpoint_connection_string()
+    finally:
+        server.stop()
+
+
+@contextmanager
+def create_restate_container(
+    restate_image: str = "restatedev/restate:latest",
+    always_replay: bool = False,
+    disable_retries: bool = False,
+    stream_logs: bool = False,
+) -> typing.Generator[RestateContainer, None, None]:
+    """
+    Creates and starts a Restate container.
+
+    :param restate_image: The image name for the restate-server container
+                          (default is "restatedev/restate:latest").
+    :param always_replay: When True, this forces restate-server to always replay
+                          on a suspension point. This is useful to hunt non deterministic bugs
+                          that might prevent your code to replay correctly (default is False).
+    :param disable_retries: When True, retries are disabled (default is False).
+    """
+    restate = RestateContainer(
+        image=restate_image,
+        always_replay=always_replay,
+        disable_retries=disable_retries,
+    ).start(stream_logs)
+    try:
+        yield restate
+    finally:
+        restate.stop()
+
+
+@deprecated("Use create_test_harness instead")
+def test_harness(
+    app: RestateAppT,
+    follow_logs: bool = False,
+    restate_image: str = "restatedev/restate:latest",
+    always_replay: bool = False,
+    disable_retries: bool = False,
+) -> RestateTestHarness:
     """
     Creates a test harness for running Restate services together with restate-server.
+    """
+    config = TestConfiguration(
+        restate_image=restate_image,
+        stream_logs=follow_logs,
+        always_replay=always_replay,
+        disable_retries=disable_retries,
+    )
+    return RestateTestHarness(app, config)
+
+
+@contextmanager
+def create_test_harness(
+    app: RestateAppT,
+    follow_logs: bool = False,
+    restate_image: str = "restatedev/restate:latest",
+    always_replay: bool = False,
+    disable_retries: bool = False,
+) -> typing.Generator[TestHarnessEnvironment, None, None]:
+    """
+    Creates a test harness for running Restate services together with restate-server.
+
+    example:
+    ```
+    from restate import create_test_harness
+    from my_app import my_restate_app
+
+    with create_test_harness(my_restate_app) as env:
+        client = env.create_ingress_client()
+        # run tests against the client
+    ```
 
     :param app: The application to be tested using the RestateTestHarness.
     :param follow_logs: Whether to stream logs for the test process (default is False).
@@ -280,13 +361,21 @@ def test_harness(app,
                           on a suspension point. This is useful to hunt non deterministic bugs
                           that might prevent your code to replay correctly (default is False).
     :param disable_retries: When True, retries are disabled (default is False).
-    :return: An instance of RestateTestHarness initialized with the provided app and configuration.
-    :rtype: RestateTestHarness
     """
-    config = TestConfiguration(
-        restate_image=restate_image,
-        stream_logs=follow_logs,
-        always_replay=always_replay,
-        disable_retries=disable_retries
-    )
-    return RestateTestHarness(app, config)
+    with (
+        create_restate_container(
+            restate_image=restate_image,
+            always_replay=always_replay,
+            disable_retries=disable_retries,
+            stream_logs=follow_logs,
+        ) as runtime,
+        create_app_server(app) as bind_address,
+    ):
+        res = runtime.get_admin_client().post(
+            "/deployments", headers={"content-type": "application/json"}, json={"uri": bind_address}
+        )
+        if not res.is_success:
+            msg = f"unable to register the services at {bind_address} - {res.status_code} {res.text}"
+            raise AssertionError(msg)
+
+        yield TestHarnessEnvironment(ingress_url=runtime.ingress_url(), admin_api_url=runtime.admin_url())

@@ -11,51 +11,30 @@
 """
 This module contains the Lambda/ASGI adapter.
 """
+
 import asyncio
 import base64
 import os
-from typing import TypedDict, Dict, cast, Union, Any, Callable
+from typing import cast, Union, Any
 
-from restate.server_types import (ASGIApp,
-                                  Scope,
-                                  Receive,
-                                  HTTPResponseStartEvent,
-                                  HTTPResponseBodyEvent,
-                                  HTTPRequestEvent)
-
-class RestateLambdaRequest(TypedDict):
-    """
-    Restate Lambda request
-
-    :see: https://github.com/restatedev/restate/blob/1a10c05b16b387191060b49faffb0335ee97e96d/crates/service-client/src/lambda.rs#L297 # pylint: disable=line-too-long
-    """
-    path: str
-    httpMethod: str
-    headers: Dict[str, str]
-    body: str
-    isBase64Encoded: bool
-
-
-class RestateLambdaResponse(TypedDict):
-    """
-    Restate Lambda response
-
-    :see: https://github.com/restatedev/restate/blob/1a10c05b16b387191060b49faffb0335ee97e96d/crates/service-client/src/lambda.rs#L310 # pylint: disable=line-too-long
-    """
-    statusCode: int
-    headers: Dict[str, str]
-    body: str
-    isBase64Encoded: bool
-
-
-RestateLambdaHandler = Callable[[RestateLambdaRequest, Any], RestateLambdaResponse]
+from restate.server_types import (
+    ASGIApp,
+    Receive,
+    RestateLambdaHandler,
+    Scope,
+    HTTPResponseStartEvent,
+    HTTPResponseBodyEvent,
+    HTTPRequestEvent,
+    RestateLambdaRequest,
+    RestateLambdaResponse,
+)
 
 
 def create_scope(req: RestateLambdaRequest) -> Scope:
     """
     Create ASGI scope from lambda request
     """
-    headers = {k.lower(): v for k, v in req.get('headers', {}).items()}
+    headers = {k.lower(): v for k, v in req.get("headers", {}).items()}
     http_method = req["httpMethod"]
     path = req["path"]
 
@@ -69,10 +48,10 @@ def create_scope(req: RestateLambdaRequest) -> Scope:
         "asgi": {"version": "3.0", "spec_version": "2.0"},
         "raw_path": path.encode(),
         "root_path": "",
-        "query_string": b'',
+        "query_string": b"",
         "client": None,
         "server": None,
-        "extensions": None
+        "extensions": None,
     }
 
 
@@ -80,19 +59,16 @@ def request_to_receive(req: RestateLambdaRequest) -> Receive:
     """
     Create ASGI Receive from lambda request
     """
-    assert req['isBase64Encoded']
-    body = base64.b64decode(req['body'])
+    assert req["isBase64Encoded"]
+    body = base64.b64decode(req["body"])
 
-    events = cast(list[HTTPRequestEvent], [{
-        "type": "http.request",
-        "body": body,
-        "more_body": False
-    },
-    {
-        "type": "http.request",
-        "body": b'',
-        "more_body": False
-    }])
+    events = cast(
+        list[HTTPRequestEvent],
+        [
+            {"type": "http.request", "body": body, "more_body": False},
+            {"type": "http.request", "body": b"", "more_body": False},
+        ],
+    )
 
     async def recv() -> HTTPRequestEvent:
         if len(events) != 0:
@@ -108,6 +84,7 @@ class ResponseCollector:
     """
     Response collector from ASGI Send to Lambda
     """
+
     def __init__(self):
         self.body = bytearray()
         self.headers = {}
@@ -119,10 +96,7 @@ class ResponseCollector:
         """
         if message["type"] == "http.response.start":
             self.status_code = cast(int, message["status"])
-            self.headers = {
-                key.decode("utf-8"): value.decode("utf-8")
-                for key, value in message["headers"]
-            }
+            self.headers = {key.decode("utf-8"): value.decode("utf-8") for key, value in message["headers"]}
         elif message["type"] == "http.response.body" and "body" in message:
             self.body.extend(message["body"])
         return
@@ -135,7 +109,7 @@ class ResponseCollector:
             "statusCode": self.status_code,
             "headers": self.headers,
             "isBase64Encoded": True,
-            "body": base64.b64encode(self.body).decode()
+            "body": base64.b64encode(self.body).decode(),
         }
 
 
@@ -147,8 +121,7 @@ def is_running_on_lambda() -> bool:
     return "AWS_LAMBDA_FUNCTION_NAME" in os.environ
 
 
-def wrap_asgi_as_lambda_handler(asgi_app: ASGIApp) \
-        -> Callable[[RestateLambdaRequest, Any], RestateLambdaResponse]:
+def wrap_asgi_as_lambda_handler(asgi_app: ASGIApp) -> RestateLambdaHandler:
     """
     Wrap the given asgi_app in a Lambda handler
     """

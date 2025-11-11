@@ -26,31 +26,36 @@ from restate.context import HandlerType
 from restate.exceptions import TerminalError
 from restate.serde import DefaultSerde, PydanticJsonSerde, Serde, is_pydantic
 
-I = TypeVar('I')
-O = TypeVar('O')
-T = TypeVar('T')
+I = TypeVar("I")
+O = TypeVar("O")
+T = TypeVar("T")
 
 # we will use this symbol to store the handler in the function
 RESTATE_UNIQUE_HANDLER_SYMBOL = str(object())
+
 
 @dataclass
 class ServiceTag:
     """
     This class is used to identify the service.
     """
+
     kind: Literal["object", "service", "workflow"]
     name: str
     description: Optional[str] = None
     metadata: Optional[Dict[str, str]] = None
+
 
 @dataclass
 class TypeHint(Generic[T]):
     """
     Represents a type hint.
     """
+
     annotation: Optional[T] = None
     is_pydantic: bool = False
     is_void: bool = False
+
 
 @dataclass
 class HandlerIO(Generic[I, O]):
@@ -61,6 +66,7 @@ class HandlerIO(Generic[I, O]):
         accept (str): The accept header value for the handler.
         content_type (str): The content type header value for the handler.
     """
+
     accept: str
     content_type: str
     input_serde: Serde[I]
@@ -98,9 +104,10 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
     else:
         handler_io.output_type = TypeHint(annotation=annotation, is_pydantic=False)
         if is_pydantic(annotation):
-            handler_io.output_type.is_pydantic=True
+            handler_io.output_type.is_pydantic = True
             if isinstance(handler_io.output_serde, DefaultSerde):
                 handler_io.output_serde = PydanticJsonSerde(annotation)
+
 
 # pylint: disable=R0902
 @dataclass
@@ -126,6 +133,7 @@ class Handler(Generic[I, O]):
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
         invocation_retry_policy: Optional retry policy configuration applied to this handler.
     """
+
     service_tag: ServiceTag
     handler_io: HandlerIO[I, O]
     kind: Optional[Literal["exclusive", "shared", "workflow"]]
@@ -147,22 +155,24 @@ class Handler(Generic[I, O]):
 # disable too many arguments warning
 # pylint: disable=R0913
 # pylint: disable=R0914
-def make_handler(service_tag: ServiceTag,
-                 handler_io: HandlerIO[I, O],
-                 name: str | None,
-                 kind: Optional[Literal["exclusive", "shared", "workflow"]],
-                 wrapped: Any,
-                 signature: Signature,
-                 description: Optional[str] = None,
-                 metadata: Optional[Dict[str, str]] = None,
-                 inactivity_timeout: Optional[timedelta] = None,
-                 abort_timeout: Optional[timedelta] = None,
-                 journal_retention: Optional[timedelta] = None,
-                 idempotency_retention: Optional[timedelta] = None,
-                 workflow_retention: Optional[timedelta] = None,
-                 enable_lazy_state: Optional[bool] = None,
-                 ingress_private: Optional[bool] = None,
-                 invocation_retry_policy: Optional[InvocationRetryPolicy] = None) -> Handler[I, O]:
+def make_handler(
+    service_tag: ServiceTag,
+    handler_io: HandlerIO[I, O],
+    name: str | None,
+    kind: Optional[Literal["exclusive", "shared", "workflow"]],
+    wrapped: Any,
+    signature: Signature,
+    description: Optional[str] = None,
+    metadata: Optional[Dict[str, str]] = None,
+    inactivity_timeout: Optional[timedelta] = None,
+    abort_timeout: Optional[timedelta] = None,
+    journal_retention: Optional[timedelta] = None,
+    idempotency_retention: Optional[timedelta] = None,
+    workflow_retention: Optional[timedelta] = None,
+    enable_lazy_state: Optional[bool] = None,
+    ingress_private: Optional[bool] = None,
+    invocation_retry_policy: Optional[InvocationRetryPolicy] = None,
+) -> Handler[I, O]:
     """
     Factory function to create a handler.
 
@@ -196,27 +206,30 @@ def make_handler(service_tag: ServiceTag,
         raise ValueError("Handler must have at least one parameter")
 
     arity = len(signature.parameters)
-    update_handler_io_with_type_hints(handler_io, signature) # mutates handler_io
+    update_handler_io_with_type_hints(handler_io, signature)  # mutates handler_io
 
-    handler = Handler[I, O](service_tag=service_tag,
-                            handler_io=handler_io,
-                            kind=kind,
-                            name=handler_name,
-                            fn=wrapped,
-                            arity=arity,
-                            description=description,
-                            metadata=metadata,
-                            inactivity_timeout=inactivity_timeout,
-                            abort_timeout=abort_timeout,
-                            journal_retention=journal_retention,
-                            idempotency_retention=idempotency_retention,
-                            workflow_retention=workflow_retention,
-                            enable_lazy_state=enable_lazy_state,
-                            ingress_private=ingress_private,
-                            invocation_retry_policy=invocation_retry_policy)
+    handler = Handler[I, O](
+        service_tag=service_tag,
+        handler_io=handler_io,
+        kind=kind,
+        name=handler_name,
+        fn=wrapped,
+        arity=arity,
+        description=description,
+        metadata=metadata,
+        inactivity_timeout=inactivity_timeout,
+        abort_timeout=abort_timeout,
+        journal_retention=journal_retention,
+        idempotency_retention=idempotency_retention,
+        workflow_retention=workflow_retention,
+        enable_lazy_state=enable_lazy_state,
+        ingress_private=ingress_private,
+        invocation_retry_policy=invocation_retry_policy,
+    )
 
     vars(wrapped)[RESTATE_UNIQUE_HANDLER_SYMBOL] = handler
     return handler
+
 
 def handler_from_callable(wrapper: HandlerType[I, O]) -> Handler[I, O]:
     """
@@ -225,7 +238,8 @@ def handler_from_callable(wrapper: HandlerType[I, O]) -> Handler[I, O]:
     try:
         return vars(wrapper)[RESTATE_UNIQUE_HANDLER_SYMBOL]
     except KeyError:
-        raise ValueError("Handler not found") # pylint: disable=raise-missing-from
+        raise ValueError("Handler not found")  # pylint: disable=raise-missing-from
+
 
 async def invoke_handler(handler: Handler[I, O], ctx: Any, in_buffer: bytes) -> bytes:
     """
@@ -236,8 +250,8 @@ async def invoke_handler(handler: Handler[I, O], ctx: Any, in_buffer: bytes) -> 
             in_arg = handler.handler_io.input_serde.deserialize(in_buffer)
         except Exception as e:
             raise TerminalError(message=f"Unable to parse an input argument. {e}") from e
-        out_arg = await handler.fn(ctx, in_arg) # type: ignore [call-arg, arg-type]
+        out_arg = await handler.fn(ctx, in_arg)  # type: ignore [call-arg, arg-type]
     else:
-        out_arg = await handler.fn(ctx) # type: ignore [call-arg]
+        out_arg = await handler.fn(ctx)  # type: ignore [call-arg]
     out_buffer = handler.handler_io.output_serde.serialize(out_arg)
     return bytes(out_buffer)

@@ -1,17 +1,3 @@
-name: Test
-
-on:
-  pull_request:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-
-permissions:
-  contents: read
-  checks: write
-  pull-requests: write
-
 jobs:
   lint-and-test:
     name: "Lint and Test (Python ${{ matrix.python }})"
@@ -19,19 +5,17 @@ jobs:
     strategy:
       matrix:
         python: [ "3.10", "3.11", "3.12", "3.13" ]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python }}
-      - name: Build Rust module
-        uses: PyO3/maturin-action@v1
-        with:
-          args: --out dist --interpreter python${{ matrix.python }}
-          sccache: 'true'
-          container: off
-      - run: pip install -r requirements.txt
-      - run: pip install dist/*
+          enable-cache: true
+      - name: Install dependencies
+        run: just sync 
+      - name: Build
+        run: just build
       - name: Verify
         run: just verify

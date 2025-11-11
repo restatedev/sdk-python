@@ -53,28 +53,32 @@ CALL_NEXT_LAYER_OBJECT = 19
 
 helper = restate.Service("ServiceInterpreterHelper")
 
+
 @helper.handler()
-async def ping(ctx: Context) -> None: # pylint: disable=unused-argument
+async def ping(ctx: Context) -> None:  # pylint: disable=unused-argument
     pass
 
+
 @helper.handler()
-async def echo(ctx: Context, parameters: str) -> str: # pylint: disable=unused-argument
+async def echo(ctx: Context, parameters: str) -> str:  # pylint: disable=unused-argument
     return parameters
 
-@helper.handler(name = "echoLater")
+
+@helper.handler(name="echoLater")
 async def echo_later(ctx: Context, parameter: dict[str, typing.Any]) -> str:
-    await ctx.sleep(timedelta(milliseconds=parameter['sleep']))
-    return parameter['parameter']
+    await ctx.sleep(timedelta(milliseconds=parameter["sleep"]))
+    return parameter["parameter"]
+
 
 @helper.handler(name="terminalFailure")
 async def terminal_failure(ctx: Context) -> str:
     raise TerminalError("bye")
 
+
 @helper.handler(name="incrementIndirectly")
 async def increment_indirectly(ctx: Context, parameter) -> None:
-
-    layer = parameter['layer']
-    key = parameter['key']
+    layer = parameter["layer"]
+    key = parameter["key"]
 
     program = {
         "commands": [
@@ -84,23 +88,26 @@ async def increment_indirectly(ctx: Context, parameter) -> None:
         ],
     }
 
-    program_bytes = json.dumps(program).encode('utf-8')
+    program_bytes = json.dumps(program).encode("utf-8")
 
     ctx.generic_send(f"ObjectInterpreterL{layer}", "interpret", program_bytes, key)
+
 
 @helper.handler(name="resolveAwakeable")
 async def resolve_awakeable(ctx: Context, aid: str) -> None:
     ctx.resolve_awakeable(aid, "ok")
 
+
 @helper.handler(name="rejectAwakeable")
 async def reject_awakeable(ctx: Context, aid: str) -> None:
     ctx.reject_awakeable(aid, "error")
 
+
 @helper.handler(name="incrementViaAwakeableDance")
 async def increment_via_awakeable_dance(ctx: Context, input: dict[str, typing.Any]) -> None:
-    tx_promise_id = input['txPromiseId']
-    layer = input['interpreter']['layer']
-    key = input['interpreter']['key']
+    tx_promise_id = input["txPromiseId"]
+    layer = input["interpreter"]["layer"]
+    key = input["interpreter"]["key"]
 
     aid, promise = ctx.awakeable()
     ctx.resolve_awakeable(tx_promise_id, aid)
@@ -114,13 +121,12 @@ async def increment_via_awakeable_dance(ctx: Context, input: dict[str, typing.An
         ],
     }
 
-    program_bytes = json.dumps(program).encode('utf-8')
+    program_bytes = json.dumps(program).encode("utf-8")
 
     ctx.generic_send(f"ObjectInterpreterL{layer}", "interpret", program_bytes, key)
 
 
 class SupportService:
-
     def __init__(self, ctx: ObjectContext) -> None:
         self.ctx = ctx
         self.serde = JsonSerde[typing.Any]()
@@ -162,7 +168,7 @@ class SupportService:
         self.send("rejectAwakeable", aid)
 
     def increment_via_awakeable_dance(self, layer: int, key: str, tx_promise_id: str) -> None:
-        arg = { "interpreter" : { "layer": layer, "key": key} , "txPromiseId": tx_promise_id }
+        arg = {"interpreter": {"layer": layer, "key": key}, "txPromiseId": tx_promise_id}
         self.send("incrementViaAwakeableDance", arg)
 
 
@@ -172,20 +178,16 @@ class Command(TypedDict):
     duration: int
     sleep: int
     index: int
-    program: typing.Any # avoid circular type
+    program: typing.Any  # avoid circular type
 
 
-Program = dict[typing.Literal['commands'],
-               typing.List[Command]]
+Program = dict[typing.Literal["commands"], typing.List[Command]]
 
 
-async def interpreter(layer: int,
-                      ctx: ObjectContext,
-                      program: Program) -> None:
+async def interpreter(layer: int, ctx: ObjectContext, program: Program) -> None:
     """Interprets a command and executes it."""
     service = SupportService(ctx)
-    coros: dict[int,
-                typing.Tuple[typing.Any, typing.Awaitable[typing.Any]]] = {}
+    coros: dict[int, typing.Tuple[typing.Any, typing.Awaitable[typing.Any]]] = {}
 
     async def await_promise(index: int) -> None:
         if index not in coros:
@@ -201,8 +203,8 @@ async def interpreter(layer: int,
         if result != expected:
             raise TerminalError(f"Expected {expected} but got {result}")
 
-    for i, command in enumerate(program['commands']):
-        command_type = command['kind']
+    for i, command in enumerate(program["commands"]):
+        command_type = command["kind"]
         if command_type == SET_STATE:
             ctx.set(f"key-{command['key']}", f"value-{command['key']}")
         elif command_type == GET_STATE:
@@ -214,17 +216,17 @@ async def interpreter(layer: int,
             c += 1
             ctx.set("counter", c)
         elif command_type == SLEEP:
-            duration = timedelta(milliseconds=command['duration'])
+            duration = timedelta(milliseconds=command["duration"])
             await ctx.sleep(duration)
         elif command_type == CALL_SERVICE:
             expected = f"hello-{i}"
             coros[i] = (expected, service.echo(expected))
         elif command_type == INCREMENT_VIA_DELAYED_CALL:
-            delay = command['duration']
+            delay = command["duration"]
             await service.increment_indirectly(layer=layer, key=ctx.key(), delay=delay)
         elif command_type == CALL_SLOW_SERVICE:
             expected = f"hello-{i}"
-            coros[i] = (expected, service.echo_later(expected, command['sleep']))
+            coros[i] = (expected, service.echo_later(expected, command["sleep"]))
         elif command_type == SIDE_EFFECT:
             expected = f"hello-{i}"
             result = await ctx.run_typed("sideEffect", lambda: expected)
@@ -242,6 +244,7 @@ async def interpreter(layer: int,
         elif command_type == RECOVER_TERMINAL_MAYBE_UN_AWAITED:
             pass
         elif command_type == THROWING_SIDE_EFFECT:
+
             async def side_effect():
                 if bool(random.getrandbits(1)):
                     raise ValueError("Random error")
@@ -250,7 +253,7 @@ async def interpreter(layer: int,
         elif command_type == INCREMENT_STATE_COUNTER_INDIRECTLY:
             await service.increment_indirectly(layer=layer, key=ctx.key())
         elif command_type == AWAIT_PROMISE:
-            index = command['index']
+            index = command["index"]
             await await_promise(index)
         elif command_type == RESOLVE_AWAKEABLE:
             name, promise = ctx.awakeable()
@@ -268,14 +271,15 @@ async def interpreter(layer: int,
         elif command_type == CALL_NEXT_LAYER_OBJECT:
             next_layer = f"ObjectInterpreterL{layer + 1}"
             key = f"{command['key']}"
-            program = command['program']
+            program = command["program"]
             js_program = json.dumps(program)
-            raw_js_program = js_program.encode('utf-8')
+            raw_js_program = js_program.encode("utf-8")
             promise = ctx.generic_call(next_layer, "interpret", raw_js_program, key)
-            coros[i] = (b'', promise)
+            coros[i] = (b"", promise)
         else:
             raise ValueError(f"Unknown command type: {command_type}")
         await await_promise(i)
+
 
 def make_layer(i):
     layer = VirtualObject(f"ObjectInterpreterL{i}")

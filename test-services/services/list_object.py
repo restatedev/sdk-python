@@ -16,14 +16,17 @@ from restate import VirtualObject, ObjectContext
 
 list_object = VirtualObject("ListObject")
 
+
 @list_object.handler()
 async def append(ctx: ObjectContext, value: str):
     list = await ctx.get("list") or []
     ctx.set("list", list + [value])
 
+
 @list_object.handler()
 async def get(ctx: ObjectContext) -> list[str]:
     return await ctx.get("list") or []
+
 
 @list_object.handler()
 async def clear(ctx: ObjectContext) -> list[str]:

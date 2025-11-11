@@ -15,16 +15,19 @@ This module contains the ASGI types definitions.
 """
 
 import asyncio
-from typing import (Awaitable, Callable, Dict, Iterable, List,
-                    Tuple, Union, TypedDict, Literal, Optional, Any)
+from typing import Awaitable, Callable, Dict, Iterable, List, Tuple, Union, TypedDict, Literal, Optional, Any
+
 
 class ASGIVersions(TypedDict):
     """ASGI Versions"""
+
     spec_version: str
     version: Union[Literal["2.0"], Literal["3.0"]]
 
-class Scope(TypedDict, total=False):
+
+class Scope(TypedDict):
     """ASGI Scope"""
+
     type: Literal["http"]
     asgi: ASGIVersions
     http_version: str
@@ -39,26 +42,34 @@ class Scope(TypedDict, total=False):
     server: Optional[Tuple[str, Optional[int]]]
     extensions: Optional[Dict[str, Dict[object, object]]]
 
+
 class RestateEvent(TypedDict):
     """An event that represents a run completion"""
+
     type: Literal["restate.run_completed"]
     data: Optional[Dict[str, Any]]
 
+
 class HTTPRequestEvent(TypedDict):
     """ASGI Request event"""
+
     type: Literal["http.request"]
     body: bytes
     more_body: bool
 
+
 class HTTPResponseStartEvent(TypedDict):
     """ASGI Response start event"""
+
     type: Literal["http.response.start"]
     status: int
     headers: Iterable[Tuple[bytes, bytes]]
     trailers: bool
 
+
 class HTTPResponseBodyEvent(TypedDict):
     """ASGI Response body event"""
+
     type: Literal["http.response.body"]
     body: bytes
     more_body: bool
@@ -67,10 +78,7 @@ class HTTPResponseBodyEvent(TypedDict):
 ASGIReceiveEvent = HTTPRequestEvent
 
 
-ASGISendEvent = Union[
-    HTTPResponseStartEvent,
-    HTTPResponseBodyEvent
-]
+ASGISendEvent = Union[HTTPResponseStartEvent, HTTPResponseBodyEvent]
 
 Receive = Callable[[], Awaitable[ASGIReceiveEvent]]
 Send = Callable[[ASGISendEvent], Awaitable[None]]
@@ -84,13 +92,48 @@ ASGIApp = Callable[
     Awaitable[None],
 ]
 
+
+class RestateLambdaRequest(TypedDict):
+    """
+    Restate Lambda request
+
+    :see: https://github.com/restatedev/restate/blob/1a10c05b16b387191060b49faffb0335ee97e96d/crates/service-client/src/lambda.rs#L297 # pylint: disable=line-too-long
+    """
+
+    path: str
+    httpMethod: str
+    headers: Dict[str, str]
+    body: str
+    isBase64Encoded: bool
+
+
+class RestateLambdaResponse(TypedDict):
+    """
+    Restate Lambda response
+
+    :see: https://github.com/restatedev/restate/blob/1a10c05b16b387191060b49faffb0335ee97e96d/crates/service-client/src/lambda.rs#L310 # pylint: disable=line-too-long
+    """
+
+    statusCode: int
+    headers: Dict[str, str]
+    body: str
+    isBase64Encoded: bool
+
+
+RestateLambdaHandler = Callable[[RestateLambdaRequest, Any], RestateLambdaResponse]
+
+RestateAppT = Any  # Union[ASGIApp, RestateLambdaHandler]
+
+
 def header_to_binary(headers: Iterable[Tuple[str, str]]) -> List[Tuple[bytes, bytes]]:
     """Convert a list of headers to a list of binary headers."""
-    return [ (k.encode('utf-8'), v.encode('utf-8')) for k,v in headers ]
+    return [(k.encode("utf-8"), v.encode("utf-8")) for k, v in headers]
+
 
 def binary_to_header(headers: Iterable[Tuple[bytes, bytes]]) -> List[Tuple[str, str]]:
     """Convert a list of binary headers to a list of headers."""
-    return [ (k.decode('utf-8'), v.decode('utf-8')) for k,v in headers ]
+    return [(k.decode("utf-8"), v.decode("utf-8")) for k, v in headers]
+
 
 class ReceiveChannel:
     """ASGI receive channel."""
@@ -104,9 +147,9 @@ class ReceiveChannel:
             """Receive loop."""
             while not self._disconnected.is_set():
                 event = await receive()
-                if event.get('type') == 'http.request' and not event.get('more_body', False):
+                if event.get("type") == "http.request" and not event.get("more_body", False):
                     self._http_input_closed.set()
-                elif event.get('type') == 'http.disconnect':
+                elif event.get("type") == "http.disconnect":
                     self._http_input_closed.set()
                     self._disconnected.set()
                 await self._queue.put(event)

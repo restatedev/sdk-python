@@ -18,14 +18,17 @@ from restate.exceptions import TerminalError
 
 awakeable_holder = VirtualObject("AwakeableHolder")
 
+
 @awakeable_holder.handler()
 async def hold(ctx: ObjectContext, id: str):
     ctx.set("id", id)
+
 
 @awakeable_holder.handler(name="hasAwakeable")
 async def has_awakeable(ctx: ObjectContext) -> bool:
     res = await ctx.get("id")
     return res is not None
+
 
 @awakeable_holder.handler()
 async def unlock(ctx: ObjectContext, payload: str):

@@ -21,6 +21,7 @@ logger = restate.getLogger()
 
 greeter = Service("greeter")
 
+
 @greeter.handler()
 async def greet(ctx: Context, name: str) -> str:
     logger.info("Received greeting request: %s", name)

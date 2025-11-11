@@ -19,21 +19,32 @@ from restate.serde import BytesSerde
 
 test_utils = Service("TestUtilsService")
 
+
 @test_utils.handler()
 async def echo(context: Context, input: str) -> str:
     return input
+
 
 @test_utils.handler(name="uppercaseEcho")
 async def uppercase_echo(context: Context, input: str) -> str:
     return input.upper()
 
+
 @test_utils.handler(name="echoHeaders")
 async def echo_headers(context: Context) -> Dict[str, str]:
     return context.request().headers
 
-@test_utils.handler(name="rawEcho", accept="*/*", content_type="application/octet-stream", input_serde=BytesSerde(), output_serde=BytesSerde())
+
+@test_utils.handler(
+    name="rawEcho",
+    accept="*/*",
+    content_type="application/octet-stream",
+    input_serde=BytesSerde(),
+    output_serde=BytesSerde(),
+)
 async def raw_echo(context: Context, input: bytes) -> bytes:
     return input
+
 
 @test_utils.handler(name="sleepConcurrently")
 async def sleep_concurrently(context: Context, millis_duration: List[int]) -> None:
@@ -55,6 +66,7 @@ async def count_executed_side_effects(context: Context, increments: int) -> int:
         await context.run("count", effect)
 
     return invoked_side_effects
+
 
 @test_utils.handler(name="cancelInvocation")
 async def cancel_invocation(context: Context, invocation_id: str) -> None:

@@ -10,8 +10,8 @@
 #
 """
 Holds the discovery API objects as defined by the restate protocol.
-Note that the classes defined here do not use snake case, because they 
-are intended to be serialized to JSON, and their cases must remain in the 
+Note that the classes defined here do not use snake case, because they
+are intended to be serialized to JSON, and their cases must remain in the
 case that the restate server understands.
 """
 
@@ -32,20 +32,26 @@ from typing import Dict, Optional, Any, List, get_args, get_origin
 
 from restate.endpoint import Endpoint as RestateEndpoint
 from restate.handler import TypeHint
+from restate.object import VirtualObject
+from restate.workflow import Workflow
+
 
 class ProtocolMode(Enum):
     BIDI_STREAM = "BIDI_STREAM"
     REQUEST_RESPONSE = "REQUEST_RESPONSE"
+
 
 class ServiceType(Enum):
     VIRTUAL_OBJECT = "VIRTUAL_OBJECT"
     SERVICE = "SERVICE"
     WORKFLOW = "WORKFLOW"
 
+
 class ServiceHandlerType(Enum):
     WORKFLOW = "WORKFLOW"
     EXCLUSIVE = "EXCLUSIVE"
     SHARED = "SHARED"
+
 
 class InputPayload:
     def __init__(self, required: bool, contentType: str, jsonSchema: Optional[Any] = None):
@@ -53,33 +59,39 @@ class InputPayload:
         self.contentType = contentType
         self.jsonSchema = jsonSchema
 
+
 class OutputPayload:
-    def __init__(self, setContentTypeIfEmpty: bool, contentType: Optional[str] = None, jsonSchema: Optional[Any] = None):
+    def __init__(
+        self, setContentTypeIfEmpty: bool, contentType: Optional[str] = None, jsonSchema: Optional[Any] = None
+    ):
         self.contentType = contentType
         self.setContentTypeIfEmpty = setContentTypeIfEmpty
         self.jsonSchema = jsonSchema
 
+
 class Handler:
     # pylint: disable=R0902,R0914
-    def __init__(self,
-                 name: str,
-                 ty: Optional[ServiceHandlerType] = None,
-                 input: Optional[InputPayload | Dict[str, str]] = None,
-                 output: Optional[OutputPayload] = None,
-                 description: Optional[str] = None,
-                 metadata: Optional[Dict[str, str]] = None,
-                 inactivityTimeout: Optional[int] = None,
-                 abortTimeout: Optional[int] = None,
-                 journalRetention: Optional[int] = None,
-                 idempotencyRetention: Optional[int] = None,
-                 workflowCompletionRetention: Optional[int] = None,
-                 enableLazyState: Optional[bool] = None,
-                 ingressPrivate: Optional[bool] = None,
-                 retryPolicyInitialInterval: Optional[int] = None,
-                 retryPolicyMaxInterval: Optional[int] = None,
-                 retryPolicyMaxAttempts: Optional[int] = None,
-                 retryPolicyExponentiationFactor: Optional[float] = None,
-                 retryPolicyOnMaxAttempts: Optional[str] = None):
+    def __init__(
+        self,
+        name: str,
+        ty: Optional[ServiceHandlerType] = None,
+        input: Optional[InputPayload | Dict[str, str]] = None,
+        output: Optional[OutputPayload] = None,
+        description: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        inactivityTimeout: Optional[int] = None,
+        abortTimeout: Optional[int] = None,
+        journalRetention: Optional[int] = None,
+        idempotencyRetention: Optional[int] = None,
+        workflowCompletionRetention: Optional[int] = None,
+        enableLazyState: Optional[bool] = None,
+        ingressPrivate: Optional[bool] = None,
+        retryPolicyInitialInterval: Optional[int] = None,
+        retryPolicyMaxInterval: Optional[int] = None,
+        retryPolicyMaxAttempts: Optional[int] = None,
+        retryPolicyExponentiationFactor: Optional[float] = None,
+        retryPolicyOnMaxAttempts: Optional[str] = None,
+    ):
         self.name = name
         self.ty = ty
         self.input = input
@@ -99,25 +111,28 @@ class Handler:
         self.retryPolicyExponentiationFactor = retryPolicyExponentiationFactor
         self.retryPolicyOnMaxAttempts = retryPolicyOnMaxAttempts
 
+
 class Service:
     # pylint: disable=R0902,R0914
-    def __init__(self,
-                 name: str,
-                 ty: ServiceType,
-                 handlers: List[Handler],
-                 description: Optional[str] = None,
-                 metadata: Optional[Dict[str, str]] = None,
-                 inactivityTimeout: Optional[int] = None,
-                 abortTimeout: Optional[int] = None,
-                 journalRetention: Optional[int] = None,
-                 idempotencyRetention: Optional[int] = None,
-                 enableLazyState: Optional[bool] = None,
-                 ingressPrivate: Optional[bool] = None,
-                 retryPolicyInitialInterval: Optional[int] = None,
-                 retryPolicyMaxInterval: Optional[int] = None,
-                 retryPolicyMaxAttempts: Optional[int] = None,
-                 retryPolicyExponentiationFactor: Optional[float] = None,
-                 retryPolicyOnMaxAttempts: Optional[str] = None):
+    def __init__(
+        self,
+        name: str,
+        ty: ServiceType,
+        handlers: List[Handler],
+        description: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        inactivityTimeout: Optional[int] = None,
+        abortTimeout: Optional[int] = None,
+        journalRetention: Optional[int] = None,
+        idempotencyRetention: Optional[int] = None,
+        enableLazyState: Optional[bool] = None,
+        ingressPrivate: Optional[bool] = None,
+        retryPolicyInitialInterval: Optional[int] = None,
+        retryPolicyMaxInterval: Optional[int] = None,
+        retryPolicyMaxAttempts: Optional[int] = None,
+        retryPolicyExponentiationFactor: Optional[float] = None,
+        retryPolicyOnMaxAttempts: Optional[str] = None,
+    ):
         self.name = name
         self.ty = ty
         self.handlers = handlers
@@ -135,31 +150,33 @@ class Service:
         self.retryPolicyExponentiationFactor = retryPolicyExponentiationFactor
         self.retryPolicyOnMaxAttempts = retryPolicyOnMaxAttempts
 
+
 class Endpoint:
-    def __init__(self, protocolMode: ProtocolMode, minProtocolVersion: int, maxProtocolVersion: int, services: List[Service]):
+    def __init__(
+        self, protocolMode: ProtocolMode, minProtocolVersion: int, maxProtocolVersion: int, services: List[Service]
+    ):
         self.protocolMode = protocolMode
         self.minProtocolVersion = minProtocolVersion
         self.maxProtocolVersion = maxProtocolVersion
         self.services = services
 
-PROTOCOL_MODES = {
-        "bidi" : ProtocolMode.BIDI_STREAM,
-        "request_response" : ProtocolMode.REQUEST_RESPONSE}
 
-SERVICE_TYPES = {
-            "service": ServiceType.SERVICE,
-            "object": ServiceType.VIRTUAL_OBJECT,
-            "workflow": ServiceType.WORKFLOW}
+PROTOCOL_MODES = {"bidi": ProtocolMode.BIDI_STREAM, "request_response": ProtocolMode.REQUEST_RESPONSE}
 
-HANDLER_TYPES  = {
-            'exclusive': ServiceHandlerType.EXCLUSIVE,
-            'shared': ServiceHandlerType.SHARED,
-            'workflow': ServiceHandlerType.WORKFLOW}
+SERVICE_TYPES = {"service": ServiceType.SERVICE, "object": ServiceType.VIRTUAL_OBJECT, "workflow": ServiceType.WORKFLOW}
+
+HANDLER_TYPES = {
+    "exclusive": ServiceHandlerType.EXCLUSIVE,
+    "shared": ServiceHandlerType.SHARED,
+    "workflow": ServiceHandlerType.WORKFLOW,
+}
+
 
 class PythonClassEncoder(json.JSONEncoder):
     """
     Serialize Python objects as JSON
     """
+
     def default(self, o):
         if isinstance(o, Enum):
             return o.value
@@ -186,13 +203,12 @@ def type_hint_to_json_schema(type_hint: Any) -> Any:
         items = type_hint_to_json_schema(args[0] if args else Any)
         return {"type": "array", "items": items}
     if origin is dict:
-        return {
-            "type": "object"
-        }
+        return {"type": "object"}
     if origin is None:
         return {"type": "null"}
     # Default to all valid schema
     return True
+
 
 def json_schema_from_type_hint(type_hint: Optional[TypeHint[Any]]) -> Any:
     """
@@ -203,14 +219,14 @@ def json_schema_from_type_hint(type_hint: Optional[TypeHint[Any]]) -> Any:
     if not type_hint.annotation:
         return None
     if type_hint.is_pydantic:
-        return type_hint.annotation.model_json_schema(mode='serialization')
+        return type_hint.annotation.model_json_schema(mode="serialization")
     return type_hint_to_json_schema(type_hint.annotation)
 
 
 # pylint: disable=R0912,R0915
-def compute_discovery_json(endpoint: RestateEndpoint,
-                           version: int,
-                           discovered_as: typing.Literal["bidi", "request_response"]) -> str:
+def compute_discovery_json(
+    endpoint: RestateEndpoint, version: int, discovered_as: typing.Literal["bidi", "request_response"]
+) -> str:
     """
     return restate's discovery object as JSON
     """
@@ -239,7 +255,9 @@ def compute_discovery_json(endpoint: RestateEndpoint,
                 if handler.retryPolicyMaxAttempts is not None:
                     raise ValueError("retryPolicyMaxAttempts is only supported in discovery protocol version 4")
                 if handler.retryPolicyExponentiationFactor is not None:
-                    raise ValueError("retryPolicyExponentiationFactor is only supported in discovery protocol version 4")
+                    raise ValueError(
+                        "retryPolicyExponentiationFactor is only supported in discovery protocol version 4"
+                    )
                 if handler.retryPolicyOnMaxAttempts is not None:
                     raise ValueError("retryPolicyOnMaxAttempts is only supported in discovery protocol version 4")
 
@@ -279,7 +297,7 @@ def compute_discovery_json(endpoint: RestateEndpoint,
     return json_str
 
 
-def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal["bidi", "request_response"]) -> Endpoint:
+def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["bidi", "request_response"]) -> Endpoint:
     """
     return restate's discovery object for an endpoint
     """
@@ -299,60 +317,111 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
             if handler.handler_io.input_type and handler.handler_io.input_type.is_void:
                 inp = {}
             else:
-                inp = InputPayload(required=False,
-                                   contentType=handler.handler_io.accept,
-                                   jsonSchema=json_schema_from_type_hint(handler.handler_io.input_type))
+                inp = InputPayload(
+                    required=False,
+                    contentType=handler.handler_io.accept,
+                    jsonSchema=json_schema_from_type_hint(handler.handler_io.input_type),
+                )
             # output
             if handler.handler_io.output_type and handler.handler_io.output_type.is_void:
                 out = OutputPayload(setContentTypeIfEmpty=False)
             else:
-                out = OutputPayload(setContentTypeIfEmpty=False,
-                                    contentType=handler.handler_io.content_type,
-                                    jsonSchema=json_schema_from_type_hint(handler.handler_io.output_type))
+                out = OutputPayload(
+                    setContentTypeIfEmpty=False,
+                    contentType=handler.handler_io.content_type,
+                    jsonSchema=json_schema_from_type_hint(handler.handler_io.output_type),
+                )
             # add the handler
-            service_handlers.append(Handler(name=handler.name,
-                                            ty=ty,
-                                            input=inp,
-                                            output=out,
-                                            description=handler.description,
-                                            metadata=handler.metadata,
-                                            inactivityTimeout=int(handler.inactivity_timeout.total_seconds() * 1000) if handler.inactivity_timeout else None,
-                                            abortTimeout=int(handler.abort_timeout.total_seconds() * 1000) if handler.abort_timeout else None,
-                                            journalRetention=int(handler.journal_retention.total_seconds() * 1000) if handler.journal_retention else None,
-                                            idempotencyRetention=int(handler.idempotency_retention.total_seconds() * 1000) if handler.idempotency_retention else None,
-                                            workflowCompletionRetention=int(handler.workflow_retention.total_seconds() * 1000) if handler.workflow_retention else None,
-                                            enableLazyState=handler.enable_lazy_state,
-                                            ingressPrivate=handler.ingress_private,
-                                            retryPolicyInitialInterval=int(handler.invocation_retry_policy.initial_interval.total_seconds() * 1000) if handler.invocation_retry_policy and handler.invocation_retry_policy.initial_interval else None,
-                                            retryPolicyMaxInterval=int(handler.invocation_retry_policy.max_interval.total_seconds() * 1000) if handler.invocation_retry_policy and handler.invocation_retry_policy.max_interval else None,
-                                            retryPolicyMaxAttempts=int(handler.invocation_retry_policy.max_attempts) if handler.invocation_retry_policy and handler.invocation_retry_policy.max_attempts is not None else None,
-                                            retryPolicyExponentiationFactor=float(handler.invocation_retry_policy.exponentiation_factor) if handler.invocation_retry_policy and handler.invocation_retry_policy.exponentiation_factor is not None else None,
-                                            retryPolicyOnMaxAttempts=(handler.invocation_retry_policy.on_max_attempts.upper() if handler.invocation_retry_policy and handler.invocation_retry_policy.on_max_attempts is not None else None)))
+            service_handlers.append(
+                Handler(
+                    name=handler.name,
+                    ty=ty,
+                    input=inp,
+                    output=out,
+                    description=handler.description,
+                    metadata=handler.metadata,
+                    inactivityTimeout=int(handler.inactivity_timeout.total_seconds() * 1000)
+                    if handler.inactivity_timeout
+                    else None,
+                    abortTimeout=int(handler.abort_timeout.total_seconds() * 1000) if handler.abort_timeout else None,
+                    journalRetention=int(handler.journal_retention.total_seconds() * 1000)
+                    if handler.journal_retention
+                    else None,
+                    idempotencyRetention=int(handler.idempotency_retention.total_seconds() * 1000)
+                    if handler.idempotency_retention
+                    else None,
+                    workflowCompletionRetention=int(handler.workflow_retention.total_seconds() * 1000)
+                    if handler.workflow_retention
+                    else None,
+                    enableLazyState=handler.enable_lazy_state,
+                    ingressPrivate=handler.ingress_private,
+                    retryPolicyInitialInterval=int(
+                        handler.invocation_retry_policy.initial_interval.total_seconds() * 1000
+                    )
+                    if handler.invocation_retry_policy and handler.invocation_retry_policy.initial_interval
+                    else None,
+                    retryPolicyMaxInterval=int(handler.invocation_retry_policy.max_interval.total_seconds() * 1000)
+                    if handler.invocation_retry_policy and handler.invocation_retry_policy.max_interval
+                    else None,
+                    retryPolicyMaxAttempts=int(handler.invocation_retry_policy.max_attempts)
+                    if handler.invocation_retry_policy and handler.invocation_retry_policy.max_attempts is not None
+                    else None,
+                    retryPolicyExponentiationFactor=float(handler.invocation_retry_policy.exponentiation_factor)
+                    if handler.invocation_retry_policy
+                    and handler.invocation_retry_policy.exponentiation_factor is not None
+                    else None,
+                    retryPolicyOnMaxAttempts=(
+                        handler.invocation_retry_policy.on_max_attempts.upper()
+                        if handler.invocation_retry_policy
+                        and handler.invocation_retry_policy.on_max_attempts is not None
+                        else None
+                    ),
+                )
+            )
         # add the service
         description = service.service_tag.description
         metadata = service.service_tag.metadata
-        services.append(Service(name=service.name,
-                                ty=service_type,
-                                handlers=service_handlers,
-                                description=description,
-                                metadata=metadata,
-                                inactivityTimeout=int(service.inactivity_timeout.total_seconds() * 1000) if service.inactivity_timeout else None,
-                                abortTimeout=int(service.abort_timeout.total_seconds() * 1000) if service.abort_timeout else None,
-                                journalRetention=int(service.journal_retention.total_seconds() * 1000) if service.journal_retention else None,
-                                idempotencyRetention=int(service.idempotency_retention.total_seconds() * 1000) if service.idempotency_retention else None,
-                                enableLazyState=service.enable_lazy_state if hasattr(service, 'enable_lazy_state') else None,
-                                ingressPrivate=service.ingress_private,
-                                retryPolicyInitialInterval=int(service.invocation_retry_policy.initial_interval.total_seconds() * 1000) if service.invocation_retry_policy and service.invocation_retry_policy.initial_interval else None,
-                                retryPolicyMaxInterval=int(service.invocation_retry_policy.max_interval.total_seconds() * 1000) if service.invocation_retry_policy and service.invocation_retry_policy.max_interval else None,
-                                retryPolicyMaxAttempts=int(service.invocation_retry_policy.max_attempts) if service.invocation_retry_policy and service.invocation_retry_policy.max_attempts is not None else None,
-                                retryPolicyExponentiationFactor=float(service.invocation_retry_policy.exponentiation_factor) if service.invocation_retry_policy and service.invocation_retry_policy.exponentiation_factor is not None else None,
-                                retryPolicyOnMaxAttempts=(service.invocation_retry_policy.on_max_attempts.upper() if service.invocation_retry_policy and service.invocation_retry_policy.on_max_attempts is not None else None)))
+        services.append(
+            Service(
+                name=service.name,
+                ty=service_type,
+                handlers=service_handlers,
+                description=description,
+                metadata=metadata,
+                inactivityTimeout=int(service.inactivity_timeout.total_seconds() * 1000)
+                if service.inactivity_timeout
+                else None,
+                abortTimeout=int(service.abort_timeout.total_seconds() * 1000) if service.abort_timeout else None,
+                journalRetention=int(service.journal_retention.total_seconds() * 1000)
+                if service.journal_retention
+                else None,
+                idempotencyRetention=int(service.idempotency_retention.total_seconds() * 1000)
+                if service.idempotency_retention
+                else None,
+                enableLazyState=service.enable_lazy_state if isinstance(service, (Workflow, VirtualObject)) else None,
+                ingressPrivate=service.ingress_private,
+                retryPolicyInitialInterval=int(service.invocation_retry_policy.initial_interval.total_seconds() * 1000)
+                if service.invocation_retry_policy and service.invocation_retry_policy.initial_interval
+                else None,
+                retryPolicyMaxInterval=int(service.invocation_retry_policy.max_interval.total_seconds() * 1000)
+                if service.invocation_retry_policy and service.invocation_retry_policy.max_interval
+                else None,
+                retryPolicyMaxAttempts=int(service.invocation_retry_policy.max_attempts)
+                if service.invocation_retry_policy and service.invocation_retry_policy.max_attempts is not None
+                else None,
+                retryPolicyExponentiationFactor=float(service.invocation_retry_policy.exponentiation_factor)
+                if service.invocation_retry_policy and service.invocation_retry_policy.exponentiation_factor is not None
+                else None,
+                retryPolicyOnMaxAttempts=(
+                    service.invocation_retry_policy.on_max_attempts.upper()
+                    if service.invocation_retry_policy and service.invocation_retry_policy.on_max_attempts is not None
+                    else None
+                ),
+            )
+        )
 
     if endpoint.protocol:
         protocol_mode = PROTOCOL_MODES[endpoint.protocol]
     else:
         protocol_mode = PROTOCOL_MODES[discovered_as]
-    return Endpoint(protocolMode=protocol_mode,
-                    minProtocolVersion=5,
-                    maxProtocolVersion=5,
-                    services=services)
+    return Endpoint(protocolMode=protocol_mode, minProtocolVersion=5, maxProtocolVersion=5, services=services)

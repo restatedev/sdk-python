@@ -23,13 +23,14 @@ from datetime import timedelta
 
 from restate.serde import DefaultSerde, Serde
 
-T = TypeVar('T')
-I = TypeVar('I')
-O = TypeVar('O')
-P = ParamSpec('P')
+T = TypeVar("T")
+I = TypeVar("I")
+O = TypeVar("O")
+P = ParamSpec("P")
 
 HandlerType = Union[Callable[[Any, I], Awaitable[O]], Callable[[Any], Awaitable[O]]]
 RunAction = Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]]
+
 
 # pylint: disable=R0902
 @dataclass
@@ -68,6 +69,7 @@ class RunOptions(typing.Generic[T]):
     max_retry_duration: Optional[timedelta] = None
     """Deprecated: Use max_duration instead."""
 
+
 # pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     """
@@ -77,7 +79,6 @@ class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
     @abc.abstractmethod
     def __await__(self) -> typing.Generator[Any, Any, T]:
         pass
-
 
 
 # pylint: disable=R0903
@@ -113,6 +114,7 @@ class RestateDurableSleepFuture(RestateDurableFuture[None]):
     def __await__(self) -> typing.Generator[Any, Any, None]:
         pass
 
+
 class AttemptFinishedEvent(abc.ABC):
     """
     Represents an attempt finished event.
@@ -130,7 +132,6 @@ class AttemptFinishedEvent(abc.ABC):
         """
         Returns True if the event is set, False otherwise.
         """
-
 
     @abc.abstractmethod
     async def wait(self):
@@ -151,9 +152,10 @@ class Request:
         body (bytes): The body of the request.
         attempt_finished_event (AttemptFinishedEvent): The teardown event of the request.
     """
+
     id: str
     headers: Dict[str, str]
-    attempt_headers: Dict[str,str]
+    attempt_headers: Dict[str, str]
     body: bytes
     attempt_finished_event: AttemptFinishedEvent
 
@@ -169,11 +171,9 @@ class KeyValueStore(abc.ABC):
     """
 
     @abc.abstractmethod
-    def get(self,
-            name: str,
-            serde: Serde[T] = DefaultSerde(),
-            type_hint: Optional[typing.Type[T]] = None
-            ) -> Awaitable[Optional[T]]:
+    def get(
+        self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+    ) -> Awaitable[Optional[T]]:
         """
         Retrieves the value associated with the given name.
 
@@ -189,10 +189,7 @@ class KeyValueStore(abc.ABC):
         """Returns the list of keys in the store."""
 
     @abc.abstractmethod
-    def set(self,
-            name: str,
-            value: T,
-            serde: Serde[T] = DefaultSerde()) -> None:
+    def set(self, name: str, value: T, serde: Serde[T] = DefaultSerde()) -> None:
         """set the value associated with the given name."""
 
     @abc.abstractmethod
@@ -202,6 +199,7 @@ class KeyValueStore(abc.ABC):
     @abc.abstractmethod
     def clear_all(self) -> None:
         """clear all the values in the store."""
+
 
 # pylint: disable=R0903
 class SendHandle(abc.ABC):
@@ -264,15 +262,16 @@ class Context(abc.ABC):
 
     @overload
     @abc.abstractmethod
-    def run(self,
-            name: str,
-            action: Callable[..., Coroutine[Any, Any,T]],
-            serde: Serde[T] = DefaultSerde(),
-            max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None,
-            args: Optional[typing.Tuple[Any, ...]] = None,
-            ) -> RestateDurableFuture[T]:
+    def run(
+        self,
+        name: str,
+        action: Callable[..., Coroutine[Any, Any, T]],
+        serde: Serde[T] = DefaultSerde(),
+        max_attempts: typing.Optional[int] = None,
+        max_retry_duration: typing.Optional[timedelta] = None,
+        type_hint: Optional[typing.Type[T]] = None,
+        args: Optional[typing.Tuple[Any, ...]] = None,
+    ) -> RestateDurableFuture[T]:
         """
         Runs the given action with the given name.
 
@@ -295,15 +294,16 @@ class Context(abc.ABC):
 
     @overload
     @abc.abstractmethod
-    def run(self,
-            name: str,
-            action: Callable[..., T],
-            serde: Serde[T] = DefaultSerde(),
-            max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None,
-            args: Optional[typing.Tuple[Any, ...]] = None,
-            ) -> RestateDurableFuture[T]:
+    def run(
+        self,
+        name: str,
+        action: Callable[..., T],
+        serde: Serde[T] = DefaultSerde(),
+        max_attempts: typing.Optional[int] = None,
+        max_retry_duration: typing.Optional[timedelta] = None,
+        type_hint: Optional[typing.Type[T]] = None,
+        args: Optional[typing.Tuple[Any, ...]] = None,
+    ) -> RestateDurableFuture[T]:
         """
         Runs the given coroutine action with the given name.
 
@@ -325,15 +325,16 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def run(self,
-            name: str,
-            action: RunAction[T],
-            serde: Serde[T] = DefaultSerde(),
-            max_attempts: typing.Optional[int] = None,
-            max_retry_duration: typing.Optional[timedelta] = None,
-            type_hint: Optional[typing.Type[T]] = None,
-            args: Optional[typing.Tuple[Any, ...]] = None,
-            ) -> RestateDurableFuture[T]:
+    def run(
+        self,
+        name: str,
+        action: RunAction[T],
+        serde: Serde[T] = DefaultSerde(),
+        max_attempts: typing.Optional[int] = None,
+        max_retry_duration: typing.Optional[timedelta] = None,
+        type_hint: Optional[typing.Type[T]] = None,
+        args: Optional[typing.Tuple[Any, ...]] = None,
+    ) -> RestateDurableFuture[T]:
         """
         Runs the given action with the given name.
 
@@ -354,17 +355,17 @@ class Context(abc.ABC):
 
         """
 
-
     @overload
     @abc.abstractmethod
-    def run_typed(self,
-            name: str,
-            action: Callable[P, Coroutine[Any, Any,T]],
-            options: RunOptions[T] = RunOptions(),
-            /,
-            *args: P.args,
-            **kwargs: P.kwargs,
-            ) -> RestateDurableFuture[T]:
+    def run_typed(
+        self,
+        name: str,
+        action: Callable[P, Coroutine[Any, Any, T]],
+        options: RunOptions[T] = RunOptions(),
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> RestateDurableFuture[T]:
         """
         Typed version of run that provides type hints for the function arguments.
         Runs the given action with the given name.
@@ -379,14 +380,15 @@ class Context(abc.ABC):
 
     @overload
     @abc.abstractmethod
-    def run_typed(self,
-            name: str,
-            action: Callable[P, T],
-            options: RunOptions[T] = RunOptions(),
-            /,
-            *args: P.args,
-            **kwargs: P.kwargs,
-            ) -> RestateDurableFuture[T]:
+    def run_typed(
+        self,
+        name: str,
+        action: Callable[P, T],
+        options: RunOptions[T] = RunOptions(),
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> RestateDurableFuture[T]:
         """
         Typed version of run that provides type hints for the function arguments.
         Runs the given coroutine action with the given name.
@@ -400,14 +402,15 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def run_typed(self,
-            name: str,
-            action: Union[Callable[P, Coroutine[Any, Any, T]], Callable[P, T]],
-            options: RunOptions[T] = RunOptions(),
-            /,
-            *args: P.args,
-            **kwargs: P.kwargs,
-            ) -> RestateDurableFuture[T]:
+    def run_typed(
+        self,
+        name: str,
+        action: Union[Callable[P, Coroutine[Any, Any, T]], Callable[P, T]],
+        options: RunOptions[T] = RunOptions(),
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> RestateDurableFuture[T]:
         """
         Typed version of run that provides type hints for the function arguments.
         Runs the given action with the given name.
@@ -428,121 +431,124 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def service_call(self,
-                     tpe: HandlerType[I, O],
-                     arg: I,
-                     idempotency_key: str | None = None,
-                     headers: typing.Dict[str, str] | None = None
-                     ) -> RestateDurableCallFuture[O]:
-        """
-        Invokes the given service with the given argument.
-        """
-
-
-    @abc.abstractmethod
-    def service_send(self,
-                     tpe: HandlerType[I, O],
-                     arg: I,
-                     send_delay: Optional[timedelta] = None,
-                     idempotency_key: str | None = None,
-                     headers: typing.Dict[str, str] | None = None
-                     ) -> SendHandle:
+    def service_call(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[O]:
         """
         Invokes the given service with the given argument.
         """
 
     @abc.abstractmethod
-    def object_call(self,
-                    tpe: HandlerType[I, O],
-                    key: str,
-                    arg: I,
-                    idempotency_key: str | None = None,
-                    headers: typing.Dict[str, str] | None = None
-                    ) -> RestateDurableCallFuture[O]:
+    def service_send(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
+        """
+        Invokes the given service with the given argument.
+        """
+
+    @abc.abstractmethod
+    def object_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[O]:
         """
         Invokes the given object with the given argument.
         """
 
     @abc.abstractmethod
-    def object_send(self,
-                    tpe: HandlerType[I, O],
-                    key: str,
-                    arg: I,
-                    send_delay: Optional[timedelta] = None,
-                    idempotency_key: str | None = None,
-                    headers: typing.Dict[str, str] | None = None
-                    ) -> SendHandle:
+    def object_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
         """
         Send a message to an object with the given argument.
         """
 
     @abc.abstractmethod
-    def workflow_call(self,
-                    tpe: HandlerType[I, O],
-                    key: str,
-                    arg: I,
-                    idempotency_key: str | None = None,
-                    headers: typing.Dict[str, str] | None = None
-                    ) -> RestateDurableCallFuture[O]:
+    def workflow_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[O]:
         """
         Invokes the given workflow with the given argument.
         """
 
     @abc.abstractmethod
-    def workflow_send(self,
-                    tpe: HandlerType[I, O],
-                    key: str,
-                    arg: I,
-                    send_delay: Optional[timedelta] = None,
-                    idempotency_key: str | None = None,
-                    headers: typing.Dict[str, str] | None = None
-                    ) -> SendHandle:
+    def workflow_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
         """
         Send a message to an object with the given argument.
         """
 
     # pylint: disable=R0913
     @abc.abstractmethod
-    def generic_call(self,
-                     service: str,
-                     handler: str,
-                     arg: bytes,
-                     key: Optional[str] = None,
-                     idempotency_key: str | None = None,
-                     headers: typing.Dict[str, str] | None = None
-                     )  -> RestateDurableCallFuture[bytes]:
+    def generic_call(
+        self,
+        service: str,
+        handler: str,
+        arg: bytes,
+        key: Optional[str] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[bytes]:
         """
         Invokes the given generic service/handler with the given argument.
         """
 
     @abc.abstractmethod
-    def generic_send(self,
-                     service: str,
-                     handler: str,
-                     arg: bytes,
-                     key: Optional[str] = None,
-                     send_delay: Optional[timedelta] = None,
-                     idempotency_key: str | None = None,
-                     headers: typing.Dict[str, str] | None = None
-                    ) -> SendHandle:
+    def generic_send(
+        self,
+        service: str,
+        handler: str,
+        arg: bytes,
+        key: Optional[str] = None,
+        send_delay: Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
         """
         Send a message to a generic service/handler with the given argument.
         """
 
     @abc.abstractmethod
-    def awakeable(self,
-                  serde: Serde[T] = DefaultSerde(),
-                  type_hint: Optional[typing.Type[T]] = None
-                  ) -> typing.Tuple[str, RestateDurableFuture[T]]:
+    def awakeable(
+        self, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+    ) -> typing.Tuple[str, RestateDurableFuture[T]]:
         """
         Returns the name of the awakeable and the future to be awaited.
         """
 
     @abc.abstractmethod
-    def resolve_awakeable(self,
-                          name: str,
-                          value: I,
-                          serde: Serde[I] = DefaultSerde()) -> None:
+    def resolve_awakeable(self, name: str, value: I, serde: Serde[I] = DefaultSerde()) -> None:
         """
         Resolves the awakeable with the given name.
         """
@@ -560,9 +566,9 @@ class Context(abc.ABC):
         """
 
     @abc.abstractmethod
-    def attach_invocation(self, invocation_id: str, serde: Serde[T] = DefaultSerde(),
-                          type_hint: typing.Optional[typing.Type[T]] = None
-                          ) -> RestateDurableFuture[T]:
+    def attach_invocation(
+        self, invocation_id: str, serde: Serde[T] = DefaultSerde(), type_hint: typing.Optional[typing.Type[T]] = None
+    ) -> RestateDurableFuture[T]:
         """
         Attaches the invocation with the given id.
         """
@@ -590,11 +596,9 @@ class ObjectSharedContext(Context):
         """Returns the key of the current object."""
 
     @abc.abstractmethod
-    def get(self,
-            name: str,
-            serde: Serde[T] = DefaultSerde(),
-            type_hint: Optional[typing.Type[T]] = None
-            ) -> RestateDurableFuture[Optional[T]]:
+    def get(
+        self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+    ) -> RestateDurableFuture[Optional[T]]:
         """
         Retrieves the value associated with the given name.
 
@@ -610,6 +614,7 @@ class ObjectSharedContext(Context):
         """
         Returns the list of keys in the store.
         """
+
 
 class DurablePromise(typing.Generic[T]):
     """
@@ -647,8 +652,9 @@ class DurablePromise(typing.Generic[T]):
     @abc.abstractmethod
     def __await__(self) -> typing.Generator[Any, Any, T]:
         """
-        Returns the value of the promise. This is a shortcut for calling value() and awaiting it. 
+        Returns the value of the promise. This is a shortcut for calling value() and awaiting it.
         """
+
 
 class WorkflowContext(ObjectContext):
     """
@@ -656,10 +662,13 @@ class WorkflowContext(ObjectContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None) -> DurablePromise[T]:
+    def promise(
+        self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+    ) -> DurablePromise[T]:
         """
         Returns a durable promise with the given name.
         """
+
 
 class WorkflowSharedContext(ObjectSharedContext):
     """
@@ -667,7 +676,9 @@ class WorkflowSharedContext(ObjectSharedContext):
     """
 
     @abc.abstractmethod
-    def promise(self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None) -> DurablePromise[T]:
+    def promise(
+        self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+    ) -> DurablePromise[T]:
         """
         Returns a durable promise with the given name.
         """
