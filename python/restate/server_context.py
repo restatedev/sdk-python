@@ -30,7 +30,7 @@ from uuid import UUID
 import time
 
 from restate.context import DurablePromise, AttemptFinishedEvent, HandlerType, ObjectContext, Request, RestateDurableCallFuture, RestateDurableFuture, RunAction, SendHandle, RestateDurableSleepFuture, RunOptions, P
-from restate.exceptions import TerminalError
+from restate.exceptions import TerminalError, SdkInternalBaseException, SdkInternalException, SuspendedException
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
 from restate.server_types import ReceiveChannel, Send
@@ -273,19 +273,6 @@ def update_restate_context_is_replaying(vm: VMWrapper):
     """Update the context var 'restate_context_is_replaying'. This should be called after each vm.sys_*"""
     restate_context_is_replaying.set(vm.is_replaying())
 
-async def cancel_current_task():
-    """Cancel the current task"""
-    current_task = asyncio.current_task()
-    if current_task is not None:
-        # Cancel through asyncio API
-        current_task.cancel(
-            "Cancelled by Restate SDK, you should not call any Context method after this exception is thrown."
-        )
-        # Sleep 0 will pop up the cancellation
-        await asyncio.sleep(0)
-    else:
-        raise asyncio.CancelledError("Cancelled by Restate SDK, you should not call any Context method after this exception is thrown.")
-
 # pylint: disable=R0902
 class ServerInvocationContext(ObjectContext):
     """This class implements the context for the restate framework based on the server."""
@@ -326,6 +313,8 @@ class ServerInvocationContext(ObjectContext):
             self.vm.sys_end()
         # pylint: disable=W0718
         except asyncio.CancelledError:
+            pass
+        except SdkInternalBaseException:
             pass
         except DisconnectedException:
             raise
@@ -393,11 +382,11 @@ class ServerInvocationContext(ObjectContext):
             await self.take_and_send_output()
             # Print this exception, might be relevant for the user
             traceback.print_exception(res)
-            await cancel_current_task()
+            raise SdkInternalException() from res
         if isinstance(res, Suspended):
             # We might need to write out something at this point.
             await self.take_and_send_output()
-            await cancel_current_task()
+            raise SuspendedException()
         if isinstance(res, NotReady):
             raise ValueError(f"Unexpected value error: {handle}")
         if res is None:
@@ -414,9 +403,9 @@ class ServerInvocationContext(ObjectContext):
             if isinstance(do_progress_response, BaseException):
                 # Print this exception, might be relevant for the user
                 traceback.print_exception(do_progress_response)
-                await cancel_current_task()
+                raise SdkInternalException() from do_progress_response
             if isinstance(do_progress_response, Suspended):
-                await cancel_current_task()
+                raise SuspendedException()
             if isinstance(do_progress_response, DoProgressAnyCompleted):
                 # One of the handles completed
                 return
@@ -564,6 +553,8 @@ class ServerInvocationContext(ObjectContext):
             failure = Failure(code=t.status_code, message=t.message)
             self.vm.propose_run_completion_failure(handle, failure)
         except asyncio.CancelledError as e:
+            raise e from None
+        except SdkInternalBaseException as e:
             raise e from None
         # pylint: disable=W0718
         except Exception as e:
