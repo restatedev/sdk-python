@@ -169,6 +169,8 @@ debug/
 
 # Restate data
 restate-data
+.restate
 
-# Test reports
+# Test reports, test suite
 test-services/test_report/
+restate-sdk-test-suite.jar

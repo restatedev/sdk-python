@@ -60,21 +60,80 @@ class OutputPayload:
         self.jsonSchema = jsonSchema
 
 class Handler:
-    def __init__(self, name: str, ty: Optional[ServiceHandlerType] = None, input: Optional[InputPayload | Dict[str, str]] = None, output: Optional[OutputPayload] = None, description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None):
+    # pylint: disable=R0902,R0914
+    def __init__(self,
+                 name: str,
+                 ty: Optional[ServiceHandlerType] = None,
+                 input: Optional[InputPayload | Dict[str, str]] = None,
+                 output: Optional[OutputPayload] = None,
+                 description: Optional[str] = None,
+                 metadata: Optional[Dict[str, str]] = None,
+                 inactivityTimeout: Optional[int] = None,
+                 abortTimeout: Optional[int] = None,
+                 journalRetention: Optional[int] = None,
+                 idempotencyRetention: Optional[int] = None,
+                 workflowCompletionRetention: Optional[int] = None,
+                 enableLazyState: Optional[bool] = None,
+                 ingressPrivate: Optional[bool] = None,
+                 retryPolicyInitialInterval: Optional[int] = None,
+                 retryPolicyMaxInterval: Optional[int] = None,
+                 retryPolicyMaxAttempts: Optional[int] = None,
+                 retryPolicyExponentiationFactor: Optional[float] = None,
+                 retryPolicyOnMaxAttempts: Optional[str] = None):
         self.name = name
         self.ty = ty
         self.input = input
         self.output = output
         self.documentation = description
         self.metadata = metadata
+        self.inactivityTimeout = inactivityTimeout
+        self.abortTimeout = abortTimeout
+        self.journalRetention = journalRetention
+        self.idempotencyRetention = idempotencyRetention
+        self.workflowCompletionRetention = workflowCompletionRetention
+        self.enableLazyState = enableLazyState
+        self.ingressPrivate = ingressPrivate
+        self.retryPolicyInitialInterval = retryPolicyInitialInterval
+        self.retryPolicyMaxInterval = retryPolicyMaxInterval
+        self.retryPolicyMaxAttempts = retryPolicyMaxAttempts
+        self.retryPolicyExponentiationFactor = retryPolicyExponentiationFactor
+        self.retryPolicyOnMaxAttempts = retryPolicyOnMaxAttempts
 
 class Service:
-    def __init__(self, name: str, ty: ServiceType, handlers: List[Handler], description: Optional[str] = None, metadata: Optional[Dict[str, str]] = None):
+    # pylint: disable=R0902,R0914
+    def __init__(self,
+                 name: str,
+                 ty: ServiceType,
+                 handlers: List[Handler],
+                 description: Optional[str] = None,
+                 metadata: Optional[Dict[str, str]] = None,
+                 inactivityTimeout: Optional[int] = None,
+                 abortTimeout: Optional[int] = None,
+                 journalRetention: Optional[int] = None,
+                 idempotencyRetention: Optional[int] = None,
+                 enableLazyState: Optional[bool] = None,
+                 ingressPrivate: Optional[bool] = None,
+                 retryPolicyInitialInterval: Optional[int] = None,
+                 retryPolicyMaxInterval: Optional[int] = None,
+                 retryPolicyMaxAttempts: Optional[int] = None,
+                 retryPolicyExponentiationFactor: Optional[float] = None,
+                 retryPolicyOnMaxAttempts: Optional[str] = None):
         self.name = name
         self.ty = ty
         self.handlers = handlers
         self.documentation = description
         self.metadata = metadata
+        self.inactivityTimeout = inactivityTimeout
+        self.abortTimeout = abortTimeout
+        self.journalRetention = journalRetention
+        self.idempotencyRetention = idempotencyRetention
+        self.enableLazyState = enableLazyState
+        self.ingressPrivate = ingressPrivate
+        self.retryPolicyInitialInterval = retryPolicyInitialInterval
+        self.retryPolicyMaxInterval = retryPolicyMaxInterval
+        self.retryPolicyMaxAttempts = retryPolicyMaxAttempts
+        self.retryPolicyExponentiationFactor = retryPolicyExponentiationFactor
+        self.retryPolicyOnMaxAttempts = retryPolicyOnMaxAttempts
 
 class Endpoint:
     def __init__(self, protocolMode: ProtocolMode, minProtocolVersion: int, maxProtocolVersion: int, services: List[Service]):
@@ -148,20 +207,76 @@ def json_schema_from_type_hint(type_hint: Optional[TypeHint[Any]]) -> Any:
     return type_hint_to_json_schema(type_hint.annotation)
 
 
-
+# pylint: disable=R0912,R0915
 def compute_discovery_json(endpoint: RestateEndpoint,
                            version: int,
-                           discovered_as: typing.Literal["bidi", "request_response"]) -> typing.Tuple[typing.Dict[str, str] ,str]:
+                           discovered_as: typing.Literal["bidi", "request_response"]) -> str:
     """
-    return restate's discovery object as JSON 
+    return restate's discovery object as JSON
     """
-    if version != 1:
-        raise ValueError(f"Unsupported protocol version {version}")
 
     ep = compute_discovery(endpoint, discovered_as)
+
+    # Validate that new discovery fields aren't used with older protocol versions
+    if version <= 3:
+        for service in ep.services:
+            if service.retryPolicyInitialInterval is not None:
+                raise ValueError("retryPolicyInitialInterval is only supported in discovery protocol version 4")
+            if service.retryPolicyMaxInterval is not None:
+                raise ValueError("retryPolicyMaxInterval is only supported in discovery protocol version 4")
+            if service.retryPolicyMaxAttempts is not None:
+                raise ValueError("retryPolicyMaxAttempts is only supported in discovery protocol version 4")
+            if service.retryPolicyExponentiationFactor is not None:
+                raise ValueError("retryPolicyExponentiationFactor is only supported in discovery protocol version 4")
+            if service.retryPolicyOnMaxAttempts is not None:
+                raise ValueError("retryPolicyOnMaxAttempts is only supported in discovery protocol version 4")
+
+            for handler in service.handlers:
+                if handler.retryPolicyInitialInterval is not None:
+                    raise ValueError("retryPolicyInitialInterval is only supported in discovery protocol version 4")
+                if handler.retryPolicyMaxInterval is not None:
+                    raise ValueError("retryPolicyMaxInterval is only supported in discovery protocol version 4")
+                if handler.retryPolicyMaxAttempts is not None:
+                    raise ValueError("retryPolicyMaxAttempts is only supported in discovery protocol version 4")
+                if handler.retryPolicyExponentiationFactor is not None:
+                    raise ValueError("retryPolicyExponentiationFactor is only supported in discovery protocol version 4")
+                if handler.retryPolicyOnMaxAttempts is not None:
+                    raise ValueError("retryPolicyOnMaxAttempts is only supported in discovery protocol version 4")
+
+    if version <= 2:
+        # Check for new discovery fields in version 3 that shouldn't be used in version 2 or lower
+        for service in ep.services:
+            if service.inactivityTimeout is not None:
+                raise ValueError("inactivityTimeout is only supported in discovery protocol version 3")
+            if service.abortTimeout is not None:
+                raise ValueError("abortTimeout is only supported in discovery protocol version 3")
+            if service.idempotencyRetention is not None:
+                raise ValueError("idempotencyRetention is only supported in discovery protocol version 3")
+            if service.journalRetention is not None:
+                raise ValueError("journalRetention is only supported in discovery protocol version 3")
+            if service.enableLazyState is not None:
+                raise ValueError("enableLazyState is only supported in discovery protocol version 3")
+            if service.ingressPrivate is not None:
+                raise ValueError("ingressPrivate is only supported in discovery protocol version 3")
+
+            for handler in service.handlers:
+                if handler.inactivityTimeout is not None:
+                    raise ValueError("inactivityTimeout is only supported in discovery protocol version 3")
+                if handler.abortTimeout is not None:
+                    raise ValueError("abortTimeout is only supported in discovery protocol version 3")
+                if handler.idempotencyRetention is not None:
+                    raise ValueError("idempotencyRetention is only supported in discovery protocol version 3")
+                if handler.journalRetention is not None:
+                    raise ValueError("journalRetention is only supported in discovery protocol version 3")
+                if handler.workflowCompletionRetention is not None:
+                    raise ValueError("workflowCompletionRetention is only supported in discovery protocol version 3")
+                if handler.enableLazyState is not None:
+                    raise ValueError("enableLazyState is only supported in discovery protocol version 3")
+                if handler.ingressPrivate is not None:
+                    raise ValueError("ingressPrivate is only supported in discovery protocol version 3")
+
     json_str = json.dumps(ep, cls=PythonClassEncoder, allow_nan=False)
-    headers = {"content-type": "application/vnd.restate.endpointmanifest.v1+json"}
-    return (headers, json_str)
+    return json_str
 
 
 def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal["bidi", "request_response"]) -> Endpoint:
@@ -200,11 +315,38 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as : typing.Literal[
                                             input=inp,
                                             output=out,
                                             description=handler.description,
-                                            metadata=handler.metadata))
+                                            metadata=handler.metadata,
+                                            inactivityTimeout=int(handler.inactivity_timeout.total_seconds() * 1000) if handler.inactivity_timeout else None,
+                                            abortTimeout=int(handler.abort_timeout.total_seconds() * 1000) if handler.abort_timeout else None,
+                                            journalRetention=int(handler.journal_retention.total_seconds() * 1000) if handler.journal_retention else None,
+                                            idempotencyRetention=int(handler.idempotency_retention.total_seconds() * 1000) if handler.idempotency_retention else None,
+                                            workflowCompletionRetention=int(handler.workflow_retention.total_seconds() * 1000) if handler.workflow_retention else None,
+                                            enableLazyState=handler.enable_lazy_state,
+                                            ingressPrivate=handler.ingress_private,
+                                            retryPolicyInitialInterval=int(handler.invocation_retry_policy.initial_interval.total_seconds() * 1000) if handler.invocation_retry_policy and handler.invocation_retry_policy.initial_interval else None,
+                                            retryPolicyMaxInterval=int(handler.invocation_retry_policy.max_interval.total_seconds() * 1000) if handler.invocation_retry_policy and handler.invocation_retry_policy.max_interval else None,
+                                            retryPolicyMaxAttempts=int(handler.invocation_retry_policy.max_attempts) if handler.invocation_retry_policy and handler.invocation_retry_policy.max_attempts is not None else None,
+                                            retryPolicyExponentiationFactor=float(handler.invocation_retry_policy.exponentiation_factor) if handler.invocation_retry_policy and handler.invocation_retry_policy.exponentiation_factor is not None else None,
+                                            retryPolicyOnMaxAttempts=(handler.invocation_retry_policy.on_max_attempts.upper() if handler.invocation_retry_policy and handler.invocation_retry_policy.on_max_attempts is not None else None)))
         # add the service
         description = service.service_tag.description
         metadata = service.service_tag.metadata
-        services.append(Service(name=service.name, ty=service_type, handlers=service_handlers, description=description, metadata=metadata))
+        services.append(Service(name=service.name,
+                                ty=service_type,
+                                handlers=service_handlers,
+                                description=description,
+                                metadata=metadata,
+                                inactivityTimeout=int(service.inactivity_timeout.total_seconds() * 1000) if service.inactivity_timeout else None,
+                                abortTimeout=int(service.abort_timeout.total_seconds() * 1000) if service.abort_timeout else None,
+                                journalRetention=int(service.journal_retention.total_seconds() * 1000) if service.journal_retention else None,
+                                idempotencyRetention=int(service.idempotency_retention.total_seconds() * 1000) if service.idempotency_retention else None,
+                                enableLazyState=service.enable_lazy_state if hasattr(service, 'enable_lazy_state') else None,
+                                ingressPrivate=service.ingress_private,
+                                retryPolicyInitialInterval=int(service.invocation_retry_policy.initial_interval.total_seconds() * 1000) if service.invocation_retry_policy and service.invocation_retry_policy.initial_interval else None,
+                                retryPolicyMaxInterval=int(service.invocation_retry_policy.max_interval.total_seconds() * 1000) if service.invocation_retry_policy and service.invocation_retry_policy.max_interval else None,
+                                retryPolicyMaxAttempts=int(service.invocation_retry_policy.max_attempts) if service.invocation_retry_policy and service.invocation_retry_policy.max_attempts is not None else None,
+                                retryPolicyExponentiationFactor=float(service.invocation_retry_policy.exponentiation_factor) if service.invocation_retry_policy and service.invocation_retry_policy.exponentiation_factor is not None else None,
+                                retryPolicyOnMaxAttempts=(service.invocation_retry_policy.on_max_attempts.upper() if service.invocation_retry_policy and service.invocation_retry_policy.on_max_attempts is not None else None)))
 
     if endpoint.protocol:
         protocol_mode = PROTOCOL_MODES[endpoint.protocol]

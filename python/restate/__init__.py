@@ -19,12 +19,15 @@ from .workflow import Workflow
 # types
 from .context import Context, ObjectContext, ObjectSharedContext
 from .context import WorkflowContext, WorkflowSharedContext
+from .retry_policy import InvocationRetryPolicy
 # pylint: disable=line-too-long
-from .context import DurablePromise, RestateDurableFuture, RestateDurableCallFuture, RestateDurableSleepFuture, SendHandle
-from .exceptions import TerminalError
+from .context import DurablePromise, RestateDurableFuture, RestateDurableCallFuture, RestateDurableSleepFuture, SendHandle, RunOptions
+from .exceptions import TerminalError, SdkInternalBaseException, is_internal_exception
 from .asyncio import as_completed, gather, wait_completed, select
 
 from .endpoint import app
+
+from .logging import getLogger, RestateLoggingFilter
 
 try:
     from .harness import test_harness # type: ignore
@@ -32,7 +35,11 @@ except ImportError:
     # we don't have the appropriate dependencies installed
 
     # pylint: disable=unused-argument, redefined-outer-name
-    def test_harness(app, follow_logs = False, restate_image = ""): # type: ignore
+    def test_harness(app, # type: ignore
+                     follow_logs: bool = False,
+                     restate_image: str = "",
+                     always_replay: bool = False,
+                     disable_retries: bool = False):
         """a dummy harness constructor to raise ImportError"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
 
@@ -50,11 +57,17 @@ __all__ = [
     "RestateDurableCallFuture",
     "RestateDurableSleepFuture",
     "SendHandle",
+    "RunOptions",
     "TerminalError",
     "app",
     "test_harness",
     "gather",
     "as_completed",
     "wait_completed",
-    "select"
+    "select",
+    "logging",
+    "RestateLoggingFilter",
+    "InvocationRetryPolicy",
+    "SdkInternalBaseException",
+    "is_internal_exception"
 ]

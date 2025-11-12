@@ -3,7 +3,7 @@
 [![Discord](https://img.shields.io/discord/1128210118216007792?logo=discord)](https://discord.gg/skW3AZ6uGd)
 [![Twitter](https://img.shields.io/twitter/follow/restatedev.svg?style=social&label=Follow)](https://twitter.com/intent/follow?screen_name=restatedev)
 
-# Python SDK for restate
+# Restate Python SDK
 
 [Restate](https://restate.dev/) is a system for easily building resilient applications using *distributed durable async/await*. This repository contains the Restate SDK for writing services in **Python**.
 
@@ -18,7 +18,7 @@
 ## Using the SDK
 
 **Prerequisites**:
-- Python >= v3.11
+- Python >= v3.10
 
 To use this SDK, add the dependency to your project:
 
@@ -28,16 +28,20 @@ pip install restate_sdk
 
 ## Versions
 
-The Python SDK is currently in active development, and might break across releases.
-
 The compatibility with Restate is described in the following table:
 
-| Restate Server\sdk-python | 0.0 - 0.2 | 0.3 - 0.5 | 0.6 - 0.7 |
-|---------------------------|-----------|-----------|-----------|
-| 1.0                       | ✅         | ❌         | ❌         |
-| 1.1                       | ✅         | ✅         | ❌         |
-| 1.2                       | ✅         | ✅         | ❌         |
-| 1.3                       | ✅         | ✅         | ✅         |
+| Restate Server\sdk-python | < 0.6            | 0.6 - 0.7 | 0.8 - 0.9        | 0.10 - 0.11      |
+|---------------------------|------------------|-----------|------------------|------------------|
+| < 1.3                     | ✅                | ❌         | ❌                | ❌                |
+| 1.3                       | ✅                | ✅         | ✅ <sup>(1)</sup> | ✅ <sup>(2)</sup> |
+| 1.4                       | ✅                | ✅         | ✅                | ✅ <sup>(2)</sup> |
+| 1.5                       | ⚠ <sup>(3)</sup> | ✅         | ✅                | ✅                |
+
+<sup>(1)</sup> **Note** The new Service/Object/Workflow constructor fields and the decorator fields `inactivity_timeout`, `abort_timeout`, `journal_retention`, `idempotency_retention`, `ingress_private`, `workflow_retention` work only from Restate 1.4 onward. Check the in-code documentation for more details.
+
+<sup>(1)</sup> **Note** The new Service/Object/Workflow constructor field and the decorator field `invocation_retry_policy` works only from Restate 1.4 onward. Check the in-code documentation for more details.
+
+<sup>(3)</sup> **Warning** SDK versions < 0.6 are deprecated, and cannot be registered anymore. Check the [Restate 1.5 release notes](https://github.com/restatedev/restate/releases/tag/v1.5.0) for more info.
 
 ## Contributing
 

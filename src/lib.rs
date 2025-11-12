@@ -1,11 +1,13 @@
 use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone, PyString};
+use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
 use restate_sdk_shared_core::{
     CallHandle, CoreVM, DoProgressResponse, Error, Header, IdentityVerifier, Input, NonEmptyValue,
-    NotificationHandle, ResponseHead, RetryPolicy, RunExitResult, SuspendedOrVMError,
-    TakeOutputResult, Target, TerminalFailure, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
+    NotificationHandle, ResponseHead, RetryPolicy, RunExitResult, TakeOutputResult, Target,
+    TerminalFailure, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
 };
+use std::fmt;
 use std::time::{Duration, SystemTime};
 
 // Current crate version
@@ -69,13 +71,13 @@ impl From<ResponseHead> for PyResponseHead {
     }
 }
 
-fn take_output_result_into_py(
-    py: Python,
+fn take_output_result_into_py<'py>(
+    py: Python<'py>,
     take_output_result: TakeOutputResult,
-) -> Bound<'_, PyAny> {
+) -> Bound<'py, PyAny> {
     match take_output_result {
-        TakeOutputResult::Buffer(b) => PyBytes::new_bound(py, &b).into_any(),
-        TakeOutputResult::EOF => PyNone::get_bound(py).to_owned().into_any(),
+        TakeOutputResult::Buffer(b) => PyBytes::new(py, &b).into_any(),
+        TakeOutputResult::EOF => PyNone::get(py).to_owned().into_any(),
     }
 }
 
@@ -113,33 +115,55 @@ struct PyExponentialRetryConfig {
     max_attempts: Option<u32>,
     #[pyo3(get, set)]
     max_duration: Option<u64>,
+    #[pyo3(get, set)]
+    max_interval: Option<u64>,
+    #[pyo3(get, set)]
+    factor: Option<f64>,
 }
 
 #[pymethods]
 impl PyExponentialRetryConfig {
-    #[pyo3(signature = (initial_interval=None, max_attempts=None, max_duration=None))]
+    #[pyo3(signature = (initial_interval=None, max_attempts=None, max_duration=None, max_interval=None, factor=None))]
     #[new]
     fn new(
         initial_interval: Option<u64>,
         max_attempts: Option<u32>,
         max_duration: Option<u64>,
+        max_interval: Option<u64>,
+        factor: Option<f64>,
     ) -> Self {
         Self {
             initial_interval,
             max_attempts,
             max_duration,
+            max_interval,
+            factor,
         }
     }
 }
 
 impl From<PyExponentialRetryConfig> for RetryPolicy {
     fn from(value: PyExponentialRetryConfig) -> Self {
-        RetryPolicy::Exponential {
-            initial_interval: Duration::from_millis(value.initial_interval.unwrap_or(10)),
-            max_attempts: value.max_attempts,
-            max_duration: value.max_duration.map(Duration::from_millis),
-            factor: 2.0,
-            max_interval: None,
+        if value.initial_interval.is_some()
+            || value.max_attempts.is_some()
+            || value.max_duration.is_some()
+            || value.max_interval.is_some()
+            || value.factor.is_some()
+        {
+            // If any of the values are set, then let's create the exponential retry policy
+            RetryPolicy::Exponential {
+                initial_interval: Duration::from_millis(value.initial_interval.unwrap_or(50)),
+                max_attempts: value.max_attempts,
+                max_duration: value.max_duration.map(Duration::from_millis),
+                factor: value.factor.unwrap_or(2.0) as f32,
+                max_interval: value
+                    .max_interval
+                    .map(Duration::from_millis)
+                    .or_else(|| Some(Duration::from_secs(10))),
+            }
+        } else {
+            // Let's use retry policy infinite here, which will give back control to the invocation retry policy
+            RetryPolicy::Infinite
         }
     }
 }
@@ -158,6 +182,7 @@ impl From<PyFailure> for TerminalFailure {
         TerminalFailure {
             code: value.code,
             message: value.message,
+            metadata: vec![],
         }
     }
 }
@@ -246,7 +271,7 @@ create_exception!(
     restate_sdk_python_core,
     VMException,
     pyo3::exceptions::PyException,
-    "Restate VM exception."
+    "Protocol state machine exception."
 );
 
 impl From<PyVMError> for PyErr {
@@ -319,7 +344,7 @@ impl PyVM {
     fn do_progress(
         mut self_: PyRefMut<'_, Self>,
         any_handle: Vec<PyNotificationHandle>,
-    ) -> Result<Bound<'_, PyAny>, PyVMError> {
+    ) -> PyResult<Bound<'_, PyAny>> {
         let res = self_.vm.do_progress(
             any_handle
                 .into_iter()
@@ -330,32 +355,27 @@ impl PyVM {
         let py = self_.py();
 
         match res {
-            Err(SuspendedOrVMError::VM(e)) => Err(e.into()),
-            Err(SuspendedOrVMError::Suspended(_)) => {
-                Ok(PySuspended.into_py(py).into_bound(py).into_any())
+            Err(e) if e.is_suspended_error() => Ok(Bound::new(py, PySuspended)?.into_any()),
+            Err(e) => Err(PyVMError::from(e))?,
+            Ok(DoProgressResponse::AnyCompleted) => {
+                Ok(Bound::new(py, PyDoProgressAnyCompleted)?.into_any())
             }
-            Ok(DoProgressResponse::AnyCompleted) => Ok(PyDoProgressAnyCompleted
-                .into_py(py)
-                .into_bound(py)
-                .into_any()),
-            Ok(DoProgressResponse::ReadFromInput) => Ok(PyDoProgressReadFromInput
-                .into_py(py)
-                .into_bound(py)
-                .into_any()),
-            Ok(DoProgressResponse::ExecuteRun(handle)) => Ok(PyDoProgressExecuteRun {
-                handle: handle.into(),
+            Ok(DoProgressResponse::ReadFromInput) => {
+                Ok(Bound::new(py, PyDoProgressReadFromInput)?.into_any())
             }
-            .into_py(py)
-            .into_bound(py)
+            Ok(DoProgressResponse::ExecuteRun(handle)) => Ok(Bound::new(
+                py,
+                PyDoProgressExecuteRun {
+                    handle: handle.into(),
+                },
+            )?
             .into_any()),
-            Ok(DoProgressResponse::CancelSignalReceived) => Ok(PyDoProgressCancelSignalReceived
-                .into_py(py)
-                .into_bound(py)
-                .into_any()),
-            Ok(DoProgressResponse::WaitingPendingRun) => Ok(PyDoWaitForPendingRun
-                .into_py(py)
-                .into_bound(py)
-                .into_any()), 
+            Ok(DoProgressResponse::CancelSignalReceived) => {
+                Ok(Bound::new(py, PyDoProgressCancelSignalReceived)?.into_any())
+            }
+            Ok(DoProgressResponse::WaitingPendingRun) => {
+                Ok(Bound::new(py, PyDoWaitForPendingRun)?.into_any())
+            }
         }
     }
 
@@ -371,27 +391,23 @@ impl PyVM {
     fn take_notification(
         mut self_: PyRefMut<'_, Self>,
         handle: PyNotificationHandle,
-    ) -> Result<Bound<'_, PyAny>, PyVMError> {
+    ) -> PyResult<Bound<'_, PyAny>> {
         let res = self_.vm.take_notification(NotificationHandle::from(handle));
 
         let py = self_.py();
 
         match res {
-            Err(SuspendedOrVMError::VM(e)) => Err(e.into()),
-            Err(SuspendedOrVMError::Suspended(_)) => {
-                Ok(PySuspended.into_py(py).into_bound(py).into_any())
-            }
-            Ok(None) => Ok(PyNone::get_bound(py).to_owned().into_any()),
-            Ok(Some(Value::Void)) => Ok(PyVoid.into_py(py).into_bound(py).into_any()),
-            Ok(Some(Value::Success(b))) => Ok(PyBytes::new_bound(py, &b).into_any()),
-            Ok(Some(Value::Failure(f))) => {
-                Ok(PyFailure::from(f).into_py(py).into_bound(py).into_any())
-            }
+            Err(e) if e.is_suspended_error() => Ok(Bound::new(py, PySuspended)?.into_any()),
+            Err(e) => Err(PyVMError::from(e))?,
+            Ok(None) => Ok(PyNone::get(py).to_owned().into_any()),
+            Ok(Some(Value::Void)) => Ok(Bound::new(py, PyVoid)?.into_any()),
+            Ok(Some(Value::Success(b))) => Ok(PyBytes::new(py, &b).into_any()),
+            Ok(Some(Value::Failure(f))) => Ok(Bound::new(py, PyFailure::from(f))?.into_any()),
             Ok(Some(Value::StateKeys(keys))) => {
-                Ok(PyStateKeys { keys }.into_py(py).into_bound(py).into_any())
+                Ok(Bound::new(py, PyStateKeys { keys })?.into_any())
             }
             Ok(Some(Value::InvocationId(invocation_id))) => {
-                Ok(PyString::new_bound(py, &invocation_id).into_any())
+                Ok(PyString::new(py, &invocation_id).into_any())
             }
         }
     }
@@ -445,13 +461,18 @@ impl PyVM {
     fn sys_sleep(
         mut self_: PyRefMut<'_, Self>,
         millis: u64,
+        name: Option<String>,
     ) -> Result<PyNotificationHandle, PyVMError> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("Duration since unix epoch cannot fail");
         self_
             .vm
-            .sys_sleep(String::default(), now + Duration::from_millis(millis), Some(now))
+            .sys_sleep(
+                name.unwrap_or_default(),
+                now + Duration::from_millis(millis),
+                Some(now),
+            )
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -487,6 +508,7 @@ impl PyVM {
     }
 
     #[pyo3(signature = (service, handler, buffer, key=None, delay=None, idempotency_key=None, headers=None))]
+    #[allow(clippy::too_many_arguments)]
     fn sys_send(
         mut self_: PyRefMut<'_, Self>,
         service: String,
@@ -494,7 +516,7 @@ impl PyVM {
         buffer: &Bound<'_, PyBytes>,
         key: Option<String>,
         delay: Option<u64>,
-        idempotency_key: Option<String>, 
+        idempotency_key: Option<String>,
         headers: Option<Vec<PyHeader>>,
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
@@ -615,11 +637,11 @@ impl PyVM {
         self_.vm.sys_run(name).map(Into::into).map_err(Into::into)
     }
 
-    fn sys_cancel(
-        mut self_: PyRefMut<'_, Self>,
-        invocation_id: String,
-    ) -> Result<(), PyVMError> {
-        self_.vm.sys_cancel_invocation(invocation_id).map_err(Into::into)
+    fn sys_cancel(mut self_: PyRefMut<'_, Self>, invocation_id: String) -> Result<(), PyVMError> {
+        self_
+            .vm
+            .sys_cancel_invocation(invocation_id)
+            .map_err(Into::into)
     }
 
     fn propose_run_completion_success(
@@ -678,7 +700,6 @@ impl PyVM {
         self_
             .vm
             .sys_write_output(NonEmptyValue::Success(buffer.as_bytes().to_vec().into()))
-            .map(Into::into)
             .map_err(Into::into)
     }
 
@@ -689,7 +710,6 @@ impl PyVM {
         self_
             .vm
             .sys_write_output(NonEmptyValue::Failure(value.into()))
-            .map(Into::into)
             .map_err(Into::into)
     }
 
@@ -699,13 +719,19 @@ impl PyVM {
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
-            .sys_attach_invocation(restate_sdk_shared_core::AttachInvocationTarget::InvocationId(invocation_id))
+            .sys_attach_invocation(
+                restate_sdk_shared_core::AttachInvocationTarget::InvocationId(invocation_id),
+            )
             .map(Into::into)
             .map_err(Into::into)
     }
 
     fn sys_end(mut self_: PyRefMut<'_, Self>) -> Result<(), PyVMError> {
-        self_.vm.sys_end().map(Into::into).map_err(Into::into)
+        self_.vm.sys_end().map_err(Into::into)
+    }
+
+    fn is_replaying(self_: PyRef<'_, Self>) -> bool {
+        self_.vm.is_replaying()
     }
 }
 
@@ -751,6 +777,35 @@ impl PyIdentityVerifier {
     }
 }
 
+#[derive(Debug)]
+struct PythonErrorFormatter;
+
+impl ErrorFormatter for PythonErrorFormatter {
+    fn display_closed_error(&self, f: &mut fmt::Formatter<'_>, event: &str) -> fmt::Result {
+        write!(f, "Execution is suspended, but the handler is still attempting to make progress (calling '{event}'). This can happen:
+
+* If you use try/catch all statements.
+Don't do:
+try:
+  # Code
+except:
+  # This catches all exceptions, including the SdkInternalBaseException!
+  # '{event}' <- This operation prints this exception
+
+Do instead:
+try:
+  # Code
+except TerminalError:
+  # In Restate handlers you typically want to catch TerminalError only
+
+Or remove the try/except altogether if you don't need it.
+For further info on error handling, refer to https://docs.restate.dev/develop/python/error-handling
+
+* If you use the context after the handler completed, e.g. moving the context to another thread.
+  Check https://docs.restate.dev/develop/python/concurrent-tasks for more details on how to create durable concurrent tasks in Python.")
+    }
+}
+
 #[pymodule]
 fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use tracing_subscriber::EnvFilter;
@@ -776,19 +831,23 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDoWaitForPendingRun>()?;
     m.add_class::<PyCallHandle>()?;
 
-    m.add("VMException", m.py().get_type_bound::<VMException>())?;
+    m.add("VMException", m.py().get_type::<VMException>())?;
     m.add(
         "IdentityKeyException",
-        m.py().get_type_bound::<IdentityKeyException>(),
+        m.py().get_type::<IdentityKeyException>(),
     )?;
     m.add(
         "IdentityVerificationException",
-        m.py().get_type_bound::<IdentityVerificationException>(),
+        m.py().get_type::<IdentityVerificationException>(),
     )?;
     m.add("SDK_VERSION", CURRENT_VERSION)?;
     m.add(
         "CANCEL_NOTIFICATION_HANDLE",
         PyNotificationHandle::from(CANCEL_NOTIFICATION_HANDLE),
     )?;
+
+    // Set customized error formatter
+    set_error_formatter(PythonErrorFormatter);
+
     Ok(())
 }

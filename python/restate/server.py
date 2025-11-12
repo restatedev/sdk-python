@@ -50,18 +50,64 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
         discovered_as = "request_response"
     else:
         discovered_as = "bidi"
-    headers, js = compute_discovery_json(endpoint, 1, discovered_as)
-    bin_headers = header_to_binary(headers.items())
-    bin_headers.extend(X_RESTATE_SERVER)
+
+    # Extract Accept header from request
+    accept_header = None
+    for header_name, header_value in binary_to_header(scope['headers']):
+        if header_name.lower() == 'accept':
+            accept_header = header_value
+            break
+
+    # Negotiate discovery protocol version
+    version = 2
+    if accept_header:
+        if "application/vnd.restate.endpointmanifest.v4+json" in accept_header:
+            version = 4
+        elif "application/vnd.restate.endpointmanifest.v3+json" in accept_header:
+            version = 3
+        elif "application/vnd.restate.endpointmanifest.v2+json" in accept_header:
+            version = 2
+        else:
+            await send_status_with_error_text(
+                send,
+                415,
+                f"Unsupported discovery version ${accept_header}")
+            return
+
+    try:
+        js = compute_discovery_json(endpoint, version, discovered_as)
+        bin_headers = header_to_binary([(
+            "content-type",
+            f"application/vnd.restate.endpointmanifest.v{version}+json")])
+        bin_headers.extend(X_RESTATE_SERVER)
+        await send({
+            'type': 'http.response.start',
+            'status': 200,
+            'headers': bin_headers,
+            'trailers': False
+        })
+        await send({
+            'type': 'http.response.body',
+            'body': js.encode('utf-8'),
+            'more_body': False,
+        })
+    except ValueError as e:
+        await send_status_with_error_text(send, 500, f"Error when computing discovery ${e}")
+        return
+
+async def send_status_with_error_text(send: Send, status_code: int, error_text: str):
+    """respond with an health check"""
+    headers = header_to_binary([("content-type", "text/plain")])
+    headers.extend(X_RESTATE_SERVER)
     await send({
         'type': 'http.response.start',
-        'status': 200,
-        'headers': bin_headers,
+        'status': status_code,
+        'headers': headers,
         'trailers': False
-        })
+    })
     await send({
         'type': 'http.response.body',
-        'body': js.encode('utf-8'),
+        'body': error_text.encode('utf-8'),
         'more_body': False,
     })
 

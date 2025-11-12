@@ -13,9 +13,15 @@
 # pylint: disable=W0613
 
 from restate import Service, Context
+import restate
+
+# Use restate.getLogger to create a logger that hides logs on replay
+# To configure logging, just use the usual std logging configuration (see example.py for an example)
+logger = restate.getLogger()
 
 greeter = Service("greeter")
 
 @greeter.handler()
 async def greet(ctx: Context, name: str) -> str:
+    logger.info("Received greeting request: %s", name)
     return f"Hello {name}!"

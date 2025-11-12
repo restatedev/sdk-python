@@ -60,6 +60,7 @@ def try_import_from_dacite():
         return to_dict, from_dict
 
 PydanticBaseModel = try_import_pydantic_base_model()
+# pylint: disable=C0103
 DaciteToDict, DaciteFromDict = try_import_from_dacite()
 
 T = typing.TypeVar('T')

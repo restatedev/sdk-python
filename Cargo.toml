@@ -1,6 +1,6 @@
 [package]
 name = "restate-sdk-python-core"
-version = "0.7.3"
+version = "0.11.0"
 edition = "2021"
 
 [package.metadata.maturin]
@@ -12,6 +12,6 @@ crate-type = ["cdylib"]
 doc = false
 
 [dependencies]
-pyo3 = { version = "0.24.1", features = ["extension-module"] }
+pyo3 = { version = "0.25.1", features = ["extension-module"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-restate-sdk-shared-core = { version = "0.3.0", features = ["request_identity", "sha2_random_seed"] }
+restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core.git", rev = "eafbe4729a4ae7fa74fd0fb32e29121b240e1e5e", features = ["request_identity", "sha2_random_seed"] }

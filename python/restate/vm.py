@@ -17,7 +17,7 @@ wrap the restate._internal.PyVM class
 
 from dataclasses import dataclass
 import typing
-from restate._internal import PyVM, PyHeader, PyFailure, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoWaitForPendingRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
+from restate._internal import PyVM, PyHeader, PyFailure, VMException, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoWaitForPendingRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
 
 @dataclass
 class Invocation:
@@ -33,11 +33,15 @@ class Invocation:
 @dataclass
 class RunRetryConfig:
     """
-    Expo Retry Configuration
+    Exponential Retry Configuration
+
+    All duration/interval values are in milliseconds.
     """
     initial_interval: typing.Optional[int] = None
     max_attempts: typing.Optional[int] = None
     max_duration: typing.Optional[int] = None
+    max_interval: typing.Optional[int] = None
+    interval_factor: typing.Optional[float] = None
 
 @dataclass
 class Failure:
@@ -53,18 +57,17 @@ class NotReady:
     NotReady
     """
 
-class SuspendedException(Exception):
-    """
-    Suspended Exception
-    """
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-
 NOT_READY = NotReady()
-SUSPENDED = SuspendedException()
 CANCEL_HANDLE = CANCEL_NOTIFICATION_HANDLE
 
 NotificationType = typing.Optional[typing.Union[bytes, Failure, NotReady, list[str], str]]
+
+class Suspended:
+    """
+    Represents a suspended error
+    """
+
+SUSPENDED = Suspended()
 
 class DoProgressAnyCompleted:
     """
@@ -151,11 +154,16 @@ class VMWrapper:
         """Returns true when the notification handle is completed and hasn't been taken yet."""
         return self.vm.is_completed(handle)
 
-    def do_progress(self, handles: list[int]) -> DoProgressResult:
+    # pylint: disable=R0911
+    def do_progress(self, handles: list[int]) \
+            -> typing.Union[DoProgressResult, Exception, Suspended]:
         """Do progress with notifications."""
-        result = self.vm.do_progress(handles)
+        try:
+            result = self.vm.do_progress(handles)
+        except VMException as e:
+            return e
         if isinstance(result, PySuspended):
-            raise SUSPENDED
+            return SUSPENDED
         if isinstance(result, PyDoProgressAnyCompleted):
             return DO_PROGRESS_ANY_COMPLETED
         if isinstance(result, PyDoProgressReadFromInput):
@@ -166,11 +174,17 @@ class VMWrapper:
             return DO_PROGRESS_CANCEL_SIGNAL_RECEIVED
         if isinstance(result, PyDoWaitForPendingRun):
             return DO_WAIT_PENDING_RUN
-        raise ValueError(f"Unknown progress type: {result}")
+        return ValueError(f"Unknown progress type: {result}")
 
-    def take_notification(self, handle: int) -> NotificationType:
+    def take_notification(self, handle: int) \
+            -> typing.Union[NotificationType, Exception, Suspended]:
         """Take the result of an asynchronous operation."""
-        result = self.vm.take_notification(handle)
+        try:
+            result = self.vm.take_notification(handle)
+        except VMException as e:
+            return e
+        if isinstance(result, PySuspended):
+            return SUSPENDED
         if result is None:
             return NOT_READY
         if isinstance(result, PyVoid):
@@ -190,10 +204,7 @@ class VMWrapper:
             code = result.code
             message = result.message
             return Failure(code, message)
-        if isinstance(result, PySuspended):
-            # the state machine had suspended
-            raise SUSPENDED
-        raise ValueError(f"Unknown result type: {result}")
+        return ValueError(f"Unknown result type: {result}")
 
     def sys_input(self) -> Invocation:
         """
@@ -286,9 +297,9 @@ class VMWrapper:
         """Clear the state associated with the given name."""
         self.vm.sys_clear_all_state()
 
-    def sys_sleep(self, millis: int):
+    def sys_sleep(self, millis: int, name: typing.Optional[str] = None):
         """Ask to sleep for a given duration"""
-        return self.vm.sys_sleep(millis)
+        return self.vm.sys_sleep(millis, name)
 
     def sys_call(self,
                  service: str,
@@ -387,22 +398,20 @@ class VMWrapper:
         return self.vm.propose_run_completion_failure(handle, res)
 
     # pylint: disable=line-too-long
-    def propose_run_completion_transient(self, handle: int, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig) -> int | None:
+    def propose_run_completion_transient(self, handle: int, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig):
         """
         Exit a side effect with a transient Error.
         This requires a retry policy to be provided.
         """
         py_failure = PyFailure(failure.code, failure.message)
-        py_config = PyExponentialRetryConfig(config.initial_interval, config.max_attempts, config.max_duration)
-        try:
-            handle = self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
-            # The VM decided not to retry, therefore we get back an handle that will be resolved
-            # with a terminal failure.
-            return handle
-        # pylint: disable=bare-except
-        except:
-            # The VM decided to retry, therefore we tear down the current execution
-            return None
+        py_config = PyExponentialRetryConfig(
+            config.initial_interval,
+            config.max_attempts,
+            config.max_duration,
+            config.max_interval,
+            config.interval_factor
+        )
+        self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
 
     def sys_end(self):
         """
@@ -423,3 +432,7 @@ class VMWrapper:
         Attach to an invocation
         """
         return self.vm.attach_invocation(invocation_id)
+
+    def is_replaying(self) -> bool:
+        """Returns true if the state machine is replaying."""
+        return self.vm.is_replaying()

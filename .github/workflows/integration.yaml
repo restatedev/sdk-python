@@ -20,6 +20,11 @@ on:
         required: false
         default: "ghcr.io/restatedev/restate:main"
         type: string
+      serviceImage:
+        description: "service image, if provided it will skip building the image from sdk main branch"
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       restateCommit:
@@ -31,6 +36,11 @@ on:
         description: "restate image, superseded by restate commit"
         required: false
         default: "ghcr.io/restatedev/restate:main"
+        type: string
+      serviceImage:
+        description: "service image, if provided it will skip building the image from sdk main branch"
+        required: false
+        default: ""
         type: string
 
 jobs:
@@ -51,8 +61,9 @@ jobs:
           repository: restatedev/sdk-python
 
       - name: Set up Docker containerd snapshotter
-        uses: crazy-max/ghaction-setup-docker@v3
+        uses: docker/setup-docker-action@v4
         with:
+          version: "v28.5.2"
           set-host: true
           daemon-config: |
             {
@@ -86,11 +97,15 @@ jobs:
           docker tag "${output#*: }" "localhost/restatedev/restate-commit-download:latest"
           docker image ls -a
 
+      # Either build the docker image from source
       - name: Set up QEMU
+        if: ${{ inputs.serviceImage == '' }}
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
+        if: ${{ inputs.serviceImage == '' }}
         uses: docker/setup-buildx-action@v3
       - name: Build Python test-services image
+        if: ${{ inputs.serviceImage == '' }}
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -102,11 +117,17 @@ jobs:
           cache-from: type=gha,scope=${{ github.workflow }}
           cache-to: type=gha,mode=max,scope=${{ github.workflow }}
 
+      # Or use the provided one
+      - name: Pull test services image
+        if: ${{ inputs.serviceImage != '' }}
+        shell: bash
+        run: docker pull ${{ inputs.serviceImage }}
+
       - name: Run test tool
-        uses: restatedev/sdk-test-suite@v3.0
+        uses: restatedev/sdk-test-suite@v3.2
         with:
           restateContainerImage: ${{ inputs.restateCommit != '' && 'localhost/restatedev/restate-commit-download:latest' || (inputs.restateImage != '' && inputs.restateImage || 'ghcr.io/restatedev/restate:main') }}
-          serviceContainerImage: "restatedev/test-services-python"
+          serviceContainerImage: ${{ inputs.serviceImage != '' && inputs.serviceImage || 'restatedev/test-services-python' }}
           exclusionsFile: "test-services/exclusions.yaml"
           testArtifactOutput: "sdk-python-integration-test-report"
           serviceContainerEnvFile: "test-services/.env"

@@ -14,18 +14,59 @@ Restate Context
 """
 
 import abc
+from random import Random
+from uuid import UUID
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine, overload
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine, overload, ParamSpec
 import typing
 from datetime import timedelta
+
 from restate.serde import DefaultSerde, Serde
 
 T = TypeVar('T')
 I = TypeVar('I')
 O = TypeVar('O')
+P = ParamSpec('P')
 
-RunAction = Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]]
 HandlerType = Union[Callable[[Any, I], Awaitable[O]], Callable[[Any], Awaitable[O]]]
+RunAction = Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]]
+
+# pylint: disable=R0902
+@dataclass
+class RunOptions(typing.Generic[T]):
+    """
+    Options for running an action.
+    """
+
+    serde: Serde[T] = DefaultSerde()
+    """The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
+                    See also 'type_hint'."""
+    type_hint: Optional[typing.Type[T]] = None
+    """The type hint of the return value of the action. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer."""
+    max_attempts: Optional[int] = None
+    """Max number of attempts (including the initial), before giving up.
+
+    When giving up, `ctx.run` will throw a `TerminalError` wrapping the original error message."""
+    max_duration: Optional[timedelta] = None
+    """Max duration of retries, before giving up.
+
+    When giving up, `ctx.run` will throw a `TerminalError` wrapping the original error message."""
+    initial_retry_interval: Optional[timedelta] = None
+    """Initial interval for the first retry attempt.
+    Retry interval will grow by a factor specified in `retry_interval_factor`.
+
+    If any of the other retry related fields is specified, the default for this field is 50 milliseconds, otherwise restate will fallback to the overall invocation retry policy."""
+    max_retry_interval: Optional[timedelta] = None
+    """Max interval between retries.
+    Retry interval will grow by a factor specified in `retry_interval_factor`.
+
+    The default is 10 seconds."""
+    retry_interval_factor: Optional[float] = None
+    """Exponentiation factor to use when computing the next retry delay.
+
+    If any of the other retry related fields is specified, the default for this field is `2`, meaning retry interval will double at each attempt, otherwise restate will fallback to the overall invocation retry policy."""
+    max_retry_duration: Optional[timedelta] = None
+    """Deprecated: Use max_duration instead."""
 
 # pylint: disable=R0903
 class RestateDurableFuture(typing.Generic[T], Awaitable[T]):
@@ -197,6 +238,30 @@ class Context(abc.ABC):
         Returns the request object.
         """
 
+    @abc.abstractmethod
+    def random(self) -> Random:
+        """
+        Returns a Random instance inherently predictable, deterministically seeded by Restate.
+
+        This instance is useful to generate identifiers, idempotency keys, and for uniform sampling from a set of options.
+        """
+
+    @abc.abstractmethod
+    def uuid(self) -> UUID:
+        """
+        Returns a random UUID, deterministically seeded.
+
+        This UUID will be stable across retries and replays.
+        """
+
+    @abc.abstractmethod
+    def time(self) -> RestateDurableFuture[float]:
+        """
+        Returns the result of time.time(), durably recorded in the journal.
+
+        This timestamp will be stable across retries and replays.
+        """
+
     @overload
     @abc.abstractmethod
     def run(self,
@@ -210,6 +275,8 @@ class Context(abc.ABC):
             ) -> RestateDurableFuture[T]:
         """
         Runs the given action with the given name.
+
+        DEPRECATED: Use ctx.run_typed instead.
 
         Args:
             name: The name of the action.
@@ -240,6 +307,8 @@ class Context(abc.ABC):
         """
         Runs the given coroutine action with the given name.
 
+        DEPRECATED: Use ctx.run_typed instead.
+
         Args:
             name: The name of the action.
             action: The action to run.
@@ -268,6 +337,8 @@ class Context(abc.ABC):
         """
         Runs the given action with the given name.
 
+        DEPRECATED: Use ctx.run_typed instead.
+
         Args:
             name: The name of the action.
             action: The action to run.
@@ -283,8 +354,75 @@ class Context(abc.ABC):
 
         """
 
+
+    @overload
     @abc.abstractmethod
-    def sleep(self, delta: timedelta) -> RestateDurableSleepFuture:
+    def run_typed(self,
+            name: str,
+            action: Callable[P, Coroutine[Any, Any,T]],
+            options: RunOptions[T] = RunOptions(),
+            /,
+            *args: P.args,
+            **kwargs: P.kwargs,
+            ) -> RestateDurableFuture[T]:
+        """
+        Typed version of run that provides type hints for the function arguments.
+        Runs the given action with the given name.
+
+        Args:
+            name: The name of the action.
+            action: The action to run.
+            options: The options for the run.
+            *args: The arguments to pass to the action.
+            **kwargs: The keyword arguments to pass to the action.
+        """
+
+    @overload
+    @abc.abstractmethod
+    def run_typed(self,
+            name: str,
+            action: Callable[P, T],
+            options: RunOptions[T] = RunOptions(),
+            /,
+            *args: P.args,
+            **kwargs: P.kwargs,
+            ) -> RestateDurableFuture[T]:
+        """
+        Typed version of run that provides type hints for the function arguments.
+        Runs the given coroutine action with the given name.
+
+        Args:
+            name: The name of the action.
+            action: The action to run.
+            options: The options for the run.
+            *args: The arguments to pass to the action.
+            **kwargs: The keyword arguments to pass to the action.
+        """
+
+    @abc.abstractmethod
+    def run_typed(self,
+            name: str,
+            action: Union[Callable[P, Coroutine[Any, Any, T]], Callable[P, T]],
+            options: RunOptions[T] = RunOptions(),
+            /,
+            *args: P.args,
+            **kwargs: P.kwargs,
+            ) -> RestateDurableFuture[T]:
+        """
+        Typed version of run that provides type hints for the function arguments.
+        Runs the given action with the given name.
+
+        Args:
+            name: The name of the action.
+            action: The action to run.
+            options: The options for the run.
+            *args: The arguments to pass to the action.
+            **kwargs: The keyword arguments to pass to the action.
+
+        """
+
+    @abc.abstractmethod
+    def sleep(self, delta: timedelta, name: Optional[str] = None) -> RestateDurableSleepFuture:
         """
         Suspends the current invocation for the given duration
         """
