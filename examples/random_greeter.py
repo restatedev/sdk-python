@@ -9,6 +9,7 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """example.py"""
+
 from datetime import datetime
 
 # pylint: disable=C0116
@@ -18,9 +19,9 @@ from restate import Service, Context
 
 random_greeter = Service("random_greeter")
 
+
 @random_greeter.handler()
 async def greet(ctx: Context, name: str) -> str:
-
     # ctx.random() returns a Python Random instance seeded deterministically.
     # By using ctx.random() you don't write entries in the journal,
     # but you still get the same generated values on retries.
@@ -48,8 +49,10 @@ async def greet(ctx: Context, name: str) -> str:
     # end = await ctx.time()
     # delta = datetime.timedelta(seconds=(end-start))
 
-    return (f"Hello {name} with "
-            f"random number {random_number}, "
-            f"random bytes {random_bytes!r} "
-            f"random uuid {random_uuid},"
-            f"now datetime {now_datetime}!")
+    return (
+        f"Hello {name} with "
+        f"random number {random_number}, "
+        f"random bytes {random_bytes!r} "
+        f"random uuid {random_uuid},"
+        f"now datetime {now_datetime}!"
+    )

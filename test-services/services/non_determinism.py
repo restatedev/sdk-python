@@ -20,15 +20,19 @@ from . import counter
 
 invoke_counts: Dict[str, int] = {}
 
+
 def do_left_action(ctx: ObjectContext) -> bool:
     count_key = ctx.key()
     invoke_counts[count_key] = invoke_counts.get(count_key, 0) + 1
     return invoke_counts[count_key] % 2 == 1
 
+
 def increment_counter(ctx: ObjectContext):
     ctx.object_send(counter.add, key=ctx.key(), arg=1)
 
+
 non_deterministic = VirtualObject("NonDeterministic")
+
 
 @non_deterministic.handler(name="setDifferentKey")
 async def set_different_key(ctx: ObjectContext):
@@ -39,6 +43,7 @@ async def set_different_key(ctx: ObjectContext):
     await ctx.sleep(timedelta(milliseconds=100))
     increment_counter(ctx)
 
+
 @non_deterministic.handler(name="backgroundInvokeWithDifferentTargets")
 async def background_invoke_with_different_targets(ctx: ObjectContext):
     if do_left_action(ctx):
@@ -48,6 +53,7 @@ async def background_invoke_with_different_targets(ctx: ObjectContext):
     await ctx.sleep(timedelta(milliseconds=100))
     increment_counter(ctx)
 
+
 @non_deterministic.handler(name="callDifferentMethod")
 async def call_different_method(ctx: ObjectContext):
     if do_left_action(ctx):
@@ -56,6 +62,7 @@ async def call_different_method(ctx: ObjectContext):
         await ctx.object_call(counter.reset, key="abc", arg=None)
     await ctx.sleep(timedelta(milliseconds=100))
     increment_counter(ctx)
+
 
 @non_deterministic.handler(name="eitherSleepOrCall")
 async def either_sleep_or_call(ctx: ObjectContext):

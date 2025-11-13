@@ -1,6 +1,10 @@
 # syntax=docker.io/docker/dockerfile:1.7-labs
 
-FROM ghcr.io/pyo3/maturin AS build-sdk
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim as build-sdk
+
+ENV UV_PYTHON "3.12"
+
+RUN apt-get update -y && apt-get install -y build-essential
 
 WORKDIR /usr/src/app
 
@@ -13,8 +17,11 @@ COPY requirements.txt .
 COPY pyproject.toml .
 COPY LICENSE .
 COPY README.md .
+COPY uv.lock .
 
-RUN maturin build --out dist --interpreter python3.12
+
+RUN uv sync --all-extras --all-packages
+RUN uv build --all-packages
 
 FROM python:3.12-slim AS test-services
 
@@ -22,7 +29,9 @@ WORKDIR /usr/src/app
 
 COPY --from=build-sdk /usr/src/app/dist/* /usr/src/app/deps/
 
-RUN pip install deps/* && pip install hypercorn
+RUN pip install deps/*whl 
+RUN pip install hypercorn
+
 COPY test-services/ .
 
 EXPOSE 9080

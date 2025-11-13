@@ -1,4 +1,3 @@
-
 #
 #  Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 #
@@ -89,17 +88,20 @@ class Endpoint:
 
         Returns:
             The ASGI application for this endpoint.
-       """
+        """
         # we need to import it here to avoid circular dependencies
         # pylint: disable=C0415
         # pylint: disable=R0401
         from restate.server import asgi_app
+
         return asgi_app(self)
+
 
 def app(
     services: typing.Iterable[typing.Union[Service, VirtualObject, Workflow]],
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None,
-    identity_keys: typing.Optional[typing.List[str]] = None):
+    identity_keys: typing.Optional[typing.List[str]] = None,
+):
     """A restate ASGI application that hosts the given services."""
     endpoint = Endpoint()
     if protocol == "bidi":

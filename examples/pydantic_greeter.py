@@ -17,16 +17,20 @@
 from pydantic import BaseModel
 from restate import Service, Context
 
+
 # models
 class GreetingRequest(BaseModel):
     name: str
 
+
 class Greeting(BaseModel):
     message: str
+
 
 # service
 
 pydantic_greeter = Service("pydantic_greeter")
+
 
 @pydantic_greeter.handler()
 async def greet(ctx: Context, req: GreetingRequest) -> Greeting:

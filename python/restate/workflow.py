@@ -24,8 +24,9 @@ from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import DefaultSerde, Serde
 from restate.handler import Handler, HandlerIO, ServiceTag, make_handler
 
-I = typing.TypeVar('I')
-O = typing.TypeVar('O')
+I = typing.TypeVar("I")
+O = typing.TypeVar("O")
+T = typing.TypeVar("T")
 
 
 # disable too many arguments warning
@@ -36,6 +37,7 @@ O = typing.TypeVar('O')
 
 # disable similar lines warning
 # pylint: disable=R0801
+
 
 # pylint: disable=R0902
 class Workflow:
@@ -78,17 +80,19 @@ class Workflow:
 
     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
 
-    def __init__(self,
-                 name,
-                 description: typing.Optional[str] = None,
-                 metadata: typing.Optional[typing.Dict[str, str]] = None,
-                 inactivity_timeout: typing.Optional[timedelta] = None,
-                 abort_timeout: typing.Optional[timedelta] = None,
-                 journal_retention: typing.Optional[timedelta] = None,
-                 idempotency_retention: typing.Optional[timedelta] = None,
-                 enable_lazy_state: typing.Optional[bool] = None,
-                 ingress_private: typing.Optional[bool] = None,
-                 invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None):
+    def __init__(
+        self,
+        name,
+        description: typing.Optional[str] = None,
+        metadata: typing.Optional[typing.Dict[str, str]] = None,
+        inactivity_timeout: typing.Optional[timedelta] = None,
+        abort_timeout: typing.Optional[timedelta] = None,
+        journal_retention: typing.Optional[timedelta] = None,
+        idempotency_retention: typing.Optional[timedelta] = None,
+        enable_lazy_state: typing.Optional[bool] = None,
+        ingress_private: typing.Optional[bool] = None,
+        invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
+    ):
         self.service_tag = ServiceTag("workflow", name, description, metadata)
         self.handlers = {}
         self.inactivity_timeout = inactivity_timeout
@@ -106,25 +110,27 @@ class Workflow:
         """
         return self.service_tag.name
 
-    def main(self,
-            name: typing.Optional[str] = None,
-            accept: str = "application/json",
-            content_type: str = "application/json",
-            input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
-            output_serde: Serde[O] = DefaultSerde[O](), # type: ignore
-            metadata: typing.Optional[typing.Dict[str, str]] = None,
-            inactivity_timeout: typing.Optional[timedelta] = None,
-            abort_timeout: typing.Optional[timedelta] = None,
-            journal_retention: typing.Optional[timedelta] = None,
-            workflow_retention: typing.Optional[timedelta] = None,
-            enable_lazy_state: typing.Optional[bool] = None,
-            ingress_private: typing.Optional[bool] = None,
-            invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None) -> typing.Callable: # type: ignore
+    def main(
+        self,
+        name: typing.Optional[str] = None,
+        accept: str = "application/json",
+        content_type: str = "application/json",
+        input_serde: Serde[I] = DefaultSerde[I](),  # type: ignore
+        output_serde: Serde[O] = DefaultSerde[O](),  # type: ignore
+        metadata: typing.Optional[typing.Dict[str, str]] = None,
+        inactivity_timeout: typing.Optional[timedelta] = None,
+        abort_timeout: typing.Optional[timedelta] = None,
+        journal_retention: typing.Optional[timedelta] = None,
+        workflow_retention: typing.Optional[timedelta] = None,
+        enable_lazy_state: typing.Optional[bool] = None,
+        ingress_private: typing.Optional[bool] = None,
+        invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
+    ) -> typing.Callable[[T], T]:
         """
         Mark this handler as a workflow entry point.
 
         Args:
-            name: The name of the handler. 
+            name: The name of the handler.
             accept: Set the acceptable content type when ingesting HTTP requests. Wildcards can be used, e.g.
                 `application/*` or `*/*`. Default "application/json".
             content_type: The content type of the request. Default "application/json".
@@ -160,41 +166,45 @@ class Workflow:
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
         """
-        return self._add_handler(name,
-                            kind="workflow",
-                             accept=accept,
-                             content_type=content_type,
-                             input_serde=input_serde,
-                             output_serde=output_serde,
-                             metadata=metadata,
-                             inactivity_timeout=inactivity_timeout,
-                             abort_timeout=abort_timeout,
-                             journal_retention=journal_retention,
-                             idempotency_retention=None,
-                             workflow_retention=workflow_retention,
-                             enable_lazy_state=enable_lazy_state,
-                             ingress_private=ingress_private,
-                             invocation_retry_policy=invocation_retry_policy)
+        return self._add_handler(
+            name,
+            kind="workflow",
+            accept=accept,
+            content_type=content_type,
+            input_serde=input_serde,
+            output_serde=output_serde,
+            metadata=metadata,
+            inactivity_timeout=inactivity_timeout,
+            abort_timeout=abort_timeout,
+            journal_retention=journal_retention,
+            idempotency_retention=None,
+            workflow_retention=workflow_retention,
+            enable_lazy_state=enable_lazy_state,
+            ingress_private=ingress_private,
+            invocation_retry_policy=invocation_retry_policy,
+        )
 
-    def handler(self,
-                name: typing.Optional[str] = None,
-                accept: str = "application/json",
-                content_type: str = "application/json",
-                input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
-                output_serde: Serde[O] = DefaultSerde[O](), # type: ignore
-                metadata: typing.Optional[typing.Dict[str, str]] = None,
-                inactivity_timeout: typing.Optional[timedelta] = None,
-                abort_timeout: typing.Optional[timedelta] = None,
-                journal_retention: typing.Optional[timedelta] = None,
-                idempotency_retention: typing.Optional[timedelta] = None,
-                enable_lazy_state: typing.Optional[bool] = None,
-                ingress_private: typing.Optional[bool] = None,
-                invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None) -> typing.Callable:
+    def handler(
+        self,
+        name: typing.Optional[str] = None,
+        accept: str = "application/json",
+        content_type: str = "application/json",
+        input_serde: Serde[I] = DefaultSerde[I](),  # type: ignore
+        output_serde: Serde[O] = DefaultSerde[O](),  # type: ignore
+        metadata: typing.Optional[typing.Dict[str, str]] = None,
+        inactivity_timeout: typing.Optional[timedelta] = None,
+        abort_timeout: typing.Optional[timedelta] = None,
+        journal_retention: typing.Optional[timedelta] = None,
+        idempotency_retention: typing.Optional[timedelta] = None,
+        enable_lazy_state: typing.Optional[bool] = None,
+        ingress_private: typing.Optional[bool] = None,
+        invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
+    ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
 
         Args:
-            name: The name of the handler. 
+            name: The name of the handler.
             accept: Set the acceptable content type when ingesting HTTP requests. Wildcards can be used, e.g.
                 `application/*` or `*/*`. Default "application/json".
             content_type: The content type of the request. Default "application/json".
@@ -230,32 +240,48 @@ class Workflow:
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
         """
-        return self._add_handler(name, "shared", accept, content_type, input_serde, output_serde, metadata,
-                                 inactivity_timeout, abort_timeout, journal_retention, idempotency_retention,
-                                 None, enable_lazy_state, ingress_private, invocation_retry_policy)
+        return self._add_handler(
+            name,
+            "shared",
+            accept,
+            content_type,
+            input_serde,
+            output_serde,
+            metadata,
+            inactivity_timeout,
+            abort_timeout,
+            journal_retention,
+            idempotency_retention,
+            None,
+            enable_lazy_state,
+            ingress_private,
+            invocation_retry_policy,
+        )
 
     # pylint: disable=R0914
-    def _add_handler(self,
-                name: typing.Optional[str] = None,
-                kind: typing.Literal["workflow", "shared", "exclusive"] = "shared",
-                accept: str = "application/json",
-                content_type: str = "application/json",
-                input_serde: Serde[I] = DefaultSerde[I](), # type: ignore
-                output_serde: Serde[O] = DefaultSerde[O](), # type: ignore
-                metadata: typing.Optional[typing.Dict[str, str]] = None,
-                inactivity_timeout: typing.Optional[timedelta] = None,
-                abort_timeout: typing.Optional[timedelta] = None,
-                journal_retention: typing.Optional[timedelta] = None,
-                idempotency_retention: typing.Optional[timedelta] = None,
-                workflow_retention: typing.Optional[timedelta] = None,
-                enable_lazy_state: typing.Optional[bool] = None,
-                ingress_private: typing.Optional[bool] = None,
-                invocation_retry_policy: typing.Optional["InvocationRetryPolicy"] = None) -> typing.Callable: # type: ignore
+    def _add_handler(
+        self,
+        name: typing.Optional[str] = None,
+        kind: typing.Literal["workflow", "shared", "exclusive"] = "shared",
+        accept: str = "application/json",
+        content_type: str = "application/json",
+        input_serde: Serde[I] = DefaultSerde[I](),  # type: ignore
+        output_serde: Serde[O] = DefaultSerde[O](),  # type: ignore
+        metadata: typing.Optional[typing.Dict[str, str]] = None,
+        inactivity_timeout: typing.Optional[timedelta] = None,
+        abort_timeout: typing.Optional[timedelta] = None,
+        journal_retention: typing.Optional[timedelta] = None,
+        idempotency_retention: typing.Optional[timedelta] = None,
+        workflow_retention: typing.Optional[timedelta] = None,
+        enable_lazy_state: typing.Optional[bool] = None,
+        ingress_private: typing.Optional[bool] = None,
+        invocation_retry_policy: typing.Optional["InvocationRetryPolicy"] = None,
+    ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
 
         Args:
-            name: The name of the handler. 
+            name: The name of the handler.
             kind: The kind of handler (workflow, shared, exclusive). Default "shared".
             accept: Set the acceptable content type when ingesting HTTP requests. Wildcards can be used, e.g.
                 `application/*` or `*/*`. Default "application/json".
@@ -307,32 +333,34 @@ class Workflow:
                 # handler logic
                 pass
         """
-        handler_io = HandlerIO[I,O](accept, content_type, input_serde, output_serde)
-        def wrapper(fn):
+        handler_io = HandlerIO[I, O](accept, content_type, input_serde, output_serde)
 
+        def wrapper(fn):
             @wraps(fn)
             def wrapped(*args, **kwargs):
                 return fn(*args, **kwargs)
 
             signature = inspect.signature(fn, eval_str=True)
             description = inspect.getdoc(fn)
-            handler = make_handler(service_tag=self.service_tag,
-                                   handler_io=handler_io,
-                                   name=name,
-                                   kind=kind,
-                                   wrapped=wrapped,
-                                   signature=signature,
-                                   description=description,
-                                   metadata=metadata,
-                                   inactivity_timeout=inactivity_timeout,
-                                   abort_timeout=abort_timeout,
-                                   journal_retention=journal_retention,
-                                   idempotency_retention=idempotency_retention,
-                                   workflow_retention=workflow_retention,
-                                   enable_lazy_state=enable_lazy_state,
-                                   ingress_private=ingress_private,
-                                   invocation_retry_policy=invocation_retry_policy)
+            handler = make_handler(
+                service_tag=self.service_tag,
+                handler_io=handler_io,
+                name=name,
+                kind=kind,
+                wrapped=wrapped,
+                signature=signature,
+                description=description,
+                metadata=metadata,
+                inactivity_timeout=inactivity_timeout,
+                abort_timeout=abort_timeout,
+                journal_retention=journal_retention,
+                idempotency_retention=idempotency_retention,
+                workflow_retention=workflow_retention,
+                enable_lazy_state=enable_lazy_state,
+                ingress_private=ingress_private,
+                invocation_retry_policy=invocation_retry_policy,
+            )
             self.handlers[handler.name] = handler
             return wrapped
 
-        return wrapper
+        return typing.cast(typing.Callable[[T], T], wrapper)

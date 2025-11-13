@@ -17,18 +17,36 @@ wrap the restate._internal.PyVM class
 
 from dataclasses import dataclass
 import typing
-from restate._internal import PyVM, PyHeader, PyFailure, VMException, PySuspended, PyVoid, PyStateKeys, PyExponentialRetryConfig, PyDoProgressAnyCompleted, PyDoProgressReadFromInput, PyDoProgressExecuteRun, PyDoWaitForPendingRun, PyDoProgressCancelSignalReceived, CANCEL_NOTIFICATION_HANDLE  # pylint: disable=import-error,no-name-in-module,line-too-long
+from restate._internal import (
+    PyVM,
+    PyHeader,
+    PyFailure,
+    VMException,
+    PySuspended,
+    PyVoid,
+    PyStateKeys,
+    PyExponentialRetryConfig,
+    PyDoProgressAnyCompleted,
+    PyDoProgressReadFromInput,
+    PyDoProgressExecuteRun,
+    PyDoWaitForPendingRun,
+    PyDoProgressCancelSignalReceived,
+    CANCEL_NOTIFICATION_HANDLE,
+)  # pylint: disable=import-error,no-name-in-module,line-too-long
+
 
 @dataclass
 class Invocation:
     """
     Invocation dataclass
     """
+
     invocation_id: str
     random_seed: int
     headers: typing.List[typing.Tuple[str, str]]
     input_buffer: bytes
     key: str
+
 
 @dataclass
 class RunRetryConfig:
@@ -37,19 +55,23 @@ class RunRetryConfig:
 
     All duration/interval values are in milliseconds.
     """
+
     initial_interval: typing.Optional[int] = None
     max_attempts: typing.Optional[int] = None
     max_duration: typing.Optional[int] = None
     max_interval: typing.Optional[int] = None
     interval_factor: typing.Optional[float] = None
 
+
 @dataclass
 class Failure:
     """
     Failure
     """
+
     code: int
     message: str
+
 
 @dataclass
 class NotReady:
@@ -57,57 +79,69 @@ class NotReady:
     NotReady
     """
 
+
 NOT_READY = NotReady()
 CANCEL_HANDLE = CANCEL_NOTIFICATION_HANDLE
 
 NotificationType = typing.Optional[typing.Union[bytes, Failure, NotReady, list[str], str]]
+
 
 class Suspended:
     """
     Represents a suspended error
     """
 
+
 SUSPENDED = Suspended()
+
 
 class DoProgressAnyCompleted:
     """
     Represents a notification that any of the handles has completed.
     """
 
+
 class DoProgressReadFromInput:
     """
     Represents a notification that the input needs to be read.
     """
 
+
 class DoProgressExecuteRun:
     """
     Represents a notification that a run needs to be executed.
     """
+
     handle: int
 
     def __init__(self, handle):
         self.handle = handle
+
 
 class DoProgressCancelSignalReceived:
     """
     Represents a notification that a cancel signal has been received
     """
 
+
 class DoWaitPendingRun:
     """
     Represents a notification that a run is pending
     """
+
 
 DO_PROGRESS_ANY_COMPLETED = DoProgressAnyCompleted()
 DO_PROGRESS_READ_FROM_INPUT = DoProgressReadFromInput()
 DO_PROGRESS_CANCEL_SIGNAL_RECEIVED = DoProgressCancelSignalReceived()
 DO_WAIT_PENDING_RUN = DoWaitPendingRun()
 
-DoProgressResult = typing.Union[DoProgressAnyCompleted,
-                                DoProgressReadFromInput,
-                                DoProgressExecuteRun,
-                                DoProgressCancelSignalReceived,
-                                DoWaitPendingRun]
+DoProgressResult = typing.Union[
+    DoProgressAnyCompleted,
+    DoProgressReadFromInput,
+    DoProgressExecuteRun,
+    DoProgressCancelSignalReceived,
+    DoWaitPendingRun,
+]
 
 
 # pylint: disable=too-many-public-methods
@@ -155,8 +189,7 @@ class VMWrapper:
         return self.vm.is_completed(handle)
 
     # pylint: disable=R0911
-    def do_progress(self, handles: list[int]) \
-            -> typing.Union[DoProgressResult, Exception, Suspended]:
+    def do_progress(self, handles: list[int]) -> typing.Union[DoProgressResult, Exception, Suspended]:
         """Do progress with notifications."""
         try:
             result = self.vm.do_progress(handles)
@@ -176,8 +209,7 @@ class VMWrapper:
             return DO_WAIT_PENDING_RUN
         return ValueError(f"Unknown progress type: {result}")
 
-    def take_notification(self, handle: int) \
-            -> typing.Union[NotificationType, Exception, Suspended]:
+    def take_notification(self, handle: int) -> typing.Union[NotificationType, Exception, Suspended]:
         """Take the result of an asynchronous operation."""
         try:
             result = self.vm.take_notification(handle)
@@ -208,10 +240,10 @@ class VMWrapper:
 
     def sys_input(self) -> Invocation:
         """
-            Retrieves the system input from the virtual machine.
+        Retrieves the system input from the virtual machine.
 
-            Returns:
-                An instance of the Invocation class containing the system input.
+        Returns:
+            An instance of the Invocation class containing the system input.
         """
         inp = self.vm.sys_input()
         invocation_id: str = inp.invocation_id
@@ -221,11 +253,8 @@ class VMWrapper:
         key: str = inp.key
 
         return Invocation(
-            invocation_id=invocation_id,
-            random_seed=random_seed,
-            headers=headers,
-            input_buffer=input_buffer,
-            key=key)
+            invocation_id=invocation_id, random_seed=random_seed, headers=headers, input_buffer=input_buffer, key=key
+        )
 
     def sys_write_output_success(self, output: bytes):
         """
@@ -252,7 +281,6 @@ class VMWrapper:
         res = PyFailure(output.code, output.message)
         self.vm.sys_write_output_failure(res)
 
-
     def sys_get_state(self, name) -> int:
         """
         Retrieves a key-value binding.
@@ -265,7 +293,6 @@ class VMWrapper:
         """
         return self.vm.sys_get_state(name)
 
-
     def sys_get_state_keys(self) -> int:
         """
         Retrieves all keys.
@@ -274,7 +301,6 @@ class VMWrapper:
             The state keys
         """
         return self.vm.sys_get_state_keys()
-
 
     def sys_set_state(self, name: str, value: bytes):
         """
@@ -301,29 +327,31 @@ class VMWrapper:
         """Ask to sleep for a given duration"""
         return self.vm.sys_sleep(millis, name)
 
-    def sys_call(self,
-                 service: str,
-                 handler: str,
-                 parameter: bytes,
-                 key: typing.Optional[str] = None,
-                 idempotency_key: typing.Optional[str] = None,
-                 headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None
-                 ):
+    def sys_call(
+        self,
+        service: str,
+        handler: str,
+        parameter: bytes,
+        key: typing.Optional[str] = None,
+        idempotency_key: typing.Optional[str] = None,
+        headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None,
+    ):
         """Call a service"""
         if headers:
             headers = [PyHeader(key=h[0], value=h[1]) for h in headers]
         return self.vm.sys_call(service, handler, parameter, key, idempotency_key, headers)
 
     # pylint: disable=too-many-arguments
-    def sys_send(self,
-                 service: str,
-                 handler: str,
-                 parameter: bytes,
-                 key: typing.Optional[str] = None,
-                 delay: typing.Optional[int] = None,
-                 idempotency_key: typing.Optional[str] = None,
-                 headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None
-                 ) -> int:
+    def sys_send(
+        self,
+        service: str,
+        handler: str,
+        parameter: bytes,
+        key: typing.Optional[str] = None,
+        delay: typing.Optional[int] = None,
+        idempotency_key: typing.Optional[str] = None,
+        headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None,
+    ) -> int:
         """
         send an invocation to a service, and return the handle
         to the promise that will resolve with the invocation id
@@ -398,7 +426,9 @@ class VMWrapper:
         return self.vm.propose_run_completion_failure(handle, res)
 
     # pylint: disable=line-too-long
-    def propose_run_completion_transient(self, handle: int, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig):
+    def propose_run_completion_transient(
+        self, handle: int, failure: Failure, attempt_duration_ms: int, config: RunRetryConfig
+    ):
         """
         Exit a side effect with a transient Error.
         This requires a retry policy to be provided.
@@ -409,7 +439,7 @@ class VMWrapper:
             config.max_attempts,
             config.max_duration,
             config.max_interval,
-            config.interval_factor
+            config.interval_factor,
         )
         self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
 

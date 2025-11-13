@@ -20,18 +20,23 @@ import typing
 from pydantic import BaseModel
 from restate import wait_completed, Service, Context
 
+
 # models
 class GreetingRequest(BaseModel):
     name: str
 
+
 class Greeting(BaseModel):
     messages: typing.List[str]
+
 
 class Message(BaseModel):
     role: str
     content: str
 
+
 concurrent_greeter = Service("concurrent_greeter")
+
 
 @concurrent_greeter.handler()
 async def greet(ctx: Context, req: GreetingRequest) -> Greeting:
@@ -45,16 +50,18 @@ async def greet(ctx: Context, req: GreetingRequest) -> Greeting:
 
     # cancel the pending calls
     for f in pending:
-        await f.cancel_invocation() # type: ignore
+        await f.cancel_invocation()  # type: ignore
 
     return Greeting(messages=greetings)
 
 
 # not really interesting, just for this demo:
 
+
 @concurrent_greeter.handler()
 async def claude_sonnet(ctx: Context, req: Message) -> str:
     return f"Bonjour {req.content[13:]}!"
+
 
 @concurrent_greeter.handler()
 async def open_ai(ctx: Context, req: Message) -> str:

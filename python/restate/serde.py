@@ -8,67 +8,83 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-""" This module contains functions for serializing and deserializing data. """
+"""This module contains functions for serializing and deserializing data."""
+
 import abc
 import json
 import typing
 
 from dataclasses import asdict, is_dataclass
 
+
 def try_import_pydantic_base_model():
     """
     Try to import PydanticBaseModel from Pydantic.
     """
     try:
-        from pydantic import BaseModel # type: ignore # pylint: disable=import-outside-toplevel
+        from pydantic import BaseModel  # type: ignore # pylint: disable=import-outside-toplevel
+
         return BaseModel
     except ImportError:
-        class Dummy: # pylint: disable=too-few-public-methods
+
+        class Dummy:  # pylint: disable=too-few-public-methods
             """a dummy class to use when Pydantic is not available"""
 
         return Dummy
+
 
 def try_import_from_dacite():
     """
     Try to import from_dict from dacite.
     """
     try:
-        from dacite import from_dict # type: ignore # pylint: disable=import-outside-toplevel
+        from dacite import from_dict  # type: ignore # pylint: disable=import-outside-toplevel
 
-        return asdict, from_dict
+        def _to_dict(obj: typing.Any) -> dict[typing.Any, typing.Any]:
+            return asdict(obj)
+
+        def _from_dict(data_class: typing.Any, data: typing.Any) -> typing.Any:
+            return from_dict(data_class, data)
+
+        return _to_dict, _from_dict
 
     except ImportError:
 
-        def to_dict(obj):
+        def _to_dict(obj: typing.Any) -> dict[typing.Any, typing.Any]:
             """a dummy function when dacite is not available"""
-            raise RuntimeError("Trying to deserialize into a @dataclass." \
-            "Please add the optional dependencies needed." \
-            "use pip install restate-sdk[serde] "
-            "or" \
-            " pip install restate-sdk[all] to install all dependencies.")
+            raise RuntimeError(
+                "Trying to deserialize into a @dataclass."
+                "Please add the optional dependencies needed."
+                "use pip install restate-sdk[serde] "
+                "or"
+                " pip install restate-sdk[all] to install all dependencies."
+            )
 
-
-        def from_dict(a,b): # pylint: disable=too-few-public-methods,unused-argument
+        def _from_dict(data_class: typing.Any, data: typing.Any) -> typing.Any:  # pylint: disable=too-few-public-methods,unused-argument
             """a dummy function when dacite is not available"""
 
-            raise RuntimeError("Trying to deserialize into a @dataclass." \
-            "Please add the optional dependencies needed." \
-            "use pip install restate-sdk[serde] "
-            "or" \
-            " pip install restate-sdk[all] to install all dependencies.")
+            raise RuntimeError(
+                "Trying to deserialize into a @dataclass."
+                "Please add the optional dependencies needed."
+                "use pip install restate-sdk[serde] "
+                "or"
+                " pip install restate-sdk[all] to install all dependencies."
+            )
 
-        return to_dict, from_dict
+        return _to_dict, _from_dict
+
 
 PydanticBaseModel = try_import_pydantic_base_model()
 # pylint: disable=C0103
 DaciteToDict, DaciteFromDict = try_import_from_dacite()
 
-T = typing.TypeVar('T')
-I = typing.TypeVar('I')
-O = typing.TypeVar('O')
+T = typing.TypeVar("T")
+I = typing.TypeVar("I")
+O = typing.TypeVar("O")
 
 # disable to few parameters
 # pylint: disable=R0903
+
 
 def is_pydantic(annotation) -> bool:
     """
@@ -79,6 +95,7 @@ def is_pydantic(annotation) -> bool:
     except TypeError:
         # annotation is not a class or a type
         return False
+
 
 class Serde(typing.Generic[T], abc.ABC):
     """serializer/deserializer interface."""
@@ -94,6 +111,7 @@ class Serde(typing.Generic[T], abc.ABC):
         """
         Serializes an object to a bytearray.
         """
+
 
 class BytesSerde(Serde[bytes]):
     """A pass-trough serializer/deserializer."""
@@ -157,6 +175,7 @@ class JsonSerde(Serde[I]):
 
         return bytes(json.dumps(obj), "utf-8")
 
+
 class DefaultSerde(Serde[I]):
     """
     The default serializer/deserializer used when no explicit type hints are provided.
@@ -168,15 +187,15 @@ class DefaultSerde(Serde[I]):
         - Otherwise, it falls back to `json.dumps()`.
     - Deserialization:
         - Uses `json.loads()` to convert byte arrays into Python objects.
-        - Does **not** automatically reconstruct Pydantic models; 
+        - Does **not** automatically reconstruct Pydantic models;
             deserialized objects remain as generic JSON structures (dicts, lists, etc.).
 
     Serde Selection:
-    - When using the `@handler` decorator, if a function's type hints specify a Pydantic model, 
+    - When using the `@handler` decorator, if a function's type hints specify a Pydantic model,
       `PydanticJsonSerde` is automatically selected instead of `DefaultSerde`.
     - `DefaultSerde` is only used if no explicit type hints are provided.
 
-    This serde ensures compatibility with both structured (Pydantic) and unstructured JSON data, 
+    This serde ensures compatibility with both structured (Pydantic) and unstructured JSON data,
     while allowing automatic serde selection based on type hints.
     """
 
@@ -209,7 +228,7 @@ class DefaultSerde(Serde[I]):
         if not buf:
             return None
         if is_pydantic(self.type_hint):
-            return self.type_hint.model_validate_json(buf) # type: ignore
+            return self.type_hint.model_validate_json(buf)  # type: ignore
         if is_dataclass(self.type_hint):
             data = json.loads(buf)
             return DaciteFromDict(self.type_hint, data)
@@ -231,7 +250,7 @@ class DefaultSerde(Serde[I]):
         if is_pydantic(self.type_hint):
             return obj.model_dump_json().encode("utf-8")  # type: ignore[attr-defined]
         if is_dataclass(obj):
-            data = DaciteToDict(obj) # type: ignore
+            data = DaciteToDict(obj)  # type: ignore
             return json.dumps(data).encode("utf-8")
         return json.dumps(obj).encode("utf-8")
 
@@ -270,5 +289,5 @@ class PydanticJsonSerde(Serde[I]):
         """
         if obj is None:
             return bytes()
-        json_str = obj.model_dump_json() # type: ignore[attr-defined]
+        json_str = obj.model_dump_json()  # type: ignore[attr-defined]
         return json_str.encode("utf-8")

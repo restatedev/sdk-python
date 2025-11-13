@@ -24,15 +24,16 @@ from restate.serde import Serde, DefaultSerde
 from restate.retry_policy import InvocationRetryPolicy
 from .handler import Handler, HandlerIO, ServiceTag, make_handler
 
-I = typing.TypeVar('I')
-O = typing.TypeVar('O')
-
+I = typing.TypeVar("I")
+O = typing.TypeVar("O")
+T = typing.TypeVar("T")
 
 # disable too many arguments warning
 # pylint: disable=R0913
 
 # disable line too long warning
 # pylint: disable=C0301,R0902
+
 
 class Service:
     """
@@ -69,15 +70,18 @@ class Service:
         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this service.
     """
 
-    def __init__(self, name: str,
-                 description: typing.Optional[str] = None,
-                 metadata: typing.Optional[typing.Dict[str, str]] = None,
-                 inactivity_timeout: typing.Optional[timedelta] = None,
-                 abort_timeout: typing.Optional[timedelta] = None,
-                 journal_retention: typing.Optional[timedelta] = None,
-                 idempotency_retention: typing.Optional[timedelta] = None,
-                 ingress_private: typing.Optional[bool] = None,
-                 invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        description: typing.Optional[str] = None,
+        metadata: typing.Optional[typing.Dict[str, str]] = None,
+        inactivity_timeout: typing.Optional[timedelta] = None,
+        abort_timeout: typing.Optional[timedelta] = None,
+        journal_retention: typing.Optional[timedelta] = None,
+        idempotency_retention: typing.Optional[timedelta] = None,
+        ingress_private: typing.Optional[bool] = None,
+        invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
+    ) -> None:
         self.service_tag = ServiceTag("service", name, description, metadata)
         self.handlers: typing.Dict[str, Handler] = {}
         self.inactivity_timeout = inactivity_timeout
@@ -94,25 +98,26 @@ class Service:
         """
         return self.service_tag.name
 
-    def handler(self,
-                name: typing.Optional[str] = None,
-                accept: str = "application/json",
-                content_type: str = "application/json",
-                input_serde: Serde[I] = DefaultSerde(),
-                output_serde: Serde[O] = DefaultSerde(),
-                metadata: typing.Optional[typing.Dict[str, str]] = None,
-                inactivity_timeout: typing.Optional[timedelta] = None,
-                abort_timeout: typing.Optional[timedelta] = None,
-                journal_retention: typing.Optional[timedelta] = None,
-                idempotency_retention: typing.Optional[timedelta] = None,
-                ingress_private: typing.Optional[bool] = None,
-                invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None) -> typing.Callable:
-
+    def handler(
+        self,
+        name: typing.Optional[str] = None,
+        accept: str = "application/json",
+        content_type: str = "application/json",
+        input_serde: Serde[I] = DefaultSerde(),
+        output_serde: Serde[O] = DefaultSerde(),
+        metadata: typing.Optional[typing.Dict[str, str]] = None,
+        inactivity_timeout: typing.Optional[timedelta] = None,
+        abort_timeout: typing.Optional[timedelta] = None,
+        journal_retention: typing.Optional[timedelta] = None,
+        idempotency_retention: typing.Optional[timedelta] = None,
+        ingress_private: typing.Optional[bool] = None,
+        invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
+    ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
 
         Args:
-            name: The name of the handler. 
+            name: The name of the handler.
             accept: Set the acceptable content type when ingesting HTTP requests. Wildcards can be used, e.g.
                 `application/*` or `*/*`. Default "application/json".
             content_type: The content type of the request. Default "application/json".
@@ -157,17 +162,33 @@ class Service:
                 # handler logic
                 pass
         """
-        handler_io = HandlerIO[I,O](accept, content_type, input_serde, output_serde)
+        handler_io = HandlerIO[I, O](accept, content_type, input_serde, output_serde)
+
         def wrapper(fn):
             @wraps(fn)
             def wrapped(*args, **kwargs):
                 return fn(*args, **kwargs)
 
             signature = inspect.signature(fn, eval_str=True)
-            handler = make_handler(self.service_tag, handler_io, name, None, wrapped, signature, inspect.getdoc(fn), metadata,
-                                   inactivity_timeout, abort_timeout, journal_retention, idempotency_retention,
-                                   None, None, ingress_private, invocation_retry_policy)
+            handler = make_handler(
+                self.service_tag,
+                handler_io,
+                name,
+                None,
+                wrapped,
+                signature,
+                inspect.getdoc(fn),
+                metadata,
+                inactivity_timeout,
+                abort_timeout,
+                journal_retention,
+                idempotency_retention,
+                None,
+                None,
+                ingress_private,
+                invocation_retry_policy,
+            )
             self.handlers[handler.name] = handler
             return wrapped
 
-        return wrapper
+        return typing.cast(typing.Callable[[T], T], wrapper)

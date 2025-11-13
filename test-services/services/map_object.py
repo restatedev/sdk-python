@@ -22,19 +22,22 @@ class Entry(TypedDict):
     key: str
     value: str
 
+
 @map_object.handler(name="set")
 async def map_set(ctx: ObjectContext, entry: Entry):
     ctx.set(entry["key"], entry["value"])
+
 
 @map_object.handler(name="get")
 async def map_get(ctx: ObjectContext, key: str) -> str:
     return await ctx.get(key) or ""
 
+
 @map_object.handler(name="clearAll")
 async def map_clear_all(ctx: ObjectContext) -> list[Entry]:
     entries = []
     for key in await ctx.state_keys():
-        value: str = await ctx.get(key) # type: ignore 
+        value: str = await ctx.get(key)  # type: ignore
         entry = Entry(key=key, value=value)
         entries.append(entry)
         ctx.clear(key)

@@ -9,6 +9,7 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """example.py"""
+
 from datetime import timedelta
 
 # pylint: disable=C0116
@@ -21,17 +22,21 @@ from restate import RunOptions
 
 failing = VirtualObject("Failing")
 
+
 @failing.handler(name="terminallyFailingCall")
 async def terminally_failing_call(ctx: ObjectContext, msg: str):
     raise TerminalError(message=msg)
 
+
 @failing.handler(name="callTerminallyFailingCall")
 async def call_terminally_failing_call(ctx: ObjectContext, msg: str) -> str:
-    await ctx.object_call(terminally_failing_call,  key="random-583e1bf2", arg=msg)
+    await ctx.object_call(terminally_failing_call, key="random-583e1bf2", arg=msg)
 
     raise Exception("Should not reach here")
 
+
 failures = 0
+
 
 @failing.handler(name="failingCallWithEventualSuccess")
 async def failing_call_with_eventual_success(ctx: ObjectContext) -> int:
@@ -42,9 +47,9 @@ async def failing_call_with_eventual_success(ctx: ObjectContext) -> int:
         return 4
     raise ValueError(f"Failed at attempt: {failures}")
 
+
 @failing.handler(name="terminallyFailingSideEffect")
 async def terminally_failing_side_effect(ctx: ObjectContext, error_message: str):
-
     def side_effect():
         raise TerminalError(message=error_message)
 
@@ -53,6 +58,7 @@ async def terminally_failing_side_effect(ctx: ObjectContext, error_message: str)
 
 
 eventual_success_side_effects = 0
+
 
 @failing.handler(name="sideEffectSucceedsAfterGivenAttempts")
 async def side_effect_succeeds_after_given_attempts(ctx: ObjectContext, minimum_attempts: int) -> int:
@@ -63,24 +69,30 @@ async def side_effect_succeeds_after_given_attempts(ctx: ObjectContext, minimum_
             return eventual_success_side_effects
         raise ValueError(f"Failed at attempt: {eventual_success_side_effects}")
 
-    options: RunOptions[int] = RunOptions(max_attempts=minimum_attempts + 1, initial_retry_interval=timedelta(milliseconds=1), retry_interval_factor=1.0)
+    options: RunOptions[int] = RunOptions(
+        max_attempts=minimum_attempts + 1, initial_retry_interval=timedelta(milliseconds=1), retry_interval_factor=1.0
+    )
     return await ctx.run_typed("sideEffect", side_effect, options)
+
 
 eventual_failure_side_effects = 0
 
+
 @failing.handler(name="sideEffectFailsAfterGivenAttempts")
 async def side_effect_fails_after_given_attempts(ctx: ObjectContext, retry_policy_max_retry_count: int) -> int:
-
     def side_effect():
         global eventual_failure_side_effects
         eventual_failure_side_effects += 1
         raise ValueError(f"Failed at attempt: {eventual_failure_side_effects}")
 
     try:
-        options: RunOptions[int] = RunOptions(max_attempts=retry_policy_max_retry_count, initial_retry_interval=timedelta(milliseconds=1), retry_interval_factor=1.0)
+        options: RunOptions[int] = RunOptions(
+            max_attempts=retry_policy_max_retry_count,
+            initial_retry_interval=timedelta(milliseconds=1),
+            retry_interval_factor=1.0,
+        )
         await ctx.run_typed("sideEffect", side_effect, options)
         raise ValueError("Side effect did not fail.")
-    except TerminalError as t:
+    except TerminalError:
         global eventual_failure_side_effects
         return eventual_failure_side_effects
-
