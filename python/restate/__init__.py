@@ -26,6 +26,7 @@ from .workflow import Workflow
 from .context import Context, ObjectContext, ObjectSharedContext
 from .context import WorkflowContext, WorkflowSharedContext
 from .retry_policy import InvocationRetryPolicy
+from .client_types import RestateClient, RestateClientSendHandle
 
 # pylint: disable=line-too-long
 from .context import (
@@ -58,7 +59,7 @@ except ImportError:
         always_replay: bool = False,
         disable_retries: bool = False,
     ) -> typing.Generator[TestHarnessEnvironment, None, None]:
-        """a dummy harness constructor to raise ImportError"""
+        """a dummy harness constructor to raise ImportError. Install restate-sdk[harness] to use this feature"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
 
     def test_harness(
@@ -68,8 +69,18 @@ except ImportError:
         always_replay: bool = False,
         disable_retries: bool = False,
     ):
-        """a dummy harness constructor to raise ImportError"""
+        """a dummy harness constructor to raise ImportError. Install restate-sdk[harness] to use this feature"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
+
+
+try:
+    from .client import create_client
+except ImportError:
+    # we don't have the appropriate dependencies installed
+
+    def create_client(ingress: str, headers: typing.Optional[dict] = None) -> RestateClient:
+        """a dummy client constructor to raise ImportError. Install restate-sdk[client] to use this feature"""
+        raise ImportError("Install restate-sdk[client] to use this feature")
 
 
 __all__ = [
@@ -101,4 +112,7 @@ __all__ = [
     "SdkInternalBaseException",
     "is_internal_exception",
     "getLogger",
+    "RestateClient",
+    "RestateClientSendHandle",
+    "create_client",
 ]
