@@ -545,6 +545,9 @@ name = "restate-sdk"
 source = { editable = "." }
 
 [package.optional-dependencies]
+client = [
+    { name = "httpx" },
+]
 harness = [
     { name = "httpx" },
     { name = "hypercorn" },
@@ -567,6 +570,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "dacite", marker = "extra == 'serde'" },
+    { name = "httpx", marker = "extra == 'client'" },
     { name = "httpx", marker = "extra == 'harness'" },
     { name = "hypercorn", marker = "extra == 'harness'" },
     { name = "hypercorn", marker = "extra == 'test'" },
@@ -577,7 +581,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6.9" },
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
-provides-extras = ["test", "lint", "harness", "serde"]
+provides-extras = ["test", "lint", "harness", "serde", "client"]
 
 [[package]]
 name = "ruff"
