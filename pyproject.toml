@@ -25,6 +25,7 @@ test = ["pytest", "hypercorn"]
 lint = ["mypy>=1.11.2", "pyright>=1.1.390", "ruff>=0.6.9"]
 harness = ["testcontainers", "hypercorn", "httpx"]
 serde = ["dacite", "pydantic"]
+client = ["httpx"]
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]
