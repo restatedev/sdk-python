@@ -45,6 +45,7 @@ class Client(RestateClient):
         send: bool = False,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        force_json_output: bool = False,
     ) -> O:
         """Make an RPC call to the given handler"""
         target_handler = handler_from_callable(tpe)
@@ -63,7 +64,7 @@ class Client(RestateClient):
 
         service = target_handler.service_tag.name
         handler = target_handler.name
-        output_serde = target_handler.handler_io.output_serde
+        output_serde = target_handler.handler_io.output_serde if force_json_output is False else JsonSerde()
 
         return await self.do_raw_call(
             service=service,
@@ -158,6 +159,30 @@ class Client(RestateClient):
 
     @typing.final
     @typing.override
+    async def service_send(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        send_handle = await self.do_call(
+            tpe,
+            parameter=arg,
+            send=True,
+            send_delay=send_delay,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            force_json_output=True,
+        )
+
+        send = typing.cast(typing.Dict[str, str], send_handle)
+
+        return RestateClientSendHandle(send.get("invocationId", ""), 200)  # TODO: verify
+
+    @typing.final
+    @typing.override
     async def object_call(
         self,
         tpe: HandlerType[I, O],
@@ -171,6 +196,32 @@ class Client(RestateClient):
 
     @typing.final
     @typing.override
+    async def object_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        send_handle = await self.do_call(
+            tpe,
+            parameter=arg,
+            key=key,
+            send=True,
+            send_delay=send_delay,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            force_json_output=True,
+        )
+
+        send = typing.cast(typing.Dict[str, str], send_handle)
+
+        return RestateClientSendHandle(send.get("invocationId", ""), 200)  # TODO: verify
+
+    @typing.final
+    @typing.override
     async def workflow_call(
         self,
         tpe: HandlerType[I, O],
@@ -180,6 +231,26 @@ class Client(RestateClient):
         headers: typing.Dict[str, str] | None = None,
     ) -> O:
         return await self.object_call(tpe, key, arg, idempotency_key=idempotency_key, headers=headers)
+
+    @typing.final
+    @typing.override
+    async def workflow_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        return await self.object_send(
+            tpe,
+            key,
+            arg,
+            send_delay=send_delay,
+            idempotency_key=idempotency_key,
+            headers=headers,
+        )
 
     @typing.final
     @typing.override
