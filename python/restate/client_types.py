@@ -51,6 +51,18 @@ class RestateClient(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def service_send(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        """Make a send operation to the given handler"""
+        pass
+
+    @abc.abstractmethod
     async def object_call(
         self,
         tpe: HandlerType[I, O],
@@ -63,6 +75,19 @@ class RestateClient(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def object_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        """Make a send operation to the given object handler"""
+        pass
+
+    @abc.abstractmethod
     async def workflow_call(
         self,
         tpe: HandlerType[I, O],
@@ -72,6 +97,19 @@ class RestateClient(abc.ABC):
         headers: typing.Dict[str, str] | None = None,
     ) -> O:
         """Make an RPC call to the given workflow handler"""
+        pass
+
+    @abc.abstractmethod
+    async def workflow_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        """Make a send operation to the given workflow handler"""
         pass
 
     @abc.abstractmethod
