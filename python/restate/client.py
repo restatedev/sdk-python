@@ -15,6 +15,7 @@ This is a basic remote client for the Restate service.
 from datetime import timedelta
 import httpx
 import typing
+from contextlib import asynccontextmanager
 
 from .client_types import RestateClient, RestateClientSendHandle
 
@@ -31,10 +32,9 @@ class Client(RestateClient):
     A basic client for connecting to the Restate service.
     """
 
-    def __init__(self, ingress: str, headers: typing.Optional[dict] = None):
-        self.ingress = ingress
+    def __init__(self, client: httpx.AsyncClient, headers: typing.Optional[dict] = None):
         self.headers = headers or {}
-        self.client = httpx.AsyncClient(base_url=ingress, headers=self.headers)
+        self.client = client
 
     async def do_call(
         self,
@@ -236,8 +236,10 @@ class Client(RestateClient):
         return RestateClientSendHandle(send_handle_json.get("invocationId", ""), 200)  # TODO: verify
 
 
-def create_client(ingress: str, headers: typing.Optional[dict] = None) -> RestateClient:
+@asynccontextmanager
+async def create_client(ingress: str, headers: typing.Optional[dict] = None) -> typing.AsyncGenerator[RestateClient]:
     """
     Create a new Restate client.
     """
-    return Client(ingress, headers)
+    async with httpx.AsyncClient(base_url=ingress, headers=headers) as http_client:
+        yield Client(http_client, headers)

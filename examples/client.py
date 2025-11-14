@@ -10,7 +10,7 @@
 #
 import restate
 
-from virtual_object import count, increment
+from virtual_object import increment, count
 
 #
 # uv run examples/client.py
@@ -18,13 +18,12 @@ from virtual_object import count, increment
 
 
 async def main():
-    client = restate.create_client("http://localhost:8080")
-    res = await client.object_call(increment, key="a", arg=5)
+    async with restate.create_client("http://localhost:8080") as client:
+        await client.object_call(increment, key="a", arg=5)
 
-    res_count = await client.object_call(count, key="a", arg=None)
+        current_count = await client.object_call(count, key="a", arg=None)
 
-    print(res)
-    print(res_count)
+        print(f"Current count for 'a': {current_count}")
 
 
 if __name__ == "__main__":

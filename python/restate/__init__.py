@@ -12,7 +12,7 @@
 Restate SDK for Python
 """
 
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 import typing
 
 from restate.server_types import RestateAppT
@@ -78,9 +78,13 @@ try:
 except ImportError:
     # we don't have the appropriate dependencies installed
 
-    def create_client(ingress: str, headers: typing.Optional[dict] = None) -> RestateClient:
+    @asynccontextmanager
+    async def create_client(
+        ingress: str, headers: typing.Optional[dict] = None
+    ) -> typing.AsyncGenerator[RestateClient]:
         """a dummy client constructor to raise ImportError. Install restate-sdk[client] to use this feature"""
         raise ImportError("Install restate-sdk[client] to use this feature")
+        yield  # type: ignore
 
 
 __all__ = [
