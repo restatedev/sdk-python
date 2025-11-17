@@ -17,15 +17,17 @@ import threading
 import typing
 from urllib.error import URLError
 import socket
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 from warnings import deprecated
 
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
+from restate.client import create_client
 from restate.server_types import RestateAppT
 from restate.types import TestHarnessEnvironment
 from testcontainers.core.container import DockerContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_container_is_ready  # type: ignore
+
 import httpx
 
 
@@ -332,14 +334,14 @@ def test_harness(
     return RestateTestHarness(app, config)
 
 
-@contextmanager
-def create_test_harness(
+@asynccontextmanager
+async def create_test_harness(
     app: RestateAppT,
     follow_logs: bool = False,
     restate_image: str = "restatedev/restate:latest",
     always_replay: bool = False,
     disable_retries: bool = False,
-) -> typing.Generator[TestHarnessEnvironment, None, None]:
+) -> typing.AsyncGenerator[TestHarnessEnvironment, None]:
     """
     Creates a test harness for running Restate services together with restate-server.
 
@@ -378,4 +380,7 @@ def create_test_harness(
             msg = f"unable to register the services at {bind_address} - {res.status_code} {res.text}"
             raise AssertionError(msg)
 
-        yield TestHarnessEnvironment(ingress_url=runtime.ingress_url(), admin_api_url=runtime.admin_url())
+        async with create_client(runtime.ingress_url()) as client:
+            yield TestHarnessEnvironment(
+                ingress_url=runtime.ingress_url(), admin_api_url=runtime.admin_url(), client=client
+            )

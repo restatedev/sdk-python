@@ -18,7 +18,6 @@ from virtual_object import increment, count
 
 
 async def main():
-    
     async with restate.create_client("http://localhost:8080") as client:
         await client.object_call(increment, key="a", arg=5)
 

@@ -312,5 +312,5 @@ async def create_client(ingress: str, headers: typing.Optional[dict] = None) -> 
     """
     Create a new Restate client.
     """
-    async with httpx.AsyncClient(base_url=ingress, headers=headers) as http_client:
+    async with httpx.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
         yield Client(http_client, headers)

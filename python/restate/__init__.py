@@ -12,7 +12,7 @@
 Restate SDK for Python
 """
 
-from contextlib import contextmanager, asynccontextmanager
+from contextlib import asynccontextmanager
 import typing
 
 from restate.server_types import RestateAppT
@@ -51,14 +51,14 @@ except ImportError:
     # we don't have the appropriate dependencies installed
 
     # pylint: disable=unused-argument, redefined-outer-name
-    @contextmanager
+    @asynccontextmanager
     def create_test_harness(
         app: RestateAppT,
         follow_logs: bool = False,
         restate_image: str = "restatedev/restate:latest",
         always_replay: bool = False,
         disable_retries: bool = False,
-    ) -> typing.Generator[TestHarnessEnvironment, None, None]:
+    ) -> typing.AsyncGenerator[TestHarnessEnvironment, None]:
         """a dummy harness constructor to raise ImportError. Install restate-sdk[harness] to use this feature"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
 
