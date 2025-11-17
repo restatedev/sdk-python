@@ -13,7 +13,6 @@ COPY python ./python/
 COPY Cargo.lock .
 COPY Cargo.toml .
 COPY rust-toolchain.toml .
-COPY requirements.txt .
 COPY pyproject.toml .
 COPY LICENSE .
 COPY README.md .
