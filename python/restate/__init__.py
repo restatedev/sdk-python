@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 import typing
 
 from restate.server_types import RestateAppT
-from restate.types import TestHarnessEnvironment
+from restate.types import HarnessEnvironment
 
 from .service import Service
 from .object import VirtualObject
@@ -55,10 +55,10 @@ except ImportError:
     def create_test_harness(
         app: RestateAppT,
         follow_logs: bool = False,
-        restate_image: str = "restatedev/restate:latest",
+        restate_image: str = "docker.io/restatedev/restate:latest",
         always_replay: bool = False,
         disable_retries: bool = False,
-    ) -> typing.AsyncGenerator[TestHarnessEnvironment, None]:
+    ) -> typing.AsyncGenerator[HarnessEnvironment, None]:
         """a dummy harness constructor to raise ImportError. Install restate-sdk[harness] to use this feature"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
 
@@ -66,7 +66,7 @@ except ImportError:
     def test_harness(
         app: RestateAppT,
         follow_logs: bool = False,
-        restate_image: str = "restatedev/restate:latest",
+        restate_image: str = "docker.io/restatedev/restate:latest",
         always_replay: bool = False,
         disable_retries: bool = False,
     ):
@@ -107,6 +107,7 @@ __all__ = [
     "app",
     "create_test_harness",
     "test_harness",
+    "HarnessEnvironment",
     "gather",
     "as_completed",
     "wait_completed",
