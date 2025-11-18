@@ -9,6 +9,7 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 
+import uuid
 import restate
 from restate import (
     Context,
@@ -107,17 +108,29 @@ async def test_greeter(restate_test_harness: HarnessEnvironment):
 
 
 async def test_counter(restate_test_harness: HarnessEnvironment):
-    initial_count = await restate_test_harness.client.object_call(count, key="abc", arg=None)
-    await restate_test_harness.client.object_call(increment, key="abc", arg=1)
-    new_count = await restate_test_harness.client.object_call(count, key="abc", arg=None)
+    random_key = str(uuid.uuid4())
+    initial_count = await restate_test_harness.client.object_call(count, key=random_key, arg=None)
+    await restate_test_harness.client.object_call(increment, key=random_key, arg=1)
+    new_count = await restate_test_harness.client.object_call(count, key=random_key, arg=None)
+
+    assert new_count == initial_count + 1
+
+
+async def test_idempotency_key(restate_test_harness: HarnessEnvironment):
+    random_key = str(uuid.uuid4())
+    initial_count = await restate_test_harness.client.object_call(count, key=random_key, arg=None)
+    await restate_test_harness.client.object_call(increment, key=random_key, arg=1, idempotency_key=random_key)
+    await restate_test_harness.client.object_call(increment, key=random_key, arg=1, idempotency_key=random_key)
+    new_count = await restate_test_harness.client.object_call(count, key=random_key, arg=None)
 
     assert new_count == initial_count + 1
 
 
 async def test_workflow(restate_test_harness: HarnessEnvironment):
-    call_task = asyncio.create_task(restate_test_harness.client.workflow_call(pay, key="Pippo", arg=None))
+    random_key = str(uuid.uuid4())
+    call_task = asyncio.create_task(restate_test_harness.client.workflow_call(pay, key=random_key, arg=None))
 
-    await restate_test_harness.client.workflow_call(payment_verified, key="Pippo", arg="Done")
+    await restate_test_harness.client.workflow_call(payment_verified, key=random_key, arg="Done")
 
     assert await call_task == "Verified Done!"
 
