@@ -18,7 +18,6 @@ import typing
 from urllib.error import URLError
 import socket
 from contextlib import contextmanager, asynccontextmanager
-from warnings import deprecated
 
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
@@ -314,7 +313,6 @@ def create_restate_container(
         restate.stop()
 
 
-@deprecated("Use create_test_harness instead")
 def test_harness(
     app: RestateAppT,
     follow_logs: bool = False,
@@ -323,7 +321,7 @@ def test_harness(
     disable_retries: bool = False,
 ) -> RestateTestHarness:
     """
-    Creates a test harness for running Restate services together with restate-server.
+    DEPRECATED: Use ctx.create_test_harness instead.
     """
     config = TestConfiguration(
         restate_image=restate_image,
