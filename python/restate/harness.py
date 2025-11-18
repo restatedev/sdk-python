@@ -15,7 +15,6 @@ import asyncio
 from dataclasses import dataclass
 import threading
 import typing
-from urllib.error import URLError
 import socket
 from contextlib import contextmanager, asynccontextmanager
 
@@ -25,7 +24,7 @@ from restate.client import create_client
 from restate.server_types import RestateAppT
 from restate.types import TestHarnessEnvironment
 from testcontainers.core.container import DockerContainer  # type: ignore
-from testcontainers.core.waiting_utils import wait_container_is_ready  # type: ignore
+from testcontainers.core.wait_strategies import CompositeWaitStrategy, HttpWaitStrategy
 
 import httpx
 
@@ -153,6 +152,12 @@ class RestateContainer(DockerContainer):
             self.with_env("RESTATE_WORKER__INVOKER__RETRY_POLICY__TYPE", "none")
 
         self.with_kwargs(extra_hosts={"host.docker.internal": "host-gateway"})
+        self.waiting_for(
+            CompositeWaitStrategy(
+                HttpWaitStrategy(8080, "/restate/health").for_status_code(200),
+                HttpWaitStrategy(9070, "/health").for_status_code(200),
+            )
+        )
 
     def ingress_url(self):
         """return the URL to access the Restate ingress"""
@@ -170,12 +175,6 @@ class RestateContainer(DockerContainer):
         """return an httpx client to access the ingress interface"""
         return httpx.Client(base_url=self.ingress_url())
 
-    @wait_container_is_ready(httpx.HTTPError, URLError)
-    def _wait_healthy(self):
-        """wait for restate's health checks to pass"""
-        self.get_ingress_client().get("/restate/health").raise_for_status()
-        self.get_admin_client().get("/health").raise_for_status()
-
     def start(self, stream_logs=False):
         """start the container and wait for health checks to pass"""
         super().start()
@@ -189,7 +188,6 @@ class RestateContainer(DockerContainer):
             thread.start()
             self.log_thread = thread
 
-        self._wait_healthy()
         return self
 
 
