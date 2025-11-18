@@ -12,6 +12,11 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
+
+#
+# uv run examples/example.py
+#
+
 import logging
 import restate
 

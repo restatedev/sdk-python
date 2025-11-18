@@ -17,6 +17,8 @@ This represents common types used throughout the Restate SDK for Python.
 
 from dataclasses import dataclass
 
+from restate.client_types import RestateClient
+
 
 @dataclass
 class TestHarnessEnvironment:
@@ -27,3 +29,6 @@ class TestHarnessEnvironment:
 
     admin_api_url: str
     """The URL of the Restate admin API endpoint used in the test"""
+
+    client: RestateClient
+    """The Restate client connected to the ingress URL"""

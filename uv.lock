@@ -207,6 +207,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517, upload-time = "2024-12-06T15:37:21.509Z" },
 ]
 
+[package.optional-dependencies]
+http2 = [
+    { name = "h2" },
+]
+
 [[package]]
 name = "hypercorn"
 version = "0.17.3"
@@ -545,6 +550,9 @@ name = "restate-sdk"
 source = { editable = "." }
 
 [package.optional-dependencies]
+client = [
+    { name = "httpx", extra = ["http2"] },
+]
 harness = [
     { name = "httpx" },
     { name = "hypercorn" },
@@ -568,6 +576,7 @@ test = [
 requires-dist = [
     { name = "dacite", marker = "extra == 'serde'" },
     { name = "httpx", marker = "extra == 'harness'" },
+    { name = "httpx", extras = ["http2"], marker = "extra == 'client'" },
     { name = "hypercorn", marker = "extra == 'harness'" },
     { name = "hypercorn", marker = "extra == 'test'" },
     { name = "mypy", marker = "extra == 'lint'", specifier = ">=1.11.2" },
@@ -577,7 +586,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6.9" },
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
-provides-extras = ["test", "lint", "harness", "serde"]
+provides-extras = ["test", "lint", "harness", "serde", "client"]
 
 [[package]]
 name = "ruff"
