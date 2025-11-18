@@ -146,7 +146,6 @@ class Client(RestateClient):
         return res.content
 
     @typing.final
-    @typing.override
     async def service_call(
         self,
         tpe: HandlerType[I, O],
@@ -157,8 +156,6 @@ class Client(RestateClient):
         coro = await self.do_call(tpe, arg, idempotency_key=idempotency_key, headers=headers)
         return coro
 
-    @typing.final
-    @typing.override
     async def service_send(
         self,
         tpe: HandlerType[I, O],
@@ -181,8 +178,6 @@ class Client(RestateClient):
 
         return RestateClientSendHandle(send.get("invocationId", ""), 200)  # TODO: verify
 
-    @typing.final
-    @typing.override
     async def object_call(
         self,
         tpe: HandlerType[I, O],
@@ -194,8 +189,6 @@ class Client(RestateClient):
         coro = await self.do_call(tpe, arg, key, idempotency_key=idempotency_key, headers=headers)
         return coro
 
-    @typing.final
-    @typing.override
     async def object_send(
         self,
         tpe: HandlerType[I, O],
@@ -220,8 +213,6 @@ class Client(RestateClient):
 
         return RestateClientSendHandle(send.get("invocationId", ""), 200)  # TODO: verify
 
-    @typing.final
-    @typing.override
     async def workflow_call(
         self,
         tpe: HandlerType[I, O],
@@ -232,8 +223,6 @@ class Client(RestateClient):
     ) -> O:
         return await self.object_call(tpe, key, arg, idempotency_key=idempotency_key, headers=headers)
 
-    @typing.final
-    @typing.override
     async def workflow_send(
         self,
         tpe: HandlerType[I, O],
@@ -252,8 +241,6 @@ class Client(RestateClient):
             headers=headers,
         )
 
-    @typing.final
-    @typing.override
     async def generic_call(
         self,
         service: str,
@@ -276,8 +263,6 @@ class Client(RestateClient):
         )
         return call_handle
 
-    @typing.final
-    @typing.override
     async def generic_send(
         self,
         service: str,
