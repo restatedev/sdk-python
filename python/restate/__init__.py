@@ -62,6 +62,7 @@ except ImportError:
         """a dummy harness constructor to raise ImportError. Install restate-sdk[harness] to use this feature"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
 
+    @typing.no_type_check
     def test_harness(
         app: RestateAppT,
         follow_logs: bool = False,
@@ -70,7 +71,7 @@ except ImportError:
         disable_retries: bool = False,
     ):
         """a dummy harness constructor to raise ImportError. Install restate-sdk[harness] to use this feature"""
-        raise ImportError("Install restate-sdk[harness] to use this feature")
+        raise ImportError("Install restate-sdk[harness] to use this feature")  # type: ignore
 
 
 try:
