@@ -17,7 +17,7 @@ This represents common types used throughout the Restate SDK for Python.
 
 from dataclasses import dataclass
 
-from restate.client import RestateClient
+from restate.client_types import RestateClient
 
 
 @dataclass

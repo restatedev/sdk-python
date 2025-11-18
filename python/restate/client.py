@@ -308,7 +308,9 @@ class Client(RestateClient):
 
 
 @asynccontextmanager
-async def create_client(ingress: str, headers: typing.Optional[dict] = None) -> typing.AsyncGenerator[RestateClient]:
+async def create_client(
+    ingress: str, headers: typing.Optional[dict] = None
+) -> typing.AsyncGenerator[RestateClient, None]:
     """
     Create a new Restate client.
     """

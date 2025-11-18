@@ -81,7 +81,7 @@ except ImportError:
     @asynccontextmanager
     async def create_client(
         ingress: str, headers: typing.Optional[dict] = None
-    ) -> typing.AsyncGenerator[RestateClient]:
+    ) -> typing.AsyncGenerator[RestateClient, None]:
         """a dummy client constructor to raise ImportError. Install restate-sdk[client] to use this feature"""
         raise ImportError("Install restate-sdk[client] to use this feature")
         yield  # type: ignore
