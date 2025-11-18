@@ -22,7 +22,7 @@ from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from restate.client import create_client
 from restate.server_types import RestateAppT
-from restate.types import TestHarnessEnvironment
+from restate.types import HarnessEnvironment
 from testcontainers.core.container import DockerContainer  # type: ignore
 from testcontainers.core.wait_strategies import CompositeWaitStrategy, HttpWaitStrategy
 
@@ -314,7 +314,7 @@ def create_restate_container(
 def test_harness(
     app: RestateAppT,
     follow_logs: bool = False,
-    restate_image: str = "restatedev/restate:latest",
+    restate_image: str = "docker.io/restatedev/restate:latest",
     always_replay: bool = False,
     disable_retries: bool = False,
 ) -> RestateTestHarness:
@@ -334,10 +334,10 @@ def test_harness(
 async def create_test_harness(
     app: RestateAppT,
     follow_logs: bool = False,
-    restate_image: str = "restatedev/restate:latest",
+    restate_image: str = "docker.io/restatedev/restate:latest",
     always_replay: bool = False,
     disable_retries: bool = False,
-) -> typing.AsyncGenerator[TestHarnessEnvironment, None]:
+) -> typing.AsyncGenerator[HarnessEnvironment, None]:
     """
     Creates a test harness for running Restate services together with restate-server.
 
@@ -377,6 +377,6 @@ async def create_test_harness(
             raise AssertionError(msg)
 
         async with create_client(runtime.ingress_url()) as client:
-            yield TestHarnessEnvironment(
+            yield HarnessEnvironment(
                 ingress_url=runtime.ingress_url(), admin_api_url=runtime.admin_url(), client=client
             )

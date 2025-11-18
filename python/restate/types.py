@@ -21,7 +21,7 @@ from restate.client_types import RestateClient
 
 
 @dataclass
-class TestHarnessEnvironment:
+class HarnessEnvironment:
     """Information about the test environment"""
 
     ingress_url: str

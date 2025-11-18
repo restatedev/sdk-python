@@ -21,7 +21,7 @@ Source = "https://github.com/restatedev/sdk-python"
 "Bug Tracker" = "https://github.com/restatedev/sdk-python/issues"
 
 [project.optional-dependencies]
-test = ["pytest", "hypercorn"]
+test = ["pytest", "hypercorn", "anyio"]
 lint = ["mypy>=1.11.2", "pyright>=1.1.390", "ruff>=0.6.9"]
 harness = ["testcontainers", "hypercorn", "httpx"]
 serde = ["dacite", "pydantic"]
@@ -53,3 +53,4 @@ ignore = ["E741"]
 filterwarnings = [
    "ignore:The @wait_container_is_ready decorator is deprecated:DeprecationWarning",
 ]
+anyio_mode = "auto"
