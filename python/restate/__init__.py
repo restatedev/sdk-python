@@ -44,7 +44,6 @@ from .endpoint import app
 
 from .logging import getLogger, RestateLoggingFilter
 
-
 try:
     from .harness import create_test_harness, test_harness  # type: ignore
 except ImportError:

@@ -30,6 +30,7 @@ from uuid import UUID
 import time
 
 from restate.context import (
+    Context,
     DurablePromise,
     AttemptFinishedEvent,
     HandlerType,
@@ -302,6 +303,14 @@ def update_restate_context_is_replaying(vm: VMWrapper):
     restate_context_is_replaying.set(vm.is_replaying())
 
 
+_restate_context_var = contextvars.ContextVar[Context]("restate_context")
+
+
+def current_context() -> Context | None:
+    """Get the current context."""
+    return _restate_context_var.get()
+
+
 # pylint: disable=R0902
 class ServerInvocationContext(ObjectContext):
     """This class implements the context for the restate framework based on the server."""
@@ -330,6 +339,7 @@ class ServerInvocationContext(ObjectContext):
     async def enter(self):
         """Invoke the user code."""
         update_restate_context_is_replaying(self.vm)
+        token = _restate_context_var.set(self)
         try:
             in_buffer = self.invocation.input_buffer
             out_buffer = await invoke_handler(handler=self.handler, ctx=self, in_buffer=in_buffer)
@@ -356,6 +366,8 @@ class ServerInvocationContext(ObjectContext):
                 stacktrace = "\n".join(traceback.format_exception(e))
                 self.vm.notify_error(repr(e), stacktrace)
                 raise e
+        finally:
+            _restate_context_var.reset(token)
 
     async def leave(self):
         """Leave the context."""
