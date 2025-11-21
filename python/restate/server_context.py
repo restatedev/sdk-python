@@ -363,13 +363,24 @@ class ServerInvocationContext(ObjectContext):
         except DisconnectedException:
             raise
         except Exception as e:
-            # check the immediate cause for SdkInternalBaseException
-            cause = e.__cause__
-            if not isinstance(cause, SdkInternalBaseException):
-                # unexpected exception, notify the VM
+            # check the immediate cause for SdkInternalBaseException or TerminalError that
+            # got accidentally re-raised by user code as part of another exception.
+            cause: BaseException | None = e
+            while cause is not None:
+                if isinstance(cause, TerminalError):
+                    failure = Failure(code=cause.status_code, message=cause.message)
+                    restate_context_is_replaying.set(False)
+                    self.vm.sys_write_output_failure(failure)
+                    self.vm.sys_end()
+                    break
+                elif isinstance(cause, SdkInternalBaseException):
+                    break
+                cause = cause.__cause__
+            else:
+                # nothing interesting found, treat as unexpected exception
                 stacktrace = "\n".join(traceback.format_exception(e))
                 self.vm.notify_error(repr(e), stacktrace)
-                raise e
+                raise
         finally:
             _restate_context_var.reset(token)
 
