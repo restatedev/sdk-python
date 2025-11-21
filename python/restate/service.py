@@ -81,6 +81,7 @@ class Service:
         idempotency_retention: typing.Optional[timedelta] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
+        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
     ) -> None:
         self.service_tag = ServiceTag("service", name, description, metadata)
         self.handlers: typing.Dict[str, Handler] = {}
@@ -90,6 +91,7 @@ class Service:
         self.idempotency_retention = idempotency_retention
         self.ingress_private = ingress_private
         self.invocation_retry_policy = invocation_retry_policy
+        self.context_managers = context_managers
 
     @property
     def name(self):
@@ -112,6 +114,7 @@ class Service:
         idempotency_retention: typing.Optional[timedelta] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
+        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -170,6 +173,14 @@ class Service:
                 return fn(*args, **kwargs)
 
             signature = inspect.signature(fn, eval_str=True)
+
+            # combine context managers or leave None if both are None
+            combined_context_managers = (
+                (self.context_managers or []) + (context_managers or [])
+                if self.context_managers or context_managers
+                else None
+            )
+
             handler = make_handler(
                 self.service_tag,
                 handler_io,
@@ -187,6 +198,7 @@ class Service:
                 None,
                 ingress_private,
                 invocation_retry_policy,
+                combined_context_managers,
             )
             self.handlers[handler.name] = handler
             return wrapped

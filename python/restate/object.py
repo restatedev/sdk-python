@@ -87,6 +87,7 @@ class VirtualObject:
         enable_lazy_state: typing.Optional[bool] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
+        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
     ):
         self.service_tag = ServiceTag("object", name, description, metadata)
         self.handlers = {}
@@ -97,6 +98,7 @@ class VirtualObject:
         self.enable_lazy_state = enable_lazy_state
         self.ingress_private = ingress_private
         self.invocation_retry_policy = invocation_retry_policy
+        self.context_managers = context_managers
 
     @property
     def name(self):
@@ -122,6 +124,7 @@ class VirtualObject:
         enable_lazy_state: typing.Optional[bool] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
+        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -184,6 +187,11 @@ class VirtualObject:
                 return fn(*args, **kwargs)
 
             signature = inspect.signature(fn, eval_str=True)
+            combined_context_managers = (
+                (self.context_managers or []) + (context_managers or [])
+                if self.context_managers or context_managers
+                else None
+            )
             handler = make_handler(
                 self.service_tag,
                 handler_io,
@@ -201,6 +209,7 @@ class VirtualObject:
                 enable_lazy_state,
                 ingress_private,
                 invocation_retry_policy,
+                combined_context_managers,
             )
             self.handlers[handler.name] = handler
             return wrapped

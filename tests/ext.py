@@ -9,12 +9,12 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 
+from contextlib import asynccontextmanager
+from restate.extensions import contextvar
+
 import restate
-from restate import (
-    Context,
-    Service,
-    HarnessEnvironment,
-)
+
+from restate import Context, Service, HarnessEnvironment, extensions
 import pytest
 
 # ----- Asyncio fixtures
@@ -35,9 +35,7 @@ greeter = Service("greeter")
 
 
 def magic_function():
-    from restate.extensions import current_context
-
-    ctx = current_context()
+    ctx = extensions.current_context()
     assert ctx is not None
     return ctx.request().id
 
@@ -46,6 +44,20 @@ def magic_function():
 async def greet(ctx: Context, name: str) -> str:
     id = magic_function()
     return f"Hello {id}!"
+
+
+# -- context manager
+
+
+@contextvar
+@asynccontextmanager
+async def my_resource_manager():
+    yield "hello"
+
+
+@greeter.handler(context_managers=[my_resource_manager])
+async def greet_with_cm(ctx: Context, name: str) -> str:
+    return my_resource_manager.value
 
 
 @pytest.fixture(scope="session")
@@ -62,3 +74,8 @@ async def restate_test_harness():
 async def test_greeter(restate_test_harness: HarnessEnvironment):
     greeting = await restate_test_harness.client.service_call(greet, arg="bob")
     assert greeting.startswith("Hello ")
+
+
+async def test_greeter_with_cm(restate_test_harness: HarnessEnvironment):
+    greeting = await restate_test_harness.client.service_call(greet_with_cm, arg="bob")
+    assert greeting == "hello"

@@ -17,6 +17,7 @@
 """This module contains the restate context implementation based on the server"""
 
 import asyncio
+from contextlib import AsyncExitStack
 import contextvars
 import copy
 from random import Random
@@ -342,7 +343,10 @@ class ServerInvocationContext(ObjectContext):
         token = _restate_context_var.set(self)
         try:
             in_buffer = self.invocation.input_buffer
-            out_buffer = await invoke_handler(handler=self.handler, ctx=self, in_buffer=in_buffer)
+            async with AsyncExitStack() as stack:
+                for manager in self.handler.context_managers or []:
+                    await stack.enter_async_context(manager())
+                out_buffer = await invoke_handler(handler=self.handler, ctx=self, in_buffer=in_buffer)
             restate_context_is_replaying.set(False)
             self.vm.sys_write_output_success(bytes(out_buffer))
             self.vm.sys_end()
