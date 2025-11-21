@@ -124,7 +124,9 @@ class VirtualObject:
         enable_lazy_state: typing.Optional[bool] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
-        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
+        invocation_context_managers: typing.Optional[
+            typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+        ] = None,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -188,8 +190,8 @@ class VirtualObject:
 
             signature = inspect.signature(fn, eval_str=True)
             combined_context_managers = (
-                (self.context_managers or []) + (context_managers or [])
-                if self.context_managers or context_managers
+                (self.context_managers or []) + (invocation_context_managers or [])
+                if self.context_managers or invocation_context_managers
                 else None
             )
             handler = make_handler(
