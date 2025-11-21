@@ -9,14 +9,18 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 
+from contextlib import asynccontextmanager
 import restate
 from restate import (
     Context,
     RunOptions,
     Service,
     TerminalError,
+    VirtualObject,
+    Workflow,
 )
 import pytest
+import typing
 
 # ----- Asyncio fixtures
 
@@ -35,6 +39,14 @@ def ohoh():
     raise TerminalError("Simulated terminal error")
 
 
+@asynccontextmanager
+async def simple_harness(service: Service | VirtualObject | Workflow) -> typing.AsyncIterator[restate.RestateClient]:
+    async with restate.create_test_harness(
+        restate.app([service]), restate_image="ghcr.io/restatedev/restate:latest"
+    ) as restate_test_harness:
+        yield restate_test_harness.client
+
+
 async def test_sanity():
     greeter = Service("greeter")
 
@@ -43,11 +55,9 @@ async def test_sanity():
         await ctx.run_typed("foo", ohoh, RunOptions(max_attempts=3))
         return "hi"
 
-    async with restate.create_test_harness(
-        restate.app([greeter]), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as restate_test_harness:
+    async with simple_harness(greeter) as client:
         with pytest.raises(Exception):
-            await restate_test_harness.client.service_call(greet, arg="bob")
+            await client.service_call(greet, arg="bob")
 
 
 async def test_wrapped_terminal_exception():
@@ -61,8 +71,6 @@ async def test_wrapped_terminal_exception():
         except TerminalError as te:
             raise ValueError("Wrapped terminal error") from te
 
-    async with restate.create_test_harness(
-        restate.app([greeter]), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as restate_test_harness:
+    async with simple_harness(greeter) as client:
         with pytest.raises(Exception):
-            await restate_test_harness.client.service_call(greet, arg="bob")
+            await client.service_call(greet, arg="bob")
