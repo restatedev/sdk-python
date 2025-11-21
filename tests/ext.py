@@ -9,12 +9,12 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 
+from contextlib import asynccontextmanager
+from restate.extensions import contextvar
+
 import restate
-from restate import (
-    Context,
-    Service,
-    HarnessEnvironment,
-)
+
+from restate import Context, Service, HarnessEnvironment, extensions
 import pytest
 
 # ----- Asyncio fixtures
@@ -35,8 +35,7 @@ greeter = Service("greeter")
 
 
 def magic_function():
-
-    ctx = current_context()
+    ctx = extensions.current_context()
     assert ctx is not None
     return ctx.request().id
 
@@ -48,9 +47,6 @@ async def greet(ctx: Context, name: str) -> str:
 
 
 # -- context manager
-
-from contextlib import asynccontextmanager
-from restate.extensions import contextvar
 
 
 @contextvar
