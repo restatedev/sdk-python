@@ -57,7 +57,9 @@ class contextvar(Generic[P, T]):
         """Return the value yielded by the wrapped context manager."""
         val = self._value_var.get()
         if val is None:
-            raise LookupError("Context manager value accessed outside of context manager scope (has not been entered yet)")
+            raise LookupError(
+                "Context manager value accessed outside of context manager scope (has not been entered yet)"
+            )
         return val
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> AsyncContextManager[None]:

@@ -76,6 +76,7 @@ class Workflow:
             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
             otherwise the service discovery will fail.
         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
+        invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this workflow.
     """
 
     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
@@ -92,7 +93,9 @@ class Workflow:
         enable_lazy_state: typing.Optional[bool] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
-        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
+        invocation_context_managers: typing.Optional[
+            typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+        ] = None,
     ):
         self.service_tag = ServiceTag("workflow", name, description, metadata)
         self.handlers = {}
@@ -103,7 +106,7 @@ class Workflow:
         self.enable_lazy_state = enable_lazy_state
         self.ingress_private = ingress_private
         self.invocation_retry_policy = invocation_retry_policy
-        self.context_managers = context_managers
+        self.context_managers = invocation_context_managers
 
     @property
     def name(self):
@@ -127,7 +130,9 @@ class Workflow:
         enable_lazy_state: typing.Optional[bool] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
-        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
+        invocation_context_managers: typing.Optional[
+            typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+        ] = None,
     ) -> typing.Callable[[T], T]:
         """
         Mark this handler as a workflow entry point.
@@ -185,7 +190,7 @@ class Workflow:
             enable_lazy_state=enable_lazy_state,
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
-            context_managers=context_managers,
+            invocation_context_managers=invocation_context_managers,
         )
 
     def handler(
@@ -203,7 +208,9 @@ class Workflow:
         enable_lazy_state: typing.Optional[bool] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
-        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
+        invocation_context_managers: typing.Optional[
+            typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+        ] = None,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -244,6 +251,7 @@ class Workflow:
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
+            invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this handler.
         """
         return self._add_handler(
             name,
@@ -261,7 +269,7 @@ class Workflow:
             enable_lazy_state,
             ingress_private,
             invocation_retry_policy,
-            context_managers,
+            invocation_context_managers,
         )
 
     # pylint: disable=R0914
@@ -282,7 +290,9 @@ class Workflow:
         enable_lazy_state: typing.Optional[bool] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional["InvocationRetryPolicy"] = None,
-        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
+        invocation_context_managers: typing.Optional[
+            typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+        ] = None,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -350,8 +360,8 @@ class Workflow:
             signature = inspect.signature(fn, eval_str=True)
             description = inspect.getdoc(fn)
             combined_context_managers = (
-                (self.context_managers or []) + (context_managers or [])
-                if self.context_managers or context_managers
+                (self.context_managers or []) + (invocation_context_managers or [])
+                if self.context_managers or invocation_context_managers
                 else None
             )
             handler = make_handler(

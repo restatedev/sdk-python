@@ -55,7 +55,7 @@ async def my_resource_manager():
     yield "hello"
 
 
-@greeter.handler(context_managers=[my_resource_manager])
+@greeter.handler(invocation_context_managers=[my_resource_manager])
 async def greet_with_cm(ctx: Context, name: str) -> str:
     return my_resource_manager.value
 

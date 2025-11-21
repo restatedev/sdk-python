@@ -68,6 +68,7 @@ class Service:
             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
             otherwise the service discovery will fail.
         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this service.
+        invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this service.
     """
 
     def __init__(
@@ -81,7 +82,9 @@ class Service:
         idempotency_retention: typing.Optional[timedelta] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
-        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
+        invocation_context_managers: typing.Optional[
+            typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+        ] = None,
     ) -> None:
         self.service_tag = ServiceTag("service", name, description, metadata)
         self.handlers: typing.Dict[str, Handler] = {}
@@ -91,7 +94,7 @@ class Service:
         self.idempotency_retention = idempotency_retention
         self.ingress_private = ingress_private
         self.invocation_retry_policy = invocation_retry_policy
-        self.context_managers = context_managers
+        self.context_managers = invocation_context_managers
 
     @property
     def name(self):
@@ -114,7 +117,9 @@ class Service:
         idempotency_retention: typing.Optional[timedelta] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
-        context_managers: typing.Optional[typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]] = None,
+        invocation_context_managers: typing.Optional[
+            typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+        ] = None,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -152,6 +157,7 @@ class Service:
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
+            invocation_context_managers: List of context manager factories that will be applied to each invocation of this handler.
 
         Returns:
             Callable: The decorated function.
@@ -176,8 +182,8 @@ class Service:
 
             # combine context managers or leave None if both are None
             combined_context_managers = (
-                (self.context_managers or []) + (context_managers or [])
-                if self.context_managers or context_managers
+                (self.context_managers or []) + (invocation_context_managers or [])
+                if self.context_managers or invocation_context_managers
                 else None
             )
 
