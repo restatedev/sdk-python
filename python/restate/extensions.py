@@ -11,5 +11,6 @@
 """This module contains internal extensions apis"""
 
 from .server_context import current_context
+from .context_managers import contextvar
 
-__all__ = ["current_context"]
+__all__ = ["current_context", "contextvar"]

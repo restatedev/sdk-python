@@ -18,7 +18,7 @@ which is used to define the handlers for the services.
 from dataclasses import dataclass
 from datetime import timedelta
 from inspect import Signature
-from typing import Any, Callable, Awaitable, Dict, Generic, Literal, Optional, TypeVar
+from typing import Any, AsyncContextManager, Callable, Awaitable, Dict, Generic, List, Literal, Optional, TypeVar
 
 from restate.retry_policy import InvocationRetryPolicy
 
@@ -150,6 +150,7 @@ class Handler(Generic[I, O]):
     enable_lazy_state: Optional[bool] = None
     ingress_private: Optional[bool] = None
     invocation_retry_policy: Optional[InvocationRetryPolicy] = None
+    context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None
 
 
 # disable too many arguments warning
@@ -172,6 +173,7 @@ def make_handler(
     enable_lazy_state: Optional[bool] = None,
     ingress_private: Optional[bool] = None,
     invocation_retry_policy: Optional[InvocationRetryPolicy] = None,
+    context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None,
 ) -> Handler[I, O]:
     """
     Factory function to create a handler.
@@ -225,6 +227,7 @@ def make_handler(
         enable_lazy_state=enable_lazy_state,
         ingress_private=ingress_private,
         invocation_retry_policy=invocation_retry_policy,
+        context_managers=context_managers,
     )
 
     vars(wrapped)[RESTATE_UNIQUE_HANDLER_SYMBOL] = handler

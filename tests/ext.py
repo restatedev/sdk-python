@@ -35,7 +35,6 @@ greeter = Service("greeter")
 
 
 def magic_function():
-    from restate.extensions import current_context
 
     ctx = current_context()
     assert ctx is not None
@@ -46,6 +45,23 @@ def magic_function():
 async def greet(ctx: Context, name: str) -> str:
     id = magic_function()
     return f"Hello {id}!"
+
+
+# -- context manager
+
+from contextlib import asynccontextmanager
+from restate.extensions import contextvar
+
+
+@contextvar
+@asynccontextmanager
+async def my_resource_manager():
+    yield "hello"
+
+
+@greeter.handler(context_managers=[my_resource_manager])
+async def greet_with_cm(ctx: Context, name: str) -> str:
+    return my_resource_manager.value
 
 
 @pytest.fixture(scope="session")
@@ -62,3 +78,8 @@ async def restate_test_harness():
 async def test_greeter(restate_test_harness: HarnessEnvironment):
     greeting = await restate_test_harness.client.service_call(greet, arg="bob")
     assert greeting.startswith("Hello ")
+
+
+async def test_greeter_with_cm(restate_test_harness: HarnessEnvironment):
+    greeting = await restate_test_harness.client.service_call(greet_with_cm, arg="bob")
+    assert greeting == "hello"
