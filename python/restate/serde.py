@@ -74,7 +74,24 @@ def try_import_from_dacite():
         return _to_dict, _from_dict
 
 
+def try_import_msgspec_struct():
+    """
+    Try to import Struct from msgspec.
+    """
+    try:
+        from msgspec import Struct  # type: ignore # pylint: disable=import-outside-toplevel
+
+        return Struct
+    except ImportError:
+
+        class Dummy:  # pylint: disable=too-few-public-methods
+            """a dummy class to use when msgspec is not available"""
+
+        return Dummy
+
+
 PydanticBaseModel = try_import_pydantic_base_model()
+MsgspecStruct = try_import_msgspec_struct()
 # pylint: disable=C0103
 DaciteToDict, DaciteFromDict = try_import_from_dacite()
 
@@ -92,6 +109,17 @@ def is_pydantic(annotation) -> bool:
     """
     try:
         return issubclass(annotation, PydanticBaseModel)
+    except TypeError:
+        # annotation is not a class or a type
+        return False
+
+
+def is_msgspec(annotation) -> bool:
+    """
+    Check if an object is a msgspec Struct.
+    """
+    try:
+        return issubclass(annotation, MsgspecStruct)
     except TypeError:
         # annotation is not a class or a type
         return False
@@ -227,6 +255,10 @@ class DefaultSerde(Serde[I]):
         """
         if not buf:
             return None
+        if is_msgspec(self.type_hint):
+            import msgspec.json  # type: ignore # pylint: disable=import-outside-toplevel
+
+            return msgspec.json.decode(buf, type=self.type_hint)
         if is_pydantic(self.type_hint):
             return self.type_hint.model_validate_json(buf)  # type: ignore
         if is_dataclass(self.type_hint):
@@ -237,7 +269,7 @@ class DefaultSerde(Serde[I]):
     def serialize(self, obj: typing.Optional[I]) -> bytes:
         """
         Serializes a Python object into a byte array.
-        If the object is a Pydantic BaseModel, uses its model_dump_json method.
+        If the object is a msgspec Struct or Pydantic BaseModel, uses their respective methods.
 
         Args:
             obj (Optional[I]): The Python object to serialize.
@@ -247,6 +279,10 @@ class DefaultSerde(Serde[I]):
         """
         if obj is None:
             return bytes()
+        if is_msgspec(self.type_hint):
+            import msgspec.json  # type: ignore # pylint: disable=import-outside-toplevel
+
+            return msgspec.json.encode(obj)
         if is_pydantic(self.type_hint):
             return obj.model_dump_json().encode("utf-8")  # type: ignore[attr-defined]
         if is_dataclass(obj):
@@ -291,3 +327,44 @@ class PydanticJsonSerde(Serde[I]):
             return bytes()
         json_str = obj.model_dump_json()  # type: ignore[attr-defined]
         return json_str.encode("utf-8")
+
+
+class MsgspecJsonSerde(Serde[I]):
+    """
+    Serde for msgspec Structs to/from JSON
+    """
+
+    def __init__(self, model):
+        self.model = model
+
+    def deserialize(self, buf: bytes) -> typing.Optional[I]:
+        """
+        Deserializes a bytearray to a msgspec Struct.
+
+        Args:
+            buf (bytearray): The bytearray to deserialize.
+
+        Returns:
+            typing.Optional[I]: The deserialized msgspec Struct.
+        """
+        if not buf:
+            return None
+        import msgspec.json  # type: ignore # pylint: disable=import-outside-toplevel
+
+        return msgspec.json.decode(buf, type=self.model)
+
+    def serialize(self, obj: typing.Optional[I]) -> bytes:
+        """
+        Serializes a msgspec Struct to a bytearray.
+
+        Args:
+            obj (I): The msgspec Struct to serialize.
+
+        Returns:
+            bytearray: The serialized bytearray.
+        """
+        if obj is None:
+            return bytes()
+        import msgspec.json  # type: ignore # pylint: disable=import-outside-toplevel
+
+        return msgspec.json.encode(obj)
