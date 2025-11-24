@@ -53,9 +53,11 @@ class TypeHint(Generic[T]):
     """
 
     annotation: Optional[T] = None
-    is_pydantic: bool = False
-    is_msgspec: bool = False
+    """The type annotation."""
     is_void: bool = False
+    """Whether the type is void (i.e., None)."""
+    generate_json_schema: Callable[[], Dict[str, Any]] | None = None
+    """A callable that generates the JSON schema for the type."""
 
 
 @dataclass
@@ -92,30 +94,32 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
         handler_io.input_type = TypeHint(is_void=True)
     else:
         annotation = params[-1].annotation
-        handler_io.input_type = TypeHint(annotation=annotation, is_pydantic=False, is_msgspec=False)
+        handler_io.input_type = TypeHint(annotation=annotation)
         if Msgspec.is_struct(annotation):
-            handler_io.input_type.is_msgspec = True
+            handler_io.input_type.generate_json_schema = lambda: Msgspec.json_schema(annotation)
             if isinstance(handler_io.input_serde, DefaultSerde):
                 handler_io.input_serde = MsgspecJsonSerde(annotation)
         elif is_pydantic(annotation):
-            handler_io.input_type.is_pydantic = True
+            handler_io.input_type.generate_json_schema = lambda: annotation.model_json_schema(mode="serialization")
             if isinstance(handler_io.input_serde, DefaultSerde):
                 handler_io.input_serde = PydanticJsonSerde(annotation)
 
-    annotation = signature.return_annotation
-    if annotation is None or annotation is Signature.empty:
+    return_annotation = signature.return_annotation
+    if return_annotation is None or return_annotation is Signature.empty:
         # if there is no return annotation, we assume it is void
         handler_io.output_type = TypeHint(is_void=True)
     else:
-        handler_io.output_type = TypeHint(annotation=annotation, is_pydantic=False, is_msgspec=False)
-        if Msgspec.is_struct(annotation):
-            handler_io.output_type.is_msgspec = True
+        handler_io.output_type = TypeHint(annotation=return_annotation)
+        if Msgspec.is_struct(return_annotation):
+            handler_io.output_type.generate_json_schema = lambda: Msgspec.json_schema(return_annotation)
             if isinstance(handler_io.output_serde, DefaultSerde):
-                handler_io.output_serde = MsgspecJsonSerde(annotation)
-        elif is_pydantic(annotation):
-            handler_io.output_type.is_pydantic = True
+                handler_io.output_serde = MsgspecJsonSerde(return_annotation)
+        elif is_pydantic(return_annotation):
+            handler_io.output_type.generate_json_schema = lambda: return_annotation.model_json_schema(
+                mode="serialization"
+            )
             if isinstance(handler_io.output_serde, DefaultSerde):
-                handler_io.output_serde = PydanticJsonSerde(annotation)
+                handler_io.output_serde = PydanticJsonSerde(return_annotation)
 
 
 # pylint: disable=R0902

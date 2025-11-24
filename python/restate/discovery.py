@@ -218,12 +218,8 @@ def json_schema_from_type_hint(type_hint: Optional[TypeHint[Any]]) -> Any:
         return None
     if not type_hint.annotation:
         return None
-    if type_hint.is_msgspec:
-        import msgspec.json  # type: ignore # pylint: disable=import-outside-toplevel
-
-        return msgspec.json.schema(type_hint.annotation)
-    if type_hint.is_pydantic:
-        return type_hint.annotation.model_json_schema(mode="serialization")
+    if type_hint.generate_json_schema is not None:
+        return type_hint.generate_json_schema()
     return type_hint_to_json_schema(type_hint.annotation)
 
 
