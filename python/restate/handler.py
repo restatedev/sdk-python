@@ -24,7 +24,7 @@ from restate.retry_policy import InvocationRetryPolicy
 
 from restate.context import HandlerType
 from restate.exceptions import TerminalError
-from restate.serde import DefaultSerde, PydanticJsonSerde, Serde, is_pydantic
+from restate.serde import DefaultSerde, PydanticJsonSerde, MsgspecJsonSerde, Serde, is_pydantic, is_msgspec
 
 I = TypeVar("I")
 O = TypeVar("O")
@@ -54,6 +54,7 @@ class TypeHint(Generic[T]):
 
     annotation: Optional[T] = None
     is_pydantic: bool = False
+    is_msgspec: bool = False
     is_void: bool = False
 
 
@@ -79,11 +80,11 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
     """
     Augment handler_io with additional information about the input and output types.
 
-    This function has a special check for Pydantic models when these are provided.
+    This function has a special check for msgspec Structs and Pydantic models when these are provided.
     This method will inspect the signature of an handler and will look for
     the input and the return types of a function, and will:
-    * capture any Pydantic models (to be used later at discovery)
-    * replace the default json serializer (is unchanged by a user) with a Pydantic serde
+    * capture any msgspec Structs or Pydantic models (to be used later at discovery)
+    * replace the default json serializer (is unchanged by a user) with the appropriate serde
     """
     params = list(signature.parameters.values())
     if len(params) == 1:
@@ -91,8 +92,12 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
         handler_io.input_type = TypeHint(is_void=True)
     else:
         annotation = params[-1].annotation
-        handler_io.input_type = TypeHint(annotation=annotation, is_pydantic=False)
-        if is_pydantic(annotation):
+        handler_io.input_type = TypeHint(annotation=annotation, is_pydantic=False, is_msgspec=False)
+        if is_msgspec(annotation):
+            handler_io.input_type.is_msgspec = True
+            if isinstance(handler_io.input_serde, DefaultSerde):
+                handler_io.input_serde = MsgspecJsonSerde(annotation)
+        elif is_pydantic(annotation):
             handler_io.input_type.is_pydantic = True
             if isinstance(handler_io.input_serde, DefaultSerde):
                 handler_io.input_serde = PydanticJsonSerde(annotation)
@@ -102,8 +107,12 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
         # if there is no return annotation, we assume it is void
         handler_io.output_type = TypeHint(is_void=True)
     else:
-        handler_io.output_type = TypeHint(annotation=annotation, is_pydantic=False)
-        if is_pydantic(annotation):
+        handler_io.output_type = TypeHint(annotation=annotation, is_pydantic=False, is_msgspec=False)
+        if is_msgspec(annotation):
+            handler_io.output_type.is_msgspec = True
+            if isinstance(handler_io.output_serde, DefaultSerde):
+                handler_io.output_serde = MsgspecJsonSerde(annotation)
+        elif is_pydantic(annotation):
             handler_io.output_type.is_pydantic = True
             if isinstance(handler_io.output_serde, DefaultSerde):
                 handler_io.output_serde = PydanticJsonSerde(annotation)
