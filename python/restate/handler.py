@@ -24,7 +24,7 @@ from restate.retry_policy import InvocationRetryPolicy
 
 from restate.context import HandlerType
 from restate.exceptions import TerminalError
-from restate.serde import DefaultSerde, PydanticJsonSerde, MsgspecJsonSerde, Serde, is_pydantic, is_msgspec
+from restate.serde import DefaultSerde, PydanticJsonSerde, MsgspecJsonSerde, Serde, is_pydantic, Msgspec
 
 I = TypeVar("I")
 O = TypeVar("O")
@@ -93,7 +93,7 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
     else:
         annotation = params[-1].annotation
         handler_io.input_type = TypeHint(annotation=annotation, is_pydantic=False, is_msgspec=False)
-        if is_msgspec(annotation):
+        if Msgspec.is_struct(annotation):
             handler_io.input_type.is_msgspec = True
             if isinstance(handler_io.input_serde, DefaultSerde):
                 handler_io.input_serde = MsgspecJsonSerde(annotation)
@@ -108,7 +108,7 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
         handler_io.output_type = TypeHint(is_void=True)
     else:
         handler_io.output_type = TypeHint(annotation=annotation, is_pydantic=False, is_msgspec=False)
-        if is_msgspec(annotation):
+        if Msgspec.is_struct(annotation):
             handler_io.output_type.is_msgspec = True
             if isinstance(handler_io.output_serde, DefaultSerde):
                 handler_io.output_serde = MsgspecJsonSerde(annotation)

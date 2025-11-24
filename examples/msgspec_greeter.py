@@ -35,4 +35,3 @@ msgspec_greeter = Service("msgspec_greeter")
 @msgspec_greeter.handler()
 async def greet(ctx: Context, req: GreetingRequest) -> Greeting:
     return Greeting(message=f"Hello {req.name}!")
-
