@@ -16,6 +16,10 @@ import typing
 
 from dataclasses import asdict, is_dataclass
 
+T = typing.TypeVar("T")
+I = typing.TypeVar("I")
+O = typing.TypeVar("O")
+
 
 def try_import_pydantic_base_model():
     """
@@ -74,30 +78,55 @@ def try_import_from_dacite():
         return _to_dict, _from_dict
 
 
-def try_import_msgspec_struct():
+class MsgspecJsonAPI:
+    def is_struct(self, annotation: typing.Any) -> bool:
+        return False
+
+    def decode(self, buf: bytes, type: typing.Type[T]) -> T:
+        raise NotImplementedError("Please use msgspec as a conditional dependency to use msgspec features.")
+
+    def encode(self, obj: typing.Any) -> bytes:
+        raise NotImplementedError("Please use msgspec as a conditional dependency to use msgspec features.")
+
+    def json_schema(self, type: typing.Type[T]) -> dict[str, typing.Any]:
+        raise NotImplementedError("Please use msgspec as a conditional dependency to use msgspec features.")
+
+
+def try_import_msgspec_api():
     """
-    Try to import Struct from msgspec.
+    Try to import msgspec API.
     """
     try:
         from msgspec import Struct  # type: ignore # pylint: disable=import-outside-toplevel
+        import msgspec
 
-        return Struct
+        class MsgspecImpl(MsgspecJsonAPI):
+            def is_struct(self, annotation: typing.Any) -> bool:
+                try:
+                    return issubclass(annotation, Struct)
+                except TypeError:
+                    # annotation is not a class or a type
+                    return False
+
+            def decode(self, buf: bytes, type: typing.Type[T]) -> T:
+                return msgspec.json.decode(buf, type=type)
+
+            def encode(self, obj: typing.Any) -> bytes:
+                return msgspec.json.encode(obj)
+
+            def json_schema(self, type: typing.Type[T]) -> dict[str, typing.Any]:
+                return msgspec.json.schema(type)
+
+        return MsgspecImpl()
+
     except ImportError:
-
-        class Dummy:  # pylint: disable=too-few-public-methods
-            """a dummy class to use when msgspec is not available"""
-
-        return Dummy
+        return MsgspecJsonAPI()
 
 
 PydanticBaseModel = try_import_pydantic_base_model()
-MsgspecStruct = try_import_msgspec_struct()
+Msgspec = try_import_msgspec_api()
 # pylint: disable=C0103
 DaciteToDict, DaciteFromDict = try_import_from_dacite()
-
-T = typing.TypeVar("T")
-I = typing.TypeVar("I")
-O = typing.TypeVar("O")
 
 # disable to few parameters
 # pylint: disable=R0903
@@ -109,17 +138,6 @@ def is_pydantic(annotation) -> bool:
     """
     try:
         return issubclass(annotation, PydanticBaseModel)
-    except TypeError:
-        # annotation is not a class or a type
-        return False
-
-
-def is_msgspec(annotation) -> bool:
-    """
-    Check if an object is a msgspec Struct.
-    """
-    try:
-        return issubclass(annotation, MsgspecStruct)
     except TypeError:
         # annotation is not a class or a type
         return False
@@ -255,15 +273,19 @@ class DefaultSerde(Serde[I]):
         """
         if not buf:
             return None
-        if is_msgspec(self.type_hint):
-            import msgspec.json  # type: ignore # pylint: disable=import-outside-toplevel
-
-            return msgspec.json.decode(buf, type=self.type_hint)
-        if is_pydantic(self.type_hint):
-            return self.type_hint.model_validate_json(buf)  # type: ignore
-        if is_dataclass(self.type_hint):
+        hint = self.type_hint
+        if not hint:
+            return json.loads(buf)
+        if Msgspec.is_struct(hint):
+            return Msgspec.decode(buf, type=hint)
+        if is_pydantic(hint):
+            return hint.model_validate_json(buf)  # type: ignore
+        if is_dataclass(hint):
             data = json.loads(buf)
-            return DaciteFromDict(self.type_hint, data)
+            return DaciteFromDict(hint, data)
+        # although we have a type hint, we fall back to json.loads because we were not able to
+        # identify a specific deserialization method, perhaps the user specified a default type
+        # for another reason than serialization/deserialization.
         return json.loads(buf)
 
     def serialize(self, obj: typing.Optional[I]) -> bytes:
@@ -279,15 +301,19 @@ class DefaultSerde(Serde[I]):
         """
         if obj is None:
             return bytes()
-        if is_msgspec(self.type_hint):
-            import msgspec.json  # type: ignore # pylint: disable=import-outside-toplevel
-
-            return msgspec.json.encode(obj)
-        if is_pydantic(self.type_hint):
+        hint = self.type_hint
+        if not hint:
+            return json.dumps(obj).encode("utf-8")
+        if Msgspec.is_struct(hint):
+            return Msgspec.encode(obj)
+        if is_pydantic(hint):
             return obj.model_dump_json().encode("utf-8")  # type: ignore[attr-defined]
         if is_dataclass(obj):
             data = DaciteToDict(obj)  # type: ignore
             return json.dumps(data).encode("utf-8")
+        # although we have a type hint, we fall back to json.dumps because we were not able to
+        # identify a specific serialization method, perhaps the user specified a default type
+        # for another reason than serialization/deserialization.
         return json.dumps(obj).encode("utf-8")
 
 
@@ -349,9 +375,8 @@ class MsgspecJsonSerde(Serde[I]):
         """
         if not buf:
             return None
-        import msgspec.json  # type: ignore # pylint: disable=import-outside-toplevel
 
-        return msgspec.json.decode(buf, type=self.model)
+        return Msgspec.decode(buf, type=self.model)
 
     def serialize(self, obj: typing.Optional[I]) -> bytes:
         """
@@ -365,6 +390,4 @@ class MsgspecJsonSerde(Serde[I]):
         """
         if obj is None:
             return bytes()
-        import msgspec.json  # type: ignore # pylint: disable=import-outside-toplevel
-
-        return msgspec.json.encode(obj)
+        return Msgspec.encode(obj)
