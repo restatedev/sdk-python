@@ -18,7 +18,9 @@ from restate import (
     TerminalError,
     VirtualObject,
     Workflow,
+    WorkflowContext,
 )
+from restate.serde import DefaultSerde
 import pytest
 import typing
 
@@ -74,3 +76,22 @@ async def test_wrapped_terminal_exception():
     async with simple_harness(greeter) as client:
         with pytest.raises(Exception):
             await client.service_call(greet, arg="bob")
+
+
+async def test_promise_default_serde():
+    workflow = Workflow("test_workflow")
+
+    @workflow.main()
+    async def run(ctx: WorkflowContext) -> str:
+        promise = ctx.promise("test.promise", type_hint=str)
+
+        assert isinstance(promise.serde, DefaultSerde), \
+            f"Expected DefaultSerde but got {type(promise.serde).__name__}"
+
+        await promise.resolve("success")
+        return await promise.value()
+
+
+    async with simple_harness(workflow) as client:
+        result = await client.workflow_call(run, key="test-key", arg=None)
+        assert result == "success"
