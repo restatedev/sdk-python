@@ -47,7 +47,7 @@ from restate.context import (
 )
 from restate.exceptions import TerminalError, SdkInternalBaseException, SdkInternalException, SuspendedException
 from restate.handler import Handler, handler_from_callable, invoke_handler
-from restate.serde import BytesSerde, DefaultSerde, JsonSerde, Serde
+from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_types import ReceiveChannel, Send
 from restate.vm import Failure, Invocation, NotReady, VMWrapper, RunRetryConfig, Suspended  # pylint: disable=line-too-long
 from restate.vm import (
@@ -939,7 +939,7 @@ class ServerInvocationContext(ObjectContext):
         update_restate_context_is_replaying(self.vm)
 
     def promise(
-        self, name: str, serde: typing.Optional[Serde[T]] = JsonSerde(), type_hint: Optional[typing.Type[T]] = None
+        self, name: str, serde: typing.Optional[Serde[T]] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
     ) -> DurablePromise[T]:
         """Create a durable promise."""
         if isinstance(serde, DefaultSerde):
