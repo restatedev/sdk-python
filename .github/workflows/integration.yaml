@@ -124,7 +124,7 @@ jobs:
         run: docker pull ${{ inputs.serviceImage }}
 
       - name: Run test tool
-        uses: restatedev/sdk-test-suite@v3.2
+        uses: restatedev/sdk-test-suite@v3.4
         with:
           restateContainerImage: ${{ inputs.restateCommit != '' && 'localhost/restatedev/restate-commit-download:latest' || (inputs.restateImage != '' && inputs.restateImage || 'ghcr.io/restatedev/restate:main') }}
           serviceContainerImage: ${{ inputs.serviceImage != '' && inputs.serviceImage || 'restatedev/test-services-python' }}
