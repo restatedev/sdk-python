@@ -26,7 +26,7 @@ from .workflow import Workflow
 from .context import Context, ObjectContext, ObjectSharedContext
 from .context import WorkflowContext, WorkflowSharedContext
 from .retry_policy import InvocationRetryPolicy
-from .client_types import RestateClient, RestateClientSendHandle
+from .client_types import RestateClient, HttpError, RestateClientSendHandle
 
 # pylint: disable=line-too-long
 from .context import (
@@ -119,5 +119,6 @@ __all__ = [
     "getLogger",
     "RestateClient",
     "RestateClientSendHandle",
+    "HttpError",
     "create_client",
 ]
