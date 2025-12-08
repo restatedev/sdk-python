@@ -11,8 +11,8 @@
 """This module contains the ASGI server for the restate framework."""
 
 import asyncio
+import logging
 from typing import Dict, TypedDict, Literal
-import traceback
 
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
@@ -23,6 +23,8 @@ from restate.aws_lambda import is_running_on_lambda, wrap_asgi_as_lambda_handler
 
 from restate._internal import PyIdentityVerifier, IdentityVerificationException  # pylint: disable=import-error,no-name-in-module
 from restate._internal import SDK_VERSION  # pylint: disable=import-error,no-name-in-module
+
+logger = logging.getLogger(__name__)
 
 X_RESTATE_SERVER = header_to_binary([("x-restate-server", f"restate-sdk-python/{SDK_VERSION}")])
 
@@ -165,7 +167,7 @@ async def process_invocation_to_completion(
         return
     # pylint: disable=W0718
     except Exception:
-        traceback.print_exc()
+        logger.exception("Exception in Restate handler")
     try:
         await context.leave()
     finally:
@@ -272,7 +274,7 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
         except LifeSpanNotImplemented as e:
             raise e
         except Exception as e:
-            traceback.print_exc()
+            logger.exception("Exception in ASGI app")
             raise e
 
     if is_running_on_lambda():

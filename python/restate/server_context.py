@@ -24,6 +24,7 @@ from random import Random
 from datetime import timedelta
 import inspect
 import functools
+import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, Coroutine
 import typing
 import traceback
@@ -59,6 +60,7 @@ from restate.vm import (
     DoWaitPendingRun,
 )
 
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 I = TypeVar("I")
@@ -448,8 +450,7 @@ class ServerInvocationContext(ObjectContext):
         if isinstance(res, Exception):
             # We might need to write out something at this point.
             await self.take_and_send_output()
-            # Print this exception, might be relevant for the user
-            traceback.print_exception(res)
+            logger.exception("Exception in take_notification", exc_info=res)
             raise SdkInternalException() from res
         if isinstance(res, Suspended):
             # We might need to write out something at this point.
@@ -469,8 +470,7 @@ class ServerInvocationContext(ObjectContext):
             await self.take_and_send_output()
             do_progress_response = self.vm.do_progress(handles)
             if isinstance(do_progress_response, BaseException):
-                # Print this exception, might be relevant for the user
-                traceback.print_exception(do_progress_response)
+                logger.exception("Exception in do_progress", exc_info=do_progress_response)
                 raise SdkInternalException() from do_progress_response
             if isinstance(do_progress_response, Suspended):
                 raise SuspendedException()
