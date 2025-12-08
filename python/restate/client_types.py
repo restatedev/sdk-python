@@ -34,6 +34,18 @@ class RestateClientSendHandle:
         self.status_code = status_code
 
 
+class HttpError(Exception):
+    """
+    An error that occurs during an HTTP request.
+    """
+
+    def __init__(self, status_code: int, message: str, body: str | None = None):
+        super().__init__(f"HTTP {status_code}: {message}")
+        self.status_code = status_code
+        self.message = message
+        self.body = body
+
+
 class RestateClient(abc.ABC):
     """
     An abstract base class for a Restate client.

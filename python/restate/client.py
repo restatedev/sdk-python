@@ -17,7 +17,7 @@ import httpx
 import typing
 from contextlib import asynccontextmanager
 
-from .client_types import RestateClient, RestateClientSendHandle
+from .client_types import RestateClient, RestateClientSendHandle, HttpError
 
 from .context import HandlerType
 from .serde import BytesSerde, JsonSerde, Serde
@@ -142,7 +142,8 @@ class Client(RestateClient):
         if idempotency_key is not None:
             dict_headers["Idempotency-Key"] = idempotency_key
         res = await self.client.post(endpoint, headers=dict_headers, content=content)
-        res.raise_for_status()
+        if res.status_code >= 400:
+            raise HttpError(res.status_code, res.reason_phrase, res.text)
         return res.content
 
     @typing.final
