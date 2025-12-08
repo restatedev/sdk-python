@@ -85,13 +85,38 @@ async def test_promise_default_serde():
     async def run(ctx: WorkflowContext) -> str:
         promise = ctx.promise("test.promise", type_hint=str)
 
-        assert isinstance(promise.serde, DefaultSerde), \
-            f"Expected DefaultSerde but got {type(promise.serde).__name__}"
+        assert isinstance(promise.serde, DefaultSerde), f"Expected DefaultSerde but got {type(promise.serde).__name__}"
 
         await promise.resolve("success")
         return await promise.value()
 
-
     async with simple_harness(workflow) as client:
         result = await client.workflow_call(run, key="test-key", arg=None)
         assert result == "success"
+
+
+async def test_handler_with_union_none():
+    greeter = Service("greeter")
+
+    @greeter.handler()
+    async def greet(ctx: Context, name: str) -> str | None:
+        return "hi"
+
+    async with simple_harness(greeter) as client:
+        res = await client.service_call(greet, arg="bob")
+        assert res == "hi"
+
+
+async def test_handler_with_ctx_none():
+    greeter = Service("greeter")
+
+    async def maybe_something() -> str | None:
+        return "hi"
+
+    @greeter.handler()
+    async def greet(ctx: Context, name: str) -> str | None:
+        return await ctx.run_typed("foo", maybe_something)
+
+    async with simple_harness(greeter) as client:
+        res = await client.service_call(greet, arg="bob")
+        assert res == "hi"

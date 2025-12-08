@@ -18,13 +18,25 @@ which is used to define the handlers for the services.
 from dataclasses import dataclass
 from datetime import timedelta
 from inspect import Signature
-from typing import Any, AsyncContextManager, Callable, Awaitable, Dict, Generic, List, Literal, Optional, TypeVar
+from typing import (
+    Any,
+    AsyncContextManager,
+    Callable,
+    Awaitable,
+    Dict,
+    Generic,
+    List,
+    Literal,
+    Optional,
+    TypeVar,
+)
 
 from restate.retry_policy import InvocationRetryPolicy
 
 from restate.context import HandlerType
 from restate.exceptions import TerminalError
 from restate.serde import DefaultSerde, PydanticJsonSerde, MsgspecJsonSerde, Serde, is_pydantic, Msgspec
+from restate.types import extract_core_type
 
 I = TypeVar("I")
 O = TypeVar("O")
@@ -78,6 +90,117 @@ class HandlerIO(Generic[I, O]):
     output_type: Optional[TypeHint[O]] = None
 
 
+def _json_schema_wrap_as_optional(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    modify the given JSON schema with its type wrapped as optional (nullable).
+    """
+    t = schema.get("type")
+
+    if t is None:
+        # If type is unspecified, leave it open by only adding "null"
+        schema["type"] = ["null"]
+        return schema
+
+    if isinstance(t, list):
+        if "null" not in t:
+            t.append("null")
+    else:
+        if t != "null":
+            schema["type"] = [t, "null"]
+
+    return schema
+
+
+def _make_json_schema_generator(
+    original: Callable[[], Dict[str, Any]], type: Literal["optional", "simple"]
+) -> Callable[[], Dict[str, Any]]:
+    """
+    Create a JSON schema generator that handles optional types.
+
+    If the type is optional, the generated schema will include "null" in the type.
+    """
+    if type == "simple":
+        return original
+
+    def generator() -> Dict[str, Any]:
+        schema = original()
+        if type == "optional":
+            return _json_schema_wrap_as_optional(schema)
+
+        assert False, "unreachable"
+
+    return generator
+
+
+def update_handler_io_with_input_type_hints(handler_io: HandlerIO[I, O], signature: Signature):
+    """
+    Augment handler_io with additional information about the input type.
+
+    This function has a special check for msgspec Structs and Pydantic models when these are provided.
+    This method will inspect the signature of an handler and will look for
+    the input type of a function, and will:
+    * capture any msgspec Structs or Pydantic models (to be used later at discovery)
+    * replace the default json serializer (is unchanged by a user) with the appropriate serde
+    """
+    params = list(signature.parameters.values())
+    if len(params) == 1:
+        # if there is only one parameter, it is the context.
+        handler_io.input_type = TypeHint(is_void=True)
+        return
+
+    annotation = params[-1].annotation
+    core_kind, core_type = extract_core_type(annotation)
+    handler_io.input_type = TypeHint(annotation=core_type)
+    if Msgspec.is_struct(core_type):
+        handler_io.input_type.generate_json_schema = _make_json_schema_generator(
+            lambda: Msgspec.json_schema(core_type), core_kind
+        )
+        if isinstance(handler_io.input_serde, DefaultSerde):
+            handler_io.input_serde = MsgspecJsonSerde(core_type)
+        return
+
+    if is_pydantic(core_type):
+        handler_io.input_type.generate_json_schema = _make_json_schema_generator(
+            lambda: core_type.model_json_schema(mode="serialization"), core_kind
+        )
+        if isinstance(handler_io.input_serde, DefaultSerde):
+            handler_io.input_serde = PydanticJsonSerde(core_type)
+
+
+def update_handler_io_with_return_type_hints(handler_io: HandlerIO[I, O], signature: Signature):
+    """
+    Augment handler_io with additional information about the output type.
+
+    This function has a special check for msgspec Structs and Pydantic models when these are provided.
+    This method will inspect the signature of an handler and will look for
+    the return type of a function, and will:
+    * capture any msgspec Structs or Pydantic models (to be used later at discovery)
+    * replace the default json serializer (is unchanged by a user) with the appropriate serde
+    """
+    return_annotation = signature.return_annotation
+    if return_annotation is None or return_annotation is Signature.empty:
+        # if there is no return annotation, we assume it is void
+        handler_io.output_type = TypeHint(is_void=True)
+        return
+
+    core_kind, return_core_type = extract_core_type(return_annotation)
+    handler_io.output_type = TypeHint(annotation=return_core_type)
+    if Msgspec.is_struct(return_core_type):
+        handler_io.output_type.generate_json_schema = _make_json_schema_generator(
+            lambda: Msgspec.json_schema(return_core_type), core_kind
+        )
+        if isinstance(handler_io.output_serde, DefaultSerde):
+            handler_io.output_serde = MsgspecJsonSerde(return_core_type)
+        return
+
+    if is_pydantic(return_core_type):
+        handler_io.output_type.generate_json_schema = _make_json_schema_generator(
+            lambda: return_core_type.model_json_schema(mode="serialization"), core_kind
+        )
+        if isinstance(handler_io.output_serde, DefaultSerde):
+            handler_io.output_serde = PydanticJsonSerde(return_core_type)
+
+
 def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Signature):
     """
     Augment handler_io with additional information about the input and output types.
@@ -88,38 +211,8 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
     * capture any msgspec Structs or Pydantic models (to be used later at discovery)
     * replace the default json serializer (is unchanged by a user) with the appropriate serde
     """
-    params = list(signature.parameters.values())
-    if len(params) == 1:
-        # if there is only one parameter, it is the context.
-        handler_io.input_type = TypeHint(is_void=True)
-    else:
-        annotation = params[-1].annotation
-        handler_io.input_type = TypeHint(annotation=annotation)
-        if Msgspec.is_struct(annotation):
-            handler_io.input_type.generate_json_schema = lambda: Msgspec.json_schema(annotation)
-            if isinstance(handler_io.input_serde, DefaultSerde):
-                handler_io.input_serde = MsgspecJsonSerde(annotation)
-        elif is_pydantic(annotation):
-            handler_io.input_type.generate_json_schema = lambda: annotation.model_json_schema(mode="serialization")
-            if isinstance(handler_io.input_serde, DefaultSerde):
-                handler_io.input_serde = PydanticJsonSerde(annotation)
-
-    return_annotation = signature.return_annotation
-    if return_annotation is None or return_annotation is Signature.empty:
-        # if there is no return annotation, we assume it is void
-        handler_io.output_type = TypeHint(is_void=True)
-    else:
-        handler_io.output_type = TypeHint(annotation=return_annotation)
-        if Msgspec.is_struct(return_annotation):
-            handler_io.output_type.generate_json_schema = lambda: Msgspec.json_schema(return_annotation)
-            if isinstance(handler_io.output_serde, DefaultSerde):
-                handler_io.output_serde = MsgspecJsonSerde(return_annotation)
-        elif is_pydantic(return_annotation):
-            handler_io.output_type.generate_json_schema = lambda: return_annotation.model_json_schema(
-                mode="serialization"
-            )
-            if isinstance(handler_io.output_serde, DefaultSerde):
-                handler_io.output_serde = PydanticJsonSerde(return_annotation)
+    update_handler_io_with_input_type_hints(handler_io, signature)
+    update_handler_io_with_return_type_hints(handler_io, signature)
 
 
 # pylint: disable=R0902

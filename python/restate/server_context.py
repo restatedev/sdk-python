@@ -49,6 +49,7 @@ from restate.exceptions import TerminalError, SdkInternalBaseException, SdkInter
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_types import ReceiveChannel, Send
+from restate.types import extract_core_type
 from restate.vm import Failure, Invocation, NotReady, VMWrapper, RunRetryConfig, Suspended  # pylint: disable=line-too-long
 from restate.vm import (
     DoProgressAnyCompleted,
@@ -697,6 +698,10 @@ class ServerInvocationContext(ObjectContext):
             if options.type_hint is None:
                 signature = inspect.signature(action, eval_str=True)
                 options.type_hint = signature.return_annotation
+            core_type_kind, core_type = extract_core_type(options.type_hint)
+            if core_type_kind == "simple" or core_type_kind == "optional":
+                # use core type as it is more specific. E.g. Optional[T] -> T
+                options.type_hint = core_type
             options.serde = typing.cast(DefaultSerde, options.serde).with_maybe_type(options.type_hint)
         handle = self.vm.sys_run(name)
         update_restate_context_is_replaying(self.vm)
