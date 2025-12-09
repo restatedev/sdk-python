@@ -27,6 +27,7 @@ harness = ["testcontainers", "hypercorn", "httpx"]
 serde = ["dacite", "pydantic", "msgspec"]
 client = ["httpx[http2]"]
 adk = ["google-adk>=1.20.0"]
+openai = ["openai-agents>=0.6.1"]
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]
