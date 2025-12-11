@@ -17,12 +17,14 @@ import restate
 from typing import Optional, Any, cast
 
 from google.adk.sessions import Session
+from google.adk.sessions.state import State
 from google.adk.events.event import Event
 from google.adk.sessions.base_session_service import (
     BaseSessionService,
     ListSessionsResponse,
     GetSessionConfig,
 )
+from restate import TerminalError
 
 from restate.extensions import current_context
 
@@ -42,14 +44,22 @@ class RestateSessionService(BaseSessionService):
         if session_id is None:
             session_id = str(self.ctx().uuid())
 
-        session = await self.ctx().get(f"session_store::{session_id}", type_hint=Session) or Session(
+        session = await self.ctx().get(f"session_store::{session_id}", type_hint=Session)
+        if session is not None:
+            raise TerminalError("Session with the given ID already exists.")
+
+        session = Session(
             app_name=app_name,
             user_id=user_id,
             id=session_id,
             state=state or {},
         )
-        self.ctx().set(f"session_store::{session_id}", session)
+
+        await self.flush_session_state(session)
         return session
+
+    async def has_session(self, *, session_id: str) -> bool:
+        return await self.ctx().get(f"session_store::{session_id}", type_hint=Session) is not None
 
     async def get_session(
         self,
@@ -89,12 +99,18 @@ class RestateSessionService(BaseSessionService):
         session.events.append(event)
         return event
 
+    async def flush_session_state(self, session: Session):
+        session_to_store = session.model_copy()
 
-async def flush_session_state(ctx: restate.ObjectContext, session: Session):
-    session_to_store = session.model_copy()
-    # Remove restate-specific context that got added by the plugin before storing
-    session_to_store.state.pop("restate_context", None)
-    deterministic_session = await ctx.run_typed(
-        "store session", lambda: session_to_store, restate.RunOptions(type_hint=Session)
-    )
-    ctx.set(f"session_store::{session.id}", deterministic_session)
+        # Remove temporary state keys before storing
+        for key in list(session_to_store.state.keys()):
+            if key.startswith(State.TEMP_PREFIX):
+                session_to_store.state.pop(key)
+
+        # Remove restate-specific context that got added by the plugin before storing
+        session_to_store.state.pop("restate_context", None)
+
+        deterministic_session = await self.ctx().run_typed(
+            "store session", lambda: session_to_store, restate.RunOptions(type_hint=Session)
+        )
+        self.ctx().set(f"session_store::{session.id}", deterministic_session)
