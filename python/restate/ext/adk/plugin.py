@@ -22,6 +22,7 @@ from google.genai import types
 
 from google.adk.agents import BaseAgent, LlmAgent
 from google.adk.agents.callback_context import CallbackContext
+from google.adk.agents.invocation_context import InvocationContext
 from google.adk.plugins import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
@@ -30,11 +31,9 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.models import LLMRegistry
 from google.adk.models.base_llm import BaseLlm
 from google.adk.flows.llm_flows.functions import generate_client_function_call_id
-
+from restate.ext.adk import RestateSessionService
 
 from restate.extensions import current_context
-
-from .session import flush_session_state
 
 
 class RestatePlugin(BasePlugin):
@@ -84,11 +83,12 @@ class RestatePlugin(BasePlugin):
     ) -> Optional[types.Content]:
         self._models.pop(callback_context.invocation_id, None)
         self._locks.pop(callback_context.invocation_id, None)
-
-        ctx = cast(restate.ObjectContext, current_context())
-        await flush_session_state(ctx, callback_context.session)
-
         return None
+
+    async def after_run_callback(self, *, invocation_context: InvocationContext) -> None:
+        if isinstance(invocation_context.session_service, RestateSessionService):
+            restate_session_service = cast(RestateSessionService, invocation_context.session_service)
+            await restate_session_service.flush_session_state(invocation_context.session)
 
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
@@ -109,9 +109,10 @@ class RestatePlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> Optional[dict]:
-        tool_context.session.state["restate_context"] = current_context()
         lock = self._locks[tool_context.invocation_id]
+        ctx = current_context()
         await lock.acquire()
+        tool_context.session.state["restate_context"] = ctx
         # TODO: if we want we can also automatically wrap tools with ctx.run_typed here
         return None
 
@@ -123,9 +124,9 @@ class RestatePlugin(BasePlugin):
         tool_context: ToolContext,
         result: dict,
     ) -> Optional[dict]:
+        tool_context.session.state.pop("restate_context", None)
         lock = self._locks[tool_context.invocation_id]
         lock.release()
-        tool_context.session.state.pop("restate_context", None)
         return None
 
     async def on_tool_error_callback(
@@ -136,9 +137,9 @@ class RestatePlugin(BasePlugin):
         tool_context: ToolContext,
         error: Exception,
     ) -> Optional[dict]:
+        tool_context.session.state.pop("restate_context", None)
         lock = self._locks[tool_context.invocation_id]
         lock.release()
-        tool_context.session.state.pop("restate_context", None)
         return None
 
     async def close(self):
