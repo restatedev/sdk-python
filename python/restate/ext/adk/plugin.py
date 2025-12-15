@@ -35,17 +35,25 @@ from restate.ext.adk import RestateSessionService
 
 from restate.extensions import current_context
 
+from restate.ext.turnstile import Turnstile
+
+
+def _create_turnstile(s: LlmResponse) -> Turnstile:
+    ids = _get_function_call_ids(s)
+    turnstile = Turnstile(ids)
+    return turnstile
+
 
 class RestatePlugin(BasePlugin):
     """A plugin to integrate Restate with the ADK framework."""
 
     _models: dict[str, BaseLlm]
-    _locks: dict[str, asyncio.Lock]
+    _turnstiles: dict[str, Turnstile | None]
 
     def __init__(self, *, max_model_call_retries: int = 10):
         super().__init__(name="restate_plugin")
         self._models = {}
-        self._locks = {}
+        self._turnstiles = {}
         self._max_model_call_retries = max_model_call_retries
 
     async def before_agent_callback(
@@ -62,7 +70,7 @@ class RestatePlugin(BasePlugin):
             )
         model = agent.model if isinstance(agent.model, BaseLlm) else LLMRegistry.new_llm(agent.model)
         self._models[callback_context.invocation_id] = model
-        self._locks[callback_context.invocation_id] = asyncio.Lock()
+        self._turnstiles[callback_context.invocation_id] = None
 
         id = callback_context.invocation_id
         event = ctx.request().attempt_finished_event
@@ -73,7 +81,7 @@ class RestatePlugin(BasePlugin):
                 await event.wait()
             finally:
                 self._models.pop(id, None)
-                self._locks.pop(id, None)
+                self._turnstiles.pop(id, None)
 
         _ = asyncio.create_task(release_task())
         return None
@@ -82,7 +90,7 @@ class RestatePlugin(BasePlugin):
         self, *, agent: BaseAgent, callback_context: CallbackContext
     ) -> Optional[types.Content]:
         self._models.pop(callback_context.invocation_id, None)
-        self._locks.pop(callback_context.invocation_id, None)
+        self._turnstiles.pop(callback_context.invocation_id, None)
         return None
 
     async def after_run_callback(self, *, invocation_context: InvocationContext) -> None:
@@ -100,6 +108,8 @@ class RestatePlugin(BasePlugin):
                 "No Restate context found, the restate plugin must be used from within a restate handler."
             )
         response = await _generate_content_async(ctx, self._max_model_call_retries, model, llm_request)
+        turnstile = _create_turnstile(response)
+        self._turnstiles[callback_context.invocation_id] = turnstile
         return response
 
     async def before_tool_callback(
@@ -109,11 +119,17 @@ class RestatePlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> Optional[dict]:
-        lock = self._locks[tool_context.invocation_id]
+        turnstile = self._turnstiles[tool_context.invocation_id]
+        assert turnstile is not None, "Turnstile not found for tool invocation."
+
+        id = tool_context.function_call_id
+        assert id is not None, "Function call ID is required for tool invocation."
+
+        await turnstile.wait_for(id)
+
         ctx = current_context()
-        await lock.acquire()
         tool_context.session.state["restate_context"] = ctx
-        # TODO: if we want we can also automatically wrap tools with ctx.run_typed here
+
         return None
 
     async def after_tool_callback(
@@ -125,8 +141,11 @@ class RestatePlugin(BasePlugin):
         result: dict,
     ) -> Optional[dict]:
         tool_context.session.state.pop("restate_context", None)
-        lock = self._locks[tool_context.invocation_id]
-        lock.release()
+        turnstile = self._turnstiles[tool_context.invocation_id]
+        assert turnstile is not None, "Turnstile not found for tool invocation."
+        id = tool_context.function_call_id
+        assert id is not None, "Function call ID is required for tool invocation."
+        turnstile.allow_next_after(id)
         return None
 
     async def on_tool_error_callback(
@@ -138,13 +157,26 @@ class RestatePlugin(BasePlugin):
         error: Exception,
     ) -> Optional[dict]:
         tool_context.session.state.pop("restate_context", None)
-        lock = self._locks[tool_context.invocation_id]
-        lock.release()
+        turnstile = self._turnstiles[tool_context.invocation_id]
+        assert turnstile is not None, "Turnstile not found for tool invocation."
+        id = tool_context.function_call_id
+        assert id is not None, "Function call ID is required for tool invocation."
+        turnstile.allow_next_after(id)
         return None
 
     async def close(self):
         self._models.clear()
-        self._locks.clear()
+        self._turnstiles.clear()
+
+
+def _get_function_call_ids(s: LlmResponse) -> list[str]:
+    ids = []
+    if s.content and s.content.parts:
+        for part in s.content.parts:
+            if part.function_call:
+                if part.function_call.id:
+                    ids.append(part.function_call.id)
+    return ids
 
 
 def _generate_client_function_call_id(s: LlmResponse) -> None:
