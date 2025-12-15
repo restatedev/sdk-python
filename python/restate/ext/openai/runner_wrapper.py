@@ -179,7 +179,7 @@ class RestateSession(SessionABC):
             return self._items.pop()
         return None
 
-    async def flush(self) -> None:
+    def flush(self) -> None:
         """Flush the session items to the context."""
         self._ctx().set("items", self._items)
 
@@ -279,6 +279,6 @@ class DurableRunner:
             # Flush session items to Restate
             session = kwargs.get("session", None)
             if session is not None and isinstance(session, RestateSession):
-                await session.flush()
+                session.flush()
 
         return result
