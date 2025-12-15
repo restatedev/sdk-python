@@ -93,7 +93,7 @@ class DurableModelCalls(MultiProvider):
     A Restate model provider that wraps the OpenAI SDK's default MultiProvider.
     """
 
-    def __init__(self, llm_retry_opts: LlmRetryOpts):
+    def __init__(self, llm_retry_opts: LlmRetryOpts | None = None):
         super().__init__()
         self.llm_retry_opts = llm_retry_opts
 
@@ -106,7 +106,7 @@ class RestateModelWrapper(Model):
     A wrapper around the OpenAI SDK's Model that persists LLM calls in the Restate journal.
     """
 
-    def __init__(self, model: Model, llm_retry_opts: LlmRetryOpts):
+    def __init__(self, model: Model, llm_retry_opts: LlmRetryOpts | None = LlmRetryOpts()):
         self.model = model
         self.model_name = "RestateModelWrapper"
         self.llm_retry_opts = llm_retry_opts
@@ -124,7 +124,6 @@ class RestateModelWrapper(Model):
         ctx = current_context()
         if ctx is None:
             raise RuntimeError("No current Restate context found, make sure to run inside a Restate handler")
-        print("Calling LLM with retry options:", self.llm_retry_opts)
         result = await ctx.run_typed(
             "call LLM",
             call_llm,
@@ -255,7 +254,7 @@ class DurableRunner:
         """
 
         # Set persisting model calls
-        llm_retry_opts = kwargs.get("llm_retry_opts", LlmRetryOpts())
+        llm_retry_opts = kwargs.get("llm_retry_opts", None)
         run_config = kwargs.pop("run_config", RunConfig())
         run_config = dataclasses.replace(run_config, model_provider=DurableModelCalls(llm_retry_opts))
 

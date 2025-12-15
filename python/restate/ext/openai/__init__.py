@@ -16,7 +16,6 @@ import typing
 
 from .runner_wrapper import (
     DurableRunner,
-    DurableModelCalls,
     continue_on_terminal_errors,
     raise_terminal_errors,
     RestateSession,
@@ -43,12 +42,11 @@ def restate_context() -> Context:
 
 
 __all__ = [
-    "DurableModelCalls",
-    "continue_on_terminal_errors",
-    "raise_terminal_errors",
-    "RestateSession",
     "DurableRunner",
+    "RestateSession",
     "LlmRetryOpts",
     "restate_object_context",
     "restate_context",
+    "continue_on_terminal_errors",
+    "raise_terminal_errors",
 ]
