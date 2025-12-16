@@ -147,11 +147,21 @@ def _create_wrapper(state, captured_tool):
     async def on_invoke_tool_wrapper(tool_context: ToolContext[Any], tool_input: Any) -> Any:
         turnstile = state.turnstile
         call_id = tool_context.tool_call_id
+        # wait for our turn
+        await turnstile.wait_for(call_id)
         try:
-            await turnstile.wait_for(call_id)
-            return await captured_tool.on_invoke_tool(tool_context, tool_input)
-        finally:
+            # invoke the original tool
+            res = await captured_tool.on_invoke_tool(tool_context, tool_input)
+            # allow the next tool to proceed
             turnstile.allow_next_after(call_id)
+            return res
+        except BaseException as ex:
+            # if there was an error, it will be propagated up, towards the handler
+            # but we need to make sure that all subsequent tools will not execute
+            # as they might interact with the restate context.
+            turnstile.cancel_all_after(call_id)
+            # re-raise the exception
+            raise ex from None
 
     return on_invoke_tool_wrapper
 

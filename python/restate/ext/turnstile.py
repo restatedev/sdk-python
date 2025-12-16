@@ -1,4 +1,5 @@
 from asyncio import Event
+from restate.exceptions import SdkInternalException
 
 
 class Turnstile:
@@ -14,6 +15,7 @@ class Turnstile:
         self.turns = dict(zip(ids, ids[1:]))
         # mapping of id to event that signals when that id's turn is allowed
         self.events = {id: Event() for id in ids}
+        self.canceled = False
         if ids:
             # make sure that the first id can proceed immediately
             event = self.events[ids[0]]
@@ -22,6 +24,16 @@ class Turnstile:
     async def wait_for(self, id: str) -> None:
         event = self.events[id]
         await event.wait()
+        if self.canceled:
+            raise SdkInternalException() from None
+
+    def cancel_all_after(self, id: str) -> None:
+        self.canceled = True
+        next_id = self.turns.get(id)
+        while next_id is not None:
+            next_event = self.events[next_id]
+            next_event.set()
+            next_id = self.turns.get(next_id)
 
     def allow_next_after(self, id: str) -> None:
         next_id = self.turns.get(id)
