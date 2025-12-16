@@ -12,11 +12,34 @@
 This module contains the optional OpenAI integration for Restate.
 """
 
-from .runner_wrapper import Runner, DurableModelCalls, continue_on_terminal_errors, raise_terminal_errors
+import typing
+
+from .runner_wrapper import DurableRunner, continue_on_terminal_errors, raise_terminal_errors, LlmRetryOpts
+from restate import ObjectContext, Context
+from restate.server_context import current_context
+
+
+def restate_object_context() -> ObjectContext:
+    """Get the current Restate ObjectContext."""
+    ctx = current_context()
+    if ctx is None:
+        raise RuntimeError("No Restate context found.")
+    return typing.cast(ObjectContext, ctx)
+
+
+def restate_context() -> Context:
+    """Get the current Restate Context."""
+    ctx = current_context()
+    if ctx is None:
+        raise RuntimeError("No Restate context found.")
+    return ctx
+
 
 __all__ = [
-    "DurableModelCalls",
+    "DurableRunner",
+    "LlmRetryOpts",
+    "restate_object_context",
+    "restate_context",
     "continue_on_terminal_errors",
     "raise_terminal_errors",
-    "Runner",
 ]
