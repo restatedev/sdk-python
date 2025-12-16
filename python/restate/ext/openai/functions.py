@@ -9,7 +9,7 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 
-from typing import List, Any
+from typing import List, Any, overload, Callable, Union, TypeVar, Awaitable
 import dataclasses
 
 from agents import (
@@ -18,9 +18,18 @@ from agents import (
     Agent,
     RunContextWrapper,
     ModelBehaviorError,
+    AgentBase,
 )
 
-from agents.tool import FunctionTool, Tool, ToolFunction, function_tool as oai_function_tool
+from agents.function_schema import DocstringStyle
+
+from agents.tool import (
+    FunctionTool,
+    Tool,
+    ToolFunction,
+    ToolErrorFunction,
+    function_tool as oai_function_tool,
+)
 from agents.tool_context import ToolContext
 from agents.items import TResponseOutputItem
 
@@ -28,16 +37,9 @@ from restate import TerminalError
 
 from .models import State, AgentsTerminalException
 
+T = TypeVar("T")
 
-def function_tool(func: ToolFunction, *args, **kwargs) -> FunctionTool:
-    failure_error_function = kwargs.pop("failure_error_function", raise_terminal_errors)
-
-    return oai_function_tool(
-        func,
-        *args,
-        failure_error_function=failure_error_function,
-        **kwargs,
-    )
+MaybeAwaitable = Union[Awaitable[T], T]
 
 
 def raise_terminal_errors(context: RunContextWrapper[Any], error: Exception) -> str:
@@ -66,6 +68,73 @@ def continue_on_terminal_errors(context: RunContextWrapper[Any], error: Exceptio
         return f"An error occurred while calling the tool: {str(error)}"
 
     raise error
+
+
+@overload
+def function_tool(
+    func: ToolFunction[...],
+    *,
+    name_override: str | None = None,
+    description_override: str | None = None,
+    docstring_style: DocstringStyle | None = None,
+    use_docstring_info: bool = True,
+    failure_error_function: ToolErrorFunction | None = None,
+    strict_mode: bool = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+) -> FunctionTool:
+    """Overload for usage as @function_tool (no parentheses)."""
+    ...
+
+
+@overload
+def function_tool(
+    *,
+    name_override: str | None = None,
+    description_override: str | None = None,
+    docstring_style: DocstringStyle | None = None,
+    use_docstring_info: bool = True,
+    failure_error_function: ToolErrorFunction | None = None,
+    strict_mode: bool = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+) -> Callable[[ToolFunction[...]], FunctionTool]:
+    """Overload for usage as @function_tool(...)."""
+    ...
+
+
+def function_tool(
+    func: ToolFunction[...] | None = None,
+    *,
+    name_override: str | None = None,
+    description_override: str | None = None,
+    docstring_style: DocstringStyle | None = None,
+    use_docstring_info: bool = True,
+    failure_error_function: ToolErrorFunction | None = raise_terminal_errors,
+    strict_mode: bool = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
+    # If func is actually a callable, we were used as @function_tool with no parentheses
+    if callable(func):
+        return oai_function_tool(
+            func=func,
+            name_override=name_override,
+            description_override=description_override,
+            docstring_style=docstring_style,
+            use_docstring_info=use_docstring_info,
+            failure_error_function=failure_error_function or raise_terminal_errors,
+            strict_mode=strict_mode,
+            is_enabled=is_enabled,
+        )
+
+    # Otherwise, we were used as @function_tool(...), so return a decorator
+    return oai_function_tool(
+        name_override=name_override,
+        description_override=description_override,
+        docstring_style=docstring_style,
+        use_docstring_info=use_docstring_info,
+        failure_error_function=failure_error_function or raise_terminal_errors,
+        strict_mode=strict_mode,
+        is_enabled=is_enabled,
+    )
 
 
 def get_function_call_ids(response: list[TResponseOutputItem]) -> List[str]:
