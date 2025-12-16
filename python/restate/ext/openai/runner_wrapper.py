@@ -35,7 +35,7 @@ from restate.ext.turnstile import Turnstile
 from restate.extensions import current_context
 from restate import RunOptions, TerminalError
 
-from .utils import get_function_call_ids, wrap_agent_tools
+from .functions import get_function_call_ids, wrap_agent_tools
 from .models import LlmRetryOpts, RestateModelResponse, State
 from .session import RestateSession
 
