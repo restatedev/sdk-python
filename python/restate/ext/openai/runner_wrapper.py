@@ -25,15 +25,12 @@ from agents import (
     Agent,
     ModelBehaviorError,
     ModelSettings,
+    Runner,
 )
 from agents.models.multi_provider import MultiProvider
 from agents.items import TResponseStreamEvent, TResponseOutputItem, ModelResponse
 from agents.memory.session import SessionABC
 from agents.items import TResponseInputItem
-from agents.run import (
-    AgentRunner,
-    DEFAULT_AGENT_RUNNER,
-)
 from datetime import timedelta
 from typing import List, Any, AsyncIterator, Optional, cast
 from pydantic import BaseModel
@@ -41,6 +38,7 @@ from pydantic import BaseModel
 from restate.exceptions import SdkInternalBaseException
 from restate.extensions import current_context
 from restate import RunOptions, ObjectContext, TerminalError
+
 
 @dataclasses.dataclass
 class LlmRetryOpts:
@@ -106,10 +104,10 @@ class RestateModelWrapper(Model):
     A wrapper around the OpenAI SDK's Model that persists LLM calls in the Restate journal.
     """
 
-    def __init__(self, model: Model, llm_retry_opts: LlmRetryOpts | None = LlmRetryOpts()):
+    def __init__(self, model: Model, llm_retry_opts: LlmRetryOpts | None = None):
         self.model = model
         self.model_name = "RestateModelWrapper"
-        self.llm_retry_opts = llm_retry_opts
+        self.llm_retry_opts = llm_retry_opts if llm_retry_opts is not None else LlmRetryOpts()
 
     async def get_response(self, *args, **kwargs) -> ModelResponse:
         async def call_llm() -> RestateModelResponse:
@@ -155,26 +153,24 @@ class RestateSession(SessionABC):
     def _ctx(self) -> ObjectContext:
         return cast(ObjectContext, current_context())
 
-    async def _load_items_if_needed(self) -> None:
-        """Load items from context if not already loaded."""
-        if self._items is None:
-            self._items = await self._ctx().get("items", type_hint=List[TResponseInputItem]) or []
-
     async def get_items(self, limit: int | None = None) -> List[TResponseInputItem]:
         """Retrieve conversation history for this session."""
-        await self._load_items_if_needed()
+        if self._items is None:
+            self._items = await self._ctx().get("items") or []
         if limit is not None:
             return self._items[-limit:]
         return self._items.copy()
 
     async def add_items(self, items: List[TResponseInputItem]) -> None:
         """Store new items for this session."""
-        await self._load_items_if_needed()
+        if self._items is None:
+            self._items = await self._ctx().get("items") or []
         self._items.extend(items)
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from this session."""
-        await self._load_items_if_needed()
+        if self._items is None:
+            self._items = await self._ctx().get("items") or []
         if self._items:
             return self._items.pop()
         return None
@@ -244,6 +240,8 @@ class DurableRunner:
     async def run(
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
+        *,
+        use_restate_session: bool = False,
         **kwargs,
     ) -> RunResult:
         """
@@ -254,7 +252,7 @@ class DurableRunner:
         """
 
         # Set persisting model calls
-        llm_retry_opts = kwargs.get("llm_retry_opts", None)
+        llm_retry_opts = kwargs.pop("llm_retry_opts", None)
         run_config = kwargs.pop("run_config", RunConfig())
         run_config = dataclasses.replace(run_config, model_provider=DurableModelCalls(llm_retry_opts))
 
@@ -272,12 +270,19 @@ class DurableRunner:
             model_settings=model_settings,
         )
 
-        runner = DEFAULT_AGENT_RUNNER or AgentRunner()
+        # Use Restate session if requested, otherwise use provided session
+        session = kwargs.pop("session", None)
+        if use_restate_session:
+            if session is not None:
+                raise TerminalError("When use_restate_session is True, session config cannot be provided.")
+            session = RestateSession()
+
         try:
-            result = await runner.run(starting_agent=starting_agent, input=input, run_config=run_config, **kwargs)
+            result = await Runner.run(
+                starting_agent=starting_agent, input=input, run_config=run_config, session=session, **kwargs
+            )
         finally:
             # Flush session items to Restate
-            session = kwargs.get("session", None)
             if session is not None and isinstance(session, RestateSession):
                 session.flush()
 
