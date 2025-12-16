@@ -20,13 +20,24 @@ from agents import (
     ModelBehaviorError,
 )
 
-from agents.tool import FunctionTool, Tool
+from agents.tool import FunctionTool, Tool, ToolFunction, function_tool as oai_function_tool
 from agents.tool_context import ToolContext
 from agents.items import TResponseOutputItem
 
 from restate import TerminalError
 
 from .models import State, AgentsTerminalException
+
+
+def function_tool(func: ToolFunction, *args, **kwargs) -> FunctionTool:
+    failure_error_function = kwargs.pop("failure_error_function", raise_terminal_errors)
+
+    return oai_function_tool(
+        func,
+        *args,
+        failure_error_function=failure_error_function,
+        **kwargs,
+    )
 
 
 def raise_terminal_errors(context: RunContextWrapper[Any], error: Exception) -> str:

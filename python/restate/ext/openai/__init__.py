@@ -19,7 +19,7 @@ from restate.server_context import current_context
 
 from .runner_wrapper import DurableRunner
 from .models import LlmRetryOpts
-from .functions import continue_on_terminal_errors, raise_terminal_errors
+from .functions import continue_on_terminal_errors, raise_terminal_errors, function_tool
 
 
 def restate_object_context() -> ObjectContext:
@@ -45,4 +45,5 @@ __all__ = [
     "restate_context",
     "continue_on_terminal_errors",
     "raise_terminal_errors",
+    "function_tool",
 ]
