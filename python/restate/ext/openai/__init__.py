@@ -14,9 +14,11 @@ This module contains the optional OpenAI integration for Restate.
 
 import typing
 
-from .runner_wrapper import DurableRunner, continue_on_terminal_errors, raise_terminal_errors, LlmRetryOpts
 from restate import ObjectContext, Context
 from restate.server_context import current_context
+
+from .runner_wrapper import DurableRunner, continue_on_terminal_errors, raise_terminal_errors
+from .models import LlmRetryOpts
 
 
 def restate_object_context() -> ObjectContext:
