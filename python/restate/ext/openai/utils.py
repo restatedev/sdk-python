@@ -9,6 +9,7 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 
+from typing import List, Any
 import dataclasses
 
 from agents import (
@@ -19,11 +20,7 @@ from agents import (
 
 from agents.tool import FunctionTool, Tool
 from agents.tool_context import ToolContext
-
-from typing import List, Any
-
 from agents.items import TResponseOutputItem
-from restate.extensions import current_context
 
 from .models import State
 
@@ -36,23 +33,11 @@ def get_function_call_ids(response: list[TResponseOutputItem]) -> List[str]:
 
 def _create_wrapper(state, captured_tool):
     async def on_invoke_tool_wrapper(tool_context: ToolContext[Any], tool_input: Any) -> Any:
-        async def invoke():
-            result = await captured_tool.on_invoke_tool(tool_context, tool_input)
-            # Ensure Pydantic objects are serialized to dict for LLM compatibility
-            if hasattr(result, "model_dump"):
-                return result.model_dump()
-            elif hasattr(result, "dict"):
-                return result.dict()
-            return result
-
         turnstile = state.turnstile
         call_id = tool_context.tool_call_id
         try:
             await turnstile.wait_for(call_id)
-            ctx = current_context()
-            if ctx is None:
-                raise RuntimeError("No current Restate context found, make sure to run inside a Restate handler")
-            return await ctx.run_typed(captured_tool.name, invoke)
+            return await captured_tool.on_invoke_tool(tool_context, tool_input)
         finally:
             turnstile.allow_next_after(call_id)
 

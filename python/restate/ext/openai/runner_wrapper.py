@@ -1,5 +1,5 @@
 #
-#  Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
+#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 #
 #  This file is part of the Restate SDK for Python,
 #  which is released under the MIT license.
@@ -23,7 +23,6 @@ from agents import (
     RunResult,
     Agent,
     ModelBehaviorError,
-    ModelSettings,
     Runner,
 )
 from agents.models.multi_provider import MultiProvider
@@ -183,20 +182,6 @@ class DurableRunner:
         llm_retry_opts = kwargs.pop("llm_retry_opts", None)
         run_config = kwargs.pop("run_config", RunConfig())
         run_config = dataclasses.replace(run_config, model_provider=DurableModelCalls(state, llm_retry_opts))
-
-        # Disable parallel tool calls
-        model_settings = run_config.model_settings
-        if model_settings is None:
-            model_settings = ModelSettings(parallel_tool_calls=False)
-        else:
-            model_settings = dataclasses.replace(
-                model_settings,
-                parallel_tool_calls=False,
-            )
-        run_config = dataclasses.replace(
-            run_config,
-            model_settings=model_settings,
-        )
 
         # Use Restate session if requested, otherwise use provided session
         session = kwargs.pop("session", None)
