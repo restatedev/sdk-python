@@ -16,13 +16,45 @@ from agents import (
     Handoff,
     TContext,
     Agent,
+    RunContextWrapper,
+    ModelBehaviorError,
 )
 
 from agents.tool import FunctionTool, Tool
 from agents.tool_context import ToolContext
 from agents.items import TResponseOutputItem
 
-from .models import State
+from restate import TerminalError
+
+from .models import State, AgentsTerminalException
+
+
+def raise_terminal_errors(context: RunContextWrapper[Any], error: Exception) -> str:
+    """A custom function to provide a user-friendly error message."""
+    # Raise terminal errors and cancellations
+    if isinstance(error, TerminalError):
+        # For the agent SDK it needs to be an AgentsException, for restate it needs to be a TerminalError
+        # so we create a new exception that inherits from both
+        raise AgentsTerminalException(error.message)
+
+    if isinstance(error, ModelBehaviorError):
+        return f"An error occurred while calling the tool: {str(error)}"
+
+    raise error
+
+
+def continue_on_terminal_errors(context: RunContextWrapper[Any], error: Exception) -> str:
+    """A custom function to provide a user-friendly error message."""
+    # Raise terminal errors and cancellations
+    if isinstance(error, TerminalError):
+        # For the agent SDK it needs to be an AgentsException, for restate it needs to be a TerminalError
+        # so we create a new exception that inherits from both
+        return f"An error occurred while running the tool: {str(error)}"
+
+    if isinstance(error, ModelBehaviorError):
+        return f"An error occurred while calling the tool: {str(error)}"
+
+    raise error
 
 
 def get_function_call_ids(response: list[TResponseOutputItem]) -> List[str]:

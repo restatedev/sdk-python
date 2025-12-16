@@ -16,21 +16,17 @@ import dataclasses
 
 from agents import (
     Model,
-    RunContextWrapper,
-    AgentsException,
     RunConfig,
     TContext,
     RunResult,
     Agent,
-    ModelBehaviorError,
     Runner,
 )
 from agents.models.multi_provider import MultiProvider
 from agents.items import TResponseStreamEvent, ModelResponse
 from agents.items import TResponseInputItem
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
-from restate.exceptions import SdkInternalBaseException
 from restate.ext.turnstile import Turnstile
 from restate.extensions import current_context
 from restate import RunOptions, TerminalError
@@ -103,48 +99,6 @@ class RestateModelWrapper(Model):
 
     def stream_response(self, *args, **kwargs) -> AsyncIterator[TResponseStreamEvent]:
         raise TerminalError("Streaming is not supported in Restate. Use `get_response` instead.")
-
-
-class AgentsTerminalException(AgentsException, TerminalError):
-    """Exception that is both an AgentsException and a restate.TerminalError."""
-
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-
-
-class AgentsSuspension(AgentsException, SdkInternalBaseException):
-    """Exception that is both an AgentsException and a restate SdkInternalBaseException."""
-
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-
-
-def raise_terminal_errors(context: RunContextWrapper[Any], error: Exception) -> str:
-    """A custom function to provide a user-friendly error message."""
-    # Raise terminal errors and cancellations
-    if isinstance(error, TerminalError):
-        # For the agent SDK it needs to be an AgentsException, for restate it needs to be a TerminalError
-        # so we create a new exception that inherits from both
-        raise AgentsTerminalException(error.message)
-
-    if isinstance(error, ModelBehaviorError):
-        return f"An error occurred while calling the tool: {str(error)}"
-
-    raise error
-
-
-def continue_on_terminal_errors(context: RunContextWrapper[Any], error: Exception) -> str:
-    """A custom function to provide a user-friendly error message."""
-    # Raise terminal errors and cancellations
-    if isinstance(error, TerminalError):
-        # For the agent SDK it needs to be an AgentsException, for restate it needs to be a TerminalError
-        # so we create a new exception that inherits from both
-        return f"An error occurred while running the tool: {str(error)}"
-
-    if isinstance(error, ModelBehaviorError):
-        return f"An error occurred while calling the tool: {str(error)}"
-
-    raise error
 
 
 class DurableRunner:

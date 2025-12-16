@@ -17,8 +17,9 @@ import typing
 from restate import ObjectContext, Context
 from restate.server_context import current_context
 
-from .runner_wrapper import DurableRunner, continue_on_terminal_errors, raise_terminal_errors
+from .runner_wrapper import DurableRunner
 from .models import LlmRetryOpts
+from .functions import continue_on_terminal_errors, raise_terminal_errors
 
 
 def restate_object_context() -> ObjectContext:
