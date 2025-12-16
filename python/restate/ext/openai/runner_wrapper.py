@@ -247,6 +247,10 @@ class DurableRunner:
         """
         Run an agent with automatic Restate configuration.
 
+        Args:
+            use_restate_session: If True, creates a RestateSession for conversation persistence.
+                                Requires running within a Restate Virtual Object context.
+
         Returns:
             The result from Runner.run
         """
