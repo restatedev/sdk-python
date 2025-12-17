@@ -41,3 +41,8 @@ class Turnstile:
             return
         next_event = self.events[next_id]
         next_event.set()
+
+    def cancel_all(self) -> None:
+        self.canceled = True
+        for event in self.events.values():
+            event.set()
