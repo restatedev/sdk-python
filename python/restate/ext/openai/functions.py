@@ -29,6 +29,7 @@ from agents.tool import (
     ToolFunction,
     ToolErrorFunction,
     function_tool as oai_function_tool,
+    default_tool_error_function,
 )
 from agents.tool_context import ToolContext
 from agents.items import TResponseOutputItem
@@ -56,22 +57,21 @@ def raise_terminal_errors(context: RunContextWrapper[Any], error: Exception) -> 
     raise error
 
 
-def continue_on_terminal_errors(context: RunContextWrapper[Any], error: Exception) -> str:
-    """A custom function to provide a user-friendly error message."""
-    # Raise terminal errors and cancellations
-    if isinstance(error, TerminalError):
-        # For the agent SDK it needs to be an AgentsException, for restate it needs to be a TerminalError
-        # so we create a new exception that inherits from both
-        return f"An error occurred while running the tool: {str(error)}"
+def propagate_cancellation(failure_error_function: ToolErrorFunction | None = None) -> ToolErrorFunction:
+    _fn = failure_error_function if failure_error_function is not None else default_tool_error_function
 
-    if isinstance(error, ModelBehaviorError):
-        return f"An error occurred while calling the tool: {str(error)}"
+    def inner(context: RunContextWrapper[Any], error: Exception):
+        """Raise cancellations as exceptions."""
+        if isinstance(error, TerminalError):
+            if error.status_code == 409:
+                raise error from None
+        return _fn(context, error)
 
-    raise error
+    return inner
 
 
 @overload
-def function_tool(
+def durable_function_tool(
     func: ToolFunction[...],
     *,
     name_override: str | None = None,
@@ -87,7 +87,7 @@ def function_tool(
 
 
 @overload
-def function_tool(
+def durable_function_tool(
     *,
     name_override: str | None = None,
     description_override: str | None = None,
@@ -101,7 +101,7 @@ def function_tool(
     ...
 
 
-def function_tool(
+def durable_function_tool(
     func: ToolFunction[...] | None = None,
     *,
     name_override: str | None = None,
@@ -112,7 +112,8 @@ def function_tool(
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
-    # If func is actually a callable, we were used as @function_tool with no parentheses
+    failure_fn = propagate_cancellation(failure_error_function)
+
     if callable(func):
         return oai_function_tool(
             func=func,
@@ -120,21 +121,20 @@ def function_tool(
             description_override=description_override,
             docstring_style=docstring_style,
             use_docstring_info=use_docstring_info,
-            failure_error_function=failure_error_function or raise_terminal_errors,
+            failure_error_function=failure_fn,
             strict_mode=strict_mode,
             is_enabled=is_enabled,
         )
-
-    # Otherwise, we were used as @function_tool(...), so return a decorator
-    return oai_function_tool(
-        name_override=name_override,
-        description_override=description_override,
-        docstring_style=docstring_style,
-        use_docstring_info=use_docstring_info,
-        failure_error_function=failure_error_function or raise_terminal_errors,
-        strict_mode=strict_mode,
-        is_enabled=is_enabled,
-    )
+    else:
+        return oai_function_tool(
+            name_override=name_override,
+            description_override=description_override,
+            docstring_style=docstring_style,
+            use_docstring_info=use_docstring_info,
+            failure_error_function=failure_fn,
+            strict_mode=strict_mode,
+            is_enabled=is_enabled,
+        )
 
 
 def get_function_call_ids(response: list[TResponseOutputItem]) -> List[str]:

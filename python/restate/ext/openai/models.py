@@ -25,7 +25,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from restate.ext.turnstile import Turnstile
-from restate import TerminalError, SdkInternalBaseException
+from restate import TerminalError
 
 
 class State:
@@ -83,13 +83,6 @@ class RestateModelResponse(BaseModel):
 
 class AgentsTerminalException(AgentsException, TerminalError):
     """Exception that is both an AgentsException and a restate.TerminalError."""
-
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-
-
-class AgentsSuspension(AgentsException, SdkInternalBaseException):
-    """Exception that is both an AgentsException and a restate SdkInternalBaseException."""
 
     def __init__(self, *args: object) -> None:
         super().__init__(*args)
