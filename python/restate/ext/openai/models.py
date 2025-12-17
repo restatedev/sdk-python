@@ -16,6 +16,7 @@ import dataclasses
 
 from agents import (
     Usage,
+    AgentsException,
 )
 from agents.items import TResponseOutputItem
 from agents.items import TResponseInputItem
@@ -24,6 +25,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from restate.ext.turnstile import Turnstile
+from restate import TerminalError
 
 
 class State:
@@ -77,3 +79,10 @@ class RestateModelResponse(BaseModel):
 
     def to_input_items(self) -> list[TResponseInputItem]:
         return [it.model_dump(exclude_unset=True) for it in self.output]  # type: ignore
+
+
+class AgentsTerminalException(AgentsException, TerminalError):
+    """Exception that is both an AgentsException and a restate.TerminalError."""
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)

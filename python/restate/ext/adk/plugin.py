@@ -81,7 +81,9 @@ class RestatePlugin(BasePlugin):
                 await event.wait()
             finally:
                 self._models.pop(id, None)
-                self._turnstiles.pop(id, None)
+                maybe_turnstile = self._turnstiles.pop(id, None)
+                if maybe_turnstile is not None:
+                    maybe_turnstile.cancel_all()
 
         _ = asyncio.create_task(release_task())
         return None
@@ -161,7 +163,7 @@ class RestatePlugin(BasePlugin):
         assert turnstile is not None, "Turnstile not found for tool invocation."
         id = tool_context.function_call_id
         assert id is not None, "Function call ID is required for tool invocation."
-        turnstile.allow_next_after(id)
+        turnstile.cancel_all_after(id)
         return None
 
     async def close(self):
