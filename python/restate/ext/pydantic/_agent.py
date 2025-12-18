@@ -4,7 +4,8 @@ from collections.abc import AsyncIterable, AsyncIterator, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from typing import Any, Never, overload
 
-from restate import Context, TerminalError
+from restate import TerminalError
+from restate.extensions import current_context
 
 from pydantic_ai import models
 from pydantic_ai._run_context import AgentDepsT
@@ -38,9 +39,10 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
 
        weather = restate.Service('weather')
 
+       agent = RestateAgent(weather_agent)
+
        @weather.handler()
        async def get_weather(ctx: restate.Context, city: str):
-            agent = RestateAgent(weather_agent, context=ctx)
             result = await agent.run(f'What is the weather in {city}?')
             return result.output
        ...
@@ -72,11 +74,12 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
             return LatLng(lat, lng)
 
 
+       agent = RestateAgent(weather_agent)
+
        weather = restate.Service('weather')
 
        @weather.handler()
        async def get_weather(ctx: restate.Context, city: str):
-            agent = RestateAgent(weather_agent, context=ctx)
             result = await agent.run(f'What is the weather in {city}?', deps=WeatherDeps(restate_context=ctx, ...))
             return result.output
        ...
@@ -86,7 +89,6 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
     def __init__(
         self,
         wrapped: AbstractAgent[AgentDepsT, OutputDataT],
-        restate_context: Context,
         *,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         disable_auto_wrapping_tools: bool = False,
@@ -97,17 +99,14 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
                 "An agent needs to have a `model` in order to be used with Restate, it cannot be set at agent run time."
             )
 
-        self.restate_context = restate_context
         self._event_stream_handler = event_stream_handler
         self._disable_auto_wrapping_tools = disable_auto_wrapping_tools
-        self._model = RestateModelWrapper(
-            wrapped.model, restate_context, event_stream_handler=event_stream_handler, max_attempts=3
-        )
+        self._model = RestateModelWrapper(wrapped.model, event_stream_handler=event_stream_handler, max_attempts=3)
 
         def set_context(toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
             """Set the Restate context for the toolset, wrapping tools if needed."""
             if isinstance(toolset, FunctionToolset) and not disable_auto_wrapping_tools:
-                return RestateContextRunToolSet(toolset, restate_context)
+                return RestateContextRunToolSet(toolset)
             try:
                 from pydantic_ai.mcp import MCPServer
 
@@ -116,7 +115,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
                 pass
             else:
                 if isinstance(toolset, MCPServer):
-                    return RestateMCPServer(toolset, restate_context)
+                    return RestateMCPServer(toolset)
 
             return toolset
 
@@ -148,12 +147,16 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         fn = self._event_stream_handler
         if fn is None:
             return
+        context = current_context()
+        if context is None:
+            raise UserError("No Restate context found for RestateAgent event stream handler.")
+
         async for event in stream:
 
             async def single_event():
                 yield event
 
-            await self.restate_context.run_typed("run event", lambda: fn(ctx, single_event()))
+            await context.run_typed("run event", lambda: fn(ctx, single_event()))
 
     @property
     def toolsets(self) -> Sequence[AbstractToolset[AgentDepsT]]:

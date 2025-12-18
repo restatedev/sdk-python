@@ -3,7 +3,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from restate import Context, RunOptions, SdkInternalBaseException
+from restate import RunOptions, SdkInternalBaseException
+from restate.extensions import current_context
 
 from pydantic_ai.agent.abstract import EventStreamHandler
 from pydantic_ai.exceptions import UserError
@@ -57,18 +58,21 @@ class RestateModelWrapper(WrapperModel):
     def __init__(
         self,
         wrapped: Model,
-        context: Context,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         max_attempts: int | None = None,
     ):
         super().__init__(wrapped)
         self._options = RunOptions(serde=MODEL_RESPONSE_SERDE, max_attempts=max_attempts)
-        self._context = context
         self._event_stream_handler = event_stream_handler
 
     async def request(self, *args: Any, **kwargs: Any) -> ModelResponse:
+        context = current_context()
+        if context is None:
+            raise UserError(
+                "A model cannot be used without a Restate context. Make sure to run it within an agent or a run context."
+            )
         try:
-            return await self._context.run_typed("Model call", self.wrapped.request, self._options, *args, **kwargs)
+            return await context.run_typed("Model call", self.wrapped.request, self._options, *args, **kwargs)
         except SdkInternalBaseException as e:
             raise Exception("Internal error during model call") from e
 
