@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from restate import RunOptions, SdkInternalBaseException, TerminalError
+from restate.exceptions import SdkInternalException
 from restate.extensions import current_context
 
 from pydantic_ai import ToolDefinition
@@ -16,6 +17,7 @@ from pydantic_ai.toolsets.abstract import AbstractToolset, ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from ._serde import PydanticTypeAdapter
+from ._utils import current_state
 
 
 @dataclass
@@ -77,12 +79,17 @@ class RestateContextRunToolSet(WrapperToolset[AgentDepsT]):
             except UserError as e:
                 raise TerminalError(str(e)) from e
 
+        id = ctx.tool_call_id
+        if id is None:
+            raise TerminalError("Tool call ID is required for turnstile synchronization.")
         context = current_context()
         if context is None:
             raise UserError(
                 "A tool cannot be used without a Restate context. Make sure to run it within an agent or a run context."
             )
+        turnstile = current_state().turnstile
         try:
+            await turnstile.wait_for(id)
             res = await context.run_typed(f"Calling {name}", action, self.options)
 
             if res.kind == "call_deferred":
@@ -94,9 +101,14 @@ class RestateContextRunToolSet(WrapperToolset[AgentDepsT]):
                 raise ModelRetry(res.error)
             else:
                 assert res.kind == "output"
+                turnstile.allow_next_after(id)
                 return res.output
-        except SdkInternalBaseException as e:
-            raise Exception("Internal error during tool call") from e
+        except Exception as e:
+            turnstile.cancel_all_after(id)
+            raise e from None
+        except SdkInternalException as e:
+            turnstile.cancel_all_after(id)
+            raise RuntimeError() from e
 
     def visit_and_replace(
         self, visitor: Callable[[AbstractToolset[AgentDepsT]], AbstractToolset[AgentDepsT]]

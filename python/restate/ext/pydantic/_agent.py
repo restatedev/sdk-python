@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
-from typing import Any, Never, overload
+from typing import Any, overload
 
 from restate import TerminalError
+from restate.ext.pydantic._utils import state_context
 from restate.extensions import current_context
 
 from pydantic_ai import models
@@ -126,7 +127,8 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         with (
             super().override(model=self._model, toolsets=self._toolsets, tools=[]),
         ):
-            yield
+            with state_context():
+                yield
 
     @property
     def model(self) -> models.Model | models.KnownModelName | str | None:
@@ -338,7 +340,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
         builtin_tools: Sequence[AbstractBuiltinTool | BuiltinToolFunc[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
-        **_deprecated_kwargs: Never,
+        **_deprecated_kwargs: Any,
     ) -> AsyncIterator[StreamedRunResult[AgentDepsT, Any]]:
         """Run the agent with a user prompt in async mode, returning a streamed response.
 

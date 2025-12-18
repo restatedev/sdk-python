@@ -4,7 +4,9 @@ from datetime import datetime
 from typing import Any
 
 from restate import RunOptions, SdkInternalBaseException
+from restate.ext.pydantic._utils import current_state
 from restate.extensions import current_context
+from restate.ext.turnstile import Turnstile
 
 from pydantic_ai.agent.abstract import EventStreamHandler
 from pydantic_ai.exceptions import UserError
@@ -72,7 +74,10 @@ class RestateModelWrapper(WrapperModel):
                 "A model cannot be used without a Restate context. Make sure to run it within an agent or a run context."
             )
         try:
-            return await context.run_typed("Model call", self.wrapped.request, self._options, *args, **kwargs)
+            res = await context.run_typed("Model call", self.wrapped.request, self._options, *args, **kwargs)
+            ids = [c.tool_call_id for c in res.tool_calls]
+            current_state().turnstile = Turnstile(ids)
+            return res
         except SdkInternalBaseException as e:
             raise Exception("Internal error during model call") from e
 
