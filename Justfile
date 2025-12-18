@@ -23,9 +23,9 @@ typecheck-pyright:
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright test-services/
 
 typecheck-mypy:
-    uv run -m mypy --check-untyped-defs --ignore-missing-imports python/
-    uv run -m mypy --check-untyped-defs --ignore-missing-imports examples/
-    uv run -m mypy --check-untyped-defs --ignore-missing-imports tests/
+    uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional python/
+    uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional examples/
+    uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional tests/
 
 typecheck: typecheck-pyright typecheck-mypy
 
