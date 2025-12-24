@@ -296,7 +296,7 @@ def create_restate_container(
     :param restate_image: The image name for the restate-server container
                           (default is "restatedev/restate:latest").
     :param always_replay: When True, this forces restate-server to always replay
-                          on a suspension point. This is useful to hunt non deterministic bugs
+                          on a suspension point. This is useful to hunt non-deterministic bugs
                           that might prevent your code to replay correctly (default is False).
     :param disable_retries: When True, retries are disabled (default is False).
     """
@@ -356,7 +356,7 @@ async def create_test_harness(
     :param restate_image: The image name for the restate-server container
                           (default is "restatedev/restate:latest").
     :param always_replay: When True, this forces restate-server to always replay
-                          on a suspension point. This is useful to hunt non deterministic bugs
+                          on a suspension point. This is useful to hunt non-deterministic bugs
                           that might prevent your code to replay correctly (default is False).
     :param disable_retries: When True, retries are disabled (default is False).
     """

@@ -37,7 +37,7 @@ class Endpoint:
         Create a new restate endpoint that serves as a container for all the services and objects
         """
         self.services = {}
-        # we will let the user to override it later perhaps, but for now let us
+        # we will let the user override it later perhaps, but for now let us
         # auto deduce it on discovery.
         # None means that the user did not explicitly set it.
         self.protocol = None

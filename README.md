@@ -56,7 +56,7 @@ We know that your time is precious and, therefore, deeply value any effort to co
 * [just](https://github.com/casey/just)
 * [Rust toolchain](https://rustup.rs/)
 
-Setup your virtual environment using the tool of your choice, e.g. VirtualEnv:
+Set up your virtual environment using the tool of your choice, e.g. VirtualEnv:
 
 ```shell
 python3 -m venv .venv
