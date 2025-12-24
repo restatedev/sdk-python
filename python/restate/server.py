@@ -262,7 +262,7 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
                 return
             #
             # At this point we have a valid handler.
-            # Let us setup restate's execution context for this invocation and handler.
+            # Let us set up restate's execution context for this invocation and handler.
             #
             receive_channel = ReceiveChannel(receive)
             try:

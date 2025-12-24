@@ -120,7 +120,7 @@ class AttemptFinishedEvent(abc.ABC):
     Represents an attempt finished event.
 
     This event is used to signal that an attempt has finished (either successfully or with an error), and it is now
-    safe to cleanup any attempt related resources, such as pending ctx.run() 3rd party calls, or any other resources that
+    safe to clean up any attempt related resources, such as pending ctx.run() 3rd party calls, or any other resources that
     are only valid for the duration of the attempt.
 
     An attempt is considered finished when either the connection to the restate server is closed, the invocation is completed, or a transient

@@ -223,7 +223,7 @@ class VMWrapper:
             # success with an empty value
             return None
         if isinstance(result, bytes):
-            # success with a non empty value
+            # success with a non-empty value
             return result
         if isinstance(result, PyStateKeys):
             # success with state keys

@@ -86,7 +86,7 @@ class RestateModelWrapper(Model):
                 retry_interval_factor=self.llm_retry_opts.retry_interval_factor,
             ),
         )
-        # collect function call IDs, to
+        # collect function call IDs, too
         ids = get_function_call_ids(result.output)
         self.state.turnstile = Turnstile(ids)
 
