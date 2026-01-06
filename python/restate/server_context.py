@@ -17,7 +17,7 @@
 """This module contains the restate context implementation based on the server"""
 
 import asyncio
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 import contextvars
 import copy
 from random import Random
@@ -314,6 +314,44 @@ def current_context() -> Context | None:
     """Get the current context."""
     return _restate_context_var.get()
 
+def set_extension_data(ctx: Context, key: str, value: T) -> None:
+    """Set extension data in the current context."""
+    if not isinstance(ctx, ServerInvocationContext):
+        raise RuntimeError("Current context is not a ServerInvocationContext")
+    ctx.extension_data[key] = value
+    
+def get_extension_data(ctx: Context, key: str) -> Any:
+    """Get extension data from the current context."""
+    if not isinstance(ctx, ServerInvocationContext):
+        raise RuntimeError("Current context is not a ServerInvocationContext")
+    return ctx.extension_data.get(key, None)
+
+def clear_extension_data(ctx: Context, key: str) -> None:
+    """Clear extension data from the current context."""
+    if not isinstance(ctx, ServerInvocationContext):
+        raise RuntimeError("Current context is not a ServerInvocationContext")
+    if key in ctx.extension_data:
+        del ctx.extension_data[key]
+
+@asynccontextmanager
+def auto_close_extension_data(data: Dict[str, Any]):
+    """Context manager to auto close extension data."""
+    try:
+        yield
+    finally:
+        for value in data.values():
+            if hasattr(value, "__close__") and callable(getattr(value, "__close__")):
+                try:
+                    close_method = getattr(value, "close")
+                    if inspect.iscoroutinefunction(close_method):
+                        await close_method()
+                    else:
+                        close_method()
+                except Exception as e:
+                    # extension data close failure should not block further processing
+                    # TODO: add logging here
+                   pass
+        data.clear()
 
 # pylint: disable=R0902
 class ServerInvocationContext(ObjectContext):
@@ -339,6 +377,7 @@ class ServerInvocationContext(ObjectContext):
         self.run_coros_to_execute: dict[int, Callable[[], Awaitable[None]]] = {}
         self.request_finished_event = asyncio.Event()
         self.tasks = Tasks()
+        self.extension_data: Dict[str, Any] = {}
 
     async def enter(self):
         """Invoke the user code."""
@@ -349,6 +388,8 @@ class ServerInvocationContext(ObjectContext):
             async with AsyncExitStack() as stack:
                 for manager in self.handler.context_managers or []:
                     await stack.enter_async_context(manager())
+                stack.enter_async_context(auto_close_extension_data(self.extension_data))
+
                 out_buffer = await invoke_handler(handler=self.handler, ctx=self, in_buffer=in_buffer)
             restate_context_is_replaying.set(False)
             self.vm.sys_write_output_success(bytes(out_buffer))
@@ -971,3 +1012,11 @@ class ServerInvocationContext(ObjectContext):
         handle = self.vm.attach_invocation(invocation_id)
         update_restate_context_is_replaying(self.vm)
         return self.create_future(handle, serde)
+    
+    def get_extension_data(self, key: str) -> Any:
+        """Get extension data by key."""
+        return self.extension_data.get(key)
+    
+    def set_extension_data(self, key: str, value: Any) -> None:
+        """Set extension data by key.""" 
+        self.extension_data[key] = value
