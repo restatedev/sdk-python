@@ -48,27 +48,46 @@ def _invocation_extension_key(invocation_id: str) -> str:
     return "adk_" + invocation_id
 
 
-def _turnstile_from_context(invocation_id: str) -> Turnstile:
-    ctx = current_context()
-    if ctx is None:
-        raise RuntimeError("No Restate context found, the restate plugin must be used from within a restate handler.")
-    state = get_extension_data(ctx, _invocation_extension_key(invocation_id))
-    if state is None:
-        raise RuntimeError(
-            "No RestatePlugin state found, the restate plugin must be used from within a restate handler."
-        )
-    turnstile = state.turnstiles
-    return turnstile
-
-
 class PluginState:
     def __init__(self, model: BaseLlm):
         self.model = model
-        self.turnstiles: Turnstile = Turnstile([])
+        self.turnstile: Turnstile = Turnstile([])
 
     def __close__(self):
         """Clean up resources."""
-        self.turnstiles.cancel_all()
+        self.turnstile.cancel_all()
+
+    @staticmethod
+    def create(invocation_id: str, model: BaseLlm, ctx: restate.Context) -> None:
+        extension_key = _invocation_extension_key(invocation_id)
+        state = PluginState(model)
+        set_extension_data(ctx, extension_key, state)
+
+    @staticmethod
+    def clear(invocation_id: str) -> None:
+        ctx = current_context()
+        if ctx is None:
+            raise RuntimeError(
+                "No Restate context found, the restate plugin must be used from within a restate handler."
+            )
+        extension_key = _invocation_extension_key(invocation_id)
+        clear_extension_data(ctx, extension_key)
+
+    @staticmethod
+    def from_context(invocation_id: str, ctx: restate.Context | None = None) -> "PluginState":
+        if ctx is None:
+            ctx = current_context()
+        if ctx is None:
+            raise RuntimeError(
+                "No Restate context found, the restate plugin must be used from within a restate handler."
+            )
+        extension_key = _invocation_extension_key(invocation_id)
+        state: PluginState | None = get_extension_data(ctx, extension_key)
+        if state is None:
+            raise RuntimeError(
+                "No RestatePlugin state found, the restate plugin must be used from within a restate handler."
+            )
+        return state
 
 
 class RestatePlugin(BasePlugin):
@@ -92,22 +111,13 @@ class RestatePlugin(BasePlugin):
             )
 
         model = agent.model if isinstance(agent.model, BaseLlm) else LLMRegistry.new_llm(agent.model)
-        set_extension_data(ctx, "adk_" + callback_context.invocation_id, PluginState(model))
+        PluginState.create(callback_context.invocation_id, model, ctx)
         return None
 
     async def after_agent_callback(
         self, *, agent: BaseAgent, callback_context: CallbackContext
     ) -> Optional[types.Content]:
-        ctx = current_context()
-        if ctx is None:
-            raise RuntimeError(
-                "No Restate context found, the restate plugin must be used from within a restate handler."
-            )
-        state = get_extension_data(ctx, "adk_" + callback_context.invocation_id)
-        if state is not None:
-            state.__close__()
-        clear_extension_data(ctx, "adk_" + callback_context.invocation_id)
-
+        PluginState.clear(callback_context.invocation_id)
         return None
 
     async def after_run_callback(self, *, invocation_context: InvocationContext) -> None:
@@ -118,20 +128,18 @@ class RestatePlugin(BasePlugin):
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> Optional[LlmResponse]:
-        ctx = current_context()
+        ctx = current_context()  # Ensure we have a Restate context
         if ctx is None:
-            raise RuntimeError(
-                "No Restate context found, the restate plugin must be used from within a restate handler."
+            raise restate.TerminalError(
+                """No Restate context found for RestatePlugin.
+            Ensure that the agent is invoked within a restate handler and,
+            using a ```with restate_overrides(ctx):``` block. around your agent use."""
             )
-        state = get_extension_data(ctx, "adk_" + callback_context.invocation_id)
-        if state is None:
-            raise RuntimeError(
-                "No RestatePlugin state found, the restate plugin must be used from within a restate handler."
-            )
+        state = PluginState.from_context(callback_context.invocation_id, ctx)
         model = state.model
         response = await _generate_content_async(ctx, self._max_model_call_retries, model, llm_request)
         turnstile = _create_turnstile(response)
-        state.turnstiles = turnstile
+        state.turnstile = turnstile
         return response
 
     async def before_tool_callback(
@@ -141,9 +149,10 @@ class RestatePlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> Optional[dict]:
-        turnstile = _turnstile_from_context(tool_context.invocation_id)
         id = tool_context.function_call_id
         assert id is not None, "Function call ID is required for tool invocation."
+
+        turnstile = PluginState.from_context(tool_context.invocation_id).turnstile
         await turnstile.wait_for(id)
         return None
 
@@ -155,9 +164,9 @@ class RestatePlugin(BasePlugin):
         tool_context: ToolContext,
         result: dict,
     ) -> Optional[dict]:
-        turnstile = _turnstile_from_context(tool_context.invocation_id)
         id = tool_context.function_call_id
         assert id is not None, "Function call ID is required for tool invocation."
+        turnstile = PluginState.from_context(tool_context.invocation_id).turnstile
         turnstile.allow_next_after(id)
 
         return None
@@ -170,9 +179,9 @@ class RestatePlugin(BasePlugin):
         tool_context: ToolContext,
         error: Exception,
     ) -> Optional[dict]:
-        turnstile = _turnstile_from_context(tool_context.invocation_id)
         id = tool_context.function_call_id
         assert id is not None, "Function call ID is required for tool invocation."
+        turnstile = PluginState.from_context(tool_context.invocation_id).turnstile
         turnstile.cancel_all_after(id)
         return None
 
