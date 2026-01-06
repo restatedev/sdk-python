@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
+import dataclasses
 
 from restate import RunOptions, SdkInternalBaseException
 from restate.ext.pydantic._utils import current_state
@@ -60,11 +61,12 @@ class RestateModelWrapper(WrapperModel):
     def __init__(
         self,
         wrapped: Model,
+        run_options: RunOptions,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
-        max_attempts: int | None = None,
     ):
         super().__init__(wrapped)
-        self._options = RunOptions(serde=MODEL_RESPONSE_SERDE, max_attempts=max_attempts)
+
+        self._options = dataclasses.replace(run_options, serde=MODEL_RESPONSE_SERDE)
         self._event_stream_handler = event_stream_handler
 
     async def request(self, *args: Any, **kwargs: Any) -> ModelResponse:

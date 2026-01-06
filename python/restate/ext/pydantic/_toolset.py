@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from restate import RunOptions, SdkInternalBaseException, TerminalError
@@ -55,9 +55,9 @@ MCP_RUN_SERDE = PydanticTypeAdapter(RestateMCPToolRunResult)
 class RestateContextRunToolSet(WrapperToolset[AgentDepsT]):
     """A toolset that automatically wraps tool calls with restate's `ctx.run_typed()`."""
 
-    def __init__(self, wrapped: AbstractToolset[AgentDepsT]):
+    def __init__(self, wrapped: AbstractToolset[AgentDepsT], run_options: RunOptions):
         super().__init__(wrapped)
-        self.options = RunOptions[RestateContextRunResult](serde=CONTEXT_RUN_SERDE)
+        self.options = replace(run_options, serde=CONTEXT_RUN_SERDE)
 
     async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: ToolsetTool[AgentDepsT]
@@ -119,9 +119,11 @@ class RestateContextRunToolSet(WrapperToolset[AgentDepsT]):
 class RestateMCPServer(WrapperToolset[AgentDepsT]):
     """A wrapper for MCPServer that integrates with restate."""
 
-    def __init__(self, wrapped: MCPServer):
+    def __init__(self, wrapped: MCPServer, run_options: RunOptions):
         super().__init__(wrapped)
         self._wrapped = wrapped
+        self.get_tools_options = replace(run_options, serde=MCP_GET_TOOLS_SERDE)
+        self.run_tools_options = replace(run_options, serde=MCP_RUN_SERDE)
 
     def visit_and_replace(
         self, visitor: Callable[[AbstractToolset[AgentDepsT]], AbstractToolset[AgentDepsT]]
@@ -136,8 +138,6 @@ class RestateMCPServer(WrapperToolset[AgentDepsT]):
             # so we just return the ToolDefinitions and wrap them in ToolsetTool outside of the activity.
             return RestateMCPGetToolsContextRunResult(output={name: tool.tool_def for name, tool in res.items()})
 
-        options = RunOptions(serde=MCP_GET_TOOLS_SERDE)
-
         context = current_context()
         if context is None:
             raise UserError(
@@ -145,7 +145,7 @@ class RestateMCPServer(WrapperToolset[AgentDepsT]):
             )
 
         try:
-            tool_defs = await context.run_typed("get mcp tools", get_tools_in_context, options)
+            tool_defs = await context.run_typed("get mcp tools", get_tools_in_context, self.get_tools_options)
             return {name: self.tool_for_tool_def(tool_def) for name, tool_def in tool_defs.output.items()}
         except SdkInternalBaseException as e:
             raise Exception("Internal error during get_tools call") from e
@@ -165,14 +165,13 @@ class RestateMCPServer(WrapperToolset[AgentDepsT]):
             res = await self._wrapped.call_tool(name, tool_args, ctx, tool)
             return RestateMCPToolRunResult(output=res)
 
-        options = RunOptions(serde=MCP_RUN_SERDE)
         context = current_context()
         if context is None:
             raise UserError(
                 "A toolset cannot be used without a Restate context. Make sure to run it within an agent or a run context."
             )
         try:
-            res = await context.run_typed(f"Calling mcp tool {name}", call_tool_in_context, options)
+            res = await context.run_typed(f"Calling mcp tool {name}", call_tool_in_context, self.run_tools_options)
         except SdkInternalBaseException as e:
             raise Exception("Internal error during tool call") from e
 

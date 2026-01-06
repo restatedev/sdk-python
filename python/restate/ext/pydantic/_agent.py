@@ -4,7 +4,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from typing import Any, overload
 
-from restate import TerminalError
+from restate import RunOptions, TerminalError
 from restate.ext.pydantic._utils import state_context
 from restate.extensions import current_context
 
@@ -93,6 +93,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         *,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         disable_auto_wrapping_tools: bool = False,
+        run_options: RunOptions | None = None,
     ):
         super().__init__(wrapped)
         if not isinstance(wrapped.model, Model):
@@ -102,12 +103,16 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
 
         self._event_stream_handler = event_stream_handler
         self._disable_auto_wrapping_tools = disable_auto_wrapping_tools
-        self._model = RestateModelWrapper(wrapped.model, event_stream_handler=event_stream_handler, max_attempts=3)
+
+        if run_options is None:
+            run_options = RunOptions(max_attempts=3)
+
+        self._model = RestateModelWrapper(wrapped.model, run_options, event_stream_handler=event_stream_handler)
 
         def set_context(toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
             """Set the Restate context for the toolset, wrapping tools if needed."""
             if isinstance(toolset, FunctionToolset) and not disable_auto_wrapping_tools:
-                return RestateContextRunToolSet(toolset)
+                return RestateContextRunToolSet(toolset, run_options)
             try:
                 from pydantic_ai.mcp import MCPServer
 
@@ -116,7 +121,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
                 pass
             else:
                 if isinstance(toolset, MCPServer):
-                    return RestateMCPServer(toolset)
+                    return RestateMCPServer(toolset, run_options)
 
             return toolset
 
