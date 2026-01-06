@@ -44,11 +44,15 @@ def _create_turnstile(s: LlmResponse) -> Turnstile:
     return turnstile
 
 
+def _invocation_extension_key(invocation_id: str) -> str:
+    return "adk_" + invocation_id
+
+
 def _turnstile_from_context(invocation_id: str) -> Turnstile:
     ctx = current_context()
     if ctx is None:
         raise RuntimeError("No Restate context found, the restate plugin must be used from within a restate handler.")
-    state = get_extension_data(ctx, "adk_" + invocation_id)
+    state = get_extension_data(ctx, _invocation_extension_key(invocation_id))
     if state is None:
         raise RuntimeError(
             "No RestatePlugin state found, the restate plugin must be used from within a restate handler."
