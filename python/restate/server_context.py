@@ -344,9 +344,9 @@ async def auto_close_extension_data(data: Dict[str, Any]):
         yield
     finally:
         for value in data.values():
-            if hasattr(value, "__close__") and callable(getattr(value, "__close__")):
+            close_method = getattr(value, "__close__", None)
+            if callable(close_method):
                 try:
-                    close_method = getattr(value, "__close__")
                     if inspect.iscoroutinefunction(close_method):
                         await close_method()
                     else:
