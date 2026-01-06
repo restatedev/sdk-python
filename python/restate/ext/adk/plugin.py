@@ -54,7 +54,6 @@ def _turnstile_from_context(invocation_id: str) -> Turnstile:
             "No RestatePlugin state found, the restate plugin must be used from within a restate handler."
         )
     turnstile = state.turnstiles
-    assert turnstile is not None, "Turnstile not found for invocation."
     return turnstile
 
 
