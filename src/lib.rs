@@ -96,13 +96,20 @@ struct PyFailure {
     code: u16,
     #[pyo3(get, set)]
     message: String,
+    #[pyo3(get, set)]
+    stacktrace: Option<String>,
 }
 
 #[pymethods]
 impl PyFailure {
     #[new]
-    fn new(code: u16, message: String) -> PyFailure {
-        Self { code, message }
+    #[pyo3(signature = (code, message, stacktrace=None))]
+    fn new(code: u16, message: String, stacktrace: Option<String>) -> PyFailure {
+        Self {
+            code,
+            message,
+            stacktrace,
+        }
     }
 }
 
@@ -173,6 +180,7 @@ impl From<TerminalFailure> for PyFailure {
         PyFailure {
             code: value.code,
             message: value.message,
+            stacktrace: None,
         }
     }
 }
@@ -188,8 +196,18 @@ impl From<PyFailure> for TerminalFailure {
 }
 
 impl From<PyFailure> for Error {
-    fn from(value: PyFailure) -> Self {
-        Self::new(value.code, value.message)
+    fn from(
+        PyFailure {
+            code,
+            message,
+            stacktrace,
+        }: PyFailure,
+    ) -> Self {
+        let mut e = Self::new(code, message);
+        if let Some(stacktrace) = stacktrace {
+            e = e.with_stacktrace(stacktrace);
+        }
+        e
     }
 }
 
@@ -501,7 +519,8 @@ impl PyVM {
                         .map(Into::into)
                         .collect(),
                 },
-                buffer.as_bytes().to_vec().into(),Default::default()
+                buffer.as_bytes().to_vec().into(),
+                Default::default(),
             )
             .map(Into::into)
             .map_err(Into::into)
@@ -539,8 +558,8 @@ impl PyVM {
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .expect("Duration since unix epoch cannot fail")
                         + Duration::from_millis(millis)
-                })
-                , Default::default()
+                }),
+                Default::default(),
             )
             .map(|s| s.invocation_id_notification_handle.into())
             .map_err(Into::into)
@@ -566,7 +585,7 @@ impl PyVM {
             .sys_complete_awakeable(
                 id,
                 NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),
-                Default::default()
+                Default::default(),
             )
             .map_err(Into::into)
     }
@@ -613,7 +632,8 @@ impl PyVM {
             .vm
             .sys_complete_promise(
                 key,
-                NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),Default::default()
+                NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),
+                Default::default(),
             )
             .map(Into::into)
             .map_err(Into::into)
@@ -626,7 +646,11 @@ impl PyVM {
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
-            .sys_complete_promise(key, NonEmptyValue::Failure(value.into()),Default::default())
+            .sys_complete_promise(
+                key,
+                NonEmptyValue::Failure(value.into()),
+                Default::default(),
+            )
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -701,7 +725,10 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_write_output(NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),Default::default())
+            .sys_write_output(
+                NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),
+                Default::default(),
+            )
             .map_err(Into::into)
     }
 
@@ -711,7 +738,7 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_write_output(NonEmptyValue::Failure(value.into()),Default::default())
+            .sys_write_output(NonEmptyValue::Failure(value.into()), Default::default())
             .map_err(Into::into)
     }
 

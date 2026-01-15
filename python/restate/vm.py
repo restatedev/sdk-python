@@ -71,6 +71,7 @@ class Failure:
 
     code: int
     message: str
+    stacktrace: typing.Optional[str] = None
 
 
 @dataclass
@@ -433,7 +434,7 @@ class VMWrapper:
         Exit a side effect with a transient Error.
         This requires a retry policy to be provided.
         """
-        py_failure = PyFailure(failure.code, failure.message)
+        py_failure = PyFailure(failure.code, failure.message, failure.stacktrace)
         py_config = PyExponentialRetryConfig(
             config.initial_interval,
             config.max_attempts,
