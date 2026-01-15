@@ -427,7 +427,7 @@ class ServerInvocationContext(ObjectContext):
                 cause = cause.__cause__
             else:
                 # nothing interesting found, treat as unexpected exception
-                stacktrace = "\n".join(traceback.format_exception(e))
+                stacktrace = "".join(traceback.format_exception(e))
                 self.vm.notify_error(repr(e), stacktrace)
                 raise
         finally:
@@ -680,7 +680,7 @@ class ServerInvocationContext(ObjectContext):
         except Exception as e:
             end = time.time()
             attempt_duration = int((end - start) * 1000)
-            failure = Failure(code=500, message=str(e))
+            failure = Failure(code=500, message=repr(e), stacktrace="".join(traceback.format_exception(e)))
             max_duration_ms = None if max_duration is None else int(max_duration.total_seconds() * 1000)
             initial_retry_interval_ms = (
                 None if initial_retry_interval is None else int(initial_retry_interval.total_seconds() * 1000)
