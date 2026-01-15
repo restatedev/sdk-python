@@ -424,7 +424,7 @@ impl PyVM {
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
-            .sys_state_get(key)
+            .sys_state_get(key, Default::default())
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -446,7 +446,7 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_state_set(key, buffer.as_bytes().to_vec().into())
+            .sys_state_set(key, buffer.as_bytes().to_vec().into(), Default::default())
             .map_err(Into::into)
     }
 
@@ -501,7 +501,7 @@ impl PyVM {
                         .map(Into::into)
                         .collect(),
                 },
-                buffer.as_bytes().to_vec().into(),
+                buffer.as_bytes().to_vec().into(),Default::default()
             )
             .map(Into::into)
             .map_err(Into::into)
@@ -539,7 +539,8 @@ impl PyVM {
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .expect("Duration since unix epoch cannot fail")
                         + Duration::from_millis(millis)
-                }),
+                })
+                , Default::default()
             )
             .map(|s| s.invocation_id_notification_handle.into())
             .map_err(Into::into)
@@ -565,6 +566,7 @@ impl PyVM {
             .sys_complete_awakeable(
                 id,
                 NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),
+                Default::default()
             )
             .map_err(Into::into)
     }
@@ -576,7 +578,7 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_complete_awakeable(id, NonEmptyValue::Failure(value.into()))
+            .sys_complete_awakeable(id, NonEmptyValue::Failure(value.into()), Default::default())
             .map_err(Into::into)
     }
 
@@ -611,7 +613,7 @@ impl PyVM {
             .vm
             .sys_complete_promise(
                 key,
-                NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),
+                NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),Default::default()
             )
             .map(Into::into)
             .map_err(Into::into)
@@ -624,7 +626,7 @@ impl PyVM {
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
-            .sys_complete_promise(key, NonEmptyValue::Failure(value.into()))
+            .sys_complete_promise(key, NonEmptyValue::Failure(value.into()),Default::default())
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -699,7 +701,7 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_write_output(NonEmptyValue::Success(buffer.as_bytes().to_vec().into()))
+            .sys_write_output(NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),Default::default())
             .map_err(Into::into)
     }
 
@@ -709,7 +711,7 @@ impl PyVM {
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_write_output(NonEmptyValue::Failure(value.into()))
+            .sys_write_output(NonEmptyValue::Failure(value.into()),Default::default())
             .map_err(Into::into)
     }
 
