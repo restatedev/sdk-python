@@ -62,6 +62,11 @@ def request_to_receive(req: RestateLambdaRequest) -> Receive:
     assert req["isBase64Encoded"]
     body = base64.b64decode(req["body"])
 
+    # Decompress zstd-encoded request body
+    headers = {k.lower(): v for k, v in req.get("headers", {}).items()}
+    if "zstd" in headers.get("content-encoding", ""):
+        body = zstd_decompress(body)
+
     events = cast(
         list[HTTPRequestEvent],
         [
@@ -80,15 +85,19 @@ def request_to_receive(req: RestateLambdaRequest) -> Receive:
     return recv
 
 
+RESPONSE_COMPRESSION_THRESHOLD = 3 * 1024 * 1024
+
+
 class ResponseCollector:
     """
     Response collector from ASGI Send to Lambda
     """
 
-    def __init__(self):
+    def __init__(self, accept_encoding: str = ""):
         self.body = bytearray()
-        self.headers = {}
+        self.headers: dict[str, str] = {}
         self.status_code = 500
+        self.accept_encoding = accept_encoding
 
     async def __call__(self, message: Union[HTTPResponseStartEvent, HTTPResponseBodyEvent]) -> None:
         """
@@ -105,11 +114,18 @@ class ResponseCollector:
         """
         Convert collected values to lambda response
         """
+        body: bytes | bytearray = self.body
+
+        # Compress response if it exceeds threshold and client accepts zstd
+        if len(body) > RESPONSE_COMPRESSION_THRESHOLD and "zstd" in self.accept_encoding and zstd_available():
+            body = zstd_compress(body)
+            self.headers["content-encoding"] = "zstd"
+
         return {
             "statusCode": self.status_code,
             "headers": self.headers,
             "isBase64Encoded": True,
-            "body": base64.b64encode(self.body).decode(),
+            "body": base64.b64encode(body).decode(),
         }
 
 
@@ -134,7 +150,8 @@ def wrap_asgi_as_lambda_handler(asgi_app: ASGIApp) -> RestateLambdaHandler:
 
         scope = create_scope(event)
         recv = request_to_receive(event)
-        send = ResponseCollector()
+        req_headers = {k.lower(): v for k, v in event.get("headers", {}).items()}
+        send = ResponseCollector(accept_encoding=req_headers.get("accept-encoding", ""))
 
         asgi_instance = asgi_app(scope, recv, send)
         asgi_task = loop.create_task(asgi_instance)  # type: ignore[var-annotated, arg-type]
@@ -143,3 +160,44 @@ def wrap_asgi_as_lambda_handler(asgi_app: ASGIApp) -> RestateLambdaHandler:
         return send.to_lambda_response()
 
     return lambda_handler
+
+
+def get_lambda_compression():
+    """Return 'zstd' if running on Lambda and compression.zstd is available (Python 3.14+), else None."""
+    if is_running_on_lambda() and zstd_available():
+        return "zstd"
+    return None
+
+
+def zstd_available() -> bool:
+    """Return True if zstd compression is available (Python 3.14+)."""
+    try:
+        import compression.zstd  # type: ignore[import-not-found]
+
+        return compression.zstd is not None
+    except ImportError:
+        return False
+
+
+def zstd_compress(data: bytes | bytearray) -> bytes:
+    """Compress data using zstd."""
+    try:
+        import compression.zstd  # type: ignore[import-not-found]
+    except ImportError as e:
+        raise RuntimeError(
+            "zstd compression requested but compression.zstd is not available. "
+            "Python 3.14+ is required for zstd compression support."
+        ) from e
+    return compression.zstd.compress(data)
+
+
+def zstd_decompress(data: bytes) -> bytes:
+    """Decompress zstd-compressed data."""
+    try:
+        import compression.zstd  # type: ignore[import-not-found]
+    except ImportError as e:
+        raise RuntimeError(
+            "Received zstd-compressed request but compression.zstd is not available. "
+            "Python 3.14+ is required for zstd compression support."
+        ) from e
+    return compression.zstd.decompress(data)

@@ -34,6 +34,7 @@ from restate.endpoint import Endpoint as RestateEndpoint
 from restate.handler import TypeHint
 from restate.object import VirtualObject
 from restate.workflow import Workflow
+from restate.aws_lambda import get_lambda_compression
 
 
 class ProtocolMode(Enum):
@@ -159,6 +160,7 @@ class Endpoint:
         self.minProtocolVersion = minProtocolVersion
         self.maxProtocolVersion = maxProtocolVersion
         self.services = services
+        self.lambdaCompression = get_lambda_compression()
 
 
 PROTOCOL_MODES = {"bidi": ProtocolMode.BIDI_STREAM, "request_response": ProtocolMode.REQUEST_RESPONSE}
@@ -235,6 +237,9 @@ def compute_discovery_json(
 
     # Validate that new discovery fields aren't used with older protocol versions
     if version <= 3:
+        # Strip lambdaCompression for older discovery versions
+        ep.lambdaCompression = None
+
         for service in ep.services:
             if service.retryPolicyInitialInterval is not None:
                 raise ValueError("retryPolicyInitialInterval is only supported in discovery protocol version 4")
