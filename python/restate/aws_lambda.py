@@ -117,7 +117,7 @@ class ResponseCollector:
         body: bytes | bytearray = self.body
 
         # Compress response if it exceeds threshold and client accepts zstd
-        if len(body) > RESPONSE_COMPRESSION_THRESHOLD and "zstd" in self.accept_encoding and zstd_available():
+        if len(body) > RESPONSE_COMPRESSION_THRESHOLD and "zstd" in self.accept_encoding and ZSTD_AVAILABLE:
             body = zstd_compress(body)
             self.headers["content-encoding"] = "zstd"
 
@@ -162,14 +162,7 @@ def wrap_asgi_as_lambda_handler(asgi_app: ASGIApp) -> RestateLambdaHandler:
     return lambda_handler
 
 
-def get_lambda_compression():
-    """Return 'zstd' if running on Lambda and compression.zstd is available (Python 3.14+), else None."""
-    if is_running_on_lambda() and zstd_available():
-        return "zstd"
-    return None
-
-
-def zstd_available() -> bool:
+def _check_zstd_available() -> bool:
     """Return True if zstd compression is available (Python 3.14+)."""
     try:
         import compression.zstd  # type: ignore[import-not-found]
@@ -177,6 +170,16 @@ def zstd_available() -> bool:
         return compression.zstd is not None
     except ImportError:
         return False
+
+
+ZSTD_AVAILABLE = _check_zstd_available()
+
+
+def is_lambda_compression_supported():
+    """Return 'zstd' if running on Lambda and compression.zstd is available (Python 3.14+), else None."""
+    if is_running_on_lambda() and ZSTD_AVAILABLE:
+        return "zstd"
+    return None
 
 
 def zstd_compress(data: bytes | bytearray) -> bytes:
