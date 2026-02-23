@@ -158,6 +158,8 @@ class ReceiveChannel:
 
     async def __call__(self) -> ASGIReceiveEvent | RestateEvent:
         """Get the next message."""
+        if self._disconnected.is_set() and self._queue.empty():
+            return {"type": "http.disconnect"}
         what = await self._queue.get()
         self._queue.task_done()
         return what

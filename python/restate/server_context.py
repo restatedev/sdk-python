@@ -454,7 +454,10 @@ class ServerInvocationContext(ObjectContext):
         # {'type': 'http.request', 'body': b'', 'more_body': True}
         # {'type': 'http.request', 'body': b'', 'more_body': False}
         # {'type': 'http.disconnect'}
-        await self.receive.block_until_http_input_closed()
+        try:
+            await asyncio.wait_for(self.receive.block_until_http_input_closed(), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out waiting for HTTP input to close during leave()")
         # finally, we close our side
         # it is important to do it, after the other side has closed his side,
         # because some asgi servers (like hypercorn) will remove the stream
@@ -545,9 +548,9 @@ class ServerInvocationContext(ObjectContext):
                     continue
                 if chunk.get("type") == "http.disconnect":
                     raise DisconnectedException()
-                if chunk.get("body", None) is not None:
-                    body = chunk.get("body")
-                    assert isinstance(body, bytes)
+                # Skip empty body frames to avoid hot loop (see #175)
+                body = chunk.get("body", None)
+                if body is not None and len(body) > 0:
                     self.vm.notify_input(body)
                 if not chunk.get("more_body", False):
                     self.vm.notify_input_closed()
