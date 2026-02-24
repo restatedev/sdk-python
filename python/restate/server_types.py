@@ -58,6 +58,12 @@ class HTTPRequestEvent(TypedDict):
     more_body: bool
 
 
+class HTTPDisconnectEvent(TypedDict):
+    """ASGI Disconnect event"""
+
+    type: Literal["http.disconnect"]
+
+
 class HTTPResponseStartEvent(TypedDict):
     """ASGI Response start event"""
 
@@ -75,7 +81,7 @@ class HTTPResponseBodyEvent(TypedDict):
     more_body: bool
 
 
-ASGIReceiveEvent = HTTPRequestEvent
+ASGIReceiveEvent = Union[HTTPRequestEvent, HTTPDisconnectEvent]
 
 
 ASGISendEvent = Union[HTTPResponseStartEvent, HTTPResponseBodyEvent]
