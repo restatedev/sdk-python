@@ -25,7 +25,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from restate.server_types import ReceiveChannel
+from restate.server_types import ASGIReceiveEvent, ReceiveChannel
 
 
 @pytest.fixture(scope="session")
@@ -47,12 +47,13 @@ async def test_receive_channel_returns_disconnect_when_drained():
     ]
     event_iter = iter(events)
 
-    async def mock_receive():
+    async def mock_receive() -> ASGIReceiveEvent:
         try:
             return next(event_iter)
         except StopIteration:
             # Block forever — simulates the real ASGI receive after disconnect
             await asyncio.Event().wait()
+            raise RuntimeError("unreachable")
 
     channel = ReceiveChannel(mock_receive)
 
@@ -83,11 +84,12 @@ async def test_receive_channel_does_not_block_after_disconnect():
     ]
     event_iter = iter(events)
 
-    async def mock_receive():
+    async def mock_receive() -> ASGIReceiveEvent:
         try:
             return next(event_iter)
         except StopIteration:
             await asyncio.Event().wait()
+            raise RuntimeError("unreachable")
 
     channel = ReceiveChannel(mock_receive)
 
@@ -129,11 +131,12 @@ async def test_empty_body_frames_do_not_cause_hotloop():
     ]
     event_iter = iter(events)
 
-    async def mock_receive():
+    async def mock_receive() -> ASGIReceiveEvent:
         try:
             return next(event_iter)
         except StopIteration:
             await asyncio.Event().wait()
+            raise RuntimeError("unreachable")
 
     receive_channel = ReceiveChannel(mock_receive)
 
