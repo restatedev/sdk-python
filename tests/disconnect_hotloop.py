@@ -21,6 +21,7 @@ caused the worker to spin at 82% CPU and never exit:
 """
 
 import asyncio
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -49,7 +50,7 @@ async def test_receive_channel_returns_disconnect_when_drained():
 
     async def mock_receive() -> ASGIReceiveEvent:
         try:
-            return next(event_iter)
+            return cast(ASGIReceiveEvent, next(event_iter))
         except StopIteration:
             # Block forever — simulates the real ASGI receive after disconnect
             await asyncio.Event().wait()
@@ -86,7 +87,7 @@ async def test_receive_channel_does_not_block_after_disconnect():
 
     async def mock_receive() -> ASGIReceiveEvent:
         try:
-            return next(event_iter)
+            return cast(ASGIReceiveEvent, next(event_iter))
         except StopIteration:
             await asyncio.Event().wait()
             raise RuntimeError("unreachable")
@@ -133,7 +134,7 @@ async def test_empty_body_frames_do_not_cause_hotloop():
 
     async def mock_receive() -> ASGIReceiveEvent:
         try:
-            return next(event_iter)
+            return cast(ASGIReceiveEvent, next(event_iter))
         except StopIteration:
             await asyncio.Event().wait()
             raise RuntimeError("unreachable")
