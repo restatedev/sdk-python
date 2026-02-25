@@ -548,7 +548,7 @@ class ServerInvocationContext(ObjectContext):
                 if chunk.get("type") == "http.disconnect":
                     raise DisconnectedException()
                 # Skip empty body frames to avoid hot loop (see #175)
-                body = chunk.get("body", None)
+                body: bytes | None = chunk.get("body", None)  # type: ignore[assignment]
                 if body is not None and len(body) > 0:
                     self.vm.notify_input(body)
                 if not chunk.get("more_body", False):
