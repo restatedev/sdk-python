@@ -9,15 +9,11 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """
-Regression tests for the SIGTERM hot-loop bug.
+Regression tests for disconnect and SIGTERM shutdown handling.
 
-When a BidiStream disconnects (e.g. pod receives SIGTERM), two interacting bugs
-caused the worker to spin at 82% CPU and never exit:
-
-1. ReceiveChannel.__call__() blocked forever on an empty queue after the
-   disconnect event had been consumed — no more events would ever arrive.
-2. create_poll_or_cancel_coroutine() fed empty body frames (b'') to the VM
-   via notify_input(), causing a synchronous tight loop.
+Covers:
+- Hot-loop bug when BidiStream disconnects (empty queue, empty body frames)
+- Graceful shutdown via notify_shutdown() unblocking block_until_http_input_closed()
 """
 
 import asyncio
@@ -163,3 +159,98 @@ async def test_empty_body_frames_do_not_cause_hotloop():
             assert len(arg) > 0, f"notify_input called with empty bytes: {arg!r}"
     finally:
         await receive_channel.close()
+
+
+# ---- Shutdown / SIGTERM tests ----
+
+
+async def test_block_until_http_input_closed_returns_on_normal_close():
+    """block_until_http_input_closed returns when the runtime closes its input."""
+    events = [
+        {"type": "http.request", "body": b"data", "more_body": True},
+        {"type": "http.request", "body": b"", "more_body": False},
+    ]
+    event_iter = iter(events)
+
+    async def mock_receive() -> ASGIReceiveEvent:
+        try:
+            return cast(ASGIReceiveEvent, next(event_iter))
+        except StopIteration:
+            await asyncio.Event().wait()
+            raise RuntimeError("unreachable")
+
+    channel = ReceiveChannel(mock_receive)
+    try:
+        # Should return promptly once more_body=False is received
+        await asyncio.wait_for(channel.block_until_http_input_closed(), timeout=1.0)
+    finally:
+        await channel.close()
+
+
+async def test_block_until_http_input_closed_returns_on_shutdown():
+    """block_until_http_input_closed returns when notify_shutdown() is called,
+    even if the runtime never closes its input."""
+
+    async def mock_receive() -> ASGIReceiveEvent:
+        # Never sends any events — simulates the runtime not closing its side
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    channel = ReceiveChannel(mock_receive)
+    try:
+        # Schedule shutdown after a short delay
+        async def trigger_shutdown():
+            await asyncio.sleep(0.05)
+            channel.notify_shutdown()
+
+        asyncio.create_task(trigger_shutdown())
+
+        # Should return promptly due to shutdown, NOT block forever
+        await asyncio.wait_for(channel.block_until_http_input_closed(), timeout=1.0)
+    finally:
+        await channel.close()
+
+
+async def test_notify_shutdown_is_idempotent():
+    """Calling notify_shutdown() multiple times does not raise."""
+
+    async def mock_receive() -> ASGIReceiveEvent:
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    channel = ReceiveChannel(mock_receive)
+    try:
+        channel.notify_shutdown()
+        channel.notify_shutdown()  # should not raise
+
+        # Should return immediately since shutdown is already set
+        await asyncio.wait_for(channel.block_until_http_input_closed(), timeout=0.5)
+    finally:
+        await channel.close()
+
+
+async def test_shutdown_unblocks_concurrent_waiters():
+    """Multiple concurrent waiters on block_until_http_input_closed
+    should all be unblocked by a single notify_shutdown()."""
+
+    async def mock_receive() -> ASGIReceiveEvent:
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    channel = ReceiveChannel(mock_receive)
+    try:
+        results = []
+
+        async def waiter(idx: int):
+            await channel.block_until_http_input_closed()
+            results.append(idx)
+
+        tasks = [asyncio.create_task(waiter(i)) for i in range(3)]
+
+        await asyncio.sleep(0.05)
+        channel.notify_shutdown()
+
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=1.0)
+        assert sorted(results) == [0, 1, 2]
+    finally:
+        await channel.close()

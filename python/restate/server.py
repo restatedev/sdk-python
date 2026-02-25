@@ -12,7 +12,8 @@
 
 import asyncio
 import logging
-from typing import Dict, TypedDict, Literal
+import signal
+from typing import Dict, Set, TypedDict, Literal
 
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
@@ -213,7 +214,23 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
     # Prepare request signer
     identity_verifier = PyIdentityVerifier(endpoint.identity_keys)
 
+    active_channels: Set[ReceiveChannel] = set()
+    sigterm_installed = False
+
+    def _on_sigterm() -> None:
+        """Notify all active receive channels of graceful shutdown."""
+        for ch in active_channels:
+            ch.notify_shutdown()
+
     async def app(scope: Scope, receive: Receive, send: Send):
+        nonlocal sigterm_installed
+        if not sigterm_installed:
+            loop = asyncio.get_running_loop()
+            try:
+                loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+            except (NotImplementedError, RuntimeError):
+                pass  # Windows or non-main thread
+            sigterm_installed = True
         try:
             if scope["type"] == "lifespan":
                 raise LifeSpanNotImplemented()
@@ -265,11 +282,13 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             # Let us set up restate's execution context for this invocation and handler.
             #
             receive_channel = ReceiveChannel(receive)
+            active_channels.add(receive_channel)
             try:
                 await process_invocation_to_completion(
                     VMWrapper(request_headers), handler, dict(request_headers), receive_channel, send
                 )
             finally:
+                active_channels.discard(receive_channel)
                 await receive_channel.close()
         except LifeSpanNotImplemented as e:
             raise e

@@ -454,10 +454,9 @@ class ServerInvocationContext(ObjectContext):
         # {'type': 'http.request', 'body': b'', 'more_body': True}
         # {'type': 'http.request', 'body': b'', 'more_body': False}
         # {'type': 'http.disconnect'}
-        try:
-            await asyncio.wait_for(self.receive.block_until_http_input_closed(), timeout=30.0)
-        except asyncio.TimeoutError:
-            logger.warning("Timed out waiting for HTTP input to close during leave()")
+        # Wait for the runtime to explicitly close its side of the input.
+        # On SIGTERM, the shutdown event unblocks this instead of an arbitrary timeout.
+        await self.receive.block_until_http_input_closed()
         # finally, we close our side
         # it is important to do it, after the other side has closed his side,
         # because some asgi servers (like hypercorn) will remove the stream

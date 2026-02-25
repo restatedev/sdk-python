@@ -170,8 +170,12 @@ class ReceiveChannel:
         self._queue.task_done()
         return what
 
+    def notify_shutdown(self) -> None:
+        """Signal that a graceful shutdown has been requested (e.g. SIGTERM)."""
+        self._http_input_closed.set()
+
     async def block_until_http_input_closed(self) -> None:
-        """Wait until the HTTP input is closed"""
+        """Wait until the HTTP input is closed or a shutdown signal is received."""
         await self._http_input_closed.wait()
 
     async def enqueue_restate_event(self, what: RestateEvent):
