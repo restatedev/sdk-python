@@ -58,6 +58,12 @@ class HTTPRequestEvent(TypedDict):
     more_body: bool
 
 
+class HTTPDisconnectEvent(TypedDict):
+    """ASGI Disconnect event"""
+
+    type: Literal["http.disconnect"]
+
+
 class HTTPResponseStartEvent(TypedDict):
     """ASGI Response start event"""
 
@@ -75,7 +81,7 @@ class HTTPResponseBodyEvent(TypedDict):
     more_body: bool
 
 
-ASGIReceiveEvent = HTTPRequestEvent
+ASGIReceiveEvent = Union[HTTPRequestEvent, HTTPDisconnectEvent]
 
 
 ASGISendEvent = Union[HTTPResponseStartEvent, HTTPResponseBodyEvent]
@@ -158,12 +164,18 @@ class ReceiveChannel:
 
     async def __call__(self) -> ASGIReceiveEvent | RestateEvent:
         """Get the next message."""
+        if self._disconnected.is_set() and self._queue.empty():
+            return {"type": "http.disconnect"}
         what = await self._queue.get()
         self._queue.task_done()
         return what
 
+    def notify_shutdown(self) -> None:
+        """Signal that a graceful shutdown has been requested (e.g. SIGTERM)."""
+        self._http_input_closed.set()
+
     async def block_until_http_input_closed(self) -> None:
-        """Wait until the HTTP input is closed"""
+        """Wait until the HTTP input is closed or a shutdown signal is received."""
         await self._http_input_closed.wait()
 
     async def enqueue_restate_event(self, what: RestateEvent):

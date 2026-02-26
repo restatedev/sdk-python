@@ -454,6 +454,8 @@ class ServerInvocationContext(ObjectContext):
         # {'type': 'http.request', 'body': b'', 'more_body': True}
         # {'type': 'http.request', 'body': b'', 'more_body': False}
         # {'type': 'http.disconnect'}
+        # Wait for the runtime to explicitly close its side of the input.
+        # On SIGTERM, the shutdown event unblocks this instead of an arbitrary timeout.
         await self.receive.block_until_http_input_closed()
         # finally, we close our side
         # it is important to do it, after the other side has closed his side,
@@ -545,9 +547,9 @@ class ServerInvocationContext(ObjectContext):
                     continue
                 if chunk.get("type") == "http.disconnect":
                     raise DisconnectedException()
-                if chunk.get("body", None) is not None:
-                    body = chunk.get("body")
-                    assert isinstance(body, bytes)
+                # Skip empty body frames to avoid hot loop (see #175)
+                body: bytes | None = chunk.get("body", None)  # type: ignore[assignment]
+                if body is not None and len(body) > 0:
                     self.vm.notify_input(body)
                 if not chunk.get("more_body", False):
                     self.vm.notify_input_closed()
