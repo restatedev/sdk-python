@@ -12,6 +12,7 @@ import typing
 
 from .session import RestateSessionService
 from .plugin import RestatePlugin
+from .summarizer import RestateEventSummarizer
 from restate import ObjectContext, Context
 from restate.extensions import current_context
 
@@ -35,6 +36,7 @@ def restate_context() -> Context:
 __all__ = [
     "RestateSessionService",
     "RestatePlugin",
+    "RestateEventSummarizer",
     "restate_object_context",
     "restate_context",
 ]
