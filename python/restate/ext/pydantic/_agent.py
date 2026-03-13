@@ -66,11 +66,17 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
     Example:
        ...
 
-       weather = restate.Service('weather')
+       from restate.ext.pydantic import restate_context
 
-       agent = RestateAgent(weather_agent, auto_wrap_tools=True)
+       weather_agent = RestateAgent(weather_agent, auto_wrap_tools=True)
 
-       @weather.handler()
+       @weather_agent.tool
+       async def get_weather(ctx: RunContext, city: str) -> dict:
+            return await fetch_weather(...)
+
+       agent_service = restate.Service('agent')
+
+       @agent_service.handler()
        async def get_weather(ctx: restate.Context, city: str):
             result = await agent.run(f'What is the weather in {city}?')
             return result.output
