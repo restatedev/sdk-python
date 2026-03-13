@@ -93,10 +93,13 @@ class RestateSessionService(BaseSessionService):
         """Appends an event to a session object."""
         if event.partial:
             return event
-        # For now, we also store temp state
         event = self._trim_temp_delta_state(event)
         self._update_session_state(session, event)
         session.events.append(event)
+        # Compaction runs after after_run_callback (which flushes the session),
+        # so compaction events must be flushed explicitly here.
+        if event.actions and event.actions.compaction:
+            await self.flush_session_state(session)
         return event
 
     async def flush_session_state(self, session: Session):
