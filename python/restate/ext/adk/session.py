@@ -69,12 +69,23 @@ class RestateSessionService(BaseSessionService):
         session_id: str,
         config: Optional[GetSessionConfig] = None,
     ) -> Optional[Session]:
-        # TODO : Handle config options
-        return await self.ctx().get(f"session_store::{session_id}", type_hint=Session) or Session(
+        session = await self.ctx().get(f"session_store::{session_id}", type_hint=Session) or Session(
             app_name=app_name,
             user_id=user_id,
             id=session_id,
         )
+        if config:
+            if config.num_recent_events:
+                session.events = session.events[-config.num_recent_events:]
+            if config.after_timestamp:
+                i = len(session.events) - 1
+                while i >= 0:
+                    if session.events[i].timestamp < config.after_timestamp:
+                        break
+                    i -= 1
+                if i >= 0:
+                    session.events = session.events[i + 1:]
+        return session
 
     async def list_sessions(self, *, app_name: str, user_id: Optional[str] = None) -> ListSessionsResponse:
         state_keys = await self.ctx().state_keys()
