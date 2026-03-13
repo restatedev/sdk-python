@@ -29,20 +29,43 @@ from restate.extensions import current_context
 
 
 class RestateEventSummarizer(BaseEventsSummarizer):
-    """Event summarizer that journals the LLM call through Restate ctx.run.
+    """Event summarizer that journals the summarization call through Restate ctx.run.
 
-    Creates an LlmEventSummarizer internally and wraps its call in ctx.run_typed
-    so the result is persisted in the Restate journal and replayed deterministically.
+    Wraps any BaseEventsSummarizer in ctx.run_typed so the result is persisted
+    in the Restate journal and replayed deterministically.
+
+    Use the factory methods to create instances:
+        - ``RestateEventSummarizer.from_llm(llm)`` for the default LlmEventSummarizer
+        - ``RestateEventSummarizer.from_summarizer(summarizer)`` for a custom summarizer
     """
 
     def __init__(
         self,
+        inner: BaseEventsSummarizer,
+        max_retries: int = 10,
+    ):
+        self._inner = inner
+        self._max_retries = max_retries
+
+    @staticmethod
+    def from_llm(
         llm: BaseLlm,
         prompt_template: Optional[str] = None,
         max_retries: int = 10,
-    ):
-        self._inner = LlmEventSummarizer(llm=llm, prompt_template=prompt_template)
-        self._max_retries = max_retries
+    ) -> "RestateEventSummarizer":
+        """Create a RestateEventSummarizer using the default LlmEventSummarizer."""
+        return RestateEventSummarizer(
+            LlmEventSummarizer(llm=llm, prompt_template=prompt_template),
+            max_retries=max_retries,
+        )
+
+    @staticmethod
+    def from_summarizer(
+        summarizer: BaseEventsSummarizer,
+        max_retries: int = 10,
+    ) -> "RestateEventSummarizer":
+        """Create a RestateEventSummarizer wrapping a custom summarizer."""
+        return RestateEventSummarizer(summarizer, max_retries=max_retries)
 
     async def maybe_summarize_events(
         self, *, events: list[Event]
