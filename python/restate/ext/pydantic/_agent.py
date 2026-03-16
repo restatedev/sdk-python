@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
+from datetime import timedelta
 from typing import Any, overload
 
 from restate import RunOptions, TerminalError
@@ -102,7 +103,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         self._auto_wrap_tools = auto_wrap_tools
 
         if run_options is None:
-            run_options = RunOptions(max_attempts=3)
+            run_options = RunOptions(max_attempts=10, initial_retry_interval=timedelta(seconds=1))
 
         self._model = RestateModelWrapper(wrapped.model, run_options, event_stream_handler=event_stream_handler)
 
