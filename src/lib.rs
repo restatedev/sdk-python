@@ -335,11 +335,14 @@ impl PyVM {
         self_.vm.notify_input_closed();
     }
 
-    #[pyo3(signature = (error, stacktrace=None))]
-    fn notify_error(mut self_: PyRefMut<'_, Self>, error: String, stacktrace: Option<String>) {
+    #[pyo3(signature = (error, stacktrace=None, delay_override_ms=None))]
+    fn notify_error(mut self_: PyRefMut<'_, Self>, error: String, stacktrace: Option<String>, delay_override_ms: Option<u64>) {
         let mut error = Error::new(restate_sdk_shared_core::error::codes::INTERNAL, error);
         if let Some(desc) = stacktrace {
             error = error.with_stacktrace(desc);
+        }
+        if let Some(delay) = delay_override_ms {
+            error = error.with_next_retry_delay_override(Duration::from_millis(delay));
         }
         CoreVM::notify_error(&mut self_.vm, error, None);
     }
@@ -717,6 +720,37 @@ impl PyVM {
                     error: value.into(),
                 },
                 config.into(),
+            )
+            .map_err(Into::into)
+    }
+
+    fn propose_run_completion_failure_transient_with_delay_override(
+        mut self_: PyRefMut<'_, Self>,
+        handle: PyNotificationHandle,
+        value: PyFailure,
+        attempt_duration: u64,
+        delay_override_ms: Option<u64>,
+        max_retry_attempts_override: Option<u32>,
+        max_retry_duration_override_ms: Option<u64>,
+    ) -> Result<(), PyVMError> {
+        let retry_policy = if delay_override_ms.is_some() || max_retry_attempts_override.is_some() || max_retry_duration_override_ms.is_some() {
+            RetryPolicy::FixedDelay {
+                interval: delay_override_ms.map(Duration::from_millis),
+                max_attempts: max_retry_attempts_override,
+                max_duration: max_retry_duration_override_ms.map(Duration::from_millis),
+            }
+        } else {
+            RetryPolicy::Infinite
+        };
+        self_
+            .vm
+            .propose_run_completion(
+                handle.into(),
+                RunExitResult::RetryableFailure {
+                    attempt_duration: Duration::from_millis(attempt_duration),
+                    error: value.into(),
+                },
+                retry_policy,
             )
             .map_err(Into::into)
     }
