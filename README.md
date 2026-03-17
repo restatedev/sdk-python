@@ -36,6 +36,7 @@ The compatibility with Restate is described in the following table:
 | 1.3                       | ✅                | ✅         | ✅ <sup>(1)</sup> | ✅ <sup>(2)</sup> |
 | 1.4                       | ✅                | ✅         | ✅                | ✅ <sup>(2)</sup> |
 | 1.5                       | ⚠ <sup>(3)</sup> | ✅         | ✅                | ✅                |
+| 1.6                       | ⚠ <sup>(3)</sup> | ✅         | ✅                | ✅                |
 
 <sup>(1)</sup> **Note** The new Service/Object/Workflow constructor fields and the decorator fields `inactivity_timeout`, `abort_timeout`, `journal_retention`, `idempotency_retention`, `ingress_private`, `workflow_retention` work only from Restate 1.4 onward. Check the in-code documentation for more details.
 
