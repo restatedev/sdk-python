@@ -521,6 +521,7 @@ impl PyVM {
                 },
                 buffer.as_bytes().to_vec().into(),
                 Default::default(),
+                Default::default()
             )
             .map(Into::into)
             .map_err(Into::into)
@@ -560,6 +561,7 @@ impl PyVM {
                         + Duration::from_millis(millis)
                 }),
                 Default::default(),
+                Default::default()
             )
             .map(|s| s.invocation_id_notification_handle.into())
             .map_err(Into::into)
