@@ -11,6 +11,9 @@
 """This module contains the restate exceptions"""
 
 # pylint: disable=C0301
+from typing import Optional
+
+from datetime import timedelta
 
 
 class TerminalError(Exception):
@@ -20,6 +23,23 @@ class TerminalError(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+class RetryableError(Exception):
+    """
+    This exception is thrown to indicate that Restate should retry with an explicit delay.
+
+    Args:
+        message: The error message.
+        status_code: The HTTP status code to return for this error (default: 500).
+        retry_after: The delay after which Restate should retry the invocation.
+    """
+
+    def __init__(self, message: str, status_code: int = 500, retry_after: Optional[timedelta] = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.retry_after = retry_after
 
 
 class SdkInternalBaseException(BaseException):

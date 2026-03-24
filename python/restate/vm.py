@@ -11,9 +11,12 @@
 """
 wrap the restate._internal.PyVM class
 """
+
 # pylint: disable=E1101,R0917
 # pylint: disable=too-many-arguments
 # pylint: disable=too-few-public-methods
+from typing import Optional
+from datetime import timedelta
 
 from dataclasses import dataclass
 import typing
@@ -173,9 +176,11 @@ class VMWrapper:
         """Notify the virtual machine that the input has been closed."""
         self.vm.notify_input_closed()
 
-    def notify_error(self, error: str, stacktrace: str):
+    def notify_error(self, error: str, stacktrace: str, delay_override: Optional[timedelta] = None):
         """Notify the virtual machine of an error."""
-        self.vm.notify_error(error, stacktrace)
+        self.vm.notify_error(
+            error, stacktrace, int(delay_override.total_seconds() * 1000) if delay_override is not None else None
+        )
 
     def take_output(self) -> typing.Optional[bytes]:
         """Take the output from the virtual machine."""
@@ -443,6 +448,28 @@ class VMWrapper:
             config.interval_factor,
         )
         self.vm.propose_run_completion_failure_transient(handle, py_failure, attempt_duration_ms, py_config)
+
+    def propose_run_completion_transient_with_delay_override(
+        self,
+        handle: int,
+        failure: Failure,
+        attempt_duration_ms: int,
+        delay_override: timedelta | None,
+        max_retry_attempts_override: int | None,
+        max_retry_duration_override: timedelta | None,
+    ):
+        """
+        Exit a side effect with a transient Error and override the retry policy with explicit parameters.
+        """
+        py_failure = PyFailure(failure.code, failure.message, failure.stacktrace)
+        self.vm.propose_run_completion_failure_transient_with_delay_override(
+            handle,
+            py_failure,
+            attempt_duration_ms,
+            int(delay_override.total_seconds() * 1000) if delay_override else None,
+            max_retry_attempts_override,
+            int(max_retry_duration_override.total_seconds() * 1000) if max_retry_duration_override else None,
+        )
 
     def sys_end(self):
         """

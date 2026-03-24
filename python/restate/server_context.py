@@ -46,7 +46,13 @@ from restate.context import (
     RunOptions,
     P,
 )
-from restate.exceptions import TerminalError, SdkInternalBaseException, SdkInternalException, SuspendedException
+from restate.exceptions import (
+    TerminalError,
+    SdkInternalBaseException,
+    SdkInternalException,
+    SuspendedException,
+    RetryableError,
+)
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_types import ReceiveChannel, Send
@@ -404,6 +410,10 @@ class ServerInvocationContext(ObjectContext):
             restate_context_is_replaying.set(False)
             self.vm.sys_write_output_failure(failure)
             self.vm.sys_end()
+        except RetryableError as r:
+            stacktrace = "".join(traceback.format_exception(r))
+            restate_context_is_replaying.set(False)
+            self.vm.notify_error(r.message, stacktrace, r.retry_after)
         # pylint: disable=W0718
         except asyncio.CancelledError:
             pass
@@ -421,6 +431,11 @@ class ServerInvocationContext(ObjectContext):
                     restate_context_is_replaying.set(False)
                     self.vm.sys_write_output_failure(failure)
                     self.vm.sys_end()
+                    break
+                elif isinstance(cause, RetryableError):
+                    stacktrace = "".join(traceback.format_exception(cause))
+                    restate_context_is_replaying.set(False)
+                    self.vm.notify_error(cause.message, stacktrace, cause.retry_after)
                     break
                 elif isinstance(cause, SdkInternalBaseException):
                     break
@@ -674,6 +689,18 @@ class ServerInvocationContext(ObjectContext):
         except TerminalError as t:
             failure = Failure(code=t.status_code, message=t.message)
             self.vm.propose_run_completion_failure(handle, failure)
+        except RetryableError as r:
+            failure = Failure(code=r.status_code, message=r.message)
+            end = time.time()
+            attempt_duration = int((end - start) * 1000)
+            self.vm.propose_run_completion_transient_with_delay_override(
+                handle,
+                failure,
+                attempt_duration_ms=attempt_duration,
+                delay_override=r.retry_after,
+                max_retry_attempts_override=max_attempts,
+                max_retry_duration_override=max_duration,
+            )
         except asyncio.CancelledError as e:
             raise e from None
         except SdkInternalBaseException as e:
