@@ -62,6 +62,7 @@ class ServiceInfo(BaseModel):
 
 class ListServicesResponse(BaseModel):
     """Response from GET /services."""
+
     services: list[ServiceInfo]
 
 
@@ -78,8 +79,9 @@ class AdminClient:
                     print(f"  - {h.name} metadata={h.metadata}")
     """
 
-    def __init__(self, admin_url: str):
+    def __init__(self, admin_url: str, headers: dict[str, str] | None = None):
         self._admin_url = admin_url.rstrip("/")
+        self._headers = headers
         self._client: httpx.AsyncClient | None = None
         self._owns_client = False
 
@@ -93,7 +95,7 @@ class AdminClient:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(base_url=self._admin_url)
+            self._client = httpx.AsyncClient(base_url=self._admin_url, headers=self._headers)
             self._owns_client = True
         return self._client
 
