@@ -88,12 +88,6 @@ except ImportError:
         yield  # type: ignore
 
 
-try:
-    from .admin_client import AdminClient, ServiceInfo, HandlerInfo
-except ImportError:
-    pass
-
-
 __all__ = [
     "Service",
     "VirtualObject",
@@ -128,7 +122,4 @@ __all__ = [
     "RestateClientSendHandle",
     "HttpError",
     "create_client",
-    "AdminClient",
-    "ServiceInfo",
-    "HandlerInfo",
 ]
