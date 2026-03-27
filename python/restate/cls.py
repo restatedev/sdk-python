@@ -40,10 +40,16 @@ Example::
 from __future__ import annotations
 
 import inspect
+import sys
 from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import wraps
 from typing import Any, AsyncContextManager, Callable, Dict, List, Literal, Optional, TypeVar
+
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
 
 from restate.handler import HandlerIO, ServiceTag, make_handler
 from restate.retry_policy import InvocationRetryPolicy
@@ -612,7 +618,7 @@ class Service:
         )
 
     @classmethod
-    def call(cls) -> "Service":  # type: ignore[return-type]
+    def call(cls) -> Self:  # type: ignore[return-type]
         """Return a proxy for making durable service calls.
 
         The proxy has the same method signatures as the class,
@@ -621,7 +627,7 @@ class Service:
         return _ServiceCallProxy(cls)  # type: ignore[return-value]
 
     @classmethod
-    def send(cls, *, delay: Optional[timedelta] = None) -> "Service":  # type: ignore[return-type]
+    def send(cls, *, delay: Optional[timedelta] = None) -> Self:  # type: ignore[return-type]
         """Return a proxy for fire-and-forget service sends."""
         return _ServiceSendProxy(cls, delay)  # type: ignore[return-value]
 
@@ -677,12 +683,12 @@ class VirtualObject:
         )
 
     @classmethod
-    def call(cls, key: str) -> "VirtualObject":  # type: ignore[return-type]
+    def call(cls, key: str) -> Self:  # type: ignore[return-type]
         """Return a proxy for making durable object calls."""
         return _ObjectCallProxy(cls, key)  # type: ignore[return-value]
 
     @classmethod
-    def send(cls, key: str, *, delay: Optional[timedelta] = None) -> "VirtualObject":  # type: ignore[return-type]
+    def send(cls, key: str, *, delay: Optional[timedelta] = None) -> Self:  # type: ignore[return-type]
         """Return a proxy for fire-and-forget object sends."""
         return _ObjectSendProxy(cls, key, delay)  # type: ignore[return-value]
 
@@ -738,12 +744,12 @@ class Workflow:
         )
 
     @classmethod
-    def call(cls, key: str) -> "Workflow":  # type: ignore[return-type]
+    def call(cls, key: str) -> Self:  # type: ignore[return-type]
         """Return a proxy for making durable workflow calls."""
         return _WorkflowCallProxy(cls, key)  # type: ignore[return-value]
 
     @classmethod
-    def send(cls, key: str, *, delay: Optional[timedelta] = None) -> "Workflow":  # type: ignore[return-type]
+    def send(cls, key: str, *, delay: Optional[timedelta] = None) -> Self:  # type: ignore[return-type]
         """Return a proxy for fire-and-forget workflow sends."""
         return _WorkflowSendProxy(cls, key, delay)  # type: ignore[return-value]
 

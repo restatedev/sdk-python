@@ -5,6 +5,8 @@ This example demonstrates the same services as the decorator-based examples,
 but using the class-based API with @handler, @shared, and @main decorators.
 """
 
+from datetime import timedelta
+
 import restate
 from restate.cls import Service, VirtualObject, Workflow, handler, shared, main, Context
 
@@ -51,4 +53,27 @@ class PaymentWorkflow(Workflow):
         return await Context.get("status", type_hint=str) or "unknown"
 
 
-app = restate.app([Greeter, Counter, PaymentWorkflow])
+class OrderProcessor(Service):
+    """Demonstrates type-safe RPC between services using fluent proxies."""
+
+    @handler
+    async def process(self, customer: str) -> str:
+        # Call a service handler — IDE knows .greet() takes str, returns str
+        greeting = await Greeter.call().greet(customer)
+
+        # Call a virtual object — IDE knows .increment() takes int, returns int
+        count = await Counter.call(customer).increment(1)
+
+        # Fire-and-forget send (returns SendHandle, not a coroutine)
+        Counter.send(customer).increment(1)  # type: ignore[unused-coroutine]
+
+        # Send with delay
+        Counter.send(customer, delay=timedelta(seconds=30)).increment(1)  # type: ignore[unused-coroutine]
+
+        # Call a workflow
+        receipt = await PaymentWorkflow.call(f"order-{count}").pay(100)
+
+        return f"{greeting} (visit #{count}, {receipt})"
+
+
+app = restate.app([Greeter, Counter, PaymentWorkflow, OrderProcessor])
