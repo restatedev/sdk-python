@@ -67,17 +67,14 @@ class RestateEventSummarizer(BaseEventsSummarizer):
         """Create a RestateEventSummarizer wrapping a custom summarizer."""
         return RestateEventSummarizer(summarizer, max_retries=max_retries)
 
-    async def maybe_summarize_events(
-        self, *, events: list[Event]
-    ) -> Optional[Event]:
+    async def maybe_summarize_events(self, *, events: list[Event]) -> Optional[Event]:
         if not events:
             return None
 
         ctx = current_context()
         if ctx is None:
             raise RuntimeError(
-                "No Restate context found. "
-                "RestateEventSummarizer must be used from within a Restate handler."
+                "No Restate context found. RestateEventSummarizer must be used from within a Restate handler."
             )
 
         inner = self._inner

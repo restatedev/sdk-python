@@ -1,0 +1,15 @@
+[project]
+name = "examples"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "hypercorn>=0.18.0",
+    "pydantic>=2.12.5",
+    "restate-sdk",
+    "uvicorn>=0.38.0",
+]
+
+[tool.uv.sources]
+restate-sdk = { path = "../dist/restate_sdk-0.14.2-cp313-cp313-macosx_14_0_arm64.whl" }

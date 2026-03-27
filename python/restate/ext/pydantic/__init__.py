@@ -8,6 +8,7 @@ from ._model import RestateModelWrapper
 from ._serde import PydanticTypeAdapter
 from ._toolset import RestateContextRunToolSet
 
+
 def restate_object_context() -> ObjectContext:
     """Get the current Restate ObjectContext."""
     ctx = current_context()
