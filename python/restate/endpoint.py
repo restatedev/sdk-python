@@ -44,12 +44,13 @@ class Endpoint:
 
         self.identity_keys = []
 
-    def bind(self, *services: typing.Union[Service, VirtualObject, Workflow]):
+    def bind(self, *services: typing.Any):
         """
         Bind a service to the endpoint
 
         Args:
-            service: The service or virtual object to bind to the endpoint
+            service: The service or virtual object to bind to the endpoint.
+                     Also accepts class-based services (subclasses of restate.cls.Service etc.)
 
         Raises:
             ValueError: If a service with the same name already exists in the endpoint
@@ -58,10 +59,12 @@ class Endpoint:
             The updated Endpoint instance
         """
         for service in services:
-            if service.name in self.services:
-                raise ValueError(f"Service {service.name} already exists")
-            if isinstance(service, (Service, VirtualObject, Workflow)):
-                self.services[service.name] = service
+            # Support class-based services: extract companion object
+            actual = getattr(service, "_restate_service", service)
+            if actual.name in self.services:
+                raise ValueError(f"Service {actual.name} already exists")
+            if isinstance(actual, (Service, VirtualObject, Workflow)):
+                self.services[actual.name] = actual
             else:
                 raise ValueError(f"Invalid service type {service}")
         return self
@@ -98,7 +101,7 @@ class Endpoint:
 
 
 def app(
-    services: typing.Iterable[typing.Union[Service, VirtualObject, Workflow]],
+    services: typing.Iterable[typing.Any],
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None,
     identity_keys: typing.Optional[typing.List[str]] = None,
 ):
