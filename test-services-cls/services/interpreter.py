@@ -16,7 +16,7 @@ from typing import TypedDict
 import typing
 import random
 
-from restate.cls import Service, handler, Context
+from restate.cls import Service, handler, Restate
 from restate.exceptions import TerminalError
 from restate.serde import JsonSerde
 
@@ -63,7 +63,7 @@ class ServiceInterpreterHelper(Service, name="ServiceInterpreterHelper"):
 
     @handler(name="echoLater")
     async def echo_later(self, parameter: dict[str, typing.Any]) -> str:
-        await Context.sleep(timedelta(milliseconds=parameter["sleep"]))
+        await Restate.sleep(timedelta(milliseconds=parameter["sleep"]))
         return parameter["parameter"]
 
     @handler(name="terminalFailure")
@@ -84,15 +84,15 @@ class ServiceInterpreterHelper(Service, name="ServiceInterpreterHelper"):
         }
 
         program_bytes = json.dumps(program).encode("utf-8")
-        Context.generic_send(f"ObjectInterpreterL{layer}", "interpret", program_bytes, key)
+        Restate.generic_send(f"ObjectInterpreterL{layer}", "interpret", program_bytes, key)
 
     @handler(name="resolveAwakeable")
     async def resolve_awakeable(self, aid: str) -> None:
-        Context.resolve_awakeable(aid, "ok")
+        Restate.resolve_awakeable(aid, "ok")
 
     @handler(name="rejectAwakeable")
     async def reject_awakeable(self, aid: str) -> None:
-        Context.reject_awakeable(aid, "error")
+        Restate.reject_awakeable(aid, "error")
 
     @handler(name="incrementViaAwakeableDance")
     async def increment_via_awakeable_dance(self, input: dict[str, typing.Any]) -> None:
@@ -100,8 +100,8 @@ class ServiceInterpreterHelper(Service, name="ServiceInterpreterHelper"):
         layer = input["interpreter"]["layer"]
         key = input["interpreter"]["key"]
 
-        aid, promise = Context.awakeable()
-        Context.resolve_awakeable(tx_promise_id, aid)
+        aid, promise = Restate.awakeable()
+        Restate.resolve_awakeable(tx_promise_id, aid)
         await promise
 
         program = {
@@ -113,7 +113,7 @@ class ServiceInterpreterHelper(Service, name="ServiceInterpreterHelper"):
         }
 
         program_bytes = json.dumps(program).encode("utf-8")
-        Context.generic_send(f"ObjectInterpreterL{layer}", "interpret", program_bytes, key)
+        Restate.generic_send(f"ObjectInterpreterL{layer}", "interpret", program_bytes, key)
 
 
 # Keep helper as a reference to the class for the __init__.py import
@@ -127,7 +127,7 @@ class SupportService:
 
     async def call(self, method: str, arg: typing.Any) -> typing.Any:
         buffer = self.serde.serialize(arg)
-        out_buffer = await Context.generic_call("ServiceInterpreterHelper", method, buffer)
+        out_buffer = await Restate.generic_call("ServiceInterpreterHelper", method, buffer)
         return self.serde.deserialize(out_buffer)
 
     def send(self, method: str, arg: typing.Any, delay: int | None = None) -> None:
@@ -136,7 +136,7 @@ class SupportService:
             send_delay = None
         else:
             send_delay = timedelta(milliseconds=delay)
-        Context.generic_send("ServiceInterpreterHelper", method, buffer, send_delay=send_delay)
+        Restate.generic_send("ServiceInterpreterHelper", method, buffer, send_delay=send_delay)
 
     async def ping(self) -> None:
         return await self.call(method="ping", arg=None)
@@ -200,30 +200,30 @@ async def interpreter(layer: int, program: Program) -> None:
     for i, command in enumerate(program["commands"]):
         command_type = command["kind"]
         if command_type == SET_STATE:
-            Context.set(f"key-{command['key']}", f"value-{command['key']}")
+            Restate.set(f"key-{command['key']}", f"value-{command['key']}")
         elif command_type == GET_STATE:
-            await Context.get(f"key-{command['key']}")
+            await Restate.get(f"key-{command['key']}")
         elif command_type == CLEAR_STATE:
-            Context.clear(f"key-{command['key']}")
+            Restate.clear(f"key-{command['key']}")
         elif command_type == INCREMENT_STATE_COUNTER:
-            c = await Context.get("counter") or 0
+            c = await Restate.get("counter") or 0
             c += 1
-            Context.set("counter", c)
+            Restate.set("counter", c)
         elif command_type == SLEEP:
             duration = timedelta(milliseconds=command["duration"])
-            await Context.sleep(duration)
+            await Restate.sleep(duration)
         elif command_type == CALL_SERVICE:
             expected = f"hello-{i}"
             coros[i] = (expected, service.echo(expected))
         elif command_type == INCREMENT_VIA_DELAYED_CALL:
             delay = command["duration"]
-            await service.increment_indirectly(layer=layer, key=Context.key(), delay=delay)
+            await service.increment_indirectly(layer=layer, key=Restate.key(), delay=delay)
         elif command_type == CALL_SLOW_SERVICE:
             expected = f"hello-{i}"
             coros[i] = (expected, service.echo_later(expected, command["sleep"]))
         elif command_type == SIDE_EFFECT:
             expected = f"hello-{i}"
-            result = await Context.run_typed("sideEffect", lambda: expected)
+            result = await Restate.run("sideEffect", lambda: expected)
             if result != expected:
                 raise TerminalError(f"Expected {expected} but got {result}")
         elif command_type == SLOW_SIDE_EFFECT:
@@ -243,32 +243,32 @@ async def interpreter(layer: int, program: Program) -> None:
                 if bool(random.getrandbits(1)):
                     raise ValueError("Random error")
 
-            await Context.run_typed("throwingSideEffect", side_effect)
+            await Restate.run("throwingSideEffect", side_effect)
         elif command_type == INCREMENT_STATE_COUNTER_INDIRECTLY:
-            await service.increment_indirectly(layer=layer, key=Context.key())
+            await service.increment_indirectly(layer=layer, key=Restate.key())
         elif command_type == AWAIT_PROMISE:
             index = command["index"]
             await await_promise(index)
         elif command_type == RESOLVE_AWAKEABLE:
-            name, promise = Context.awakeable()
+            name, promise = Restate.awakeable()
             coros[i] = ("ok", promise)
             service.resolve_awakeable(name)
         elif command_type == REJECT_AWAKEABLE:
-            name, promise = Context.awakeable()
+            name, promise = Restate.awakeable()
             coros[i] = ("rejected", promise)
             service.reject_awakeable(name)
         elif command_type == INCREMENT_STATE_COUNTER_VIA_AWAKEABLE:
-            tx_promise_id, tx_promise = Context.awakeable()
-            service.increment_via_awakeable_dance(layer=layer, key=Context.key(), tx_promise_id=tx_promise_id)
+            tx_promise_id, tx_promise = Restate.awakeable()
+            service.increment_via_awakeable_dance(layer=layer, key=Restate.key(), tx_promise_id=tx_promise_id)
             their_promise_for_us_to_resolve: str = await tx_promise
-            Context.resolve_awakeable(their_promise_for_us_to_resolve, "ok")
+            Restate.resolve_awakeable(their_promise_for_us_to_resolve, "ok")
         elif command_type == CALL_NEXT_LAYER_OBJECT:
             next_layer = f"ObjectInterpreterL{layer + 1}"
             key = f"{command['key']}"
             program = command["program"]
             js_program = json.dumps(program)
             raw_js_program = js_program.encode("utf-8")
-            promise = Context.generic_call(next_layer, "interpret", raw_js_program, key)
+            promise = Restate.generic_call(next_layer, "interpret", raw_js_program, key)
             coros[i] = (b"", promise)
         else:
             raise ValueError(f"Unknown command type: {command_type}")

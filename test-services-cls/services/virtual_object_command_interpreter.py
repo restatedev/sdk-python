@@ -15,7 +15,7 @@
 import os
 from datetime import timedelta
 from typing import Iterable, List, Union, TypedDict, Literal, Any
-from restate.cls import VirtualObject, handler, shared, Context
+from restate.cls import VirtualObject, handler, shared, Restate
 from restate import RestateDurableFuture, RestateDurableSleepFuture
 from restate import select, wait_completed, as_completed
 from restate.exceptions import TerminalError
@@ -88,43 +88,43 @@ class InterpretRequest(TypedDict):
 
 def to_durable_future(cmd: AwaitableCommand) -> RestateDurableFuture[Any]:
     if cmd["type"] == "createAwakeable":
-        awk_id, awakeable = Context.awakeable()
-        Context.set("awk-" + cmd["awakeableKey"], awk_id)
+        awk_id, awakeable = Restate.awakeable()
+        Restate.set("awk-" + cmd["awakeableKey"], awk_id)
         return awakeable
     elif cmd["type"] == "sleep":
-        return Context.sleep(timedelta(milliseconds=cmd["timeoutMillis"]))
+        return Restate.sleep(timedelta(milliseconds=cmd["timeoutMillis"]))
     elif cmd["type"] == "runThrowTerminalException":
 
         def side_effect(reason: str):
             raise TerminalError(message=reason)
 
-        res = Context.run_typed("run should fail command", side_effect, reason=cmd["reason"])
+        res = Restate.run("run should fail command", side_effect, reason=cmd["reason"])
         return res
 
 
 async def _resolve_awakeable_impl(req: ResolveAwakeable):
-    awk_id = await Context.get("awk-" + req["awakeableKey"])
+    awk_id = await Restate.get("awk-" + req["awakeableKey"])
     if not awk_id:
         raise TerminalError(message="No awakeable is registered")
-    Context.resolve_awakeable(awk_id, req["value"])
+    Restate.resolve_awakeable(awk_id, req["value"])
 
 
 async def _reject_awakeable_impl(req: RejectAwakeable):
-    awk_id = await Context.get("awk-" + req["awakeableKey"])
+    awk_id = await Restate.get("awk-" + req["awakeableKey"])
     if not awk_id:
         raise TerminalError(message="No awakeable is registered")
-    Context.reject_awakeable(awk_id, req["reason"])
+    Restate.reject_awakeable(awk_id, req["reason"])
 
 
 class VirtualObjectCommandInterpreter(VirtualObject, name="VirtualObjectCommandInterpreter"):
 
     @shared(name="getResults")
     async def get_results(self) -> List[str]:
-        return (await Context.get("results")) or []
+        return (await Restate.get("results")) or []
 
     @shared(name="hasAwakeable")
     async def has_awakeable(self, awk_key: str) -> bool:
-        awk_id = await Context.get("awk-" + awk_key)
+        awk_id = await Restate.get("awk-" + awk_key)
         if awk_id:
             return True
         return False
@@ -143,9 +143,9 @@ class VirtualObjectCommandInterpreter(VirtualObject, name="VirtualObjectCommandI
 
         for cmd in req["commands"]:
             if cmd["type"] == "awaitAwakeableOrTimeout":
-                awk_id, awakeable = Context.awakeable()
-                Context.set("awk-" + cmd["awakeableKey"], awk_id)
-                match await select(awakeable=awakeable, timeout=Context.sleep(timedelta(milliseconds=cmd["timeoutMillis"]))):
+                awk_id, awakeable = Restate.awakeable()
+                Restate.set("awk-" + cmd["awakeableKey"], awk_id)
+                match await select(awakeable=awakeable, timeout=Restate.sleep(timedelta(milliseconds=cmd["timeoutMillis"]))):
                     case ["awakeable", awk_res]:
                         result = awk_res
                     case ["timeout", _]:
@@ -162,7 +162,7 @@ class VirtualObjectCommandInterpreter(VirtualObject, name="VirtualObjectCommandI
                 def side_effect(env_name: str):
                     return os.environ.get(env_name, "")
 
-                result = await Context.run_typed("get_env", side_effect, env_name=env_name)
+                result = await Restate.run("get_env", side_effect, env_name=env_name)
             elif cmd["type"] == "awaitOne":
                 awaitable = to_durable_future(cmd["command"])
                 # We need this dance because the Python SDK doesn't support .map on futures
@@ -196,8 +196,8 @@ class VirtualObjectCommandInterpreter(VirtualObject, name="VirtualObjectCommandI
                         pass
 
             # Direct state access (same invocation, not RPC)
-            last_results = (await Context.get("results")) or []
+            last_results = (await Restate.get("results")) or []
             last_results.append(result)
-            Context.set("results", last_results)
+            Restate.set("results", last_results)
 
         return result

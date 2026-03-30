@@ -27,7 +27,6 @@ from restate.context import (
     RestateDurableFuture,
     RestateDurableSleepFuture,
     Request,
-    RunAction,
     RunOptions,
     SendHandle,
 )
@@ -38,14 +37,12 @@ I = TypeVar("I")
 O = TypeVar("O")
 
 
-def _ctx() -> Any:
-    """Get the current restate context, raising if not inside a handler.
+def current_context() -> Any:
+    """Get the current Restate context.
 
-    Returns Any because the actual runtime type is ServerInvocationContext
-    (which implements ObjectContext, WorkflowContext, etc.) but we want all
-    methods accessible without narrowing — runtime raises if mismatched.
+    Returns the context object for the current handler invocation.
+    Raises RuntimeError if called outside a handler.
     """
-    # Import here to avoid circular imports
     from restate.server_context import _restate_context_var  # pylint: disable=C0415
 
     try:
@@ -57,41 +54,32 @@ def _ctx() -> Any:
         ) from None
 
 
-def current_context():
-    """Get the current Restate context.
-
-    Returns the context object for the current handler invocation.
-    Raises RuntimeError if called outside a handler.
-    """
-    return _ctx()
-
-
 # ── State operations ──
 
 
 def get(name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[type] = None) -> Awaitable[Optional[T]]:
     """Retrieve a state value by name."""
-    return _ctx().get(name, serde=serde, type_hint=type_hint)
+    return current_context().get(name, serde=serde, type_hint=type_hint)
 
 
 def set(name: str, value: T, serde: Serde[T] = DefaultSerde()) -> None:
     """Set a state value by name."""
-    _ctx().set(name, value, serde=serde)
+    current_context().set(name, value, serde=serde)
 
 
 def clear(name: str) -> None:
     """Clear a state value by name."""
-    _ctx().clear(name)
+    current_context().clear(name)
 
 
 def clear_all() -> None:
     """Clear all state values."""
-    _ctx().clear_all()
+    current_context().clear_all()
 
 
 def state_keys() -> Awaitable[List[str]]:
     """Return the list of state keys."""
-    return _ctx().state_keys()
+    return current_context().state_keys()
 
 
 # ── Identity & request ──
@@ -99,54 +87,33 @@ def state_keys() -> Awaitable[List[str]]:
 
 def key() -> str:
     """Return the key of the current virtual object or workflow."""
-    return _ctx().key()
+    return current_context().key()
 
 
 def request() -> Request:
     """Return the current request object."""
-    return _ctx().request()
+    return current_context().request()
 
 
 def random() -> Random:
     """Return a deterministically-seeded Random instance."""
-    return _ctx().random()
+    return current_context().random()
 
 
 def uuid() -> UUID:
     """Return a deterministic UUID, stable across retries."""
-    return _ctx().uuid()
+    return current_context().uuid()
 
 
 def time() -> RestateDurableFuture[float]:
     """Return a durable timestamp, stable across retries."""
-    return _ctx().time()
+    return current_context().time()
 
 
 # ── Durable execution ──
 
 
 def run(
-    name: str,
-    action: RunAction[T],
-    serde: Serde[T] = DefaultSerde(),
-    max_attempts: Optional[int] = None,
-    max_retry_duration: Optional[timedelta] = None,
-    type_hint: Optional[type] = None,
-    args: Optional[tuple] = None,
-) -> RestateDurableFuture[T]:
-    """Run a durable side effect (deprecated — use run_typed instead)."""
-    return _ctx().run(
-        name,
-        action,
-        serde=serde,
-        max_attempts=max_attempts,
-        max_retry_duration=max_retry_duration,
-        type_hint=type_hint,
-        args=args,
-    )
-
-
-def run_typed(
     name: str,
     action: Union[Callable[..., Coroutine[Any, Any, T]], Callable[..., T]],
     options: RunOptions[T] = RunOptions(),
@@ -155,12 +122,12 @@ def run_typed(
     **kwargs: Any,
 ) -> RestateDurableFuture[T]:
     """Run a durable side effect with typed arguments."""
-    return _ctx().run_typed(name, action, options, *args, **kwargs)
+    return current_context().run_typed(name, action, options, *args, **kwargs)
 
 
 def sleep(delta: timedelta, name: Optional[str] = None) -> RestateDurableSleepFuture:
     """Suspend the current invocation for the given duration."""
-    return _ctx().sleep(delta, name=name)
+    return current_context().sleep(delta, name=name)
 
 
 # ── Service communication ──
@@ -173,7 +140,7 @@ def service_call(
     headers: Optional[Dict[str, str]] = None,
 ) -> RestateDurableCallFuture[O]:
     """Call a service handler."""
-    return _ctx().service_call(tpe, arg=arg, idempotency_key=idempotency_key, headers=headers)
+    return current_context().service_call(tpe, arg=arg, idempotency_key=idempotency_key, headers=headers)
 
 
 def service_send(
@@ -184,7 +151,9 @@ def service_send(
     headers: Optional[Dict[str, str]] = None,
 ) -> SendHandle:
     """Send a message to a service handler (fire-and-forget)."""
-    return _ctx().service_send(tpe, arg=arg, send_delay=send_delay, idempotency_key=idempotency_key, headers=headers)
+    return current_context().service_send(
+        tpe, arg=arg, send_delay=send_delay, idempotency_key=idempotency_key, headers=headers
+    )
 
 
 def object_call(
@@ -195,7 +164,7 @@ def object_call(
     headers: Optional[Dict[str, str]] = None,
 ) -> RestateDurableCallFuture[O]:
     """Call a virtual object handler."""
-    return _ctx().object_call(tpe, key=key, arg=arg, idempotency_key=idempotency_key, headers=headers)
+    return current_context().object_call(tpe, key=key, arg=arg, idempotency_key=idempotency_key, headers=headers)
 
 
 def object_send(
@@ -207,7 +176,7 @@ def object_send(
     headers: Optional[Dict[str, str]] = None,
 ) -> SendHandle:
     """Send a message to a virtual object handler (fire-and-forget)."""
-    return _ctx().object_send(
+    return current_context().object_send(
         tpe, key=key, arg=arg, send_delay=send_delay, idempotency_key=idempotency_key, headers=headers
     )
 
@@ -220,7 +189,7 @@ def workflow_call(
     headers: Optional[Dict[str, str]] = None,
 ) -> RestateDurableCallFuture[O]:
     """Call a workflow handler."""
-    return _ctx().workflow_call(tpe, key=key, arg=arg, idempotency_key=idempotency_key, headers=headers)
+    return current_context().workflow_call(tpe, key=key, arg=arg, idempotency_key=idempotency_key, headers=headers)
 
 
 def workflow_send(
@@ -232,7 +201,7 @@ def workflow_send(
     headers: Optional[Dict[str, str]] = None,
 ) -> SendHandle:
     """Send a message to a workflow handler (fire-and-forget)."""
-    return _ctx().workflow_send(
+    return current_context().workflow_send(
         tpe, key=key, arg=arg, send_delay=send_delay, idempotency_key=idempotency_key, headers=headers
     )
 
@@ -246,7 +215,9 @@ def generic_call(
     headers: Optional[Dict[str, str]] = None,
 ) -> RestateDurableCallFuture[bytes]:
     """Call a generic service/handler with raw bytes."""
-    return _ctx().generic_call(service, handler, arg, key=key, idempotency_key=idempotency_key, headers=headers)
+    return current_context().generic_call(
+        service, handler, arg, key=key, idempotency_key=idempotency_key, headers=headers
+    )
 
 
 def generic_send(
@@ -259,7 +230,7 @@ def generic_send(
     headers: Optional[Dict[str, str]] = None,
 ) -> SendHandle:
     """Send a message to a generic service/handler with raw bytes."""
-    return _ctx().generic_send(
+    return current_context().generic_send(
         service, handler, arg, key=key, send_delay=send_delay, idempotency_key=idempotency_key, headers=headers
     )
 
@@ -271,17 +242,17 @@ def awakeable(
     serde: Serde[T] = DefaultSerde(), type_hint: Optional[type] = None
 ) -> Tuple[str, RestateDurableFuture[T]]:
     """Create an awakeable and return (id, future)."""
-    return _ctx().awakeable(serde=serde, type_hint=type_hint)
+    return current_context().awakeable(serde=serde, type_hint=type_hint)
 
 
 def resolve_awakeable(name: str, value: I, serde: Serde[I] = DefaultSerde()) -> None:
     """Resolve an awakeable by id."""
-    _ctx().resolve_awakeable(name, value, serde=serde)
+    current_context().resolve_awakeable(name, value, serde=serde)
 
 
 def reject_awakeable(name: str, failure_message: str, failure_code: int = 500) -> None:
     """Reject an awakeable by id."""
-    _ctx().reject_awakeable(name, failure_message, failure_code=failure_code)
+    current_context().reject_awakeable(name, failure_message, failure_code=failure_code)
 
 
 # ── Promises (Workflow only) ──
@@ -289,7 +260,7 @@ def reject_awakeable(name: str, failure_message: str, failure_code: int = 500) -
 
 def promise(name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[type] = None) -> DurablePromise[T]:
     """Return a durable promise (workflow handlers only)."""
-    return _ctx().promise(name, serde=serde, type_hint=type_hint)
+    return current_context().promise(name, serde=serde, type_hint=type_hint)
 
 
 # ── Invocation management ──
@@ -297,11 +268,11 @@ def promise(name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typ
 
 def cancel_invocation(invocation_id: str):
     """Cancel an invocation by id."""
-    _ctx().cancel_invocation(invocation_id)
+    current_context().cancel_invocation(invocation_id)
 
 
 def attach_invocation(
     invocation_id: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[type] = None
 ) -> RestateDurableFuture[T]:
     """Attach to an invocation by id."""
-    return _ctx().attach_invocation(invocation_id, serde=serde, type_hint=type_hint)
+    return current_context().attach_invocation(invocation_id, serde=serde, type_hint=type_hint)

@@ -14,7 +14,7 @@
 
 from datetime import timedelta
 from typing import Dict, List
-from restate.cls import Service, handler, Context
+from restate.cls import Service, handler, Restate
 from restate.serde import BytesSerde
 
 
@@ -30,11 +30,11 @@ class TestUtilsService(Service, name="TestUtilsService"):
 
     @handler(name="echoHeaders")
     async def echo_headers(self) -> Dict[str, str]:
-        return Context.request().headers
+        return Restate.request().headers
 
     @handler(name="sleepConcurrently")
     async def sleep_concurrently(self, millis_duration: List[int]) -> None:
-        timers = [Context.sleep(timedelta(milliseconds=duration)) for duration in millis_duration]
+        timers = [Restate.sleep(timedelta(milliseconds=duration)) for duration in millis_duration]
         for timer in timers:
             await timer
 
@@ -47,13 +47,13 @@ class TestUtilsService(Service, name="TestUtilsService"):
             invoked_side_effects += 1
 
         for _ in range(increments):
-            await Context.run("count", effect)
+            await Restate.run("count", effect)
 
         return invoked_side_effects
 
     @handler(name="cancelInvocation")
     async def cancel_invocation(self, invocation_id: str) -> None:
-        Context.cancel_invocation(invocation_id)
+        Restate.cancel_invocation(invocation_id)
 
     @handler(
         name="rawEcho",

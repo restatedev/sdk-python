@@ -59,8 +59,28 @@ class Endpoint:
             The updated Endpoint instance
         """
         for service in services:
-            # Support class-based services: extract companion object
-            actual = getattr(service, "_restate_service", service)
+            # Support class-based services: extract companion object.
+            if isinstance(service, type) and hasattr(service, "_restate_service"):
+                # Class passed — instantiate it and bind
+                from restate.cls import _bind_instance  # pylint: disable=C0415
+
+                try:
+                    instance = service()
+                except TypeError as e:
+                    raise TypeError(
+                        f"{service.__name__} requires constructor arguments. "
+                        f"Pass an instance instead: restate.app([{service.__name__}(...)])"
+                    ) from e
+                _bind_instance(instance)
+                actual = service._restate_service  # type: ignore[attr-defined]
+            elif not isinstance(service, type) and hasattr(type(service), "_restate_service"):
+                # Instance passed — bind it
+                from restate.cls import _bind_instance  # pylint: disable=C0415
+
+                _bind_instance(service)
+                actual = type(service)._restate_service  # type: ignore[attr-defined]
+            else:
+                actual = getattr(service, "_restate_service", service)
             if actual.name in self.services:
                 raise ValueError(f"Service {actual.name} already exists")
             if isinstance(actual, (Service, VirtualObject, Workflow)):

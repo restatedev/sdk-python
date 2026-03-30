@@ -13,7 +13,7 @@
 # pylint: disable=W0613
 
 from typing import TypedDict
-from restate.cls import VirtualObject, handler, Context
+from restate.cls import VirtualObject, handler, Restate
 from restate.exceptions import TerminalError
 
 COUNTER_KEY = "counter"
@@ -28,29 +28,29 @@ class Counter(VirtualObject, name="Counter"):
 
     @handler
     async def reset(self):
-        Context.clear(COUNTER_KEY)
+        Restate.clear(COUNTER_KEY)
 
     @handler
     async def get(self) -> int:
-        c: int | None = await Context.get(COUNTER_KEY)
+        c: int | None = await Restate.get(COUNTER_KEY)
         if c is None:
             return 0
         return c
 
     @handler
     async def add(self, addend: int) -> CounterUpdateResponse:
-        old_value: int | None = await Context.get(COUNTER_KEY)
+        old_value: int | None = await Restate.get(COUNTER_KEY)
         if old_value is None:
             old_value = 0
         new_value = old_value + addend
-        Context.set(COUNTER_KEY, new_value)
+        Restate.set(COUNTER_KEY, new_value)
         return CounterUpdateResponse(oldValue=old_value, newValue=new_value)
 
     @handler(name="addThenFail")
     async def add_then_fail(self, addend: int):
-        old_value: int | None = await Context.get(COUNTER_KEY)
+        old_value: int | None = await Restate.get(COUNTER_KEY)
         if old_value is None:
             old_value = 0
         new_value = old_value + addend
-        Context.set(COUNTER_KEY, new_value)
-        raise TerminalError(message=Context.key())
+        Restate.set(COUNTER_KEY, new_value)
+        raise TerminalError(message=Restate.key())

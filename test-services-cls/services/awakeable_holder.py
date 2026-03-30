@@ -13,7 +13,7 @@
 # pylint: disable=W0613
 # pylint: disable=W0622
 
-from restate.cls import VirtualObject, handler, Context
+from restate.cls import VirtualObject, handler, Restate
 from restate.exceptions import TerminalError
 
 
@@ -21,16 +21,16 @@ class AwakeableHolder(VirtualObject, name="AwakeableHolder"):
 
     @handler
     async def hold(self, id: str):
-        Context.set("id", id)
+        Restate.set("id", id)
 
     @handler(name="hasAwakeable")
     async def has_awakeable(self) -> bool:
-        res = await Context.get("id")
+        res = await Restate.get("id")
         return res is not None
 
     @handler
     async def unlock(self, payload: str):
-        id = await Context.get("id")
+        id = await Restate.get("id")
         if id is None:
             raise TerminalError(message="No awakeable is registered")
-        Context.resolve_awakeable(id, payload)
+        Restate.resolve_awakeable(id, payload)

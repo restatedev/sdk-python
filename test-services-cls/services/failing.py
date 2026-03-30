@@ -16,7 +16,7 @@ from datetime import timedelta
 # pylint: disable=W0613
 # pylint: disable=W0622
 
-from restate.cls import VirtualObject, handler, Context
+from restate.cls import VirtualObject, handler, Restate
 from restate.exceptions import TerminalError
 from restate import RunOptions
 
@@ -34,7 +34,7 @@ class Failing(VirtualObject, name="Failing"):
     @handler(name="callTerminallyFailingCall")
     async def call_terminally_failing_call(self, msg: str) -> str:
         fn = Failing._restate_handlers["terminallyFailingCall"].fn
-        await Context.object_call(fn, key="random-583e1bf2", arg=msg)
+        await Restate.object_call(fn, key="random-583e1bf2", arg=msg)
         raise Exception("Should not reach here")
 
     @handler(name="failingCallWithEventualSuccess")
@@ -51,7 +51,7 @@ class Failing(VirtualObject, name="Failing"):
         def side_effect():
             raise TerminalError(message=error_message)
 
-        await Context.run_typed("sideEffect", side_effect)
+        await Restate.run("sideEffect", side_effect)
         raise ValueError("Should not reach here")
 
     @handler(name="sideEffectSucceedsAfterGivenAttempts")
@@ -66,7 +66,7 @@ class Failing(VirtualObject, name="Failing"):
         options: RunOptions[int] = RunOptions(
             max_attempts=minimum_attempts + 1, initial_retry_interval=timedelta(milliseconds=1), retry_interval_factor=1.0
         )
-        return await Context.run_typed("sideEffect", side_effect, options)
+        return await Restate.run("sideEffect", side_effect, options)
 
     @handler(name="sideEffectFailsAfterGivenAttempts")
     async def side_effect_fails_after_given_attempts(self, retry_policy_max_retry_count: int) -> int:
@@ -81,7 +81,7 @@ class Failing(VirtualObject, name="Failing"):
                 initial_retry_interval=timedelta(milliseconds=1),
                 retry_interval_factor=1.0,
             )
-            await Context.run_typed("sideEffect", side_effect, options)
+            await Restate.run("sideEffect", side_effect, options)
             raise ValueError("Side effect did not fail.")
         except TerminalError:
             global eventual_failure_side_effects

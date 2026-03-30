@@ -11,13 +11,72 @@
 """
 Class-based API for defining Restate services.
 
-This module provides an alternative to the decorator-based API, allowing
-services to be defined as classes with handler methods.
+This module lets you define Restate services as plain Python classes.
+Under the hood, each class is transformed into the same primitives used
+by the decorator-based API (``restate.Service``, ``restate.VirtualObject``,
+``restate.Workflow``).
+
+Transformation overview
+-----------------------
+
+Given user code like this::
+
+    class Greeter(Service):
+        def __init__(self, prefix: str):
+            self.prefix = prefix
+
+        @handler
+        async def greet(self, name: str) -> str:
+            return f"{self.prefix} {name}!"
+
+    app = restate.app([Greeter("Hello")])
+
+The following happens at **class definition time** (``__init_subclass__``):
+
+1. ``_process_class`` scans ``Greeter.__dict__`` for methods marked with
+   ``@handler``, ``@shared``, or ``@main``.
+
+2. For each marked method it creates a **placeholder wrapper** with the
+   signature ``(ctx, *args)`` that Restate's ``invoke_handler`` expects.
+   This placeholder raises ``RuntimeError`` if called before binding.
+
+3. The original method's signature is preserved separately for **type
+   deduction** — ``inspect.signature(method)`` is passed to
+   ``make_handler`` so that Pydantic/msgspec serde and JSON schemas
+   are derived from the real ``(self, name: str) -> str`` annotations,
+   not from the ``(*args)`` wrapper.
+
+4. A **companion service object** (a plain ``restate.Service``,
+   ``restate.VirtualObject``, or ``restate.Workflow``) is created and
+   stored on the class as ``Greeter._restate_service``. This companion
+   holds the handler dict and all service-level configuration.
+
+Then at **bind time** (``restate.app([...])`` → ``Endpoint.bind``):
+
+5. If a **class** is passed (``restate.app([Greeter])``), it is
+   instantiated via ``Greeter()``. If the constructor requires arguments,
+   a ``TypeError`` tells the user to pass an instance instead.
+
+6. If an **instance** is passed (``restate.app([Greeter("Hello")])``),
+   it is used directly.
+
+7. ``_bind_instance(instance)`` is called, which replaces each handler's
+   placeholder wrapper with a real one that **closes over the instance**.
+   The companion ``_restate_service`` is then registered with the
+   endpoint just like any decorator-based service.
+
+At **invocation time**, Restate calls the wrapper which dispatches
+to the bound method via its closure — no class-level state involved::
+
+    wrapper(ctx, "Alice")
+      → _method = Greeter.greet        # captured in closure
+      → _inst = Greeter("Hello") obj   # captured in closure
+      → Greeter.greet(_inst, "Alice")
+      → "Hello Alice!"
 
 Example::
 
     from restate.cls import Service, VirtualObject, Workflow, handler, shared, main
-    import restate
 
     class Greeter(Service):
         @handler
@@ -27,14 +86,14 @@ Example::
     class Counter(VirtualObject):
         @handler
         async def increment(self, value: int) -> int:
-            n = await restate.get("counter", type_hint=int) or 0
+            n = await Restate.get("counter", type_hint=int) or 0
             n += value
-            restate.set("counter", n)
+            Restate.set("counter", n)
             return n
 
         @shared
         async def count(self) -> int:
-            return await restate.get("counter", type_hint=int) or 0
+            return await Restate.get("counter", type_hint=int) or 0
 """
 
 from __future__ import annotations
@@ -318,14 +377,14 @@ def _process_class(
         handler_kind = _resolve_handler_kind(service_kind, meta.kind)
         handler_name = meta.name or method.__name__
 
-        # Create a wrapper that instantiates the class and calls the method.
-        # The wrapper has signature (ctx, *args) matching what invoke_handler expects.
+        # Placeholder wrapper — replaced by _bind_instance() at bind time
+        # with one that closes over the actual instance.
         @wraps(method)
-        async def wrapper(ctx, *args, _method=method, _cls=cls):
-            instance = object.__new__(_cls)
-            if args:
-                return await _method(instance, *args)
-            return await _method(instance)
+        async def wrapper(ctx, *args):
+            raise RuntimeError(
+                f"Handler {handler_name} called before instance was bound. "
+                f"Use restate.app([{cls.__name__}(...)]) to bind an instance."
+            )
 
         # Use the original method's signature for type/serde inspection
         sig = inspect.signature(method, eval_str=True)
@@ -415,6 +474,36 @@ def _process_class(
 
     svc.handlers = handlers
     cls._restate_service = svc  # type: ignore[attr-defined]
+
+
+def _bind_instance(instance: Any) -> None:
+    """Create real handler wrappers that close over *instance*.
+
+    Called from ``Endpoint.bind()`` once the instance is known.
+    Replaces the placeholder ``fn`` on each handler with a wrapper
+    that dispatches to the bound method on the instance.
+    """
+    cls = type(instance)
+    svc = cls._restate_service  # type: ignore[attr-defined]
+    for handler_name, h in svc.handlers.items():
+        method = cls.__dict__.get(handler_name)
+        if method is None:
+            # handler name might differ from method name
+            for attr in cls.__dict__.values():
+                meta = getattr(attr, _HANDLER_MARKER, None)
+                if meta and meta.name == handler_name:
+                    method = attr
+                    break
+        if method is None:
+            continue
+
+        @wraps(method)
+        async def wrapper(ctx, *args, _method=method, _inst=instance):
+            if args:
+                return await _method(_inst, *args)
+            return await _method(_inst)
+
+        h.fn = wrapper
 
 
 # ── Fluent RPC proxy classes ──────────────────────────────────────────────
@@ -757,178 +846,168 @@ class Workflow:
 # ── Context accessor class ────────────────────────────────────────────────
 
 
-class Context:
+class Restate:
     """Static accessor for the current Restate invocation context.
 
     Use from within handler methods to access Restate functionality
     without an explicit ``ctx`` parameter::
 
-        from restate.cls import Service, handler, Context
+        from restate.cls import Service, handler, Restate
 
         class Greeter(Service):
             @handler
             async def greet(self, name: str) -> str:
-                count = await Context.get("visits", type_hint=int) or 0
-                Context.set("visits", count + 1)
+                count = await Restate.get("visits", type_hint=int) or 0
+                Restate.set("visits", count + 1)
                 return f"Hello {name}!"
     """
 
     @staticmethod
     def _ctx() -> Any:
-        from restate.server_context import _restate_context_var  # pylint: disable=C0415
+        from restate.context_access import current_context  # pylint: disable=C0415
 
-        try:
-            return _restate_context_var.get()
-        except LookupError:
-            raise RuntimeError(
-                "Not inside a Restate handler. Context methods can only be called within a handler invocation."
-            ) from None
+        return current_context()
 
     # ── State ──
 
     @staticmethod
     def get(name: str, serde: Serde = DefaultSerde(), type_hint: Optional[type] = None) -> Any:
         """Retrieve a state value by name."""
-        return Context._ctx().get(name, serde=serde, type_hint=type_hint)
+        return Restate._ctx().get(name, serde=serde, type_hint=type_hint)
 
     @staticmethod
     def set(name: str, value: Any, serde: Serde = DefaultSerde()) -> None:
         """Set a state value by name."""
-        Context._ctx().set(name, value, serde=serde)
+        Restate._ctx().set(name, value, serde=serde)
 
     @staticmethod
     def clear(name: str) -> None:
         """Clear a state value by name."""
-        Context._ctx().clear(name)
+        Restate._ctx().clear(name)
 
     @staticmethod
     def clear_all() -> None:
         """Clear all state values."""
-        Context._ctx().clear_all()
+        Restate._ctx().clear_all()
 
     @staticmethod
     def state_keys() -> Any:
         """Return the list of state keys."""
-        return Context._ctx().state_keys()
+        return Restate._ctx().state_keys()
 
     # ── Identity & request ──
 
     @staticmethod
     def key() -> str:
         """Return the key of the current virtual object or workflow."""
-        return Context._ctx().key()
+        return Restate._ctx().key()
 
     @staticmethod
     def request() -> Any:
         """Return the current request object."""
-        return Context._ctx().request()
+        return Restate._ctx().request()
 
     @staticmethod
     def random() -> Any:
         """Return a deterministically-seeded Random instance."""
-        return Context._ctx().random()
+        return Restate._ctx().random()
 
     @staticmethod
     def uuid() -> Any:
         """Return a deterministic UUID, stable across retries."""
-        return Context._ctx().uuid()
+        return Restate._ctx().uuid()
 
     @staticmethod
     def time() -> Any:
         """Return a durable timestamp, stable across retries."""
-        return Context._ctx().time()
+        return Restate._ctx().time()
 
     # ── Durable execution ──
 
     @staticmethod
-    def run(name: str, action: Any, serde: Serde = DefaultSerde(), **kwargs: Any) -> Any:
-        """Run a durable side effect (deprecated — use run_typed)."""
-        return Context._ctx().run(name, action, serde=serde, **kwargs)
-
-    @staticmethod
-    def run_typed(name: str, action: Any, *args: Any, **kwargs: Any) -> Any:
+    def run(name: str, action: Any, *args: Any, **kwargs: Any) -> Any:
         """Run a durable side effect with typed arguments."""
-        return Context._ctx().run_typed(name, action, *args, **kwargs)
+        return Restate._ctx().run_typed(name, action, *args, **kwargs)
 
     @staticmethod
     def sleep(delta: timedelta, name: Optional[str] = None) -> Any:
         """Suspend the current invocation for the given duration."""
-        return Context._ctx().sleep(delta, name=name)
+        return Restate._ctx().sleep(delta, name=name)
 
     # ── Service communication ──
 
     @staticmethod
     def service_call(tpe: Any, arg: Any, **kwargs: Any) -> Any:
         """Call a service handler."""
-        return Context._ctx().service_call(tpe, arg=arg, **kwargs)
+        return Restate._ctx().service_call(tpe, arg=arg, **kwargs)
 
     @staticmethod
     def service_send(tpe: Any, arg: Any, **kwargs: Any) -> Any:
         """Send a message to a service handler (fire-and-forget)."""
-        return Context._ctx().service_send(tpe, arg=arg, **kwargs)
+        return Restate._ctx().service_send(tpe, arg=arg, **kwargs)
 
     @staticmethod
     def object_call(tpe: Any, key: str, arg: Any, **kwargs: Any) -> Any:
         """Call a virtual object handler."""
-        return Context._ctx().object_call(tpe, key=key, arg=arg, **kwargs)
+        return Restate._ctx().object_call(tpe, key=key, arg=arg, **kwargs)
 
     @staticmethod
     def object_send(tpe: Any, key: str, arg: Any, **kwargs: Any) -> Any:
         """Send a message to a virtual object handler (fire-and-forget)."""
-        return Context._ctx().object_send(tpe, key=key, arg=arg, **kwargs)
+        return Restate._ctx().object_send(tpe, key=key, arg=arg, **kwargs)
 
     @staticmethod
     def workflow_call(tpe: Any, key: str, arg: Any, **kwargs: Any) -> Any:
         """Call a workflow handler."""
-        return Context._ctx().workflow_call(tpe, key=key, arg=arg, **kwargs)
+        return Restate._ctx().workflow_call(tpe, key=key, arg=arg, **kwargs)
 
     @staticmethod
     def workflow_send(tpe: Any, key: str, arg: Any, **kwargs: Any) -> Any:
         """Send a message to a workflow handler (fire-and-forget)."""
-        return Context._ctx().workflow_send(tpe, key=key, arg=arg, **kwargs)
+        return Restate._ctx().workflow_send(tpe, key=key, arg=arg, **kwargs)
 
     @staticmethod
     def generic_call(service: str, handler: str, arg: bytes, key: Optional[str] = None, **kwargs: Any) -> Any:
         """Call a generic service/handler with raw bytes."""
-        return Context._ctx().generic_call(service, handler, arg, key=key, **kwargs)
+        return Restate._ctx().generic_call(service, handler, arg, key=key, **kwargs)
 
     @staticmethod
     def generic_send(service: str, handler: str, arg: bytes, key: Optional[str] = None, **kwargs: Any) -> Any:
         """Send a message to a generic service/handler with raw bytes."""
-        return Context._ctx().generic_send(service, handler, arg, key=key, **kwargs)
+        return Restate._ctx().generic_send(service, handler, arg, key=key, **kwargs)
 
     # ── Awakeables ──
 
     @staticmethod
     def awakeable(serde: Serde = DefaultSerde(), type_hint: Optional[type] = None) -> Any:
         """Create an awakeable and return (id, future)."""
-        return Context._ctx().awakeable(serde=serde, type_hint=type_hint)
+        return Restate._ctx().awakeable(serde=serde, type_hint=type_hint)
 
     @staticmethod
     def resolve_awakeable(name: str, value: Any, serde: Serde = DefaultSerde()) -> None:
         """Resolve an awakeable by id."""
-        Context._ctx().resolve_awakeable(name, value, serde=serde)
+        Restate._ctx().resolve_awakeable(name, value, serde=serde)
 
     @staticmethod
     def reject_awakeable(name: str, failure_message: str, failure_code: int = 500) -> None:
         """Reject an awakeable by id."""
-        Context._ctx().reject_awakeable(name, failure_message, failure_code=failure_code)
+        Restate._ctx().reject_awakeable(name, failure_message, failure_code=failure_code)
 
     # ── Promises (Workflow only) ──
 
     @staticmethod
     def promise(name: str, serde: Serde = DefaultSerde(), type_hint: Optional[type] = None) -> Any:
         """Return a durable promise (workflow handlers only)."""
-        return Context._ctx().promise(name, serde=serde, type_hint=type_hint)
+        return Restate._ctx().promise(name, serde=serde, type_hint=type_hint)
 
     # ── Invocation management ──
 
     @staticmethod
     def cancel_invocation(invocation_id: str) -> None:
         """Cancel an invocation by id."""
-        Context._ctx().cancel_invocation(invocation_id)
+        Restate._ctx().cancel_invocation(invocation_id)
 
     @staticmethod
     def attach_invocation(invocation_id: str, serde: Serde = DefaultSerde(), type_hint: Optional[type] = None) -> Any:
         """Attach to an invocation by id."""
-        return Context._ctx().attach_invocation(invocation_id, serde=serde, type_hint=type_hint)
+        return Restate._ctx().attach_invocation(invocation_id, serde=serde, type_hint=type_hint)

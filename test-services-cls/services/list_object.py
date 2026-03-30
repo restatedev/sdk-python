@@ -12,22 +12,22 @@
 # pylint: disable=C0116
 # pylint: disable=W0613
 
-from restate.cls import VirtualObject, handler, Context
+from restate.cls import VirtualObject, handler, Restate
 
 
 class ListObject(VirtualObject, name="ListObject"):
 
     @handler
     async def append(self, value: str):
-        lst = await Context.get("list") or []
-        Context.set("list", lst + [value])
+        lst = await Restate.get("list") or []
+        Restate.set("list", lst + [value])
 
     @handler
     async def get(self) -> list[str]:
-        return await Context.get("list") or []
+        return await Restate.get("list") or []
 
     @handler
     async def clear(self) -> list[str]:
-        result = await Context.get("list") or []
-        Context.clear("list")
+        result = await Restate.get("list") or []
+        Restate.clear("list")
         return result

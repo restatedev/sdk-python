@@ -7,8 +7,23 @@ but using the class-based API with @handler, @shared, and @main decorators.
 
 from datetime import timedelta
 
+from pydantic import BaseModel
+
 import restate
-from restate.cls import Service, VirtualObject, Workflow, handler, shared, main, Context
+from restate.cls import Service, VirtualObject, Workflow, handler, shared, main, Restate
+
+
+# ── Pydantic models ──
+
+
+class GreetingRequest(BaseModel):
+    name: str
+    language: str = "en"
+
+
+class GreetingResponse(BaseModel):
+    message: str
+    language: str
 
 
 class Greeter(Service):
@@ -24,14 +39,14 @@ class Counter(VirtualObject):
 
     @handler
     async def increment(self, value: int) -> int:
-        n: int = await Context.get("counter", type_hint=int) or 0
+        n: int = await Restate.get("counter", type_hint=int) or 0
         n += value
-        Context.set("counter", n)
+        Restate.set("counter", n)
         return n
 
     @shared
     async def count(self) -> int:
-        return await Context.get("counter", type_hint=int) or 0
+        return await Restate.get("counter", type_hint=int) or 0
 
 
 class PaymentWorkflow(Workflow):
@@ -39,18 +54,18 @@ class PaymentWorkflow(Workflow):
 
     @main
     async def pay(self, amount: int) -> str:
-        Context.set("status", "processing")
+        Restate.set("status", "processing")
 
         async def charge():
             return f"charged ${amount}"
 
-        receipt = await Context.run_typed("charge", charge)
-        Context.set("status", "completed")
+        receipt = await Restate.run("charge", charge)
+        Restate.set("status", "completed")
         return receipt
 
     @handler
     async def status(self) -> str:
-        return await Context.get("status", type_hint=str) or "unknown"
+        return await Restate.get("status", type_hint=str) or "unknown"
 
 
 class OrderProcessor(Service):
@@ -76,4 +91,21 @@ class OrderProcessor(Service):
         return f"{greeting} (visit #{count}, {receipt})"
 
 
-app = restate.app([Greeter, Counter, PaymentWorkflow, OrderProcessor])
+class PydanticGreeter(Service):
+    """Demonstrates Pydantic model serde with the class-based API."""
+
+    def __init__(self, name):
+        self.name = name
+
+    @handler
+    async def greet(self, req: GreetingRequest) -> GreetingResponse:
+        greetings = {"en": "Hello", "es": "Hola", "de": "Hallo"}
+        greeting = greetings.get(req.language, "Hello")
+
+        async def translate() -> GreetingResponse:
+            return GreetingResponse(message=f"{greeting} {req.name} from {self.name}", language=req.language)
+
+        return await Restate.run("translate", translate)
+
+
+app = restate.app([Greeter, Counter, PaymentWorkflow, OrderProcessor, PydanticGreeter("Restate")])

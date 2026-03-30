@@ -14,7 +14,7 @@
 
 from datetime import timedelta
 from typing import Literal
-from restate.cls import VirtualObject, handler, Context
+from restate.cls import VirtualObject, handler, Restate
 from restate.exceptions import TerminalError
 
 from . import awakeable_holder
@@ -28,16 +28,16 @@ class CancelTestRunner(VirtualObject, name="CancelTestRunner"):
     async def start_test(self, op: BlockingOperation):
         block_fn = CancelTestBlockingService._restate_handlers["block"].fn
         try:
-            await Context.object_call(block_fn, key=Context.key(), arg=op)
+            await Restate.object_call(block_fn, key=Restate.key(), arg=op)
         except TerminalError as t:
             if t.status_code == 409:
-                Context.set("state", True)
+                Restate.set("state", True)
             else:
                 raise t
 
     @handler(name="verifyTest")
     async def verify_test(self) -> bool:
-        state = await Context.get("state")
+        state = await Restate.get("state")
         if state is None:
             return False
         return state
@@ -48,17 +48,17 @@ class CancelTestBlockingService(VirtualObject, name="CancelTestBlockingService")
     @handler
     async def block(self, op: BlockingOperation):
         hold_fn = awakeable_holder.AwakeableHolder._restate_handlers["hold"].fn
-        name, awakeable = Context.awakeable()
-        Context.object_send(hold_fn, key=Context.key(), arg=name)
+        name, awakeable = Restate.awakeable()
+        Restate.object_send(hold_fn, key=Restate.key(), arg=name)
         await awakeable
 
         block_fn = CancelTestBlockingService._restate_handlers["block"].fn
         if op == "CALL":
-            await Context.object_call(block_fn, key=Context.key(), arg=op)
+            await Restate.object_call(block_fn, key=Restate.key(), arg=op)
         elif op == "SLEEP":
-            await Context.sleep(timedelta(days=1024))
+            await Restate.sleep(timedelta(days=1024))
         elif op == "AWAKEABLE":
-            name, uncompleteable = Context.awakeable()
+            name, uncompleteable = Restate.awakeable()
             await uncompleteable
 
     @handler(name="isUnlocked")

@@ -14,7 +14,7 @@
 
 from datetime import timedelta
 from typing import TypedDict, Optional, Iterable
-from restate.cls import Service, handler, Context
+from restate.cls import Service, handler, Restate
 
 
 class ProxyRequest(TypedDict):
@@ -36,7 +36,7 @@ class Proxy(Service, name="Proxy"):
 
     @handler(name="call")
     async def proxy_call(self, req: ProxyRequest) -> Iterable[int]:
-        response = await Context.generic_call(
+        response = await Restate.generic_call(
             req["serviceName"],
             req["handlerName"],
             bytes(req["message"]),
@@ -51,7 +51,7 @@ class Proxy(Service, name="Proxy"):
         delayMillis = req.get("delayMillis")
         if delayMillis is not None:
             send_delay = timedelta(milliseconds=delayMillis)
-        handle = Context.generic_send(
+        handle = Restate.generic_send(
             req["serviceName"],
             req["handlerName"],
             bytes(req["message"]),
@@ -72,7 +72,7 @@ class Proxy(Service, name="Proxy"):
                 delayMillis = req["proxyRequest"].get("delayMillis")
                 if delayMillis is not None:
                     send_delay = timedelta(milliseconds=delayMillis)
-                Context.generic_send(
+                Restate.generic_send(
                     req["proxyRequest"]["serviceName"],
                     req["proxyRequest"]["handlerName"],
                     bytes(req["proxyRequest"]["message"]),
@@ -81,7 +81,7 @@ class Proxy(Service, name="Proxy"):
                     idempotency_key=req["proxyRequest"].get("idempotencyKey"),
                 )
             else:
-                awaitable = Context.generic_call(
+                awaitable = Restate.generic_call(
                     req["proxyRequest"]["serviceName"],
                     req["proxyRequest"]["handlerName"],
                     bytes(req["proxyRequest"]["message"]),
