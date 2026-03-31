@@ -56,23 +56,63 @@ class RestateTracer(Tracer):
             raise Exception("You are not in a Restate handler")
         return _propagator.extract(ctx.request().attempt_headers)
 
-    def start_span(self, name, context=None, **kwargs):
+    def start_span(
+        self,
+        name,
+        context=None,
+        kind=None,
+        attributes=None,
+        links=None,
+        start_time=None,
+        record_exception=True,
+        set_status_on_exception=True,
+    ):
         if restate_context_is_replaying.get(False):
             return INVALID_SPAN
         root = self._get_root_context()
         if root is not None:
             context = root
-        span = self._tracer.start_span(name, context=context, **kwargs)
+        span = self._tracer.start_span(
+            name,
+            context=context,
+            kind=kind,
+            attributes=attributes,
+            links=links,
+            start_time=start_time,
+            record_exception=record_exception,
+            set_status_on_exception=set_status_on_exception,
+        )
         self._track_span(span)
         return span
 
-    def start_as_current_span(self, name, context=None, **kwargs):
+    def start_as_current_span(
+        self,
+        name,
+        context=None,
+        kind=None,
+        attributes=None,
+        links=None,
+        start_time=None,
+        record_exception=True,
+        set_status_on_exception=True,
+        end_on_exit=True,
+    ):
         if restate_context_is_replaying.get(False):
             return use_span(INVALID_SPAN, end_on_exit=False)
         root = self._get_root_context()
         if root is not None:
             context = root
-        return self._tracer.start_as_current_span(name, context=context, **kwargs)
+        return self._tracer.start_as_current_span(
+            name,
+            context=context,
+            kind=kind,
+            attributes=attributes,
+            links=links,
+            start_time=start_time,
+            record_exception=record_exception,
+            set_status_on_exception=set_status_on_exception,
+            end_on_exit=end_on_exit,
+        )
 
     @staticmethod
     def _track_span(span):

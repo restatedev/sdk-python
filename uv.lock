@@ -2492,9 +2492,6 @@ harness = [
     { name = "hypercorn" },
     { name = "testcontainers" },
 ]
-langfuse = [
-    { name = "opentelemetry-api" },
-]
 lint = [
     { name = "mypy" },
     { name = "pyright" },
@@ -2516,6 +2513,9 @@ test = [
     { name = "hypercorn" },
     { name = "pytest" },
 ]
+tracing = [
+    { name = "opentelemetry-api" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -2529,7 +2529,7 @@ requires-dist = [
     { name = "msgspec", marker = "extra == 'serde'" },
     { name = "mypy", marker = "extra == 'lint'", specifier = ">=1.11.2" },
     { name = "openai-agents", marker = "extra == 'openai'", specifier = ">=0.6.1" },
-    { name = "opentelemetry-api", marker = "extra == 'langfuse'", specifier = ">=1.36.0" },
+    { name = "opentelemetry-api", marker = "extra == 'tracing'", specifier = ">=1.36.0" },
     { name = "pydantic", marker = "extra == 'serde'" },
     { name = "pydantic-ai-slim", marker = "extra == 'pydantic-ai'", specifier = ">=1.68.0" },
     { name = "pyright", marker = "extra == 'lint'", specifier = ">=1.1.390" },
@@ -2537,7 +2537,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6.9" },
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
-provides-extras = ["adk", "client", "harness", "langfuse", "lint", "openai", "pydantic-ai", "serde", "test"]
+provides-extras = ["adk", "client", "harness", "lint", "openai", "pydantic-ai", "serde", "test", "tracing"]
 
 [[package]]
 name = "rpds-py"
