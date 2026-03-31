@@ -29,6 +29,7 @@ client = ["httpx[http2]"]
 adk = ["google-adk>=1.20.0"]
 openai = ["openai-agents>=0.6.1"]
 pydantic_ai = ["pydantic-ai-slim>=1.68.0"]
+langfuse = ["opentelemetry-api>=1.36.0"]
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]

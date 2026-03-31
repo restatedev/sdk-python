@@ -983,6 +983,7 @@ wheels = [
 name = "griffelib"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ad/06/eccbd311c9e2b3ca45dbc063b93134c57a1ccc7607c5e545264ad092c4a9/griffelib-2.0.0.tar.gz", hash = "sha256:e504d637a089f5cab9b5daf18f7645970509bf4f53eda8d79ed71cce8bd97934", size = 166312, upload-time = "2026-03-23T21:06:55.954Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4d/51/c936033e16d12b627ea334aaaaf42229c37620d0f15593456ab69ab48161/griffelib-2.0.0-py3-none-any.whl", hash = "sha256:01284878c966508b6d6f1dbff9b6fa607bc062d8261c5c7253cb285b06422a7f", size = 142004, upload-time = "2026-02-09T19:09:40.561Z" },
 ]
@@ -2491,6 +2492,9 @@ harness = [
     { name = "hypercorn" },
     { name = "testcontainers" },
 ]
+langfuse = [
+    { name = "opentelemetry-api" },
+]
 lint = [
     { name = "mypy" },
     { name = "pyright" },
@@ -2525,6 +2529,7 @@ requires-dist = [
     { name = "msgspec", marker = "extra == 'serde'" },
     { name = "mypy", marker = "extra == 'lint'", specifier = ">=1.11.2" },
     { name = "openai-agents", marker = "extra == 'openai'", specifier = ">=0.6.1" },
+    { name = "opentelemetry-api", marker = "extra == 'langfuse'", specifier = ">=1.36.0" },
     { name = "pydantic", marker = "extra == 'serde'" },
     { name = "pydantic-ai-slim", marker = "extra == 'pydantic-ai'", specifier = ">=1.68.0" },
     { name = "pyright", marker = "extra == 'lint'", specifier = ">=1.1.390" },
@@ -2532,7 +2537,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6.9" },
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
-provides-extras = ["adk", "client", "harness", "lint", "openai", "pydantic-ai", "serde", "test"]
+provides-extras = ["adk", "client", "harness", "langfuse", "lint", "openai", "pydantic-ai", "serde", "test"]
 
 [[package]]
 name = "rpds-py"
