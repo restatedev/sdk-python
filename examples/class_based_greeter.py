@@ -108,4 +108,35 @@ class PydanticGreeter(Service):
         return await Restate.run("translate", translate)
 
 
-app = restate.app([Greeter, Counter, PaymentWorkflow, OrderProcessor, PydanticGreeter("Restate")])
+# ── Service contract without implementation ──
+#
+# Define the shape of a service (handlers + types) without providing an
+# implementation.  The proxy only needs class-level metadata created by
+# __init_subclass__, so you can call a service that lives in another
+# process — or is written in another language — just from its contract.
+
+
+class ExternalInventory(VirtualObject, name="Inventory"):
+    """Contract for an Inventory service whose implementation lives elsewhere."""
+
+    @handler
+    async def reserve(self, item_id: str) -> bool: ...  # type: ignore[empty-body]
+
+    @handler
+    async def current_stock(self) -> int: ...  # type: ignore[empty-body]
+
+
+class Shop(Service):
+    """Demonstrates calling a service defined only by its contract."""
+
+    @handler
+    async def buy(self, item_id: str) -> str:
+        # Full IDE autocomplete — reserve(str) -> bool, current_stock() -> int
+        ok = await ExternalInventory.call(item_id).reserve(item_id)
+        if not ok:
+            return "out of stock"
+        stock = await ExternalInventory.call(item_id).current_stock()
+        return f"reserved (remaining: {stock})"
+
+
+app = restate.app([Greeter, Counter, PaymentWorkflow, OrderProcessor, PydanticGreeter("Restate"), Shop])

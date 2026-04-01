@@ -14,6 +14,7 @@ This module defines the Endpoint class, which serves as a container for all the 
 
 import typing
 
+from restate.cls import _SERVICE_ATTR
 from restate.service import Service
 from restate.object import VirtualObject
 from restate.workflow import Workflow
@@ -60,7 +61,7 @@ class Endpoint:
         """
         for service in services:
             # Support class-based services: extract companion object.
-            if isinstance(service, type) and hasattr(service, "__restate_service__"):
+            if isinstance(service, type) and hasattr(service, _SERVICE_ATTR):
                 # Class passed — instantiate it and bind
                 from restate.cls import _bind_instance  # pylint: disable=C0415
 
@@ -73,15 +74,15 @@ class Endpoint:
                     ) from e
                 _bind_instance(instance)
                 # Read from instance — _bind_instance stores a per-instance copy there
-                actual = instance.__restate_service__  # type: ignore[attr-defined]
-            elif not isinstance(service, type) and hasattr(type(service), "__restate_service__"):
+                actual = getattr(instance, _SERVICE_ATTR)
+            elif not isinstance(service, type) and hasattr(type(service), _SERVICE_ATTR):
                 # Instance passed — bind it
                 from restate.cls import _bind_instance  # pylint: disable=C0415
 
                 _bind_instance(service)
-                actual = service.__restate_service__  # type: ignore[attr-defined]
+                actual = getattr(service, _SERVICE_ATTR)
             else:
-                actual = getattr(service, "__restate_service__", service)
+                actual = service
             if actual.name in self.services:
                 raise ValueError(f"Service {actual.name} already exists")
             if isinstance(actual, (Service, VirtualObject, Workflow)):

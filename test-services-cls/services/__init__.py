@@ -1,3 +1,4 @@
+from restate.cls import _SERVICE_ATTR
 from restate.service import Service as _OrigService
 from restate.object import VirtualObject as _OrigObject
 from restate.workflow import Workflow as _OrigWorkflow
@@ -25,7 +26,7 @@ def list_services(bindings):
     """List all services from local bindings — supports both class-based and decorator-based."""
     result = {}
     for _, obj in bindings.items():
-        svc = getattr(obj, '__restate_service__', obj)
+        svc = getattr(obj, _SERVICE_ATTR, obj)
         if isinstance(svc, (_OrigService, _OrigObject, _OrigWorkflow)):
             result[svc.name] = obj
     return result

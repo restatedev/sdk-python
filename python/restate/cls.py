@@ -104,14 +104,27 @@ import sys
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import wraps
-from typing import Any, AsyncContextManager, Callable, Dict, List, Literal, Optional, TypeVar
+from typing import (
+    Any,
+    AsyncContextManager,
+    Callable,
+    Coroutine,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    ParamSpec,
+    TypeVar,
+    Union,
+)
 
 if sys.version_info >= (3, 11):
     from typing import Self
 else:
     from typing_extensions import Self
 
-from restate.handler import HandlerIO, ServiceTag, make_handler
+from restate.context import RestateDurableFuture, RunOptions
+from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL, HandlerIO, ServiceTag, make_handler
 from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import DefaultSerde, Serde
 
@@ -124,10 +137,13 @@ from restate.workflow import Workflow as _OriginalWorkflow
 I = TypeVar("I")
 O = TypeVar("O")
 T = TypeVar("T")
+P = ParamSpec("P")
 
 # ── Handler marker decorators ──────────────────────────────────────────────
 
 _HANDLER_MARKER = "__restate_handler_meta__"
+_SERVICE_ATTR = "__restate_service__"
+_HANDLERS_ATTR = "__restate_handlers__"
 
 _MISSING = object()
 
@@ -434,7 +450,7 @@ def _process_class(
             handler_index[method.__name__] = h
 
     # Store handler index on the class for proxy lookup (method name + handler name)
-    cls.__restate_handlers__ = handler_index  # type: ignore[attr-defined]
+    setattr(cls, _HANDLERS_ATTR, handler_index)
 
     # Build companion service object of the original type
     svc: _OriginalService | _OriginalVirtualObject | _OriginalWorkflow
@@ -483,7 +499,7 @@ def _process_class(
         raise ValueError(f"Unknown service kind: {service_kind}")
 
     svc.handlers = handlers
-    cls.__restate_service__ = svc  # type: ignore[attr-defined]
+    setattr(cls, _SERVICE_ATTR, svc)
 
 
 def _bind_instance(instance: Any) -> None:
@@ -496,7 +512,7 @@ def _bind_instance(instance: Any) -> None:
     of the same class (e.g. to a different endpoint) does not clobber the first.
     """
     cls = type(instance)
-    svc = cls.__restate_service__  # type: ignore[attr-defined]
+    svc = getattr(cls, _SERVICE_ATTR)
     new_handlers: Dict[str, Any] = {}
     for handler_name, h in svc.handlers.items():
         method = cls.__dict__.get(handler_name)
@@ -519,12 +535,14 @@ def _bind_instance(instance: Any) -> None:
                 return await _method(_inst, *args)
             return await _method(_inst)
 
-        new_handlers[handler_name] = replace(h, fn=wrapper)
+        new_h = replace(h, fn=wrapper)
+        vars(wrapper)[RESTATE_UNIQUE_HANDLER_SYMBOL] = new_h
+        new_handlers[handler_name] = new_h
 
     # Create a shallow copy of the companion service with the new handlers
     bound_svc = copy.copy(svc)
     bound_svc.handlers = new_handlers
-    instance.__restate_service__ = bound_svc
+    setattr(instance, _SERVICE_ATTR, bound_svc)
 
 
 # ── Fluent RPC proxy classes ──────────────────────────────────────────────
@@ -537,7 +555,7 @@ class _ServiceCallProxy:
         self._cls = cls
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "__restate_handlers__", {})
+        handlers = getattr(self._cls, _HANDLERS_ATTR, {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -561,7 +579,7 @@ class _ServiceSendProxy:
         self._delay = delay
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "__restate_handlers__", {})
+        handlers = getattr(self._cls, _HANDLERS_ATTR, {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -585,7 +603,7 @@ class _ObjectCallProxy:
         self._key = key
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "__restate_handlers__", {})
+        handlers = getattr(self._cls, _HANDLERS_ATTR, {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -610,7 +628,7 @@ class _ObjectSendProxy:
         self._delay = delay
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "__restate_handlers__", {})
+        handlers = getattr(self._cls, _HANDLERS_ATTR, {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -634,7 +652,7 @@ class _WorkflowCallProxy:
         self._key = key
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "__restate_handlers__", {})
+        handlers = getattr(self._cls, _HANDLERS_ATTR, {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -659,7 +677,7 @@ class _WorkflowSendProxy:
         self._delay = delay
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "__restate_handlers__", {})
+        handlers = getattr(self._cls, _HANDLERS_ATTR, {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -946,9 +964,16 @@ class Restate:
     # ── Durable execution ──
 
     @staticmethod
-    def run(name: str, action: Any, *args: Any, **kwargs: Any) -> Any:
+    def run(
+        name: str,
+        action: Union[Callable[P, Coroutine[Any, Any, T]], Callable[P, T]],
+        options: RunOptions[T] = RunOptions(),
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> RestateDurableFuture[T]:
         """Run a durable side effect with typed arguments."""
-        return Restate._ctx().run_typed(name, action, *args, **kwargs)
+        return Restate._ctx().run_typed(name, action, options, *args, **kwargs)
 
     @staticmethod
     def sleep(delta: timedelta, name: Optional[str] = None) -> Any:
