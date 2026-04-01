@@ -48,7 +48,7 @@ The following happens at **class definition time** (``__init_subclass__``):
 
 4. A **companion service object** (a plain ``restate.Service``,
    ``restate.VirtualObject``, or ``restate.Workflow``) is created and
-   stored on the class as ``Greeter._restate_service``. This companion
+   stored on the class as ``Greeter.__restate_service__``. This companion
    holds the handler dict and all service-level configuration.
 
 Then at **bind time** (``restate.app([...])`` → ``Endpoint.bind``):
@@ -62,7 +62,7 @@ Then at **bind time** (``restate.app([...])`` → ``Endpoint.bind``):
 
 7. ``_bind_instance(instance)`` is called, which replaces each handler's
    placeholder wrapper with a real one that **closes over the instance**.
-   The companion ``_restate_service`` is then registered with the
+   The companion ``__restate_service__`` is then registered with the
    endpoint just like any decorator-based service.
 
 At **invocation time**, Restate calls the wrapper which dispatches
@@ -98,9 +98,10 @@ Example::
 
 from __future__ import annotations
 
+import copy
 import inspect
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import wraps
 from typing import Any, AsyncContextManager, Callable, Dict, List, Literal, Optional, TypeVar
@@ -367,6 +368,9 @@ def _process_class(
         metadata=config.metadata,
     )
     handlers: Dict[str, Any] = {}
+    # Proxy lookup index: maps both handler names and Python method names.
+    # Kept separate from svc.handlers which only has canonical handler names.
+    handler_index: Dict[str, Any] = {}
 
     for attr_name, attr_value in list(cls.__dict__.items()):
         meta: Optional[_HandlerMeta] = getattr(attr_value, _HANDLER_MARKER, None)
@@ -380,13 +384,16 @@ def _process_class(
         # Placeholder wrapper — replaced by _bind_instance() at bind time
         # with one that closes over the actual instance.
         @wraps(method)
-        async def wrapper(ctx, *args):
+        async def wrapper(_ctx, *args, _handler_name=handler_name):
             raise RuntimeError(
-                f"Handler {handler_name} called before instance was bound. "
+                f"Handler {_handler_name} called before instance was bound. "
                 f"Use restate.app([{cls.__name__}(...)]) to bind an instance."
             )
 
-        # Use the original method's signature for type/serde inspection
+        # Use the original method's signature for type/serde inspection.
+        # Note: arity is derived from this signature (including `self`),
+        # which matches the (ctx, arg) calling convention of invoke_handler —
+        # `self` occupies the same slot as `ctx` in the decorator-based API.
         sig = inspect.signature(method, eval_str=True)
         handler_io: HandlerIO = HandlerIO(
             accept=meta.accept,
@@ -422,9 +429,12 @@ def _process_class(
             context_managers=combined_context_managers,
         )
         handlers[h.name] = h
+        handler_index[h.name] = h
+        if method.__name__ != h.name:
+            handler_index[method.__name__] = h
 
-    # Store handlers on the class for proxy access
-    cls._restate_handlers = handlers  # type: ignore[attr-defined]
+    # Store handler index on the class for proxy lookup (method name + handler name)
+    cls.__restate_handlers__ = handler_index  # type: ignore[attr-defined]
 
     # Build companion service object of the original type
     svc: _OriginalService | _OriginalVirtualObject | _OriginalWorkflow
@@ -473,18 +483,21 @@ def _process_class(
         raise ValueError(f"Unknown service kind: {service_kind}")
 
     svc.handlers = handlers
-    cls._restate_service = svc  # type: ignore[attr-defined]
+    cls.__restate_service__ = svc  # type: ignore[attr-defined]
 
 
 def _bind_instance(instance: Any) -> None:
     """Create real handler wrappers that close over *instance*.
 
     Called from ``Endpoint.bind()`` once the instance is known.
-    Replaces the placeholder ``fn`` on each handler with a wrapper
-    that dispatches to the bound method on the instance.
+    Creates a **copy** of the companion service with new handler objects
+    whose ``fn`` dispatches to the bound method on the instance.
+    The copy is stored on the *instance* so that binding a second instance
+    of the same class (e.g. to a different endpoint) does not clobber the first.
     """
     cls = type(instance)
-    svc = cls._restate_service  # type: ignore[attr-defined]
+    svc = cls.__restate_service__  # type: ignore[attr-defined]
+    new_handlers: Dict[str, Any] = {}
     for handler_name, h in svc.handlers.items():
         method = cls.__dict__.get(handler_name)
         if method is None:
@@ -495,15 +508,23 @@ def _bind_instance(instance: Any) -> None:
                     method = attr
                     break
         if method is None:
+            new_handlers[handler_name] = h
             continue
 
         @wraps(method)
-        async def wrapper(ctx, *args, _method=method, _inst=instance):
+        async def wrapper(_ctx, *args, _method=method, _inst=instance):
+            # _ctx is passed by invoke_handler but unused here;
+            # context is accessed via Restate._ctx() (contextvars).
             if args:
                 return await _method(_inst, *args)
             return await _method(_inst)
 
-        h.fn = wrapper
+        new_handlers[handler_name] = replace(h, fn=wrapper)
+
+    # Create a shallow copy of the companion service with the new handlers
+    bound_svc = copy.copy(svc)
+    bound_svc.handlers = new_handlers
+    instance.__restate_service__ = bound_svc
 
 
 # ── Fluent RPC proxy classes ──────────────────────────────────────────────
@@ -516,7 +537,7 @@ class _ServiceCallProxy:
         self._cls = cls
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "_restate_handlers", {})
+        handlers = getattr(self._cls, "__restate_handlers__", {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -540,7 +561,7 @@ class _ServiceSendProxy:
         self._delay = delay
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "_restate_handlers", {})
+        handlers = getattr(self._cls, "__restate_handlers__", {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -564,7 +585,7 @@ class _ObjectCallProxy:
         self._key = key
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "_restate_handlers", {})
+        handlers = getattr(self._cls, "__restate_handlers__", {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -589,7 +610,7 @@ class _ObjectSendProxy:
         self._delay = delay
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "_restate_handlers", {})
+        handlers = getattr(self._cls, "__restate_handlers__", {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -613,7 +634,7 @@ class _WorkflowCallProxy:
         self._key = key
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "_restate_handlers", {})
+        handlers = getattr(self._cls, "__restate_handlers__", {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -638,7 +659,7 @@ class _WorkflowSendProxy:
         self._delay = delay
 
     def __getattr__(self, name: str):
-        handlers = getattr(self._cls, "_restate_handlers", {})
+        handlers = getattr(self._cls, "__restate_handlers__", {})
         h = handlers.get(name)
         if h is None:
             raise AttributeError(f"No handler '{name}' on {self._cls.__name__}")
@@ -670,8 +691,8 @@ class Service:
         app = restate.app([Greeter])
     """
 
-    _restate_service: _OriginalService
-    _restate_handlers: Dict[str, Any]
+    __restate_service__: _OriginalService
+    __restate_handlers__: Dict[str, Any]
 
     def __init_subclass__(
         cls,
@@ -733,8 +754,8 @@ class VirtualObject:
         app = restate.app([Counter])
     """
 
-    _restate_service: _OriginalVirtualObject
-    _restate_handlers: Dict[str, Any]
+    __restate_service__: _OriginalVirtualObject
+    __restate_handlers__: Dict[str, Any]
 
     def __init_subclass__(
         cls,
@@ -794,8 +815,8 @@ class Workflow:
         app = restate.app([Payment])
     """
 
-    _restate_service: _OriginalWorkflow
-    _restate_handlers: Dict[str, Any]
+    __restate_service__: _OriginalWorkflow
+    __restate_handlers__: Dict[str, Any]
 
     def __init_subclass__(
         cls,

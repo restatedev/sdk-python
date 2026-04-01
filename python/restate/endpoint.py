@@ -60,7 +60,7 @@ class Endpoint:
         """
         for service in services:
             # Support class-based services: extract companion object.
-            if isinstance(service, type) and hasattr(service, "_restate_service"):
+            if isinstance(service, type) and hasattr(service, "__restate_service__"):
                 # Class passed — instantiate it and bind
                 from restate.cls import _bind_instance  # pylint: disable=C0415
 
@@ -72,15 +72,16 @@ class Endpoint:
                         f"Pass an instance instead: restate.app([{service.__name__}(...)])"
                     ) from e
                 _bind_instance(instance)
-                actual = service._restate_service  # type: ignore[attr-defined]
-            elif not isinstance(service, type) and hasattr(type(service), "_restate_service"):
+                # Read from instance — _bind_instance stores a per-instance copy there
+                actual = instance.__restate_service__  # type: ignore[attr-defined]
+            elif not isinstance(service, type) and hasattr(type(service), "__restate_service__"):
                 # Instance passed — bind it
                 from restate.cls import _bind_instance  # pylint: disable=C0415
 
                 _bind_instance(service)
-                actual = type(service)._restate_service  # type: ignore[attr-defined]
+                actual = service.__restate_service__  # type: ignore[attr-defined]
             else:
-                actual = getattr(service, "_restate_service", service)
+                actual = getattr(service, "__restate_service__", service)
             if actual.name in self.services:
                 raise ValueError(f"Service {actual.name} already exists")
             if isinstance(actual, (Service, VirtualObject, Workflow)):

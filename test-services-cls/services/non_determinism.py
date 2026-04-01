@@ -16,7 +16,7 @@ from datetime import timedelta
 from typing import Dict
 from restate.cls import VirtualObject, handler, Restate
 
-from . import counter
+from .counter import Counter
 
 invoke_counts: Dict[str, int] = {}
 
@@ -28,8 +28,7 @@ def do_left_action() -> bool:
 
 
 def increment_counter():
-    add_fn = counter.Counter._restate_handlers["add"].fn
-    Restate.object_send(add_fn, key=Restate.key(), arg=1)
+    Counter.send(Restate.key()).add(1)  # type: ignore[unused-coroutine]
 
 
 class NonDeterministic(VirtualObject, name="NonDeterministic"):
@@ -45,32 +44,27 @@ class NonDeterministic(VirtualObject, name="NonDeterministic"):
 
     @handler(name="backgroundInvokeWithDifferentTargets")
     async def background_invoke_with_different_targets(self):
-        get_fn = counter.Counter._restate_handlers["get"].fn
-        reset_fn = counter.Counter._restate_handlers["reset"].fn
         if do_left_action():
-            Restate.object_send(get_fn, key="abc", arg=None)
+            Counter.send("abc").get()  # type: ignore[unused-coroutine]
         else:
-            Restate.object_send(reset_fn, key="abc", arg=None)
+            Counter.send("abc").reset()  # type: ignore[unused-coroutine]
         await Restate.sleep(timedelta(milliseconds=100))
         increment_counter()
 
     @handler(name="callDifferentMethod")
     async def call_different_method(self):
-        get_fn = counter.Counter._restate_handlers["get"].fn
-        reset_fn = counter.Counter._restate_handlers["reset"].fn
         if do_left_action():
-            await Restate.object_call(get_fn, key="abc", arg=None)
+            await Counter.call("abc").get()
         else:
-            await Restate.object_call(reset_fn, key="abc", arg=None)
+            await Counter.call("abc").reset()
         await Restate.sleep(timedelta(milliseconds=100))
         increment_counter()
 
     @handler(name="eitherSleepOrCall")
     async def either_sleep_or_call(self):
-        get_fn = counter.Counter._restate_handlers["get"].fn
         if do_left_action():
             await Restate.sleep(timedelta(milliseconds=100))
         else:
-            await Restate.object_call(get_fn, key="abc", arg=None)
+            await Counter.call("abc").get()
         await Restate.sleep(timedelta(milliseconds=100))
         increment_counter()

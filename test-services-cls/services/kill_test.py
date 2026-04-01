@@ -14,28 +14,25 @@
 
 from restate.cls import VirtualObject, handler, Restate
 
-from . import awakeable_holder
+from .awakeable_holder import AwakeableHolder
 
 
 class KillTestRunner(VirtualObject, name="KillTestRunner"):
 
     @handler(name="startCallTree")
     async def start_call_tree(self):
-        fn = KillTestSingleton._restate_handlers["recursiveCall"].fn
-        await Restate.object_call(fn, key=Restate.key(), arg=None)
+        await KillTestSingleton.call(Restate.key()).recursive_call()
 
 
 class KillTestSingleton(VirtualObject, name="KillTestSingleton"):
 
     @handler(name="recursiveCall")
     async def recursive_call(self):
-        hold_fn = awakeable_holder.AwakeableHolder._restate_handlers["hold"].fn
         name, promise = Restate.awakeable()
-        Restate.object_send(hold_fn, key=Restate.key(), arg=name)
+        AwakeableHolder.send(Restate.key()).hold(name)  # type: ignore[unused-coroutine]
         await promise
 
-        fn = KillTestSingleton._restate_handlers["recursiveCall"].fn
-        await Restate.object_call(fn, key=Restate.key(), arg=None)
+        await KillTestSingleton.call(Restate.key()).recursive_call()
 
     @handler(name="isUnlocked")
     async def is_unlocked(self):

@@ -25,7 +25,7 @@ def list_services(bindings):
     """List all services from local bindings — supports both class-based and decorator-based."""
     result = {}
     for _, obj in bindings.items():
-        svc = getattr(obj, '_restate_service', obj)
+        svc = getattr(obj, '__restate_service__', obj)
         if isinstance(svc, (_OrigService, _OrigObject, _OrigWorkflow)):
             result[svc.name] = obj
     return result

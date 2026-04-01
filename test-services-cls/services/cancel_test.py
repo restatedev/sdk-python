@@ -26,9 +26,8 @@ class CancelTestRunner(VirtualObject, name="CancelTestRunner"):
 
     @handler(name="startTest")
     async def start_test(self, op: BlockingOperation):
-        block_fn = CancelTestBlockingService._restate_handlers["block"].fn
         try:
-            await Restate.object_call(block_fn, key=Restate.key(), arg=op)
+            await CancelTestBlockingService.call(Restate.key()).block(op)
         except TerminalError as t:
             if t.status_code == 409:
                 Restate.set("state", True)
@@ -47,14 +46,12 @@ class CancelTestBlockingService(VirtualObject, name="CancelTestBlockingService")
 
     @handler
     async def block(self, op: BlockingOperation):
-        hold_fn = awakeable_holder.AwakeableHolder._restate_handlers["hold"].fn
         name, awakeable = Restate.awakeable()
-        Restate.object_send(hold_fn, key=Restate.key(), arg=name)
+        awakeable_holder.AwakeableHolder.send(Restate.key()).hold(name)  # type: ignore[unused-coroutine]
         await awakeable
 
-        block_fn = CancelTestBlockingService._restate_handlers["block"].fn
         if op == "CALL":
-            await Restate.object_call(block_fn, key=Restate.key(), arg=op)
+            await CancelTestBlockingService.call(Restate.key()).block(op)
         elif op == "SLEEP":
             await Restate.sleep(timedelta(days=1024))
         elif op == "AWAKEABLE":

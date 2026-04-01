@@ -33,8 +33,7 @@ class Failing(VirtualObject, name="Failing"):
 
     @handler(name="callTerminallyFailingCall")
     async def call_terminally_failing_call(self, msg: str) -> str:
-        fn = Failing._restate_handlers["terminallyFailingCall"].fn
-        await Restate.object_call(fn, key="random-583e1bf2", arg=msg)
+        await Failing.call("random-583e1bf2").terminally_failing_call(msg)
         raise Exception("Should not reach here")
 
     @handler(name="failingCallWithEventualSuccess")
