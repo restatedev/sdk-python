@@ -123,7 +123,7 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import Self
 
-from restate.context import RestateDurableFuture, RunOptions
+from restate.context import HandlerType, RestateDurableCallFuture, RestateDurableFuture, RunOptions, SendHandle
 from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL, HandlerIO, ServiceTag, make_handler
 from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import DefaultSerde, Serde
@@ -983,44 +983,106 @@ class Restate:
     # ── Service communication ──
 
     @staticmethod
-    def service_call(tpe: Any, arg: Any, **kwargs: Any) -> Any:
+    def service_call(
+        tpe: HandlerType[I, O],
+        arg: I,
+        idempotency_key: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> RestateDurableCallFuture[O]:
         """Call a service handler."""
-        return Restate._ctx().service_call(tpe, arg=arg, **kwargs)
+        return Restate._ctx().service_call(tpe, arg=arg, idempotency_key=idempotency_key, headers=headers)
 
     @staticmethod
-    def service_send(tpe: Any, arg: Any, **kwargs: Any) -> Any:
+    def service_send(
+        tpe: HandlerType[I, O],
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        idempotency_key: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> SendHandle:
         """Send a message to a service handler (fire-and-forget)."""
-        return Restate._ctx().service_send(tpe, arg=arg, **kwargs)
+        return Restate._ctx().service_send(
+            tpe, arg=arg, send_delay=send_delay, idempotency_key=idempotency_key, headers=headers
+        )
 
     @staticmethod
-    def object_call(tpe: Any, key: str, arg: Any, **kwargs: Any) -> Any:
+    def object_call(
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        idempotency_key: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> RestateDurableCallFuture[O]:
         """Call a virtual object handler."""
-        return Restate._ctx().object_call(tpe, key=key, arg=arg, **kwargs)
+        return Restate._ctx().object_call(tpe, key=key, arg=arg, idempotency_key=idempotency_key, headers=headers)
 
     @staticmethod
-    def object_send(tpe: Any, key: str, arg: Any, **kwargs: Any) -> Any:
+    def object_send(
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        idempotency_key: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> SendHandle:
         """Send a message to a virtual object handler (fire-and-forget)."""
-        return Restate._ctx().object_send(tpe, key=key, arg=arg, **kwargs)
+        return Restate._ctx().object_send(
+            tpe, key=key, arg=arg, send_delay=send_delay, idempotency_key=idempotency_key, headers=headers
+        )
 
     @staticmethod
-    def workflow_call(tpe: Any, key: str, arg: Any, **kwargs: Any) -> Any:
+    def workflow_call(
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        idempotency_key: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> RestateDurableCallFuture[O]:
         """Call a workflow handler."""
-        return Restate._ctx().workflow_call(tpe, key=key, arg=arg, **kwargs)
+        return Restate._ctx().workflow_call(tpe, key=key, arg=arg, idempotency_key=idempotency_key, headers=headers)
 
     @staticmethod
-    def workflow_send(tpe: Any, key: str, arg: Any, **kwargs: Any) -> Any:
+    def workflow_send(
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        idempotency_key: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> SendHandle:
         """Send a message to a workflow handler (fire-and-forget)."""
-        return Restate._ctx().workflow_send(tpe, key=key, arg=arg, **kwargs)
+        return Restate._ctx().workflow_send(
+            tpe, key=key, arg=arg, send_delay=send_delay, idempotency_key=idempotency_key, headers=headers
+        )
 
     @staticmethod
-    def generic_call(service: str, handler: str, arg: bytes, key: Optional[str] = None, **kwargs: Any) -> Any:
+    def generic_call(
+        service: str,
+        handler: str,
+        arg: bytes,
+        key: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> RestateDurableCallFuture[bytes]:
         """Call a generic service/handler with raw bytes."""
-        return Restate._ctx().generic_call(service, handler, arg, key=key, **kwargs)
+        return Restate._ctx().generic_call(
+            service, handler, arg, key=key, idempotency_key=idempotency_key, headers=headers
+        )
 
     @staticmethod
-    def generic_send(service: str, handler: str, arg: bytes, key: Optional[str] = None, **kwargs: Any) -> Any:
+    def generic_send(
+        service: str,
+        handler: str,
+        arg: bytes,
+        key: Optional[str] = None,
+        send_delay: Optional[timedelta] = None,
+        idempotency_key: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> SendHandle:
         """Send a message to a generic service/handler with raw bytes."""
-        return Restate._ctx().generic_send(service, handler, arg, key=key, **kwargs)
+        return Restate._ctx().generic_send(
+            service, handler, arg, key=key, send_delay=send_delay, idempotency_key=idempotency_key, headers=headers
+        )
 
     # ── Awakeables ──
 
