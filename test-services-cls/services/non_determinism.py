@@ -28,7 +28,7 @@ def do_left_action() -> bool:
 
 
 def increment_counter():
-    Counter.send(Restate.key()).add(1)  # type: ignore[unused-coroutine]
+    Counter.send(Restate.key()).add(1)
 
 
 class NonDeterministic(VirtualObject, name="NonDeterministic"):
@@ -45,9 +45,9 @@ class NonDeterministic(VirtualObject, name="NonDeterministic"):
     @handler(name="backgroundInvokeWithDifferentTargets")
     async def background_invoke_with_different_targets(self):
         if do_left_action():
-            Counter.send("abc").get()  # type: ignore[unused-coroutine]
+            Counter.send("abc").get()
         else:
-            Counter.send("abc").reset()  # type: ignore[unused-coroutine]
+            Counter.send("abc").reset()
         await Restate.sleep(timedelta(milliseconds=100))
         increment_counter()
 

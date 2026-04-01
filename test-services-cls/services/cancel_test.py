@@ -47,7 +47,7 @@ class CancelTestBlockingService(VirtualObject, name="CancelTestBlockingService")
     @handler
     async def block(self, op: BlockingOperation):
         name, awakeable = Restate.awakeable()
-        awakeable_holder.AwakeableHolder.send(Restate.key()).hold(name)  # type: ignore[unused-coroutine]
+        awakeable_holder.AwakeableHolder.send(Restate.key()).hold(name)
         await awakeable
 
         if op == "CALL":

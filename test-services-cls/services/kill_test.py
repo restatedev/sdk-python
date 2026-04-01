@@ -29,7 +29,7 @@ class KillTestSingleton(VirtualObject, name="KillTestSingleton"):
     @handler(name="recursiveCall")
     async def recursive_call(self):
         name, promise = Restate.awakeable()
-        AwakeableHolder.send(Restate.key()).hold(name)  # type: ignore[unused-coroutine]
+        AwakeableHolder.send(Restate.key()).hold(name)
         await promise
 
         await KillTestSingleton.call(Restate.key()).recursive_call()

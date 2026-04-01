@@ -80,10 +80,10 @@ class OrderProcessor(Service):
         count = await Counter.call(customer).increment(1)
 
         # Fire-and-forget send (returns SendHandle, not a coroutine)
-        Counter.send(customer).increment(1)  # type: ignore[unused-coroutine]
+        Counter.send(customer).increment(1)
 
         # Send with delay
-        Counter.send(customer, delay=timedelta(seconds=30)).increment(1)  # type: ignore[unused-coroutine]
+        Counter.send(customer, delay=timedelta(seconds=30)).increment(1)
 
         # Call a workflow
         receipt = await PaymentWorkflow.call(f"order-{count}").pay(100)

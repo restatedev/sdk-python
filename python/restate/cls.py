@@ -107,6 +107,7 @@ from functools import wraps
 from typing import (
     Any,
     AsyncContextManager,
+    Awaitable,
     Callable,
     Coroutine,
     Dict,
@@ -578,7 +579,7 @@ class _ServiceSendProxy:
         self._cls = cls
         self._delay = delay
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Callable[..., SendHandle]:
         handlers = getattr(self._cls, _HANDLERS_ATTR, {})
         h = handlers.get(name)
         if h is None:
@@ -587,7 +588,7 @@ class _ServiceSendProxy:
 
         ctx = _restate_context_var.get()
 
-        def invoke(arg=_MISSING):
+        def invoke(arg=_MISSING) -> SendHandle:
             if arg is _MISSING:
                 return ctx.service_send(h.fn, arg=None, send_delay=self._delay)
             return ctx.service_send(h.fn, arg=arg, send_delay=self._delay)
@@ -627,7 +628,7 @@ class _ObjectSendProxy:
         self._key = key
         self._delay = delay
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Callable[..., SendHandle]:
         handlers = getattr(self._cls, _HANDLERS_ATTR, {})
         h = handlers.get(name)
         if h is None:
@@ -636,7 +637,7 @@ class _ObjectSendProxy:
 
         ctx = _restate_context_var.get()
 
-        def invoke(arg=_MISSING):
+        def invoke(arg=_MISSING) -> SendHandle:
             if arg is _MISSING:
                 return ctx.object_send(h.fn, key=self._key, arg=None, send_delay=self._delay)
             return ctx.object_send(h.fn, key=self._key, arg=arg, send_delay=self._delay)
@@ -676,7 +677,7 @@ class _WorkflowSendProxy:
         self._key = key
         self._delay = delay
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Callable[..., SendHandle]:
         handlers = getattr(self._cls, _HANDLERS_ATTR, {})
         h = handlers.get(name)
         if h is None:
@@ -685,7 +686,7 @@ class _WorkflowSendProxy:
 
         ctx = _restate_context_var.get()
 
-        def invoke(arg=_MISSING):
+        def invoke(arg=_MISSING) -> SendHandle:
             if arg is _MISSING:
                 return ctx.workflow_send(h.fn, key=self._key, arg=None, send_delay=self._delay)
             return ctx.workflow_send(h.fn, key=self._key, arg=arg, send_delay=self._delay)
@@ -749,15 +750,27 @@ class Service:
     def call(cls) -> Self:  # type: ignore[return-type]
         """Return a proxy for making durable service calls.
 
-        The proxy has the same method signatures as the class,
-        giving full IDE autocomplete and type inference.
+        Typed as ``Self`` so the IDE sees the real handler signatures::
+
+            greeting = await Greeter.call().greet("Alice")  # str
+
+        At runtime returns a ``_ServiceCallProxy`` whose methods yield
+        ``RestateDurableCallFuture[T]``.  After ``await`` the types
+        align (both are ``Awaitable[T]``).  For advanced use cases
+        (invocation id, ``gather``), unwrap with ``Restate.call_handle()``.
         """
         return _ServiceCallProxy(cls)  # type: ignore[return-value]
 
     @classmethod
-    def send(cls, *, delay: Optional[timedelta] = None) -> Self:  # type: ignore[return-type]
-        """Return a proxy for fire-and-forget service sends."""
-        return _ServiceSendProxy(cls, delay)  # type: ignore[return-value]
+    def send(cls, *, delay: Optional[timedelta] = None) -> _ServiceSendProxy:
+        """Return a proxy for fire-and-forget service sends.
+
+        Returns a ``_ServiceSendProxy`` whose methods return ``SendHandle``
+        (not a coroutine), so there is no need to ``await``::
+
+            Greeter.send().greet("Alice")  # SendHandle — no await needed
+        """
+        return _ServiceSendProxy(cls, delay)
 
 
 class VirtualObject:
@@ -812,13 +825,19 @@ class VirtualObject:
 
     @classmethod
     def call(cls, key: str) -> Self:  # type: ignore[return-type]
-        """Return a proxy for making durable object calls."""
+        """Return a proxy for making durable object calls.
+
+        Typed as ``Self`` for IDE autocomplete — see ``Service.call()`` docstring.
+        """
         return _ObjectCallProxy(cls, key)  # type: ignore[return-value]
 
     @classmethod
-    def send(cls, key: str, *, delay: Optional[timedelta] = None) -> Self:  # type: ignore[return-type]
-        """Return a proxy for fire-and-forget object sends."""
-        return _ObjectSendProxy(cls, key, delay)  # type: ignore[return-value]
+    def send(cls, key: str, *, delay: Optional[timedelta] = None) -> _ObjectSendProxy:
+        """Return a proxy for fire-and-forget object sends.
+
+        Returns ``_ObjectSendProxy`` — methods return ``SendHandle``, not a coroutine.
+        """
+        return _ObjectSendProxy(cls, key, delay)
 
 
 class Workflow:
@@ -873,13 +892,19 @@ class Workflow:
 
     @classmethod
     def call(cls, key: str) -> Self:  # type: ignore[return-type]
-        """Return a proxy for making durable workflow calls."""
+        """Return a proxy for making durable workflow calls.
+
+        Typed as ``Self`` for IDE autocomplete — see ``Service.call()`` docstring.
+        """
         return _WorkflowCallProxy(cls, key)  # type: ignore[return-value]
 
     @classmethod
-    def send(cls, key: str, *, delay: Optional[timedelta] = None) -> Self:  # type: ignore[return-type]
-        """Return a proxy for fire-and-forget workflow sends."""
-        return _WorkflowSendProxy(cls, key, delay)  # type: ignore[return-value]
+    def send(cls, key: str, *, delay: Optional[timedelta] = None) -> _WorkflowSendProxy:
+        """Return a proxy for fire-and-forget workflow sends.
+
+        Returns ``_WorkflowSendProxy`` — methods return ``SendHandle``, not a coroutine.
+        """
+        return _WorkflowSendProxy(cls, key, delay)
 
 
 # ── Context accessor class ────────────────────────────────────────────────
@@ -906,6 +931,30 @@ class Restate:
         from restate.context_access import current_context  # pylint: disable=C0415
 
         return current_context()
+
+    # ── Call handle ──
+
+    @staticmethod
+    def call_handle(coro: Awaitable[T]) -> RestateDurableCallFuture[T]:
+        """Unwrap a ``call()`` proxy result to its real ``RestateDurableCallFuture``.
+
+        The ``call()`` fluent proxy returns ``Self`` for IDE autocomplete,
+        so the type checker sees handler return types (e.g. ``Awaitable[int]``).
+        For simple ``await`` usage that's fine. But when you need the full
+        ``RestateDurableCallFuture`` — for example to read ``invocation_id``
+        or to pass it to ``restate.gather()`` — use this method::
+
+            handle = Restate.call_handle(Counter.call("key").increment(1))
+            # handle: RestateDurableCallFuture[int]
+            invocation_id = handle.invocation_id
+            result = await handle
+
+        At runtime the proxy already returns a ``RestateDurableCallFuture``,
+        so this is a safe cast with a runtime sanity check.
+        """
+        if not isinstance(coro, RestateDurableCallFuture):
+            raise TypeError(f"Expected a RestateDurableCallFuture from a .call() proxy, got {type(coro).__name__}")
+        return coro
 
     # ── State ──
 
