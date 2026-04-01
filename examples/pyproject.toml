@@ -12,4 +12,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-restate-sdk = { path = "../dist/restate_sdk-0.14.2-cp313-cp313-macosx_14_0_arm64.whl" }
+restate-sdk = { path = ".." }
