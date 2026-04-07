@@ -9,10 +9,10 @@ Usage:
     # All spans created by this tracer are flat children of the Restate trace.
 """
 
-from typing import Optional, Iterator
+from typing import Optional, Iterator, Sequence
 
 from opentelemetry import context as context_api
-from opentelemetry.trace import INVALID_SPAN, Span, SpanKind, Tracer, TracerProvider, use_span, _Links
+from opentelemetry.trace import INVALID_SPAN, Span, SpanKind, Tracer, TracerProvider, use_span, Link
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util import types
 from opentelemetry.util._decorator import _agnosticcontextmanager
@@ -67,7 +67,7 @@ class RestateTracer(Tracer):
         context: Optional[context_api.Context] = None,
         kind: SpanKind = SpanKind.INTERNAL,
         attributes: types.Attributes = None,
-        links: _Links = None,
+        links: Optional[Sequence[Link]] = None,
         start_time: Optional[int] = None,
         record_exception: bool = True,
         set_status_on_exception: bool = True,
@@ -97,7 +97,7 @@ class RestateTracer(Tracer):
         context: Optional[context_api.Context] = None,
         kind: SpanKind = SpanKind.INTERNAL,
         attributes: types.Attributes = None,
-        links: _Links = None,
+        links: Optional[Sequence[Link]] = None,
         start_time: Optional[int] = None,
         record_exception: bool = True,
         set_status_on_exception: bool = True,
