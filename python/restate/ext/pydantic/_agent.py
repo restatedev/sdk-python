@@ -103,7 +103,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         self._auto_wrap_tools = auto_wrap_tools
 
         if run_options is None:
-            run_options = RunOptions(max_attempts=10, initial_retry_interval=timedelta(seconds=1))
+            run_options = RunOptions()
 
         self._model = RestateModelWrapper(wrapped.model, run_options, event_stream_handler=event_stream_handler)
 
