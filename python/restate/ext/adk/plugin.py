@@ -14,7 +14,6 @@ ADK plugin implementation for restate.
 
 import restate
 
-from datetime import timedelta
 from typing import Optional, Any, cast
 
 from google.genai import types
@@ -93,9 +92,9 @@ class PluginState:
 class RestatePlugin(BasePlugin):
     """A plugin to integrate Restate with the ADK framework."""
 
-    def __init__(self, *, max_model_call_retries: int = 10):
+    def __init__(self, *, run_options: restate.RunOptions | None = None):
         super().__init__(name="restate_plugin")
-        self._max_model_call_retries = max_model_call_retries
+        self._run_options = run_options if run_options is not None else restate.RunOptions()
 
     async def before_agent_callback(
         self, *, agent: BaseAgent, callback_context: CallbackContext
@@ -137,7 +136,7 @@ class RestatePlugin(BasePlugin):
             )
         state = PluginState.from_context(callback_context.invocation_id, ctx)
         model = state.model
-        response = await _generate_content_async(ctx, self._max_model_call_retries, model, llm_request)
+        response = await _generate_content_async(ctx, self._run_options, model, llm_request)
         turnstile = _create_turnstile(response)
         state.turnstile = turnstile
         return response
@@ -210,7 +209,7 @@ def _generate_client_function_call_id(s: LlmResponse) -> None:
 
 
 async def _generate_content_async(
-    ctx: restate.Context, max_attempts: int, model: BaseLlm, llm_request: LlmRequest
+    ctx: restate.Context, run_options: restate.RunOptions, model: BaseLlm, llm_request: LlmRequest
 ) -> LlmResponse:
     """Generate content using Restate's context."""
 
@@ -226,5 +225,5 @@ async def _generate_content_async(
     return await ctx.run_typed(
         "call LLM",
         call_llm,
-        restate.RunOptions(max_attempts=max_attempts, initial_retry_interval=timedelta(seconds=1)),
+        run_options,
     )
