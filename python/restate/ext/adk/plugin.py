@@ -222,8 +222,4 @@ async def _generate_content_async(
         finally:
             await a_gen.aclose()
 
-    return await ctx.run_typed(
-        "call LLM",
-        call_llm,
-        run_options,
-    )
+    return await ctx.run_typed("call LLM", call_llm, run_options)
