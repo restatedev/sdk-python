@@ -12,16 +12,12 @@
 This module contains the optional OpenAI integration for Restate.
 """
 
-import dataclasses
-
 from agents import (
     Usage,
     AgentsException,
 )
 from agents.items import TResponseOutputItem
 from agents.items import TResponseInputItem
-from datetime import timedelta
-from typing import Optional
 from pydantic import BaseModel
 
 from restate.ext.turnstile import Turnstile
@@ -33,32 +29,6 @@ class State:
 
     def __init__(self) -> None:
         self.turnstile = Turnstile([])
-
-
-@dataclasses.dataclass
-class LlmRetryOpts:
-    max_attempts: Optional[int] = 10
-    """Max number of attempts (including the initial), before giving up.
-
-    When giving up, the LLM call will throw a `TerminalError` wrapping the original error message."""
-    max_duration: Optional[timedelta] = None
-    """Max duration of retries, before giving up.
-
-    When giving up, the LLM call will throw a `TerminalError` wrapping the original error message."""
-    initial_retry_interval: Optional[timedelta] = timedelta(seconds=1)
-    """Initial interval for the first retry attempt.
-    Retry interval will grow by a factor specified in `retry_interval_factor`.
-
-    If any of the other retry related fields is specified, the default for this field is 50 milliseconds, otherwise restate will fallback to the overall invocation retry policy."""
-    max_retry_interval: Optional[timedelta] = None
-    """Max interval between retries.
-    Retry interval will grow by a factor specified in `retry_interval_factor`.
-
-    The default is 10 seconds."""
-    retry_interval_factor: Optional[float] = None
-    """Exponentiation factor to use when computing the next retry delay.
-
-    If any of the other retry related fields is specified, the default for this field is `2`, meaning retry interval will double at each attempt, otherwise restate will fallback to the overall invocation retry policy."""
 
 
 # The OpenAI ModelResponse class is a dataclass with Pydantic fields.

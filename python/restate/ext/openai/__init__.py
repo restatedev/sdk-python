@@ -18,7 +18,6 @@ from restate import ObjectContext, Context
 from restate.server_context import current_context
 
 from .runner_wrapper import DurableRunner
-from .models import LlmRetryOpts
 from .functions import propagate_cancellation, raise_terminal_errors, durable_function_tool
 
 
@@ -40,7 +39,6 @@ def restate_context() -> Context:
 
 __all__ = [
     "DurableRunner",
-    "LlmRetryOpts",
     "restate_object_context",
     "restate_context",
     "raise_terminal_errors",

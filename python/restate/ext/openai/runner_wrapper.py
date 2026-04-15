@@ -32,7 +32,7 @@ from restate.extensions import current_context
 from restate import RunOptions, TerminalError
 
 from .functions import get_function_call_ids, wrap_agent_tools
-from .models import LlmRetryOpts, RestateModelResponse, State
+from .models import RestateModelResponse, State
 from .session import RestateSession
 
 
@@ -41,7 +41,7 @@ class DurableModelCalls(MultiProvider):
     A Restate model provider that wraps the OpenAI SDK's default MultiProvider.
     """
 
-    def __init__(self, state: State, llm_retry_opts: LlmRetryOpts | None = None):
+    def __init__(self, state: State, llm_retry_opts: RunOptions):
         super().__init__()
         self.llm_retry_opts = llm_retry_opts
         self.state = state
@@ -56,11 +56,11 @@ class RestateModelWrapper(Model):
     A wrapper around the OpenAI SDK's Model that persists LLM calls in the Restate journal.
     """
 
-    def __init__(self, model: Model, state: State, llm_retry_opts: LlmRetryOpts | None = None):
+    def __init__(self, model: Model, state: State, llm_run_options: RunOptions):
         self.model = model
         self.state = state
         self.model_name = "RestateModelWrapper"
-        self.llm_retry_opts = llm_retry_opts if llm_retry_opts is not None else LlmRetryOpts()
+        self.llm_run_options = llm_run_options
 
     async def get_response(self, *args, **kwargs) -> ModelResponse:
         async def call_llm() -> RestateModelResponse:
@@ -78,13 +78,7 @@ class RestateModelWrapper(Model):
         result = await ctx.run_typed(
             "call LLM",
             call_llm,
-            RunOptions(
-                max_attempts=self.llm_retry_opts.max_attempts,
-                max_duration=self.llm_retry_opts.max_duration,
-                initial_retry_interval=self.llm_retry_opts.initial_retry_interval,
-                max_retry_interval=self.llm_retry_opts.max_retry_interval,
-                retry_interval_factor=self.llm_retry_opts.retry_interval_factor,
-            ),
+            self.llm_run_options,
         )
         # collect function call IDs, too
         ids = get_function_call_ids(result.output)
@@ -116,6 +110,7 @@ class DurableRunner:
         input: str | list[TResponseInputItem],
         *,
         use_restate_session: bool = False,
+        run_options: RunOptions | None = None,
         **kwargs,
     ) -> RunResult:
         """
@@ -124,6 +119,7 @@ class DurableRunner:
         Args:
             use_restate_session: If True, creates a RestateSession for conversation persistence.
                                 Requires running within a Restate Virtual Object context.
+            run_options: RunOptions to use for the LLM call.
 
         Returns:
             The result from Runner.run
@@ -133,7 +129,7 @@ class DurableRunner:
         state = State()
 
         # Set persisting model calls
-        llm_retry_opts = kwargs.pop("llm_retry_opts", None)
+        llm_retry_opts = run_options if run_options is not None else RunOptions()
         run_config = kwargs.pop("run_config", RunConfig())
         run_config = dataclasses.replace(run_config, model_provider=DurableModelCalls(state, llm_retry_opts))
 
