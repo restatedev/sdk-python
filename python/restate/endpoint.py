@@ -14,6 +14,7 @@ This module defines the Endpoint class, which serves as a container for all the 
 
 import typing
 
+from restate.cls import _SERVICE_ATTR
 from restate.service import Service
 from restate.object import VirtualObject
 from restate.workflow import Workflow
@@ -44,12 +45,13 @@ class Endpoint:
 
         self.identity_keys = []
 
-    def bind(self, *services: typing.Union[Service, VirtualObject, Workflow]):
+    def bind(self, *services: typing.Any):
         """
         Bind a service to the endpoint
 
         Args:
-            service: The service or virtual object to bind to the endpoint
+            service: The service or virtual object to bind to the endpoint.
+                     Also accepts class-based services (subclasses of restate.cls.Service etc.)
 
         Raises:
             ValueError: If a service with the same name already exists in the endpoint
@@ -58,10 +60,33 @@ class Endpoint:
             The updated Endpoint instance
         """
         for service in services:
-            if service.name in self.services:
-                raise ValueError(f"Service {service.name} already exists")
-            if isinstance(service, (Service, VirtualObject, Workflow)):
-                self.services[service.name] = service
+            # Support class-based services: extract companion object.
+            if isinstance(service, type) and hasattr(service, _SERVICE_ATTR):
+                # Class passed — instantiate it and bind
+                from restate.cls import _bind_instance  # pylint: disable=C0415
+
+                try:
+                    instance = service()
+                except TypeError as e:
+                    raise TypeError(
+                        f"{service.__name__} requires constructor arguments. "
+                        f"Pass an instance instead: restate.app([{service.__name__}(...)])"
+                    ) from e
+                _bind_instance(instance)
+                # Read from instance — _bind_instance stores a per-instance copy there
+                actual = getattr(instance, _SERVICE_ATTR)
+            elif not isinstance(service, type) and hasattr(type(service), _SERVICE_ATTR):
+                # Instance passed — bind it
+                from restate.cls import _bind_instance  # pylint: disable=C0415
+
+                _bind_instance(service)
+                actual = getattr(service, _SERVICE_ATTR)
+            else:
+                actual = service
+            if actual.name in self.services:
+                raise ValueError(f"Service {actual.name} already exists")
+            if isinstance(actual, (Service, VirtualObject, Workflow)):
+                self.services[actual.name] = actual
             else:
                 raise ValueError(f"Invalid service type {service}")
         return self
@@ -98,7 +123,7 @@ class Endpoint:
 
 
 def app(
-    services: typing.Iterable[typing.Union[Service, VirtualObject, Workflow]],
+    services: typing.Iterable[typing.Any],
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None,
     identity_keys: typing.Optional[typing.List[str]] = None,
 ):
