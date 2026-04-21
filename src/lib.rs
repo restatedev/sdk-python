@@ -3,9 +3,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone, PyString};
 use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
 use restate_sdk_shared_core::{
-    CallHandle, CoreVM, DoProgressResponse, Error, Header, IdentityVerifier, Input, NonEmptyValue,
+    AwaitResponse, CallHandle, CoreVM, Error, Header, IdentityVerifier, Input, NonEmptyValue,
     NotificationHandle, ResponseHead, RetryPolicy, RunExitResult, TakeOutputResult, Target,
-    TerminalFailure, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
+    TerminalFailure, UnresolvedFuture, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
 };
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -245,7 +245,7 @@ impl From<Input> for PyInput {
 }
 
 #[pyclass]
-struct PyDoProgressReadFromInput;
+struct PyDoProgressWaitExternalProgress;
 
 #[pyclass]
 struct PyDoProgressAnyCompleted;
@@ -260,7 +260,38 @@ struct PyDoProgressExecuteRun {
 struct PyDoProgressCancelSignalReceived;
 
 #[pyclass]
-struct PyDoWaitForPendingRun;
+#[derive(Clone)]
+pub struct PyUnresolvedFuture {
+    inner: UnresolvedFuture,
+}
+
+#[pymethods]
+impl PyUnresolvedFuture {
+    #[staticmethod]
+    fn single(handle: PyNotificationHandle) -> Self {
+        PyUnresolvedFuture {
+            inner: UnresolvedFuture::Single(NotificationHandle::from(handle)),
+        }
+    }
+
+    #[staticmethod]
+    fn first_completed(children: Vec<PyRef<'_, PyUnresolvedFuture>>) -> Self {
+        PyUnresolvedFuture {
+            inner: UnresolvedFuture::FirstCompleted(
+                children.into_iter().map(|c| c.inner.clone()).collect(),
+            ),
+        }
+    }
+
+    #[staticmethod]
+    fn all_completed(children: Vec<PyRef<'_, PyUnresolvedFuture>>) -> Self {
+        PyUnresolvedFuture {
+            inner: UnresolvedFuture::AllCompleted(
+                children.into_iter().map(|c| c.inner.clone()).collect(),
+            ),
+        }
+    }
+}
 
 #[pyclass]
 pub struct PyCallHandle {
@@ -362,40 +393,32 @@ impl PyVM {
         self_.vm.is_completed(handle.into())
     }
 
-    fn do_progress(
-        mut self_: PyRefMut<'_, Self>,
-        any_handle: Vec<PyNotificationHandle>,
-    ) -> PyResult<Bound<'_, PyAny>> {
-        let res = self_.vm.do_progress(
-            any_handle
-                .into_iter()
-                .map(NotificationHandle::from)
-                .collect(),
-        );
+    fn do_progress<'py>(
+        mut self_: PyRefMut<'py, Self>,
+        unresolved_future: PyRef<'py, PyUnresolvedFuture>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let res = self_.vm.do_await(unresolved_future.inner.clone());
 
         let py = self_.py();
 
         match res {
             Err(e) if e.is_suspended_error() => Ok(Bound::new(py, PySuspended)?.into_any()),
             Err(e) => Err(PyVMError::from(e))?,
-            Ok(DoProgressResponse::AnyCompleted) => {
+            Ok(AwaitResponse::AnyCompleted) => {
                 Ok(Bound::new(py, PyDoProgressAnyCompleted)?.into_any())
             }
-            Ok(DoProgressResponse::ReadFromInput) => {
-                Ok(Bound::new(py, PyDoProgressReadFromInput)?.into_any())
+            Ok(AwaitResponse::WaitingExternalProgress { .. }) => {
+                Ok(Bound::new(py, PyDoProgressWaitExternalProgress)?.into_any())
             }
-            Ok(DoProgressResponse::ExecuteRun(handle)) => Ok(Bound::new(
+            Ok(AwaitResponse::ExecuteRun(handle)) => Ok(Bound::new(
                 py,
                 PyDoProgressExecuteRun {
                     handle: handle.into(),
                 },
             )?
             .into_any()),
-            Ok(DoProgressResponse::CancelSignalReceived) => {
+            Ok(AwaitResponse::CancelSignalReceived) => {
                 Ok(Bound::new(py, PyDoProgressCancelSignalReceived)?.into_any())
-            }
-            Ok(DoProgressResponse::WaitingPendingRun) => {
-                Ok(Bound::new(py, PyDoWaitForPendingRun)?.into_any())
             }
         }
     }
@@ -890,10 +913,10 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIdentityVerifier>()?;
     m.add_class::<PyExponentialRetryConfig>()?;
     m.add_class::<PyDoProgressAnyCompleted>()?;
-    m.add_class::<PyDoProgressReadFromInput>()?;
+    m.add_class::<PyDoProgressWaitExternalProgress>()?;
     m.add_class::<PyDoProgressExecuteRun>()?;
     m.add_class::<PyDoProgressCancelSignalReceived>()?;
-    m.add_class::<PyDoWaitForPendingRun>()?;
+    m.add_class::<PyUnresolvedFuture>()?;
     m.add_class::<PyCallHandle>()?;
 
     m.add("VMException", m.py().get_type::<VMException>())?;
