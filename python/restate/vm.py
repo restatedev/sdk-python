@@ -15,10 +15,10 @@ wrap the restate._internal.PyVM class
 # pylint: disable=E1101,R0917
 # pylint: disable=too-many-arguments
 # pylint: disable=too-few-public-methods
-from typing import Optional
+from typing import List, Optional, Union
 from datetime import timedelta
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import typing
 from restate._internal import (
     PyVM,
@@ -30,10 +30,10 @@ from restate._internal import (
     PyStateKeys,
     PyExponentialRetryConfig,
     PyDoProgressAnyCompleted,
-    PyDoProgressReadFromInput,
+    PyDoProgressWaitExternalProgress,
     PyDoProgressExecuteRun,
-    PyDoWaitForPendingRun,
     PyDoProgressCancelSignalReceived,
+    PyUnresolvedFuture,
     CANCEL_NOTIFICATION_HANDLE,
 )  # pylint: disable=import-error,no-name-in-module,line-too-long
 
@@ -105,9 +105,10 @@ class DoProgressAnyCompleted:
     """
 
 
-class DoProgressReadFromInput:
+class DoProgressWaitExternalProgress:
     """
-    Represents a notification that the input needs to be read.
+    Represents a notification that external progress is required
+    (either new input from the server or a pending run proposal).
     """
 
 
@@ -128,24 +129,55 @@ class DoProgressCancelSignalReceived:
     """
 
 
-class DoWaitPendingRun:
-    """
-    Represents a notification that a run is pending
-    """
-
-
 DO_PROGRESS_ANY_COMPLETED = DoProgressAnyCompleted()
-DO_PROGRESS_READ_FROM_INPUT = DoProgressReadFromInput()
+DO_PROGRESS_WAIT_EXTERNAL_PROGRESS = DoProgressWaitExternalProgress()
 DO_PROGRESS_CANCEL_SIGNAL_RECEIVED = DoProgressCancelSignalReceived()
-DO_WAIT_PENDING_RUN = DoWaitPendingRun()
 
 DoProgressResult = typing.Union[
     DoProgressAnyCompleted,
-    DoProgressReadFromInput,
+    DoProgressWaitExternalProgress,
     DoProgressExecuteRun,
     DoProgressCancelSignalReceived,
-    DoWaitPendingRun,
 ]
+
+
+@dataclass(frozen=True)
+class SingleUnresolvedFuture:
+    """A single leaf handle."""
+
+    handle: int
+
+
+@dataclass(frozen=True)
+class FirstCompletedUnresolvedFuture:
+    """first child to complete (success or failure) wins."""
+
+    children: List["UnresolvedFuture"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AllCompletedUnresolvedFuture:
+    """wait for all children to complete."""
+
+    children: List["UnresolvedFuture"] = field(default_factory=list)
+
+
+UnresolvedFuture = Union[
+    SingleUnresolvedFuture,
+    FirstCompletedUnresolvedFuture,
+    AllCompletedUnresolvedFuture,
+]
+
+
+def _unresolved_future_to_pyo3(uf: UnresolvedFuture) -> PyUnresolvedFuture:
+    """Recursively convert a Python-side UnresolvedFuture dataclass to its PyO3 pyclass."""
+    if isinstance(uf, SingleUnresolvedFuture):
+        return PyUnresolvedFuture.single(uf.handle)
+    if isinstance(uf, FirstCompletedUnresolvedFuture):
+        return PyUnresolvedFuture.first_completed([_unresolved_future_to_pyo3(c) for c in uf.children])
+    if isinstance(uf, AllCompletedUnresolvedFuture):
+        return PyUnresolvedFuture.all_completed([_unresolved_future_to_pyo3(c) for c in uf.children])
+    raise TypeError(f"Unknown UnresolvedFuture variant: {type(uf).__name__}")
 
 
 # pylint: disable=too-many-public-methods
@@ -195,24 +227,22 @@ class VMWrapper:
         return self.vm.is_completed(handle)
 
     # pylint: disable=R0911
-    def do_progress(self, handles: list[int]) -> typing.Union[DoProgressResult, Exception, Suspended]:
+    def do_progress(self, unresolved_future: UnresolvedFuture) -> typing.Union[DoProgressResult, Exception, Suspended]:
         """Do progress with notifications."""
         try:
-            result = self.vm.do_progress(handles)
+            result = self.vm.do_progress(_unresolved_future_to_pyo3(unresolved_future))
         except VMException as e:
             return e
         if isinstance(result, PySuspended):
             return SUSPENDED
         if isinstance(result, PyDoProgressAnyCompleted):
             return DO_PROGRESS_ANY_COMPLETED
-        if isinstance(result, PyDoProgressReadFromInput):
-            return DO_PROGRESS_READ_FROM_INPUT
+        if isinstance(result, PyDoProgressWaitExternalProgress):
+            return DO_PROGRESS_WAIT_EXTERNAL_PROGRESS
         if isinstance(result, PyDoProgressExecuteRun):
             return DoProgressExecuteRun(result.handle)
         if isinstance(result, PyDoProgressCancelSignalReceived):
             return DO_PROGRESS_CANCEL_SIGNAL_RECEIVED
-        if isinstance(result, PyDoWaitForPendingRun):
-            return DO_WAIT_PENDING_RUN
         return ValueError(f"Unknown progress type: {result}")
 
     def take_notification(self, handle: int) -> typing.Union[NotificationType, Exception, Suspended]:
@@ -343,9 +373,8 @@ class VMWrapper:
         headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None,
     ):
         """Call a service"""
-        if headers:
-            headers = [PyHeader(key=h[0], value=h[1]) for h in headers]
-        return self.vm.sys_call(service, handler, parameter, key, idempotency_key, headers)
+        py_headers = [PyHeader(key=h[0], value=h[1]) for h in headers] if headers else None
+        return self.vm.sys_call(service, handler, parameter, key, idempotency_key, py_headers)
 
     # pylint: disable=too-many-arguments
     def sys_send(
@@ -362,9 +391,8 @@ class VMWrapper:
         send an invocation to a service, and return the handle
         to the promise that will resolve with the invocation id
         """
-        if headers:
-            headers = [PyHeader(key=h[0], value=h[1]) for h in headers]
-        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key, headers)
+        py_headers = [PyHeader(key=h[0], value=h[1]) for h in headers] if headers else None
+        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key, py_headers)
 
     def sys_run(self, name: str) -> int:
         """
@@ -391,17 +419,11 @@ class VMWrapper:
         py_failure = PyFailure(failure.code, failure.message)
         self.vm.sys_complete_awakeable_failure(name, py_failure)
 
-    def propose_run_completion_success(self, handle: int, output: bytes) -> int:
+    def propose_run_completion_success(self, handle: int, output: bytes) -> None:
         """
-        Exit a side effect
-
-        Args:
-            output: The output of the side effect.
-
-        Returns:
-            handle
+        Exit a side effect with a success value.
         """
-        return self.vm.propose_run_completion_success(handle, output)
+        self.vm.propose_run_completion_success(handle, output)
 
     def sys_get_promise(self, name: str) -> int:
         """Returns the promise handle"""
@@ -420,16 +442,12 @@ class VMWrapper:
         res = PyFailure(failure.code, failure.message)
         return self.vm.sys_complete_promise_failure(name, res)
 
-    def propose_run_completion_failure(self, handle: int, output: Failure) -> int:
+    def propose_run_completion_failure(self, handle: int, output: Failure) -> None:
         """
-        Exit a side effect
-
-        Args:
-            name: The name of the side effect.
-            output: The output of the side effect.
+        Exit a side effect with a terminal failure.
         """
         res = PyFailure(output.code, output.message)
-        return self.vm.propose_run_completion_failure(handle, res)
+        self.vm.propose_run_completion_failure(handle, res)
 
     # pylint: disable=line-too-long
     def propose_run_completion_transient(

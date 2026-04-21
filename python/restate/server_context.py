@@ -61,9 +61,10 @@ from restate.vm import Failure, Invocation, NotReady, VMWrapper, RunRetryConfig,
 from restate.vm import (
     DoProgressAnyCompleted,
     DoProgressCancelSignalReceived,
-    DoProgressReadFromInput,
+    DoProgressWaitExternalProgress,
     DoProgressExecuteRun,
-    DoWaitPendingRun,
+    SingleUnresolvedFuture,
+    UnresolvedFuture,
 )
 
 logger = logging.getLogger(__name__)
@@ -193,7 +194,7 @@ class ServerSendHandle(SendHandle):
 
         async def coro() -> str:
             if not context.vm.is_completed(handle):
-                await context.create_poll_or_cancel_coroutine([handle])
+                await context.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(handle))
             invocation_id = await context.must_take_notification(handle)
             return typing.cast(str, invocation_id)
 
@@ -235,7 +236,7 @@ class ServerDurablePromise(DurablePromise):
 
         async def await_point():
             if not self.server_context.vm.is_completed(handle):
-                await self.server_context.create_poll_or_cancel_coroutine([handle])
+                await self.server_context.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(handle))
             await self.server_context.must_take_notification(handle)
 
         return ServerDurableFuture(self.server_context, handle, await_point)
@@ -248,7 +249,7 @@ class ServerDurablePromise(DurablePromise):
 
         async def await_point():
             if not self.server_context.vm.is_completed(handle):
-                await self.server_context.create_poll_or_cancel_coroutine([handle])
+                await self.server_context.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(handle))
             await self.server_context.must_take_notification(handle)
 
         return ServerDurableFuture(self.server_context, handle, await_point)
@@ -527,11 +528,11 @@ class ServerInvocationContext(ObjectContext):
             raise TerminalError(res.message, res.code)
         return res
 
-    async def create_poll_or_cancel_coroutine(self, handles: typing.List[int]) -> None:
-        """Create a coroutine to poll the handle."""
+    async def create_poll_or_cancel_coroutine(self, unresolved_future: UnresolvedFuture) -> None:
+        """Create a coroutine to poll the unresolved future."""
         while True:
             await self.take_and_send_output()
-            do_progress_response = self.vm.do_progress(handles)
+            do_progress_response = self.vm.do_progress(unresolved_future)
             if isinstance(do_progress_response, BaseException):
                 logger.exception("Exception in do_progress", exc_info=do_progress_response)
                 raise SdkInternalException() from do_progress_response
@@ -556,7 +557,7 @@ class ServerInvocationContext(ObjectContext):
                 task = asyncio.create_task(wrapper(fn))
                 self.tasks.add(task)
                 continue
-            if isinstance(do_progress_response, (DoWaitPendingRun, DoProgressReadFromInput)):
+            if isinstance(do_progress_response, DoProgressWaitExternalProgress):
                 chunk = await self.receive()
                 if chunk.get("type") == "restate.run_completed":
                     continue
@@ -574,7 +575,7 @@ class ServerInvocationContext(ObjectContext):
 
         async def fetch_result():
             if not self.vm.is_completed(handle):
-                await self.create_poll_or_cancel_coroutine([handle])
+                await self.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(handle))
             res = await self.must_take_notification(handle)
             if res is None or serde is None:
                 return res
@@ -593,7 +594,7 @@ class ServerInvocationContext(ObjectContext):
 
         async def transform():
             if not self.vm.is_completed(handle):
-                await self.create_poll_or_cancel_coroutine([handle])
+                await self.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(handle))
             await self.must_take_notification(handle)
 
         return ServerDurableSleepFuture(self, handle, transform)
@@ -605,7 +606,7 @@ class ServerInvocationContext(ObjectContext):
 
         async def inv_id_factory():
             if not self.vm.is_completed(invocation_id_handle):
-                await self.create_poll_or_cancel_coroutine([invocation_id_handle])
+                await self.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(invocation_id_handle))
             return await self.must_take_notification(invocation_id_handle)
 
         return ServerCallDurableFuture(self, handle, self._create_fetch_result_coroutine(handle, serde), inv_id_factory)
