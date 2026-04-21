@@ -105,17 +105,17 @@ async def test_receive_channel_does_not_block_after_disconnect():
 
 async def test_empty_body_frames_do_not_cause_hotloop():
     """
-    When the VM returns DoProgressReadFromInput and the chunk has body=b'',
+    When the VM returns DoProgressWaitExternalProgress and the chunk has body=b'',
     notify_input should NOT be called (it would cause a tight loop).
     The loop should exit via DisconnectedException when http.disconnect arrives.
     """
     from restate.server_context import ServerInvocationContext, DisconnectedException
-    from restate.vm import DoProgressReadFromInput
+    from restate.vm import DoProgressWaitExternalProgress, SingleUnresolvedFuture
 
     # Build a minimal mock context
     vm = MagicMock()
     vm.take_output.return_value = None
-    vm.do_progress.return_value = DoProgressReadFromInput()
+    vm.do_progress.return_value = DoProgressWaitExternalProgress()
 
     handler = MagicMock()
     invocation = MagicMock()
@@ -149,7 +149,7 @@ async def test_empty_body_frames_do_not_cause_hotloop():
     try:
         with pytest.raises(DisconnectedException):
             await asyncio.wait_for(
-                ctx.create_poll_or_cancel_coroutine([0]),
+                ctx.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(0)),
                 timeout=2.0,
             )
 
