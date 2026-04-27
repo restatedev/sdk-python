@@ -10,13 +10,11 @@
 #
 """Restate integration for LangChain agents.
 
-Pass `RestateMiddleware()` to `langchain.agents.create_agent(..., middleware=[...])`
-and run the agent inside a Restate handler. Every LLM call is journaled by
-Restate, so handler retries replay completed model calls from the journal
-instead of re-executing them.
-
-Use Restate context actions like `restate_context().run_typed("name", ...)`
-inside the tool body for the side effects you want to be durable.
+Pass `RestateMiddleware()` to `create_agent(..., middleware=[...])` and run
+the agent inside a Restate handler. LLM responses are journaled, so retries
+replay them instead of re-calling the model. To make tool side effects
+durable, wrap them with `restate_context().run_typed("name", ...)` inside
+the tool body.
 """
 
 import typing
