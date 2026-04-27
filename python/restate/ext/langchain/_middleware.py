@@ -38,7 +38,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
@@ -55,20 +55,7 @@ ToolCallResult = ToolMessage | Command
 # `AnyMessage` is a discriminated union of LangChain's concrete message
 # classes. Using `BaseMessage` here would round-trip messages back as plain
 # `BaseMessage`s and the agent loop would fail to detect `AIMessage.tool_calls`.
-_MODEL_RESPONSE_SERDE: PydanticTypeAdapter[Any] = PydanticTypeAdapter(list[AnyMessage])
-
-
-def _normalize_to_messages(result: ModelCallResult) -> list[BaseMessage]:
-    """Project a model-call result down to the list-of-messages we journal.
-    The middleware re-builds the original return shape on replay so the agent
-    loop sees the same value either way."""
-    if isinstance(result, AIMessage):
-        return [result]
-    if isinstance(result, ExtendedModelResponse):
-        # Commands are not journaled — they are graph control-flow signals
-        # and are produced fresh on each replay. We persist only the messages.
-        return list(result.model_response.result)
-    return list(result.result)
+_MODEL_RESPONSE_SERDE: PydanticTypeAdapter[Any] = PydanticTypeAdapter(ModelResponse)
 
 
 class RestateMiddleware(AgentMiddleware):
@@ -98,7 +85,7 @@ class RestateMiddleware(AgentMiddleware):
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
-    ) -> ModelCallResult:
+    ) -> ModelResponse:
         ctx = current_context()
         if ctx is None:
             raise RuntimeError(
@@ -106,22 +93,20 @@ class RestateMiddleware(AgentMiddleware):
                 "Call agent.ainvoke(...) from a handler that exposes a Restate Context."
             )
 
-        async def call_model() -> list[BaseMessage]:
-            return _normalize_to_messages(await handler(request))
+        async def call_model() -> ModelResponse:
+            return await handler(request)
 
-        messages = await ctx.run_typed("call LLM", call_model, self._llm_options)
+        model_response = await ctx.run_typed("call LLM", call_model, self._llm_options)
 
         # Seed a turnstile from the model's tool_call ids so the upcoming
         # tool calls — which `ToolNode` may run via asyncio.gather — execute
         # one at a time in a stable order across replays.
+        messages: list[BaseMessage] = model_response.result
         ai = next((m for m in messages if isinstance(m, AIMessage)), None)
         ids = [tc["id"] for tc in (ai.tool_calls if ai else []) if tc.get("id")]
         current_state().turnstile = Turnstile(ids)
 
-        # Re-build the response shape callers expect.
-        if len(messages) == 1 and isinstance(messages[0], AIMessage):
-            return messages[0]
-        return ModelResponse(result=messages)
+        return model_response
 
     async def awrap_tool_call(
         self,
@@ -137,8 +122,8 @@ class RestateMiddleware(AgentMiddleware):
             return await handler(request)
 
         turnstile = current_state().turnstile
-        await turnstile.wait_for(tool_call_id)
         try:
+            await turnstile.wait_for(tool_call_id)
             result = await handler(request)
             turnstile.allow_next_after(tool_call_id)
             return result
