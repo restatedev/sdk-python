@@ -118,6 +118,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufeatures"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crypto-bigint"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -155,7 +164,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.2.16",
  "curve25519-dalek-derive",
  "digest 0.10.7",
  "fiat-crypto",
@@ -806,8 +815,7 @@ dependencies = [
 [[package]]
 name = "restate-sdk-shared-core"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f0417331c92f9ef4a14dcbd40759cb4008221a3538affda05f907923c574119"
+source = "git+https://github.com/restatedev/sdk-shared-core.git?branch=main#2a1e339947db931fda6442d3179cce7c24018320"
 dependencies = [
  "base64",
  "bs58",
@@ -817,7 +825,7 @@ dependencies = [
  "pastey",
  "prost",
  "serde",
- "sha2 0.11.0-rc.5",
+ "sha2 0.11.0",
  "strum",
  "thiserror",
  "tracing",
@@ -943,18 +951,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.2.16",
  "digest 0.10.7",
 ]
 
 [[package]]
 name = "sha2"
-version = "0.11.0-rc.5"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c5f3b1e2dc8aad28310d8410bd4d7e180eca65fca176c52ab00d364475d0024"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.3.0",
  "digest 0.11.2",
 ]
 
