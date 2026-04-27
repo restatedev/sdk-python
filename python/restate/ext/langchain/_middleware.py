@@ -30,8 +30,7 @@ and re-raises everything else.
 from __future__ import annotations
 
 import dataclasses
-import json
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Generic, Optional, TypeVar
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import (
@@ -39,58 +38,38 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
-from pydantic import TypeAdapter
+from pydantic import BaseModel
+from pydantic.errors import PydanticSchemaGenerationError
 
 from restate import RunOptions
 from restate.extensions import current_context
 from restate.ext.turnstile import Turnstile
-from restate.serde import Serde
 
+from ._serde import PydanticTypeAdapter
 from ._state import current_state
 
 ModelCallResult = ModelResponse | AIMessage | ExtendedModelResponse
 ToolCallResult = ToolMessage | Command
 
-# `AnyMessage` is the discriminated union of LangChain's concrete message
-# classes — using it (instead of `BaseMessage`) is what keeps `AIMessage` and
-# its `tool_calls` field intact across a serialize/deserialize round-trip.
-_MESSAGES_ADAPTER: TypeAdapter[list[AnyMessage]] = TypeAdapter(list[AnyMessage])
+SchemaT = TypeVar("SchemaT")
 
 
-class _ModelResponseSerde(Serde[ModelResponse]):
-    """Journals a `ModelResponse` so the LLM call survives crashes/replay.
+class RestateModelMessage(BaseModel, Generic[SchemaT]):
+    """Pydantic shape we journal in place of `ModelResponse`.
 
-    Serializes the messages with a discriminated-union adapter (so AIMessage
-    survives the round-trip with its tool_calls), and the `structured_response`
-    as plain JSON.
+    `result` is `list[AnyMessage]` — the discriminated union of LangChain's
+    concrete message classes — so AIMessage subclass info (and `tool_calls`)
+    survives the round-trip, and we still cover the `ToolMessage` that
+    LangChain may emit alongside the AIMessage for tool-based structured
+    output. `Optional[SchemaT]` pins the user's structured-output Pydantic
+    class so it round-trips back into the same type on replay.
     """
 
-    def serialize(self, obj: Optional[ModelResponse]) -> bytes:
-        if obj is None:
-            return b""
-        return json.dumps(
-            {
-                # `model_dump` on each message uses its concrete subclass, so
-                # AIMessage-only fields like `tool_calls` are emitted as JSON.
-                "result": [msg.model_dump(mode="json") for msg in obj.result],
-                "structured_response": obj.structured_response,
-            }
-        ).encode("utf-8")
-
-    def deserialize(self, buf: bytes) -> Optional[ModelResponse]:
-        if not buf:
-            return None
-        data = json.loads(buf.decode("utf-8"))
-        return ModelResponse(
-            result=_MESSAGES_ADAPTER.validate_python(data["result"]),
-            structured_response=data.get("structured_response"),
-        )
-
-
-_MODEL_RESPONSE_SERDE: _ModelResponseSerde = _ModelResponseSerde()
+    result: list[AnyMessage]
+    structured_response: Optional[SchemaT] = None
 
 
 class RestateMiddleware(AgentMiddleware):
@@ -113,8 +92,7 @@ class RestateMiddleware(AgentMiddleware):
 
     def __init__(self, run_options: Optional[RunOptions[Any]] = None):
         super().__init__()
-        base = run_options or RunOptions()
-        self._llm_options: RunOptions[Any] = dataclasses.replace(base, serde=_MODEL_RESPONSE_SERDE)
+        self._base_options: RunOptions[Any] = run_options or RunOptions()
 
     async def awrap_model_call(
         self,
@@ -128,20 +106,47 @@ class RestateMiddleware(AgentMiddleware):
                 "Call agent.ainvoke(...) from a handler that exposes a Restate Context."
             )
 
-        async def call_model():
-            return await handler(request)
+        schema = getattr(request.response_format, "schema", None)
+        if isinstance(schema, type):
+            try:
+                # Pydantic supports parameterizing generics with a runtime type;
+                # the type checker can't see past the dynamic subscript.
+                journal_type = RestateModelMessage.__class_getitem__(schema)
+            except (TypeError, ValueError, PydanticSchemaGenerationError):
+                journal_type = RestateModelMessage[Any]
+        else:
+            journal_type = RestateModelMessage[Any]
 
-        model_response = await ctx.run_typed("call LLM", call_model, self._llm_options)
+        async def call_model():
+            resp = await handler(request)
+            # `model_validate` accepts an untyped dict so we sidestep the
+            # `BaseMessage` -> `AnyMessage` narrowing complaint; Pydantic
+            # does the discriminated-union dispatch on `result` itself.
+            return journal_type.model_validate(
+                {
+                    "result": resp.result,
+                    "structured_response": resp.structured_response,
+                }
+            )
+
+        options = dataclasses.replace(
+            self._base_options,
+            serde=PydanticTypeAdapter(journal_type),
+        )
+
+        journaled = await ctx.run_typed("LLM call", call_model, options)
 
         # Seed a turnstile from the model's tool_call ids so the upcoming
         # tool calls — which `ToolNode` may run via asyncio.gather — execute
         # one at a time in a stable order across replays.
-        messages: list[BaseMessage] = model_response.result
-        ai = next((m for m in messages if isinstance(m, AIMessage)), None)
+        ai = next((m for m in journaled.result if isinstance(m, AIMessage)), None)
         ids = [tc["id"] for tc in (ai.tool_calls if ai else []) if tc.get("id")]
         current_state().turnstile = Turnstile(ids)
 
-        return model_response
+        return ModelResponse(
+            result=list(journaled.result),
+            structured_response=journaled.structured_response,
+        )
 
     async def awrap_tool_call(
         self,
