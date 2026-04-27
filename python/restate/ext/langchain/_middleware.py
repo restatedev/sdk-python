@@ -30,6 +30,7 @@ and re-raises everything else.
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any, Awaitable, Callable, Optional
 
 from langchain.agents.middleware import AgentMiddleware
@@ -38,24 +39,58 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
+from pydantic import TypeAdapter
 
 from restate import RunOptions
 from restate.extensions import current_context
 from restate.ext.turnstile import Turnstile
+from restate.serde import Serde
 
-from ._serde import PydanticTypeAdapter
 from ._state import current_state
 
 ModelCallResult = ModelResponse | AIMessage | ExtendedModelResponse
 ToolCallResult = ToolMessage | Command
 
-# `AnyMessage` is a discriminated union of LangChain's concrete message
-# classes. Using `BaseMessage` here would round-trip messages back as plain
-# `BaseMessage`s and the agent loop would fail to detect `AIMessage.tool_calls`.
-_MODEL_RESPONSE_SERDE: PydanticTypeAdapter[Any] = PydanticTypeAdapter(ModelResponse)
+# `AnyMessage` is the discriminated union of LangChain's concrete message
+# classes — using it (instead of `BaseMessage`) is what keeps `AIMessage` and
+# its `tool_calls` field intact across a serialize/deserialize round-trip.
+_MESSAGES_ADAPTER: TypeAdapter[list[AnyMessage]] = TypeAdapter(list[AnyMessage])
+
+
+class _ModelResponseSerde(Serde[ModelResponse]):
+    """Journals a `ModelResponse` so the LLM call survives crashes/replay.
+
+    Serializes the messages with a discriminated-union adapter (so AIMessage
+    survives the round-trip with its tool_calls), and the `structured_response`
+    as plain JSON.
+    """
+
+    def serialize(self, obj: Optional[ModelResponse]) -> bytes:
+        if obj is None:
+            return b""
+        return json.dumps(
+            {
+                # `model_dump` on each message uses its concrete subclass, so
+                # AIMessage-only fields like `tool_calls` are emitted as JSON.
+                "result": [msg.model_dump(mode="json") for msg in obj.result],
+                "structured_response": obj.structured_response,
+            }
+        ).encode("utf-8")
+
+    def deserialize(self, buf: bytes) -> Optional[ModelResponse]:
+        if not buf:
+            return None
+        data = json.loads(buf.decode("utf-8"))
+        return ModelResponse(
+            result=_MESSAGES_ADAPTER.validate_python(data["result"]),
+            structured_response=data.get("structured_response"),
+        )
+
+
+_MODEL_RESPONSE_SERDE: _ModelResponseSerde = _ModelResponseSerde()
 
 
 class RestateMiddleware(AgentMiddleware):
@@ -93,7 +128,7 @@ class RestateMiddleware(AgentMiddleware):
                 "Call agent.ainvoke(...) from a handler that exposes a Restate Context."
             )
 
-        async def call_model() -> ModelResponse:
+        async def call_model():
             return await handler(request)
 
         model_response = await ctx.run_typed("call LLM", call_model, self._llm_options)
