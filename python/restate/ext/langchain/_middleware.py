@@ -21,11 +21,11 @@ exceptions — wrap side effects explicitly with `restate_context().run_typed(..
 inside the tool body.
 """
 
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, cast
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 from pydantic import BaseModel
@@ -81,28 +81,38 @@ class RestateMiddleware(AgentMiddleware):
 
         async def call_model() -> SerializableModelResponse:
             resp = await handler(request)
-            # Serialize the response to a dict so we can journal it.
-            sr = resp.structured_response
-            if isinstance(sr, BaseModel):
-                sr = sr.model_dump(mode="json")
-            return SerializableModelResponse.model_validate({"result": resp.result, "structured_response": sr})
+            # Dump Pydantic structured outputs to a dict so the journaled
+            # value is plain JSON; we re-validate against the schema below.
+            structured = resp.structured_response
+            if isinstance(structured, BaseModel):
+                structured = structured.model_dump(mode="json")
+            return SerializableModelResponse.model_validate(
+                {"result": resp.result, "structured_response": structured}
+            )
 
         journaled = await ctx.run_typed("LLM call", call_model, self._options)
 
-        # If the request asked for a Pydantic schema, restore the type
-        sr = journaled.structured_response
+        # If the request asked for a Pydantic schema, restore the type.
+        structured_response = journaled.structured_response
         schema = getattr(request.response_format, "schema", None)
-        if sr is not None and isinstance(schema, type) and issubclass(schema, BaseModel):
-            sr = schema.model_validate(sr)
+        if structured_response is not None and isinstance(schema, type) and issubclass(schema, BaseModel):
+            structured_response = schema.model_validate(structured_response)
 
         # Force tools to run sequentially by setting a turnstile.
         # Avoids asyncio.gather() from running in parallel.
         ai_message = next((m for m in journaled.result if isinstance(m, AIMessage)), None)
         if ai_message:
-            tool_call_ids = [tc.get("id") for tc in (ai_message.tool_calls or []) if tc.get("id") is not None]
+            tool_call_ids = [tid for tc in (ai_message.tool_calls or []) if (tid := tc.get("id")) is not None]
             current_state().turnstile = Turnstile(tool_call_ids)
 
-        return ModelResponse(result=journaled.result, structured_response=sr)
+        # `journaled.result` is `list[AnyMessage]` (a discriminated union of
+        # `BaseMessage` subclasses). `ModelResponse.result` is `list[BaseMessage]`;
+        # `list` is invariant so we cast — the runtime values are already
+        # concrete `BaseMessage` subclasses.
+        return ModelResponse(
+            result=cast(list[BaseMessage], journaled.result),
+            structured_response=structured_response,
+        )
 
     async def awrap_tool_call(
         self,
