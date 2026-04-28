@@ -21,8 +21,7 @@ exceptions — wrap side effects explicitly with `restate_context().run_typed(..
 inside the tool body.
 """
 
-import dataclasses
-from typing import Any, Awaitable, Callable, Generic, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Optional
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import (
@@ -34,59 +33,26 @@ from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 from pydantic import BaseModel
-from pydantic.errors import PydanticSchemaGenerationError
 
 from restate import RunOptions
 from restate.extensions import current_context
 from restate.ext.turnstile import Turnstile
 
-from ._serde import PydanticTypeAdapter
 from ._state import current_state
 
-ModelCallResult = ModelResponse | AIMessage | ExtendedModelResponse
 ToolCallResult = ToolMessage | Command
 
-SchemaT = TypeVar("SchemaT")
 
-
-class SerializableModelResponse(BaseModel, Generic[SchemaT]):
+class SerializableModelResponse(BaseModel):
     """Serializable mirror of `ModelResponse`.
 
-    Why we don't journal `ModelResponse` directly:
-
-    - In LangChain's `ModelResponse`, `result` is typed `list[BaseMessage]`.
-      It drops the tool calls on serialization, since tool calls live
-      in `AIMessage` and not in `BaseMessage`.
-      Here, we use list[AnyMessage]` (a discriminated union) so concrete
-      subclasses, so tool calls survive (de)serialization.
-    - `SchemaT` is parameterized per call with the request's structured-output
-      type so `structured_response` deserializes back into the user's Pydantic
-      class instead of a plain dict.
+    `result` uses `list[AnyMessage]` (a discriminated union)
+    so AIMessage `tool_calls` survives serialization.
+    `BaseMessage`, as on `ModelResponse`, would not.
     """
 
     result: list[AnyMessage]
-    structured_response: Optional[SchemaT] = None
-
-    @classmethod
-    def from_schema(cls, schema: Any) -> type["SerializableModelResponse[Any]"]:
-        """Return `SerializableModelResponse[schema]` for a Pydantic schema,
-        otherwise `[Any]`.
-
-        LangChain accepts four structured-output schema kinds. Only the
-        `BaseModel` case yields a typed `structured_response` on the agent's
-        result; the others produce a plain dict:
-
-        - `BaseModel` subclass → Pydantic instance — parameterize so it
-          deserializes back into the user's class on replay.
-        - `@dataclass`, `TypedDict`, raw JSON-schema dict → all dict —
-          fall through to `[Any]` so the dict survives unchanged.
-        """
-        if isinstance(schema, type) and issubclass(schema, BaseModel):
-            try:
-                return cls[schema]
-            except (TypeError, ValueError, PydanticSchemaGenerationError):
-                return cls[Any]
-        return cls[Any]
+    structured_response: Optional[Any] = None
 
 
 class RestateMiddleware(AgentMiddleware):
@@ -98,25 +64,12 @@ class RestateMiddleware(AgentMiddleware):
 
     Args:
         run_options: forwarded to the LLM `ctx.run_typed` call (max attempts,
-            retry intervals, ...). `serde` is set internally on each call.
+            retry intervals, ...). `serde` is set internally.
     """
 
     def __init__(self, run_options: Optional[RunOptions[Any]] = None):
         super().__init__()
-        self._base_options: RunOptions[Any] = run_options or RunOptions()
-        # Cache one `PydanticTypeAdapter` per distinct structured-output schema
-        self._serde_cache: dict[Any, PydanticTypeAdapter] = {}
-
-    def _serde_for(self, schema: Any) -> PydanticTypeAdapter:
-        # Only Pydantic schemas get a dedicated cache entry; every other
-        # schema kind maps to the same `[Any]` serde, so we collapse them
-        # under a single `None` key.
-        key = schema if isinstance(schema, type) and issubclass(schema, BaseModel) else None
-        serde = self._serde_cache.get(key)
-        if serde is None:
-            serde = PydanticTypeAdapter(SerializableModelResponse.from_schema(schema))
-            self._serde_cache[key] = serde
-        return serde
+        self._options: RunOptions[Any] = run_options or RunOptions()
 
     async def awrap_model_call(
         self,
@@ -130,38 +83,33 @@ class RestateMiddleware(AgentMiddleware):
                 "Call agent.ainvoke(...) from a handler that exposes a Restate Context."
             )
 
-        # Create a serde that respects the requested structured output format
-        # and use it as the `ctx.run_typed` serde.
-        schema = getattr(request.response_format, "schema", None)
-        journal_type = SerializableModelResponse.from_schema(schema)
-        options = dataclasses.replace(self._base_options, serde=self._serde_for(schema))
-
-        async def call_model():
+        async def call_model() -> SerializableModelResponse:
             resp = await handler(request)
-            # Validate via dict so we don't have to narrow `list[BaseMessage]`
-            # to `list[AnyMessage]`; Pydantic picks the right subclass per
-            # message via the discriminated union.
-            return journal_type.model_validate(
-                {
-                    "result": resp.result,
-                    "structured_response": resp.structured_response,
-                }
+            # Serialize the response to a dict so we can journal it.
+            sr = resp.structured_response
+            if isinstance(sr, BaseModel):
+                sr = sr.model_dump_json()
+            return SerializableModelResponse.model_validate(
+                {"result": resp.result, "structured_response": sr}
             )
 
-        journaled = await ctx.run_typed("LLM call", call_model, options)
+        journaled = await ctx.run_typed("LLM call", call_model, self._options)
+
+        # If the request asked for a Pydantic schema, restore the type
+        sr = journaled.structured_response
+        schema = getattr(request.response_format, "schema", None)
+        if sr is not None and isinstance(schema, type) and issubclass(schema, BaseModel):
+            sr = schema.model_validate(sr)
 
         # `ToolNode` runs tool calls in parallel via `asyncio.gather`. Seeding
         # the turnstile with the model's tool_call ids lets `awrap_tool_call`
         # release them one at a time in a stable order, so any nested
         # `ctx.run_typed` calls journal deterministically across replays.
         ai = next((m for m in journaled.result if isinstance(m, AIMessage)), None)
-        ids = [tc["id"] for tc in (ai.tool_calls if ai else []) if tc.get("id")]
+        ids = [tid for tc in (ai.tool_calls if ai else []) if (tid := tc.get("id"))]
         current_state().turnstile = Turnstile(ids)
 
-        return ModelResponse(
-            result=list(journaled.result),
-            structured_response=journaled.structured_response,
-        )
+        return ModelResponse(result=journaled.result, structured_response=sr)
 
     async def awrap_tool_call(
         self,

@@ -23,7 +23,6 @@ from restate import Context, ObjectContext
 from restate.server_context import current_context
 
 from ._middleware import RestateMiddleware
-from ._serde import PydanticTypeAdapter
 
 
 def restate_context() -> Context:
@@ -50,7 +49,6 @@ def restate_object_context() -> ObjectContext:
 
 __all__ = [
     "RestateMiddleware",
-    "PydanticTypeAdapter",
     "restate_context",
     "restate_object_context",
 ]
