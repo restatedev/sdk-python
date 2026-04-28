@@ -51,18 +51,44 @@ ToolCallResult = ToolMessage | Command
 SchemaT = TypeVar("SchemaT")
 
 
-class RestateModelMessage(BaseModel, Generic[SchemaT]):
-    """Journaled mirror of `ModelResponse`.
+class SerializableModelResponse(BaseModel, Generic[SchemaT]):
+    """Serializable mirror of `ModelResponse`.
 
-    `result` uses `list[AnyMessage]` (a discriminated union) so concrete
-    subclasses — and `AIMessage.tool_calls` in particular — survive the
-    round-trip; `BaseMessage` would not. `SchemaT` is parameterized per call
-    with the request's structured-output type so `structured_response`
-    deserializes back into the user's Pydantic class instead of a dict.
+    Why we don't journal `ModelResponse` directly:
+
+    - In LangChain's `ModelResponse`, `result` is typed `list[BaseMessage]`.
+      It drops the tool calls on serialization, since tool calls live
+      in `AIMessage` and not in `BaseMessage`.
+      Here, we use list[AnyMessage]` (a discriminated union) so concrete
+      subclasses, so tool calls survive (de)serialization.
+    - `SchemaT` is parameterized per call with the request's structured-output
+      type so `structured_response` deserializes back into the user's Pydantic
+      class instead of a plain dict.
     """
 
     result: list[AnyMessage]
     structured_response: Optional[SchemaT] = None
+
+    @classmethod
+    def from_schema(cls, schema: Any) -> type["SerializableModelResponse[Any]"]:
+        """Return `SerializableModelResponse[schema]` for a Pydantic schema,
+        otherwise `[Any]`.
+
+        LangChain accepts four structured-output schema kinds. Only the
+        `BaseModel` case yields a typed `structured_response` on the agent's
+        result; the others produce a plain dict:
+
+        - `BaseModel` subclass → Pydantic instance — parameterize so it
+          deserializes back into the user's class on replay.
+        - `@dataclass`, `TypedDict`, raw JSON-schema dict → all dict —
+          fall through to `[Any]` so the dict survives unchanged.
+        """
+        if isinstance(schema, type) and issubclass(schema, BaseModel):
+            try:
+                return cls[schema]
+            except (TypeError, ValueError, PydanticSchemaGenerationError):
+                return cls[Any]
+        return cls[Any]
 
 
 class RestateMiddleware(AgentMiddleware):
@@ -80,6 +106,19 @@ class RestateMiddleware(AgentMiddleware):
     def __init__(self, run_options: Optional[RunOptions[Any]] = None):
         super().__init__()
         self._base_options: RunOptions[Any] = run_options or RunOptions()
+        # Cache one `PydanticTypeAdapter` per distinct structured-output schema
+        self._serde_cache: dict[Any, PydanticTypeAdapter] = {}
+
+    def _serde_for(self, schema: Any) -> PydanticTypeAdapter:
+        # Only Pydantic schemas get a dedicated cache entry; every other
+        # schema kind maps to the same `[Any]` serde, so we collapse them
+        # under a single `None` key.
+        key = schema if isinstance(schema, type) and issubclass(schema, BaseModel) else None
+        serde = self._serde_cache.get(key)
+        if serde is None:
+            serde = PydanticTypeAdapter(SerializableModelResponse.from_schema(schema))
+            self._serde_cache[key] = serde
+        return serde
 
     async def awrap_model_call(
         self,
@@ -93,19 +132,11 @@ class RestateMiddleware(AgentMiddleware):
                 "Call agent.ainvoke(...) from a handler that exposes a Restate Context."
             )
 
-        # Parameterize the journaled type with the structured-output schema
-        # (if any) so `structured_response` round-trips back into the user's
-        # Pydantic class. `__class_getitem__` is the dynamic form of
-        # `RestateModelMessage[schema]` — same thing, but the type checker
-        # accepts a runtime value here.
+        # Create a serde that respects the requested structured output format
+        # and use it as the `ctx.run_typed` serde.
         schema = getattr(request.response_format, "schema", None)
-        if isinstance(schema, type):
-            try:
-                journal_type = RestateModelMessage.__class_getitem__(schema)
-            except (TypeError, ValueError, PydanticSchemaGenerationError):
-                journal_type = RestateModelMessage[Any]
-        else:
-            journal_type = RestateModelMessage[Any]
+        journal_type = SerializableModelResponse.from_schema(schema)
+        options = dataclasses.replace(self._base_options, serde=self._serde_for(schema))
 
         async def call_model():
             resp = await handler(request)
@@ -118,11 +149,6 @@ class RestateMiddleware(AgentMiddleware):
                     "structured_response": resp.structured_response,
                 }
             )
-
-        options = dataclasses.replace(
-            self._base_options,
-            serde=PydanticTypeAdapter(journal_type),
-        )
 
         journaled = await ctx.run_typed("LLM call", call_model, options)
 
