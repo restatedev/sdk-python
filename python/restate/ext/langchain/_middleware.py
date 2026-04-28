@@ -21,8 +21,6 @@ exceptions — wrap side effects explicitly with `restate_context().run_typed(..
 inside the tool body.
 """
 
-from __future__ import annotations
-
 import dataclasses
 from typing import Any, Awaitable, Callable, Generic, Optional, TypeVar
 
