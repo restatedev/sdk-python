@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
-from datetime import timedelta
 from typing import Any, overload
 
 from restate import RunOptions, TerminalError
