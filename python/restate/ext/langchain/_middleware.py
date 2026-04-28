@@ -21,11 +21,12 @@ exceptions — wrap side effects explicitly with `restate_context().run_typed(..
 inside the tool body.
 """
 
+from dataclasses import asdict
 from typing import Any, Awaitable, Callable, Optional, cast
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, ToolMessage, BaseMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 from pydantic import BaseModel
@@ -80,15 +81,8 @@ class RestateMiddleware(AgentMiddleware):
             )
 
         async def call_model() -> SerializableModelResponse:
-            resp = await handler(request)
-            # Dump Pydantic structured outputs to a dict so the journaled
-            # value is plain JSON; we re-validate against the schema below.
-            structured = resp.structured_response
-            if isinstance(structured, BaseModel):
-                structured = structured.model_dump(mode="json")
-            return SerializableModelResponse.model_validate(
-                {"result": resp.result, "structured_response": structured}
-            )
+            response = await handler(request)
+            return SerializableModelResponse(**asdict(response))
 
         journaled = await ctx.run_typed("LLM call", call_model, self._options)
 
