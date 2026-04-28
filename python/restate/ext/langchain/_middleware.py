@@ -105,10 +105,7 @@ class RestateMiddleware(AgentMiddleware):
             tool_call_ids = [tid for tc in (ai_message.tool_calls or []) if (tid := tc.get("id")) is not None]
             current_state().turnstile = Turnstile(tool_call_ids)
 
-        # `journaled.result` is `list[AnyMessage]` (a discriminated union of
-        # `BaseMessage` subclasses). `ModelResponse.result` is `list[BaseMessage]`;
-        # `list` is invariant so we cast — the runtime values are already
-        # concrete `BaseMessage` subclasses.
+        # Turn into ModelResponse as expected by the agent
         return ModelResponse(
             result=cast(list[BaseMessage], journaled.result),
             structured_response=structured_response,
