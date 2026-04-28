@@ -24,11 +24,7 @@ inside the tool body.
 from typing import Any, Awaitable, Callable, Optional
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import (
-    ExtendedModelResponse,
-    ModelRequest,
-    ModelResponse,
-)
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
@@ -89,9 +85,7 @@ class RestateMiddleware(AgentMiddleware):
             sr = resp.structured_response
             if isinstance(sr, BaseModel):
                 sr = sr.model_dump_json()
-            return SerializableModelResponse.model_validate(
-                {"result": resp.result, "structured_response": sr}
-            )
+            return SerializableModelResponse.model_validate({"result": resp.result, "structured_response": sr})
 
         journaled = await ctx.run_typed("LLM call", call_model, self._options)
 
@@ -101,13 +95,12 @@ class RestateMiddleware(AgentMiddleware):
         if sr is not None and isinstance(schema, type) and issubclass(schema, BaseModel):
             sr = schema.model_validate(sr)
 
-        # `ToolNode` runs tool calls in parallel via `asyncio.gather`. Seeding
-        # the turnstile with the model's tool_call ids lets `awrap_tool_call`
-        # release them one at a time in a stable order, so any nested
-        # `ctx.run_typed` calls journal deterministically across replays.
-        ai = next((m for m in journaled.result if isinstance(m, AIMessage)), None)
-        ids = [tid for tc in (ai.tool_calls if ai else []) if (tid := tc.get("id"))]
-        current_state().turnstile = Turnstile(ids)
+        # Force tools to run sequentially by setting a turnstile.
+        # Avoids asyncio.gather() from running in parallel.
+        ai_message = next((m for m in journaled.result if isinstance(m, AIMessage)), None)
+        if ai_message:
+            tool_call_ids = [tc.get("id") for tc in (ai_message.tool_calls or []) if tc.get("id") is not None]
+            current_state().turnstile = Turnstile(tool_call_ids)
 
         return ModelResponse(result=journaled.result, structured_response=sr)
 
