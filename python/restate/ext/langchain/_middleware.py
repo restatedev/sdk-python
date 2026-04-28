@@ -84,7 +84,7 @@ class RestateMiddleware(AgentMiddleware):
             # Serialize the response to a dict so we can journal it.
             sr = resp.structured_response
             if isinstance(sr, BaseModel):
-                sr = sr.model_dump_json()
+                sr = sr.model_dump(mode="json")
             return SerializableModelResponse.model_validate({"result": resp.result, "structured_response": sr})
 
         journaled = await ctx.run_typed("LLM call", call_model, self._options)
