@@ -16,6 +16,11 @@ from typing import Any, List, Tuple
 from restate.exceptions import TerminalError
 from restate.context import RestateDurableFuture
 from restate.server_context import ServerDurableFuture, ServerInvocationContext
+from restate.vm import (
+    AllCompletedUnresolvedFuture,
+    FirstCompletedUnresolvedFuture,
+    SingleUnresolvedFuture,
+)
 
 
 async def gather(*futures: RestateDurableFuture[Any]) -> List[RestateDurableFuture[Any]]:
@@ -24,9 +29,28 @@ async def gather(*futures: RestateDurableFuture[Any]) -> List[RestateDurableFutu
 
     Returns a list of all futures.
     """
-    async for _ in as_completed(*futures):
-        pass
-    return list(futures)
+    context: ServerInvocationContext | None = None
+    handles: List[int] = []
+    futures_list = list(futures)
+
+    if not futures_list:
+        return []
+    for f in futures_list:
+        if not isinstance(f, ServerDurableFuture):
+            raise TerminalError("All futures must SDK created futures.")
+        if context is None:
+            context = f.context
+        elif context is not f.context:
+            raise TerminalError("All futures must be created by the same SDK context.")
+        if not f.is_completed():
+            handles.append(f.handle)
+
+    if handles:
+        assert context is not None
+        await context.create_poll_or_cancel_coroutine(
+            AllCompletedUnresolvedFuture([SingleUnresolvedFuture(h) for h in handles])
+        )
+    return futures_list
 
 
 async def select(**kws: RestateDurableFuture[Any]) -> List[Any]:
@@ -118,7 +142,9 @@ async def wait_completed(
     completed = []
     uncompleted = []
     assert context is not None
-    await context.create_poll_or_cancel_coroutine(handles)
+    await context.create_poll_or_cancel_coroutine(
+        FirstCompletedUnresolvedFuture([SingleUnresolvedFuture(h) for h in handles])
+    )
 
     for index, handle in enumerate(handles):
         future = futures[index]
