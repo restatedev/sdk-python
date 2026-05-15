@@ -98,17 +98,20 @@ struct PyFailure {
     message: String,
     #[pyo3(get, set)]
     stacktrace: Option<String>,
+    #[pyo3(get, set)]
+    metadata: Option<Vec<(String, String)>>,
 }
 
 #[pymethods]
 impl PyFailure {
     #[new]
-    #[pyo3(signature = (code, message, stacktrace=None))]
-    fn new(code: u16, message: String, stacktrace: Option<String>) -> PyFailure {
+    #[pyo3(signature = (code, message, stacktrace=None, metadata=None))]
+    fn new(code: u16, message: String, stacktrace: Option<String>, metadata: Option<Vec<(String, String)>>) -> PyFailure {
         Self {
             code,
             message,
             stacktrace,
+            metadata,
         }
     }
 }
@@ -181,6 +184,11 @@ impl From<TerminalFailure> for PyFailure {
             code: value.code,
             message: value.message,
             stacktrace: None,
+            metadata: if value.metadata.is_empty() {
+                None
+            } else {
+                Some(value.metadata)
+            },
         }
     }
 }
@@ -190,21 +198,15 @@ impl From<PyFailure> for TerminalFailure {
         TerminalFailure {
             code: value.code,
             message: value.message,
-            metadata: vec![],
+            metadata: value.metadata.unwrap_or_default(),
         }
     }
 }
 
 impl From<PyFailure> for Error {
-    fn from(
-        PyFailure {
-            code,
-            message,
-            stacktrace,
-        }: PyFailure,
-    ) -> Self {
-        let mut e = Self::new(code, message);
-        if let Some(stacktrace) = stacktrace {
+    fn from(value: PyFailure) -> Self {
+        let mut e = Self::new(value.code, value.message);
+        if let Some(stacktrace) = value.stacktrace {
             e = e.with_stacktrace(stacktrace);
         }
         e
