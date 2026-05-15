@@ -75,6 +75,7 @@ class Failure:
     code: int
     message: str
     stacktrace: typing.Optional[str] = None
+    metadata: typing.Optional[typing.Dict[str, str]] = None
 
 
 @dataclass
@@ -269,9 +270,8 @@ class VMWrapper:
             return result
         if isinstance(result, PyFailure):
             # a terminal failure
-            code = result.code
-            message = result.message
-            return Failure(code, message)
+            metadata = dict(result.metadata) if result.metadata else None
+            return Failure(result.code, result.message, metadata=metadata)
         return ValueError(f"Unknown result type: {result}")
 
     def sys_input(self) -> Invocation:
@@ -314,7 +314,8 @@ class VMWrapper:
         Returns:
             None
         """
-        res = PyFailure(output.code, output.message)
+        metadata = list(output.metadata.items()) if output.metadata else None
+        res = PyFailure(output.code, output.message, metadata=metadata)
         self.vm.sys_write_output_failure(res)
 
     def sys_get_state(self, name) -> int:
@@ -446,7 +447,8 @@ class VMWrapper:
         """
         Exit a side effect with a terminal failure.
         """
-        res = PyFailure(output.code, output.message)
+        metadata = list(output.metadata.items()) if output.metadata else None
+        res = PyFailure(output.code, output.message, metadata=metadata)
         self.vm.propose_run_completion_failure(handle, res)
 
     # pylint: disable=line-too-long

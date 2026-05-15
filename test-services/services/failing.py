@@ -16,21 +16,32 @@ from datetime import timedelta
 # pylint: disable=W0613
 # pylint: disable=W0622
 
+from typing import Optional, TypedDict
+
 from restate import VirtualObject, ObjectContext
 from restate.exceptions import TerminalError
 from restate import RunOptions
+
+
+class FailureToPropagate(TypedDict):
+    errorMessage: str
+    metadata: Optional[dict[str, str]]
+
 
 failing = VirtualObject("Failing")
 
 
 @failing.handler(name="terminallyFailingCall")
-async def terminally_failing_call(ctx: ObjectContext, msg: str):
-    raise TerminalError(message=msg)
+async def terminally_failing_call(ctx: ObjectContext, failure_to_propagate: FailureToPropagate):
+    raise TerminalError(
+        message=failure_to_propagate["errorMessage"],
+        metadata=failure_to_propagate.get("metadata"),
+    )
 
 
 @failing.handler(name="callTerminallyFailingCall")
-async def call_terminally_failing_call(ctx: ObjectContext, msg: str) -> str:
-    await ctx.object_call(terminally_failing_call, key="random-583e1bf2", arg=msg)
+async def call_terminally_failing_call(ctx: ObjectContext, failure_to_propagate: FailureToPropagate) -> str:
+    await ctx.object_call(terminally_failing_call, key="random-583e1bf2", arg=failure_to_propagate)
 
     raise Exception("Should not reach here")
 
@@ -49,9 +60,12 @@ async def failing_call_with_eventual_success(ctx: ObjectContext) -> int:
 
 
 @failing.handler(name="terminallyFailingSideEffect")
-async def terminally_failing_side_effect(ctx: ObjectContext, error_message: str):
+async def terminally_failing_side_effect(ctx: ObjectContext, failure_to_propagate: FailureToPropagate):
+    error_message = failure_to_propagate["errorMessage"]
+    metadata = failure_to_propagate.get("metadata")
+
     def side_effect():
-        raise TerminalError(message=error_message)
+        raise TerminalError(message=error_message, metadata=metadata)
 
     await ctx.run_typed("sideEffect", side_effect)
     raise ValueError("Should not reach here")

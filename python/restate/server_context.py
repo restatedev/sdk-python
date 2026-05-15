@@ -407,7 +407,7 @@ class ServerInvocationContext(ObjectContext):
             self.vm.sys_write_output_success(bytes(out_buffer))
             self.vm.sys_end()
         except TerminalError as t:
-            failure = Failure(code=t.status_code, message=t.message)
+            failure = Failure(code=t.status_code, message=t.message, metadata=t.metadata)
             restate_context_is_replaying.set(False)
             self.vm.sys_write_output_failure(failure)
             self.vm.sys_end()
@@ -428,7 +428,7 @@ class ServerInvocationContext(ObjectContext):
             cause: BaseException | None = e
             while cause is not None:
                 if isinstance(cause, TerminalError):
-                    failure = Failure(code=cause.status_code, message=cause.message)
+                    failure = Failure(code=cause.status_code, message=cause.message, metadata=cause.metadata)
                     restate_context_is_replaying.set(False)
                     self.vm.sys_write_output_failure(failure)
                     self.vm.sys_end()
@@ -525,7 +525,7 @@ class ServerInvocationContext(ObjectContext):
         if res is None:
             return None
         if isinstance(res, Failure):
-            raise TerminalError(res.message, res.code)
+            raise TerminalError(res.message, res.code, metadata=res.metadata)
         return res
 
     async def create_poll_or_cancel_coroutine(self, unresolved_future: UnresolvedFuture) -> None:
@@ -688,7 +688,7 @@ class ServerInvocationContext(ObjectContext):
             buffer = serde.serialize(action_result)
             self.vm.propose_run_completion_success(handle, buffer)
         except TerminalError as t:
-            failure = Failure(code=t.status_code, message=t.message)
+            failure = Failure(code=t.status_code, message=t.message, metadata=t.metadata)
             self.vm.propose_run_completion_failure(handle, failure)
         except RetryableError as r:
             failure = Failure(code=r.status_code, message=r.message)

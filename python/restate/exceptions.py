@@ -19,10 +19,11 @@ from datetime import timedelta
 class TerminalError(Exception):
     """This exception is thrown to indicate that Restate should not retry."""
 
-    def __init__(self, message: str, status_code: int = 500) -> None:
+    def __init__(self, message: str, status_code: int = 500, metadata: Optional[dict[str, str]] = None) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.metadata = metadata
 
 
 class RetryableError(Exception):
