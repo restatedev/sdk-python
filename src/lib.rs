@@ -106,7 +106,12 @@ struct PyFailure {
 impl PyFailure {
     #[new]
     #[pyo3(signature = (code, message, stacktrace=None, metadata=None))]
-    fn new(code: u16, message: String, stacktrace: Option<String>, metadata: Option<Vec<(String, String)>>) -> PyFailure {
+    fn new(
+        code: u16,
+        message: String,
+        stacktrace: Option<String>,
+        metadata: Option<Vec<(String, String)>>,
+    ) -> PyFailure {
         Self {
             code,
             message,
@@ -369,7 +374,12 @@ impl PyVM {
     }
 
     #[pyo3(signature = (error, stacktrace=None, delay_override_ms=None))]
-    fn notify_error(mut self_: PyRefMut<'_, Self>, error: String, stacktrace: Option<String>, delay_override_ms: Option<u64>) {
+    fn notify_error(
+        mut self_: PyRefMut<'_, Self>,
+        error: String,
+        stacktrace: Option<String>,
+        delay_override_ms: Option<u64>,
+    ) {
         let mut error = Error::new(restate_sdk_shared_core::error::codes::INTERNAL, error);
         if let Some(desc) = stacktrace {
             error = error.with_stacktrace(desc);
@@ -541,6 +551,8 @@ impl PyVM {
                     handler,
                     key,
                     idempotency_key,
+                    scope: None,
+                    limit_key: None,
                     headers: headers
                         .unwrap_or_default()
                         .into_iter()
@@ -549,7 +561,7 @@ impl PyVM {
                 },
                 buffer.as_bytes().to_vec().into(),
                 Default::default(),
-                Default::default()
+                Default::default(),
             )
             .map(Into::into)
             .map_err(Into::into)
@@ -575,6 +587,8 @@ impl PyVM {
                     handler,
                     key,
                     idempotency_key,
+                    scope: None,
+                    limit_key: None,
                     headers: headers
                         .unwrap_or_default()
                         .into_iter()
@@ -589,7 +603,7 @@ impl PyVM {
                         + Duration::from_millis(millis)
                 }),
                 Default::default(),
-                Default::default()
+                Default::default(),
             )
             .map(|s| s.invocation_id_notification_handle.into())
             .map_err(Into::into)
@@ -758,7 +772,10 @@ impl PyVM {
         max_retry_attempts_override: Option<u32>,
         max_retry_duration_override_ms: Option<u64>,
     ) -> Result<(), PyVMError> {
-        let retry_policy = if delay_override_ms.is_some() || max_retry_attempts_override.is_some() || max_retry_duration_override_ms.is_some() {
+        let retry_policy = if delay_override_ms.is_some()
+            || max_retry_attempts_override.is_some()
+            || max_retry_duration_override_ms.is_some()
+        {
             RetryPolicy::FixedDelay {
                 interval: delay_override_ms.map(Duration::from_millis),
                 max_attempts: max_retry_attempts_override,
