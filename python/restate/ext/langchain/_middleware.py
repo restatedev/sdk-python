@@ -120,6 +120,7 @@ class RestateMiddleware(AgentMiddleware):
             return await handler(request)
 
         ctx = current_context()
+        assert ctx is not None, "RestateMiddleware must run inside a Restate handler"
         state = state_from_ctx(ctx)
         assert state is not None, "RestateMiddleware must run inside a Restate handler"
         turnstile = state.turnstile
