@@ -35,7 +35,7 @@ from restate import RunOptions
 from restate.extensions import current_context
 from restate.ext.turnstile import Turnstile
 
-from ._state import current_state
+from ._state import get_or_create_state, state_from_ctx
 
 ToolCallResult = ToolMessage | Command
 
@@ -92,12 +92,16 @@ class RestateMiddleware(AgentMiddleware):
         if structured_response is not None and isinstance(schema, type) and issubclass(schema, BaseModel):
             structured_response = schema.model_validate(structured_response)
 
-        # Force tools to run sequentially by setting a turnstile.
-        # Avoids asyncio.gather() from running in parallel.
+        # Install this turn's turnstile on ctx.extension_data so sibling
+        # ``awrap_tool_call`` tasks (spawned by ``tool_node``'s gather) reach
+        # the same object via the shared Restate ``Context`` — independent of
+        # ContextVar inheritance. Mirrors how ``restate.ext.adk`` stores its
+        # PluginState turnstile.
         ai_message = next((m for m in journaled.result if isinstance(m, AIMessage)), None)
-        if ai_message:
+        state = get_or_create_state(ctx)
+        if ai_message is not None:
             tool_call_ids = [tid for tc in (ai_message.tool_calls or []) if (tid := tc.get("id")) is not None]
-            current_state().turnstile = Turnstile(tool_call_ids)
+            state.turnstile = Turnstile(tool_call_ids)
 
         # Turn into ModelResponse as expected by the agent
         return ModelResponse(
@@ -115,8 +119,11 @@ class RestateMiddleware(AgentMiddleware):
         if tool_call_id is None:
             return await handler(request)
 
-        # Wait for turn and then execute
-        turnstile = current_state().turnstile
+        ctx = current_context()
+        state = state_from_ctx(ctx)
+        assert state is not None, "RestateMiddleware must run inside a Restate handler"
+        turnstile = state.turnstile
+
         try:
             await turnstile.wait_for(tool_call_id)
             result = await handler(request)
