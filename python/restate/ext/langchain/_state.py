@@ -1,5 +1,5 @@
 #
-#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
+#  Copyright (c) 2023-2026 - Restate Software, Inc., Restate GmbH
 #
 #  This file is part of the Restate SDK for Python,
 #  which is released under the MIT license.
@@ -21,8 +21,15 @@ class _State:
         self.turnstile: Turnstile = Turnstile([])
 
 
-_state_var: ContextVar[_State] = ContextVar("restate_langchain_state", default=_State())
+# No default: a module-level default `_State()` would be a single object shared
+# across every asyncio task that never calls `_state_var.set(...)`.
+_state_var: ContextVar[_State] = ContextVar("restate_langchain_state")
 
 
 def current_state() -> _State:
-    return _state_var.get()
+    try:
+        return _state_var.get()
+    except LookupError:
+        state = _State()
+        _state_var.set(state)
+        return state
