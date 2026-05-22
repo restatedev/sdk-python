@@ -114,10 +114,9 @@ class RestateMiddleware(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolCallResult]],
     ) -> ToolCallResult:
-        tool_call = request.tool_call
-        tool_call_id: Optional[str] = tool_call.get("id") if isinstance(tool_call, dict) else None
+        tool_call_id = request.tool_call.get("id")
         if tool_call_id is None:
-            return await handler(request)
+            return ToolMessage("Function call ID is required for tool invocation. Please set `id` on the ToolCall.")
 
         ctx = current_context()
         assert ctx is not None, "RestateMiddleware must run inside a Restate handler"
