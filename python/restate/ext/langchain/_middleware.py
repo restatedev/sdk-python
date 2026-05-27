@@ -128,7 +128,8 @@ class RestateMiddleware(AgentMiddleware):
             await turnstile.wait_for(tool_call_id)
             result = await handler(request)
             turnstile.allow_next_after(tool_call_id)
-            result.id = str(ctx.uuid())
+            if isinstance(result, ToolMessage):
+                result.id = str(ctx.uuid())
             return result
         except BaseException:
             # Unblock the rest of the parallel tool batch, then propagate.
