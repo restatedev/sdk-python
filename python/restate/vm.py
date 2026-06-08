@@ -34,6 +34,7 @@ from restate._internal import (
     PyDoProgressExecuteRun,
     PyDoProgressCancelSignalReceived,
     PyUnresolvedFuture,
+    PyRun,
     CANCEL_NOTIFICATION_HANDLE,
 )  # pylint: disable=import-error,no-name-in-module,line-too-long
 
@@ -128,6 +129,19 @@ class DoProgressCancelSignalReceived:
     """
     Represents a notification that a cancel signal has been received
     """
+
+
+@dataclass(frozen=True)
+class Run:
+    """
+    Represents the result of registering a run.
+
+    Holds the run notification handle and whether the run was replayed,
+    in which case the run closure must not be scheduled for execution.
+    """
+
+    replayed: bool
+    handle: int
 
 
 DO_PROGRESS_ANY_COMPLETED = DoProgressAnyCompleted()
@@ -395,11 +409,12 @@ class VMWrapper:
         py_headers = [PyHeader(key=h[0], value=h[1]) for h in headers] if headers else None
         return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key, py_headers)
 
-    def sys_run(self, name: str) -> int:
+    def sys_run(self, name: str) -> Run:
         """
         Register a run
         """
-        return self.vm.sys_run(name)
+        run: PyRun = self.vm.sys_run(name)
+        return Run(replayed=run.replayed, handle=run.handle)
 
     def sys_awakeable(self) -> typing.Tuple[str, int]:
         """

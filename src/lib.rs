@@ -3,9 +3,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone, PyString};
 use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
 use restate_sdk_shared_core::{
-    AwaitResponse, CallHandle, CoreVM, Error, Header, IdentityVerifier, Input, NonEmptyValue,
-    NotificationHandle, ResponseHead, RetryPolicy, RunExitResult, TakeOutputResult, Target,
-    TerminalFailure, UnresolvedFuture, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
+    AwaitResponse, AwakeableHandle, CallHandle, CoreVM, Error, Header, IdentityVerifier, Input,
+    NonEmptyValue, NotificationHandle, OnMaxAttempts, ResponseHead, RetryPolicy, RunExitResult,
+    RunHandle, TakeOutputResult, Target, TerminalFailure, UnresolvedFuture, VMOptions, Value,
+    CANCEL_NOTIFICATION_HANDLE, VM,
 };
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -175,6 +176,7 @@ impl From<PyExponentialRetryConfig> for RetryPolicy {
                     .max_interval
                     .map(Duration::from_millis)
                     .or_else(|| Some(Duration::from_secs(10))),
+                on_max_attempts: OnMaxAttempts::FailAsTerminal,
             }
         } else {
             // Let's use retry policy infinite here, which will give back control to the invocation retry policy
@@ -313,6 +315,23 @@ impl From<CallHandle> for PyCallHandle {
         PyCallHandle {
             invocation_id_handle: value.invocation_id_notification_handle.into(),
             result_handle: value.call_notification_handle.into(),
+        }
+    }
+}
+
+#[pyclass]
+pub struct PyRun {
+    #[pyo3(get)]
+    replayed: bool,
+    #[pyo3(get)]
+    handle: PyNotificationHandle,
+}
+
+impl From<RunHandle> for PyRun {
+    fn from(value: RunHandle) -> Self {
+        PyRun {
+            replayed: value.replayed,
+            handle: value.handle.into(),
         }
     }
 }
@@ -615,7 +634,7 @@ impl PyVM {
         self_
             .vm
             .sys_awakeable()
-            .map(|(id, handle)| (id, handle.into()))
+            .map(|AwakeableHandle { id, handle }| (id, handle.into()))
             .map_err(Into::into)
     }
 
@@ -699,11 +718,9 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    /// Returns the associated `PyNotificationHandle`.
-    fn sys_run(
-        mut self_: PyRefMut<'_, Self>,
-        name: String,
-    ) -> Result<PyNotificationHandle, PyVMError> {
+    /// Returns the associated `PyRun`, holding the run notification handle and
+    /// whether the run was replayed.
+    fn sys_run(mut self_: PyRefMut<'_, Self>, name: String) -> Result<PyRun, PyVMError> {
         self_.vm.sys_run(name).map(Into::into).map_err(Into::into)
     }
 
@@ -780,6 +797,7 @@ impl PyVM {
                 interval: delay_override_ms.map(Duration::from_millis),
                 max_attempts: max_retry_attempts_override,
                 max_duration: max_retry_duration_override_ms.map(Duration::from_millis),
+                on_max_attempts: OnMaxAttempts::FailAsTerminal,
             }
         } else {
             RetryPolicy::Infinite
@@ -838,7 +856,7 @@ impl PyVM {
     }
 
     fn is_replaying(self_: PyRef<'_, Self>) -> bool {
-        self_.vm.is_replaying()
+        self_.vm.state().is_replaying()
     }
 }
 
@@ -937,6 +955,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDoProgressCancelSignalReceived>()?;
     m.add_class::<PyUnresolvedFuture>()?;
     m.add_class::<PyCallHandle>()?;
+    m.add_class::<PyRun>()?;
 
     m.add("VMException", m.py().get_type::<VMException>())?;
     m.add(
