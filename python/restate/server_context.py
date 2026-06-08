@@ -747,16 +747,19 @@ class ServerInvocationContext(ObjectContext):
                 type_hint = signature.return_annotation
             serde = serde.with_maybe_type(type_hint)
 
-        handle = self.vm.sys_run(name)
+        run = self.vm.sys_run(name)
+        handle = run.handle
         update_restate_context_is_replaying(self.vm)
 
         if args is not None:
             noargs_action = typing.cast(RunAction[T], functools.partial(action, *args))
         else:
             noargs_action = action
-        self.run_coros_to_execute[handle] = lambda: self.create_run_coroutine(
-            handle, noargs_action, serde, max_attempts, max_retry_duration, None, None, None
-        )
+        if not run.replayed:
+            # Schedule the run closure only if the run wasn't replayed.
+            self.run_coros_to_execute[handle] = lambda: self.create_run_coroutine(
+                handle, noargs_action, serde, max_attempts, max_retry_duration, None, None, None
+            )
         return self.create_future(handle, serde)  # type: ignore
 
     def run_typed(
@@ -779,20 +782,23 @@ class ServerInvocationContext(ObjectContext):
                 # use core type as it is more specific. E.g. Optional[T] -> T
                 options.type_hint = core_type
             options.serde = typing.cast(DefaultSerde, options.serde).with_maybe_type(options.type_hint)
-        handle = self.vm.sys_run(name)
+        run = self.vm.sys_run(name)
+        handle = run.handle
         update_restate_context_is_replaying(self.vm)
 
         func = typing.cast(RunAction[T], functools.partial(action, *args, **kwargs))
-        self.run_coros_to_execute[handle] = lambda: self.create_run_coroutine(
-            handle,
-            func,
-            options.serde,
-            options.max_attempts,
-            options.max_duration,
-            options.initial_retry_interval,
-            options.max_retry_interval,
-            options.retry_interval_factor,
-        )
+        if not run.replayed:
+            # Schedule the run closure only if the run wasn't replayed.
+            self.run_coros_to_execute[handle] = lambda: self.create_run_coroutine(
+                handle,
+                func,
+                options.serde,
+                options.max_attempts,
+                options.max_duration,
+                options.initial_retry_interval,
+                options.max_retry_interval,
+                options.retry_interval_factor,
+            )
         return self.create_future(handle, options.serde)
 
     def sleep(self, delta: timedelta, name: Optional[str] = None) -> RestateDurableSleepFuture:
