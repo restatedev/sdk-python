@@ -15,7 +15,9 @@ This module contains the Lambda/ASGI adapter.
 import asyncio
 import base64
 import os
+import contextlib
 from typing import cast, Union, Any
+from types import ModuleType
 
 from restate.server_types import (
     ASGIApp,
@@ -162,17 +164,22 @@ def wrap_asgi_as_lambda_handler(asgi_app: ASGIApp) -> RestateLambdaHandler:
     return lambda_handler
 
 
-def _check_zstd_available() -> bool:
-    """Return True if zstd compression is available (Python 3.14+)."""
-    try:
+def _get_zstd_module() -> ModuleType | None:
+    """Return the module to be used for zstd compression."""
+    with contextlib.suppress(ImportError):
         import compression.zstd  # type: ignore[import-not-found]
 
-        return compression.zstd is not None
-    except ImportError:
-        return False
+        return compression.zstd
+
+    with contextlib.suppress(ImportError):
+        import backports.zstd  # type: ignore[import-not-found]
+
+        return backports.zstd
+
+    return None
 
 
-ZSTD_AVAILABLE = _check_zstd_available()
+ZSTD_AVAILABLE = _get_zstd_module() is not None
 
 
 def is_lambda_compression_supported():
@@ -184,23 +191,24 @@ def is_lambda_compression_supported():
 
 def zstd_compress(data: bytes | bytearray) -> bytes:
     """Compress data using zstd."""
-    try:
-        import compression.zstd  # type: ignore[import-not-found]
-    except ImportError as e:
+    zstd = _get_zstd_module()
+
+    if zstd is None:
         raise RuntimeError(
-            "zstd compression requested but compression.zstd is not available. "
-            "Python 3.14+ is required for zstd compression support."
-        ) from e
-    return compression.zstd.compress(data)
+            "zstd compression requested but compression.zstd or backports.zstd is not available. "
+            "Install the zstd optional default dependency.",
+        )
+    return zstd.compress(data)
 
 
 def zstd_decompress(data: bytes) -> bytes:
     """Decompress zstd-compressed data."""
-    try:
-        import compression.zstd  # type: ignore[import-not-found]
-    except ImportError as e:
+    zstd = _get_zstd_module()
+
+    if zstd is None:
         raise RuntimeError(
             "Received zstd-compressed request but compression.zstd is not available. "
-            "Python 3.14+ is required for zstd compression support."
-        ) from e
-    return compression.zstd.decompress(data)
+            "Install the zstd optional default dependency.",
+        )
+
+    return zstd.decompress(data)
