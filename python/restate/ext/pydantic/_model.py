@@ -112,8 +112,13 @@ class RestateModelWrapper(WrapperModel):
                     pass
             return streamed_response.get()
 
+        context = current_context()
+        if context is None:
+            raise UserError(
+                "A model cannot be used without a Restate context. Make sure to run it within an agent or a run context."
+            )
         try:
-            response = await self._context.run_typed("Model stream call", request_stream_run, self._options)
+            response = await context.run_typed("Model stream call", request_stream_run, self._options)
             yield RestateStreamedResponse(model_request_parameters, response)
         except SdkInternalBaseException as e:
             raise Exception("Internal error during model stream call") from e
