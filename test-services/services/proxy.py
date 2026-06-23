@@ -14,6 +14,7 @@
 
 from datetime import timedelta
 from restate import Service, Context
+from restate.context import RestateDurableCallFuture, SendHandle
 from typing import TypedDict, Optional, Iterable
 
 proxy = Service("Proxy")
@@ -26,34 +27,50 @@ class ProxyRequest(TypedDict):
     message: Iterable[int]
     delayMillis: Optional[int]
     idempotencyKey: Optional[str]
+    scope: Optional[str]
+    limitKey: Optional[str]
 
 
-@proxy.handler()
-async def call(ctx: Context, req: ProxyRequest) -> Iterable[int]:
-    response = await ctx.generic_call(
+def do_call(ctx: Context, req: ProxyRequest) -> RestateDurableCallFuture[bytes]:
+    """Issue the outgoing generic call described by req, forwarding scope/limitKey when set."""
+    return ctx.generic_call(
         req["serviceName"],
         req["handlerName"],
         bytes(req["message"]),
         req.get("virtualObjectKey"),
-        req.get("idempotencyKey"),
+        idempotency_key=req.get("idempotencyKey"),
+        scope=req.get("scope"),
+        limit_key=req.get("limitKey"),
     )
-    return list(response)
 
 
-@proxy.handler(name="oneWayCall")
-async def one_way_call(ctx: Context, req: ProxyRequest) -> str:
+def do_send(ctx: Context, req: ProxyRequest) -> SendHandle:
+    """Issue the outgoing generic send described by req, forwarding scope/limitKey when set."""
     send_delay = None
-    delayMillis = req.get("delayMillis")
-    if delayMillis is not None:
-        send_delay = timedelta(milliseconds=delayMillis)
-    handle = ctx.generic_send(
+    delay_millis = req.get("delayMillis")
+    if delay_millis is not None:
+        send_delay = timedelta(milliseconds=delay_millis)
+    return ctx.generic_send(
         req["serviceName"],
         req["handlerName"],
         bytes(req["message"]),
         req.get("virtualObjectKey"),
         send_delay=send_delay,
         idempotency_key=req.get("idempotencyKey"),
+        scope=req.get("scope"),
+        limit_key=req.get("limitKey"),
     )
+
+
+@proxy.handler()
+async def call(ctx: Context, req: ProxyRequest) -> Iterable[int]:
+    response = await do_call(ctx, req)
+    return list(response)
+
+
+@proxy.handler(name="oneWayCall")
+async def one_way_call(ctx: Context, req: ProxyRequest) -> str:
+    handle = do_send(ctx, req)
     invocation_id = await handle.invocation_id()
     return invocation_id
 
@@ -70,26 +87,9 @@ async def many_calls(ctx: Context, requests: Iterable[ManyCallRequest]):
 
     for req in requests:
         if req["oneWayCall"]:
-            send_delay = None
-            delayMillis = req["proxyRequest"].get("delayMillis")
-            if delayMillis is not None:
-                send_delay = timedelta(milliseconds=delayMillis)
-            ctx.generic_send(
-                req["proxyRequest"]["serviceName"],
-                req["proxyRequest"]["handlerName"],
-                bytes(req["proxyRequest"]["message"]),
-                req["proxyRequest"].get("virtualObjectKey"),
-                send_delay=send_delay,
-                idempotency_key=req["proxyRequest"].get("idempotencyKey"),
-            )
+            do_send(ctx, req["proxyRequest"])
         else:
-            awaitable = ctx.generic_call(
-                req["proxyRequest"]["serviceName"],
-                req["proxyRequest"]["handlerName"],
-                bytes(req["proxyRequest"]["message"]),
-                req["proxyRequest"].get("virtualObjectKey"),
-                idempotency_key=req["proxyRequest"].get("idempotencyKey"),
-            )
+            awaitable = do_call(ctx, req["proxyRequest"])
             if req["awaitAtTheEnd"]:
                 to_await.append(awaitable)
 

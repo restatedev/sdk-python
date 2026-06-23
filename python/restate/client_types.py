@@ -46,11 +46,117 @@ class HttpError(Exception):
         self.body = body
 
 
+class RestateScopedClient(abc.ABC):
+    """
+    An ingress client for making RPC calls within a specific scope.
+
+    **NOTE:** This API is in preview and is not enabled by default.
+    To use it in restate-server 1.7, enable the flow control and protocol v7 experimental features,
+    via ``RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`` and ``RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true``.
+    These can be enabled only on **new clusters**, for more info check out https://docs.restate.dev/services/flow-control#enabling-flow-control.
+    If these experimental features aren't enabled, the invocation isn't ingested and the client request fails.
+
+    Returned by ``client.scope(scope_key)``: calls and sends made through this client
+    carry the captured scope, and each method additionally accepts an optional
+    ``limit_key``.
+
+    The limit key enforces hierarchical concurrency limits on invocations sharing the same scope.
+    It can have one or two levels separated by ``/`` (e.g. ``"tenant1"`` or ``"tenant1/user42"``).
+    Each level must consist only of ``[a-zA-Z0-9_.-]`` characters, and 1 <= length <= 36.
+
+    The limit key is **not** part of the request identity: two calls to the same target with the
+    same scope and object key but different limit keys refer to the **same** resource instance.
+    The limit key only affects concurrency limits, not resource identity.
+    """
+
+    @abc.abstractmethod
+    async def service_call(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> O:
+        """Make an RPC call to the given handler, within this scope"""
+        pass
+
+    @abc.abstractmethod
+    async def service_send(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        """Make a send operation to the given handler, within this scope"""
+        pass
+
+    @abc.abstractmethod
+    async def workflow_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> O:
+        """Make an RPC call to the given workflow handler, within this scope"""
+        pass
+
+    @abc.abstractmethod
+    async def workflow_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        """Make a send operation to the given workflow handler, within this scope"""
+        pass
+
+
 class RestateClient(abc.ABC):
     """
     An abstract base class for a Restate client.
     This class defines the interface for a Restate client.
     """
+
+    @abc.abstractmethod
+    def scope(self, scope: str) -> RestateScopedClient:
+        """
+        Returns a ``RestateScopedClient`` that routes all calls within the given scope.
+
+        **NOTE:** This API is in preview and is not enabled by default.
+        To use it in restate-server 1.7, enable the flow control and protocol v7 experimental features,
+        via ``RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`` and ``RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true``.
+        These can be enabled only on **new clusters**, for more info check out https://docs.restate.dev/services/flow-control#enabling-flow-control.
+        If these experimental features aren't enabled, the invocation won't be ingested and the client request fails.
+
+        A scope is a sub-grouping of resources (invocations, workflow instances, concurrency limits) within the Restate cluster.
+        It becomes part of the target identity tuple:
+        - ``scope, service, handler, idempotency_key?``
+        - ``scope, workflow, workflow_key, handler``
+
+        Under the hood, the scope contributes to the partition key, so all resources in a scope get co-located by the restate-server.
+
+        Omitting the scope (i.e. using the regular ``service_call`` / ``workflow_call`` methods)
+        is equivalent to calling with no scope, which is the existing behavior.
+
+        The scope must consist only of ``[a-zA-Z0-9_.-]`` characters, with 1 <= length <= 36 chars.
+
+        Args:
+            scope: the scope identifier
+
+        See also: https://docs.restate.dev/services/flow-control
+        """
+        pass
 
     @abc.abstractmethod
     async def service_call(
@@ -134,8 +240,15 @@ class RestateClient(abc.ABC):
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> bytes:
-        """Make a generic RPC call to the given service and handler"""
+        """
+        Make a generic RPC call to the given service and handler.
+
+        ``scope`` optionally routes the call within the given scope (see ``RestateClient.scope``);
+        ``limit_key`` is an optional concurrency limit key within the scope and requires ``scope`` to be set.
+        """
         pass
 
     @abc.abstractmethod
@@ -148,6 +261,13 @@ class RestateClient(abc.ABC):
         send_delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> RestateClientSendHandle:
-        """Make a generic send operation to the given service and handler"""
+        """
+        Make a generic send operation to the given service and handler.
+
+        ``scope`` optionally routes the send within the given scope (see ``RestateClient.scope``);
+        ``limit_key`` is an optional concurrency limit key within the scope and requires ``scope`` to be set.
+        """
         pass

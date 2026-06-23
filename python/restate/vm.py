@@ -50,6 +50,9 @@ class Invocation:
     headers: typing.List[typing.Tuple[str, str]]
     input_buffer: bytes
     key: str
+    scope: typing.Optional[str] = None
+    limit_key: typing.Optional[str] = None
+    idempotency_key: typing.Optional[str] = None
 
 
 @dataclass
@@ -229,8 +232,8 @@ class VMWrapper:
             error, stacktrace, int(delay_override.total_seconds() * 1000) if delay_override is not None else None
         )
 
-    def take_output(self) -> typing.Optional[bytes]:
-        """Take the output from the virtual machine."""
+    def take_output(self) -> bytes:
+        """Take the buffered output from the virtual machine, possibly empty when there's nothing buffered."""
         return self.vm.take_output()
 
     def is_ready_to_execute(self) -> bool:
@@ -301,9 +304,19 @@ class VMWrapper:
         headers: typing.List[typing.Tuple[str, str]] = [(h.key, h.value) for h in inp.headers]
         input_buffer: bytes = bytes(inp.input)
         key: str = inp.key
+        scope: typing.Optional[str] = inp.scope
+        limit_key: typing.Optional[str] = inp.limit_key
+        idempotency_key: typing.Optional[str] = inp.idempotency_key
 
         return Invocation(
-            invocation_id=invocation_id, random_seed=random_seed, headers=headers, input_buffer=input_buffer, key=key
+            invocation_id=invocation_id,
+            random_seed=random_seed,
+            headers=headers,
+            input_buffer=input_buffer,
+            key=key,
+            scope=scope,
+            limit_key=limit_key,
+            idempotency_key=idempotency_key,
         )
 
     def sys_write_output_success(self, output: bytes):
@@ -386,10 +399,12 @@ class VMWrapper:
         key: typing.Optional[str] = None,
         idempotency_key: typing.Optional[str] = None,
         headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None,
+        scope: typing.Optional[str] = None,
+        limit_key: typing.Optional[str] = None,
     ):
         """Call a service"""
         py_headers = [PyHeader(key=h[0], value=h[1]) for h in headers] if headers else None
-        return self.vm.sys_call(service, handler, parameter, key, idempotency_key, py_headers)
+        return self.vm.sys_call(service, handler, parameter, key, idempotency_key, py_headers, scope, limit_key)
 
     # pylint: disable=too-many-arguments
     def sys_send(
@@ -401,13 +416,15 @@ class VMWrapper:
         delay: typing.Optional[int] = None,
         idempotency_key: typing.Optional[str] = None,
         headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None,
+        scope: typing.Optional[str] = None,
+        limit_key: typing.Optional[str] = None,
     ) -> int:
         """
         send an invocation to a service, and return the handle
         to the promise that will resolve with the invocation id
         """
         py_headers = [PyHeader(key=h[0], value=h[1]) for h in headers] if headers else None
-        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key, py_headers)
+        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key, py_headers, scope, limit_key)
 
     def sys_run(self, name: str) -> Run:
         """
@@ -434,6 +451,25 @@ class VMWrapper:
         """
         py_failure = PyFailure(failure.code, failure.message)
         self.vm.sys_complete_awakeable_failure(name, py_failure)
+
+    def sys_signal(self, signal_name: str) -> int:
+        """
+        Create a handle to await a named signal on the current invocation.
+        """
+        return self.vm.sys_signal(signal_name)
+
+    def sys_resolve_signal(self, invocation_id: str, signal_name: str, value: bytes):
+        """
+        Resolve a named signal on a target invocation.
+        """
+        self.vm.sys_complete_signal_success(invocation_id, signal_name, value)
+
+    def sys_reject_signal(self, invocation_id: str, signal_name: str, failure: Failure):
+        """
+        Reject a named signal on a target invocation.
+        """
+        py_failure = PyFailure(failure.code, failure.message)
+        self.vm.sys_complete_signal_failure(invocation_id, signal_name, py_failure)
 
     def propose_run_completion_success(self, handle: int, output: bytes) -> None:
         """

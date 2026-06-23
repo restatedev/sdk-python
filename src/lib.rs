@@ -5,7 +5,7 @@ use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
 use restate_sdk_shared_core::{
     AwaitResponse, AwakeableHandle, CallHandle, CoreVM, Error, Header, IdentityVerifier, Input,
     NonEmptyValue, NotificationHandle, OnMaxAttempts, ResponseHead, RetryPolicy, RunExitResult,
-    RunHandle, TakeOutputResult, Target, TerminalFailure, UnresolvedFuture, VMOptions, Value,
+    RunHandle, Target, TerminalFailure, UnresolvedFuture, VMOptions, Value,
     CANCEL_NOTIFICATION_HANDLE, VM,
 };
 use std::fmt;
@@ -72,15 +72,6 @@ impl From<ResponseHead> for PyResponseHead {
     }
 }
 
-fn take_output_result_into_py<'py>(
-    py: Python<'py>,
-    take_output_result: TakeOutputResult,
-) -> Bound<'py, PyAny> {
-    match take_output_result {
-        TakeOutputResult::Buffer(b) => PyBytes::new(py, &b).into_any(),
-        TakeOutputResult::EOF => PyNone::get(py).to_owned().into_any(),
-    }
-}
 
 type PyNotificationHandle = u32;
 
@@ -239,6 +230,12 @@ pub struct PyInput {
     headers: Vec<PyHeader>,
     #[pyo3(get, set)]
     input: Vec<u8>,
+    #[pyo3(get, set)]
+    scope: Option<String>,
+    #[pyo3(get, set)]
+    limit_key: Option<String>,
+    #[pyo3(get, set)]
+    idempotency_key: Option<String>,
 }
 
 impl From<Input> for PyInput {
@@ -249,6 +246,9 @@ impl From<Input> for PyInput {
             key: value.key,
             headers: value.headers.into_iter().map(Into::into).collect(),
             input: value.input.into(),
+            scope: value.scope,
+            limit_key: value.limit_key,
+            idempotency_key: value.idempotency_key,
         }
     }
 }
@@ -411,9 +411,11 @@ impl PyVM {
 
     // Take(s)
 
-    /// Returns either bytes or None, indicating EOF
-    fn take_output(mut self_: PyRefMut<'_, Self>) -> Bound<'_, PyAny> {
-        take_output_result_into_py(self_.py(), self_.vm.take_output())
+    /// Returns the buffered output as bytes, possibly empty when there's nothing buffered.
+    /// The caller (server_context) decides what to do with an empty buffer.
+    fn take_output(mut self_: PyRefMut<'_, Self>) -> Bound<'_, PyBytes> {
+        let output = self_.vm.take_output();
+        PyBytes::new(self_.py(), &output)
     }
 
     fn is_ready_to_execute(self_: PyRef<'_, Self>) -> Result<bool, PyVMError> {
@@ -552,7 +554,8 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    #[pyo3(signature = (service, handler, buffer, key=None, idempotency_key=None, headers=None))]
+    #[pyo3(signature = (service, handler, buffer, key=None, idempotency_key=None, headers=None, scope=None, limit_key=None))]
+    #[allow(clippy::too_many_arguments)]
     fn sys_call(
         mut self_: PyRefMut<'_, Self>,
         service: String,
@@ -561,6 +564,8 @@ impl PyVM {
         key: Option<String>,
         idempotency_key: Option<String>,
         headers: Option<Vec<PyHeader>>,
+        scope: Option<String>,
+        limit_key: Option<String>,
     ) -> Result<PyCallHandle, PyVMError> {
         self_
             .vm
@@ -570,8 +575,8 @@ impl PyVM {
                     handler,
                     key,
                     idempotency_key,
-                    scope: None,
-                    limit_key: None,
+                    scope,
+                    limit_key,
                     headers: headers
                         .unwrap_or_default()
                         .into_iter()
@@ -586,7 +591,7 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    #[pyo3(signature = (service, handler, buffer, key=None, delay=None, idempotency_key=None, headers=None))]
+    #[pyo3(signature = (service, handler, buffer, key=None, delay=None, idempotency_key=None, headers=None, scope=None, limit_key=None))]
     #[allow(clippy::too_many_arguments)]
     fn sys_send(
         mut self_: PyRefMut<'_, Self>,
@@ -597,6 +602,8 @@ impl PyVM {
         delay: Option<u64>,
         idempotency_key: Option<String>,
         headers: Option<Vec<PyHeader>>,
+        scope: Option<String>,
+        limit_key: Option<String>,
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
@@ -606,8 +613,8 @@ impl PyVM {
                     handler,
                     key,
                     idempotency_key,
-                    scope: None,
-                    limit_key: None,
+                    scope,
+                    limit_key,
                     headers: headers
                         .unwrap_or_default()
                         .into_iter()
@@ -661,6 +668,49 @@ impl PyVM {
         self_
             .vm
             .sys_complete_awakeable(id, NonEmptyValue::Failure(value.into()), Default::default())
+            .map_err(Into::into)
+    }
+
+    fn sys_signal(
+        mut self_: PyRefMut<'_, Self>,
+        signal_name: String,
+    ) -> Result<PyNotificationHandle, PyVMError> {
+        self_
+            .vm
+            .create_signal_handle(signal_name)
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    fn sys_complete_signal_success(
+        mut self_: PyRefMut<'_, Self>,
+        invocation_id: String,
+        signal_name: String,
+        buffer: &Bound<'_, PyBytes>,
+    ) -> Result<(), PyVMError> {
+        self_
+            .vm
+            .sys_complete_signal(
+                invocation_id,
+                signal_name,
+                NonEmptyValue::Success(buffer.as_bytes().to_vec().into()),
+            )
+            .map_err(Into::into)
+    }
+
+    fn sys_complete_signal_failure(
+        mut self_: PyRefMut<'_, Self>,
+        invocation_id: String,
+        signal_name: String,
+        value: PyFailure,
+    ) -> Result<(), PyVMError> {
+        self_
+            .vm
+            .sys_complete_signal(
+                invocation_id,
+                signal_name,
+                NonEmptyValue::Failure(value.into()),
+            )
             .map_err(Into::into)
     }
 

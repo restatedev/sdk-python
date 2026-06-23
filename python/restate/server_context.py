@@ -41,6 +41,7 @@ from restate.context import (
     RestateDurableCallFuture,
     RestateDurableFuture,
     RunAction,
+    ScopedContext,
     SendHandle,
     RestateDurableSleepFuture,
     RunOptions,
@@ -208,6 +209,101 @@ class ServerSendHandle(SendHandle):
         """Cancel the invocation."""
         invocation_id = await self.invocation_id()
         self.context.cancel_invocation(invocation_id)
+
+
+class ServerScopedContext(ScopedContext):
+    """This class implements the scoped context returned by ctx.scope(scope)."""
+
+    def __init__(self, context: "ServerInvocationContext", scope: str) -> None:
+        super().__init__()
+        self.context = context
+        self.scope = scope
+
+    def service_call(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[O]:
+        coro = self.context.do_call(
+            tpe,
+            arg,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            scope=self.scope,
+            limit_key=limit_key,
+        )
+        assert not isinstance(coro, SendHandle)
+        return coro
+
+    def service_send(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
+        send = self.context.do_call(
+            tpe=tpe,
+            parameter=arg,
+            send_delay=send_delay,
+            send=True,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            scope=self.scope,
+            limit_key=limit_key,
+        )
+        assert isinstance(send, SendHandle)
+        return send
+
+    def workflow_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[O]:
+        coro = self.context.do_call(
+            tpe,
+            arg,
+            key,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            scope=self.scope,
+            limit_key=limit_key,
+        )
+        assert not isinstance(coro, SendHandle)
+        return coro
+
+    def workflow_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
+        send = self.context.do_call(
+            tpe=tpe,
+            key=key,
+            parameter=arg,
+            send_delay=send_delay,
+            send=True,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            scope=self.scope,
+            limit_key=limit_key,
+        )
+        assert isinstance(send, SendHandle)
+        return send
 
 
 async def async_value(n: Callable[[], T]) -> T:
@@ -453,7 +549,7 @@ class ServerInvocationContext(ObjectContext):
         """Leave the context."""
         while True:
             chunk = self.vm.take_output()
-            if chunk is None:
+            if not chunk:
                 break
             await self.send(
                 {
@@ -648,7 +744,35 @@ class ServerInvocationContext(ObjectContext):
             attempt_headers=self.attempt_headers,
             body=self.invocation.input_buffer,
             attempt_finished_event=ServerTeardownEvent(self.request_finished_event),
+            scope=self.invocation.scope,
+            limit_key=self.invocation.limit_key,
+            idempotency_key=self.invocation.idempotency_key,
         )
+
+    def scope(self, scope: str) -> ScopedContext:
+        return ServerScopedContext(self, scope)
+
+    def signal(
+        self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+    ) -> RestateDurableFuture[T]:
+        if isinstance(serde, DefaultSerde):
+            serde = serde.with_maybe_type(type_hint)
+        handle = self.vm.sys_signal(name)
+        update_restate_context_is_replaying(self.vm)
+        return self.create_future(handle, serde)
+
+    def resolve_signal(self, invocation_id: str, name: str, value: I, serde: Serde[I] = DefaultSerde()) -> None:
+        """Resolve a named signal on a target invocation."""
+        if isinstance(serde, DefaultSerde):
+            serde = serde.with_maybe_type(type(value))
+        buf = serde.serialize(value)
+        self.vm.sys_resolve_signal(invocation_id, name, buf)
+        update_restate_context_is_replaying(self.vm)
+
+    def reject_signal(self, invocation_id: str, name: str, failure_message: str, failure_code: int = 500) -> None:
+        """Reject a named signal on a target invocation."""
+        self.vm.sys_reject_signal(invocation_id, name, Failure(code=failure_code, message=failure_message))
+        update_restate_context_is_replaying(self.vm)
 
     def random(self) -> Random:
         return self.random_instance
@@ -817,6 +941,8 @@ class ServerInvocationContext(ObjectContext):
         send: bool = False,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> RestateDurableCallFuture[O] | SendHandle:
         """Make an RPC call to the given handler"""
         target_handler = handler_from_callable(tpe)
@@ -825,7 +951,18 @@ class ServerInvocationContext(ObjectContext):
         input_serde = target_handler.handler_io.input_serde
         output_serde = target_handler.handler_io.output_serde
         return self.do_raw_call(
-            service, handler, parameter, input_serde, output_serde, key, send_delay, send, idempotency_key, headers
+            service,
+            handler,
+            parameter,
+            input_serde,
+            output_serde,
+            key,
+            send_delay,
+            send,
+            idempotency_key,
+            headers,
+            scope,
+            limit_key,
         )
 
     def do_raw_call(
@@ -840,6 +977,8 @@ class ServerInvocationContext(ObjectContext):
         send: bool = False,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> RestateDurableCallFuture[O] | SendHandle:
         """Make an RPC call to the given handler"""
         parameter = input_serde.serialize(input_param)
@@ -850,13 +989,28 @@ class ServerInvocationContext(ObjectContext):
         if send_delay:
             ms = int(send_delay.total_seconds() * 1000)
             send_handle = self.vm.sys_send(
-                service, handler, parameter, key, delay=ms, idempotency_key=idempotency_key, headers=headers_kvs
+                service,
+                handler,
+                parameter,
+                key,
+                delay=ms,
+                idempotency_key=idempotency_key,
+                headers=headers_kvs,
+                scope=scope,
+                limit_key=limit_key,
             )
             update_restate_context_is_replaying(self.vm)
             return ServerSendHandle(self, send_handle)
         if send:
             send_handle = self.vm.sys_send(
-                service, handler, parameter, key, idempotency_key=idempotency_key, headers=headers_kvs
+                service,
+                handler,
+                parameter,
+                key,
+                idempotency_key=idempotency_key,
+                headers=headers_kvs,
+                scope=scope,
+                limit_key=limit_key,
             )
             update_restate_context_is_replaying(self.vm)
             return ServerSendHandle(self, send_handle)
@@ -868,6 +1022,8 @@ class ServerInvocationContext(ObjectContext):
             key=key,
             idempotency_key=idempotency_key,
             headers=headers_kvs,
+            scope=scope,
+            limit_key=limit_key,
         )
         update_restate_context_is_replaying(self.vm)
 
@@ -964,6 +1120,8 @@ class ServerInvocationContext(ObjectContext):
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> RestateDurableCallFuture[bytes]:
         serde = BytesSerde()
         call_handle = self.do_raw_call(
@@ -975,6 +1133,8 @@ class ServerInvocationContext(ObjectContext):
             key=key,
             idempotency_key=idempotency_key,
             headers=headers,
+            scope=scope,
+            limit_key=limit_key,
         )
         assert not isinstance(call_handle, SendHandle)
         return call_handle
@@ -988,6 +1148,8 @@ class ServerInvocationContext(ObjectContext):
         send_delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> SendHandle:
         serde = BytesSerde()
         send_handle = self.do_raw_call(
@@ -1001,6 +1163,8 @@ class ServerInvocationContext(ObjectContext):
             send=True,
             idempotency_key=idempotency_key,
             headers=headers,
+            scope=scope,
+            limit_key=limit_key,
         )
         assert isinstance(send_handle, SendHandle)
         return send_handle
