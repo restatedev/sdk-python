@@ -151,6 +151,9 @@ class Request:
         attempt_headers (dict[str, str]): The attempt headers of the request.
         body (bytes): The body of the request.
         attempt_finished_event (AttemptFinishedEvent): The teardown event of the request.
+        scope (Optional[str]): The scope key with which this invocation was submitted, if any.
+        limit_key (Optional[str]): The limit key with which this invocation was submitted, if any.
+        idempotency_key (Optional[str]): The idempotency key with which this invocation was submitted, if any.
     """
 
     id: str
@@ -158,6 +161,9 @@ class Request:
     attempt_headers: Dict[str, str]
     body: bytes
     attempt_finished_event: AttemptFinishedEvent
+    scope: Optional[str] = None
+    limit_key: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class KeyValueStore(abc.ABC):
@@ -225,6 +231,86 @@ class SendHandle(abc.ABC):
         """
 
 
+class ScopedContext(abc.ABC):
+    """
+    A context for making RPC calls within a specific scope.
+
+    **NOTE:** This API is in preview and is not enabled by default.
+    To use it in restate-server 1.7, enable the flow control and protocol v7 experimental features,
+    via ``RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`` and ``RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true``.
+    These can be enabled only on **new clusters**, for more info check out https://docs.restate.dev/services/flow-control#enabling-flow-control.
+    When the experimental features are disabled, this method fails the invocation with a retryable error, causing the invocation to be retried until fixed.
+
+    Returned by ``ctx.scope(scope_key)``: calls and sends made through this context
+    carry the captured scope, and each method additionally accepts an optional
+    ``limit_key``.
+
+    The limit key enforces hierarchical concurrency limits on invocations sharing the same scope.
+    It can have one or two levels separated by ``/`` (e.g. ``"tenant1"`` or ``"tenant1/user42"``).
+    Each level must consist only of ``[a-zA-Z0-9_.-]`` characters, and 1 <= length <= 36.
+
+    The limit key is **not** part of the request identity: two calls to the same target with the
+    same scope and object key but different limit keys refer to the **same** resource instance.
+    The limit key only affects concurrency limits, not resource identity.
+    """
+
+    @abc.abstractmethod
+    def service_call(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[O]:
+        """
+        Invokes the given service with the given argument, within this scope.
+        """
+
+    @abc.abstractmethod
+    def service_send(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
+        """
+        Invokes the given service with the given argument, within this scope.
+        """
+
+    @abc.abstractmethod
+    def workflow_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[O]:
+        """
+        Invokes the given workflow with the given argument, within this scope.
+        """
+
+    @abc.abstractmethod
+    def workflow_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
+        """
+        Send a message to a workflow with the given argument, within this scope.
+        """
+
+
 class Context(abc.ABC):
     """
     Represents the context of the current invocation.
@@ -234,6 +320,73 @@ class Context(abc.ABC):
     def request(self) -> Request:
         """
         Returns the request object.
+        """
+
+    @abc.abstractmethod
+    def scope(self, scope: str) -> ScopedContext:
+        """
+        Returns a ``ScopedContext`` that routes all outgoing calls within the given scope.
+
+        **NOTE:** This API is in preview and is not enabled by default.
+        To use it in restate-server 1.7, enable the flow control and protocol v7 experimental features,
+        via ``RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`` and ``RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true``.
+        These can be enabled only on **new clusters**, for more info check out https://docs.restate.dev/services/flow-control#enabling-flow-control.
+        If these experimental features aren't enabled, the call fails with a retryable error and keeps retrying until they are.
+
+        A scope is a sub-grouping of resources (invocations, workflow instances, concurrency limits) within the Restate cluster.
+        It becomes part of the target identity tuple:
+        - ``scope, service, handler, idempotency_key?``
+        - ``scope, workflow, workflow_key, handler``
+
+        Under the hood, the scope contributes to the partition key, so all resources in a scope get co-located by the restate-server.
+
+        Omitting the scope (i.e. using the regular ``service_call`` / ``workflow_call`` methods)
+        is equivalent to calling with no scope, which is the existing behavior.
+
+        The scope must consist only of ``[a-zA-Z0-9_.-]`` characters, with 1 <= length <= 36 chars.
+
+        Args:
+            scope: the scope identifier
+
+        See also: https://docs.restate.dev/services/flow-control
+        """
+
+    @abc.abstractmethod
+    def signal(
+        self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+    ) -> RestateDurableFuture[T]:
+        """
+        Awaits a named signal on the current invocation, resolving when the signal arrives.
+
+        Args:
+            name: The signal name.
+            serde: The serialization/deserialization mechanism. Defaults to DefaultSerde.
+            type_hint: The type hint of the signal value, used to pick the serializer.
+        """
+
+    @abc.abstractmethod
+    def resolve_signal(self, invocation_id: str, name: str, value: I, serde: Serde[I] = DefaultSerde()) -> None:
+        """
+        Resolves a named signal on the target invocation with the given value.
+
+        Args:
+            invocation_id: The id of the target invocation.
+            name: The signal name.
+            value: The value to resolve the signal with.
+            serde: The serialization mechanism. Defaults to DefaultSerde.
+        """
+
+    @abc.abstractmethod
+    def reject_signal(self, invocation_id: str, name: str, failure_message: str, failure_code: int = 500) -> None:
+        """
+        Rejects a named signal on the target invocation. The handler awaiting the
+        signal will observe a terminal error with the given message and code.
+
+        Args:
+            invocation_id: The id of the target invocation.
+            name: The signal name.
+            failure_message: The failure message.
+            failure_code: The failure code. Defaults to 500.
         """
 
     @abc.abstractmethod
@@ -519,9 +672,15 @@ class Context(abc.ABC):
         key: Optional[str] = None,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> RestateDurableCallFuture[bytes]:
         """
         Invokes the given generic service/handler with the given argument.
+
+        Args:
+            scope: Optional scope to route the call within. See ``Context.scope``. Since restate-server 1.7.
+            limit_key: Optional concurrency limit key within the scope. Requires ``scope`` to be set. Since restate-server 1.7.
         """
 
     @abc.abstractmethod
@@ -534,9 +693,15 @@ class Context(abc.ABC):
         send_delay: Optional[timedelta] = None,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> SendHandle:
         """
         Send a message to a generic service/handler with the given argument.
+
+        Args:
+            scope: Optional scope to route the send within. See ``Context.scope``. Since restate-server 1.7.
+            limit_key: Optional concurrency limit key within the scope. Requires ``scope`` to be set. Since restate-server 1.7.
         """
 
     @abc.abstractmethod

@@ -13,10 +13,11 @@
 # pylint: disable=W0613
 
 import os
+import asyncio
 from datetime import timedelta
 from typing import Iterable, List, Union, TypedDict, Literal, Any
 from restate import VirtualObject, ObjectSharedContext, ObjectContext, RestateDurableFuture, RestateDurableSleepFuture
-from restate import select, wait_completed, as_completed
+from restate import select, wait_completed, as_completed, gather
 from restate.exceptions import TerminalError
 
 virtual_object_command_interpreter = VirtualObject("VirtualObjectCommandInterpreter")
@@ -50,7 +51,17 @@ class RunThrowTerminalException(TypedDict):
     reason: str
 
 
-AwaitableCommand = Union[CreateAwakeable, Sleep, RunThrowTerminalException]
+class CreateSignal(TypedDict):
+    type: Literal["createSignal"]
+    signalName: str
+
+
+class RunReturns(TypedDict):
+    type: Literal["runReturns"]
+    value: str
+
+
+AwaitableCommand = Union[CreateAwakeable, Sleep, RunThrowTerminalException, CreateSignal, RunReturns]
 
 
 class AwaitOne(TypedDict):
@@ -65,6 +76,26 @@ class AwaitAnySuccessful(TypedDict):
 
 class AwaitAny(TypedDict):
     type: Literal["awaitAny"]
+    commands: List[AwaitableCommand]
+
+
+class AwaitFirstSucceededOrAllFailed(TypedDict):
+    type: Literal["awaitFirstSucceededOrAllFailed"]
+    commands: List[AwaitableCommand]
+
+
+class AwaitFirstCompleted(TypedDict):
+    type: Literal["awaitFirstCompleted"]
+    commands: List[AwaitableCommand]
+
+
+class AwaitAllSucceededOrFirstFailed(TypedDict):
+    type: Literal["awaitAllSucceededOrFirstFailed"]
+    commands: List[AwaitableCommand]
+
+
+class AwaitAllCompleted(TypedDict):
+    type: Literal["awaitAllCompleted"]
     commands: List[AwaitableCommand]
 
 
@@ -92,7 +123,17 @@ class GetEnvVariable(TypedDict):
 
 
 Command = Union[
-    AwaitOne, AwaitAny, AwaitAnySuccessful, AwaitAwakeableOrTimeout, ResolveAwakeable, RejectAwakeable, GetEnvVariable
+    AwaitOne,
+    AwaitAny,
+    AwaitAnySuccessful,
+    AwaitFirstSucceededOrAllFailed,
+    AwaitFirstCompleted,
+    AwaitAllSucceededOrFirstFailed,
+    AwaitAllCompleted,
+    AwaitAwakeableOrTimeout,
+    ResolveAwakeable,
+    RejectAwakeable,
+    GetEnvVariable,
 ]
 
 
@@ -130,6 +171,25 @@ def to_durable_future(ctx: ObjectContext, cmd: AwaitableCommand) -> RestateDurab
 
         res = ctx.run_typed("run should fail command", side_effect, reason=cmd["reason"])
         return res
+    elif cmd["type"] == "createSignal":
+        return ctx.signal(cmd["signalName"], type_hint=str)
+    elif cmd["type"] == "runReturns":
+
+        async def run_returns(value: str) -> str:
+            # genuinely async: suspend inside the run block rather than returning synchronously
+            await asyncio.sleep(0)
+            return value
+
+        return ctx.run_typed("runReturns", run_returns, value=cmd["value"])
+
+
+async def resolve_command_result(fut: RestateDurableFuture[Any]) -> str:
+    """Await a single command future, mapping a sleep future to the literal "sleep"."""
+    # We need this dance because the Python SDK doesn't support .map on futures
+    if isinstance(fut, RestateDurableSleepFuture):
+        await fut
+        return "sleep"
+    return await fut
 
 
 @virtual_object_command_interpreter.handler(name="interpretCommands")
@@ -160,35 +220,41 @@ async def interpret_commands(ctx: ObjectContext, req: InterpretRequest):
             result = await ctx.run_typed("get_env", side_effect, env_name=env_name)
         elif cmd["type"] == "awaitOne":
             awaitable = to_durable_future(ctx, cmd["command"])
-            # We need this dance because the Python SDK doesn't support .map on futures
-            if isinstance(awaitable, RestateDurableSleepFuture):
-                await awaitable
-                result = "sleep"
-            else:
-                result = await awaitable
-        elif cmd["type"] == "awaitAny":
+            result = await resolve_command_result(awaitable)
+        elif cmd["type"] in ("awaitAny", "awaitFirstCompleted"):
+            # Promise.race: settle with whatever the first command to complete does.
             futures = [to_durable_future(ctx, c) for c in cmd["commands"]]
             done, _ = await wait_completed(*futures)
-            done_fut = done[0]
-            # We need this dance because the Python SDK doesn't support .map on futures
-            if isinstance(done_fut, RestateDurableSleepFuture):
-                await done_fut
-                result = "sleep"
-            else:
-                result = await done_fut
-        elif cmd["type"] == "awaitAnySuccessful":
+            result = await resolve_command_result(done[0])
+        elif cmd["type"] in ("awaitAnySuccessful", "awaitFirstSucceededOrAllFailed"):
+            # Promise.any: resolve with the first success; if all fail, raise the last error.
             futures = [to_durable_future(ctx, c) for c in cmd["commands"]]
+            last_error: TerminalError | None = None
             async for done_fut in as_completed(*futures):
                 try:
-                    # We need this dance because the Python SDK doesn't support .map on futures
-                    if isinstance(done_fut, RestateDurableSleepFuture):
-                        await done_fut
-                        result = "sleep"
-                        break
-                    result = await done_fut
+                    result = await resolve_command_result(done_fut)
                     break
-                except TerminalError:
-                    pass
+                except TerminalError as err:
+                    last_error = err
+            else:
+                assert last_error is not None
+                raise last_error
+        elif cmd["type"] == "awaitAllSucceededOrFirstFailed":
+            # Promise.all: wait for all to succeed, raise on the first failure (input order).
+            futures = [to_durable_future(ctx, c) for c in cmd["commands"]]
+            await gather(*futures)
+            result = "|".join([await resolve_command_result(f) for f in futures])
+        elif cmd["type"] == "awaitAllCompleted":
+            # Promise.allSettled: wait for all to settle, never raise.
+            futures = [to_durable_future(ctx, c) for c in cmd["commands"]]
+            await gather(*futures)
+            parts = []
+            for f in futures:
+                try:
+                    parts.append("ok:" + await resolve_command_result(f))
+                except TerminalError as err:
+                    parts.append("err:" + err.message)
+            result = "|".join(parts)
 
         last_results = await get_results(ctx)
         last_results.append(result)

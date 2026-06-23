@@ -17,7 +17,7 @@ import httpx
 import typing
 from contextlib import asynccontextmanager
 
-from .client_types import RestateClient, RestateClientSendHandle, HttpError
+from .client_types import RestateClient, RestateClientSendHandle, RestateScopedClient, HttpError
 
 from .context import HandlerType
 from .serde import BytesSerde, JsonSerde, Serde
@@ -36,6 +36,9 @@ class Client(RestateClient):
         self.headers = headers or {}
         self.client = client
 
+    def scope(self, scope: str) -> RestateScopedClient:
+        return ScopedClient(self, scope)
+
     async def do_call(
         self,
         tpe: HandlerType[I, O],
@@ -46,6 +49,8 @@ class Client(RestateClient):
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
         force_json_output: bool = False,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> O:
         """Make an RPC call to the given handler"""
         target_handler = handler_from_callable(tpe)
@@ -77,6 +82,8 @@ class Client(RestateClient):
             send=send,
             idempotency_key=idempotency_key,
             headers=headers,
+            scope=scope,
+            limit_key=limit_key,
         )
 
     async def do_raw_call(
@@ -91,6 +98,8 @@ class Client(RestateClient):
         send: bool = False,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> O:
         """Make an RPC call to the given handler"""
         parameter = input_serde.serialize(input_param)
@@ -112,6 +121,8 @@ class Client(RestateClient):
             key=key,
             delay=ms,
             idempotency_key=idempotency_key,
+            scope=scope,
+            limit_key=limit_key,
         )
         return output_serde.deserialize(res)  # type: ignore
 
@@ -126,21 +137,37 @@ class Client(RestateClient):
         key: str | None = None,
         delay: int | None = None,
         idempotency_key: str | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> bytes:
         """
         Send a POST request to the Restate service.
         """
-        endpoint = service
-        if key:
-            endpoint += f"/{key}"
-        endpoint += f"/{handler}"
-        if send:
-            endpoint += "/send"
-            if delay is not None:
+        if scope is not None:
+            # Scoped invocations use the dedicated ingress path:
+            #   restate/scope/{scope}/call/{service}[/{key}]/{handler}
+            #   restate/scope/{scope}/send/{service}[/{key}]/{handler}
+            verb = "send" if send else "call"
+            endpoint = f"restate/scope/{scope}/{verb}/{service}"
+            if key:
+                endpoint += f"/{key}"
+            endpoint += f"/{handler}"
+            if send and delay is not None:
                 endpoint = endpoint + f"?delay={delay}"
+        else:
+            endpoint = service
+            if key:
+                endpoint += f"/{key}"
+            endpoint += f"/{handler}"
+            if send:
+                endpoint += "/send"
+                if delay is not None:
+                    endpoint = endpoint + f"?delay={delay}"
         dict_headers = dict(headers) if headers is not None else {}
         if idempotency_key is not None:
             dict_headers["Idempotency-Key"] = idempotency_key
+        if limit_key is not None:
+            dict_headers["x-restate-limit-key"] = limit_key
         res = await self.client.post(endpoint, headers=dict_headers, content=content)
         if res.status_code >= 400:
             raise HttpError(res.status_code, res.reason_phrase, res.text)
@@ -250,6 +277,8 @@ class Client(RestateClient):
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> bytes:
         serde = BytesSerde()
         call_handle = await self.do_raw_call(
@@ -261,6 +290,8 @@ class Client(RestateClient):
             key=key,
             idempotency_key=idempotency_key,
             headers=headers,
+            scope=scope,
+            limit_key=limit_key,
         )
         return call_handle
 
@@ -273,6 +304,8 @@ class Client(RestateClient):
         send_delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: typing.Dict[str, str] | None = None,
+        scope: str | None = None,
+        limit_key: str | None = None,
     ) -> RestateClientSendHandle:
         serde = BytesSerde()
         output_serde: Serde[dict] = JsonSerde()
@@ -288,9 +321,108 @@ class Client(RestateClient):
             send=True,
             idempotency_key=idempotency_key,
             headers=headers,
+            scope=scope,
+            limit_key=limit_key,
         )
 
         return RestateClientSendHandle(send_handle_json.get("invocationId", ""), 200)  # TODO: verify
+
+
+class ScopedClient(RestateScopedClient):
+    """
+    A scoped client returned by ``client.scope(scope_key)``.
+
+    Re-dispatches to the underlying :class:`Client` with the captured scope and a
+    per-call ``limit_key``.
+    """
+
+    def __init__(self, client: Client, scope_key: str):
+        self.client = client
+        self.scope_key = scope_key
+
+    async def service_call(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> O:
+        return await self.client.do_call(
+            tpe,
+            arg,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            scope=self.scope_key,
+            limit_key=limit_key,
+        )
+
+    async def service_send(
+        self,
+        tpe: HandlerType[I, O],
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        send_handle = await self.client.do_call(
+            tpe,
+            parameter=arg,
+            send=True,
+            send_delay=send_delay,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            force_json_output=True,
+            scope=self.scope_key,
+            limit_key=limit_key,
+        )
+        send = typing.cast(typing.Dict[str, str], send_handle)
+        return RestateClientSendHandle(send.get("invocationId", ""), 200)
+
+    async def workflow_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> O:
+        return await self.client.do_call(
+            tpe,
+            arg,
+            key,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            scope=self.scope_key,
+            limit_key=limit_key,
+        )
+
+    async def workflow_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        send_handle = await self.client.do_call(
+            tpe,
+            parameter=arg,
+            key=key,
+            send=True,
+            send_delay=send_delay,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            force_json_output=True,
+            scope=self.scope_key,
+            limit_key=limit_key,
+        )
+        send = typing.cast(typing.Dict[str, str], send_handle)
+        return RestateClientSendHandle(send.get("invocationId", ""), 200)
 
 
 @asynccontextmanager

@@ -34,6 +34,7 @@ from .context import (
     RestateDurableFuture,
     RestateDurableCallFuture,
     RestateDurableSleepFuture,
+    ScopedContext,
     SendHandle,
     RunOptions,
 )
@@ -101,6 +102,7 @@ __all__ = [
     "RestateDurableCallFuture",
     "RestateDurableSleepFuture",
     "SendHandle",
+    "ScopedContext",
     "RunOptions",
     "TerminalError",
     "app",
