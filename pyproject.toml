@@ -31,6 +31,9 @@ openai = ["openai-agents>=0.6.1"]
 pydantic_ai = ["pydantic-ai-slim>=1.68.0"]
 langchain = ["langchain>=1.0.0", "langgraph>=1.0.0", "langchain-core>=1.0.0"]
 tracing = ["opentelemetry-api>=1.36.0"]
+zstd = [
+    "backports.zstd ; python_version < '3.14'",
+]
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]
