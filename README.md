@@ -28,21 +28,18 @@ pip install restate_sdk
 
 ## Versions
 
-The compatibility with Restate is described in the following table:
+The compatibility with Restate is described in the following table. sdk-python versions < 0.10 are deprecated and no longer supported.
 
-| Restate Server\sdk-python | < 0.6            | 0.6 - 0.7 | 0.8 - 0.9        | 0.10 - 0.18      |
-|---------------------------|------------------|-----------|------------------|------------------|
-| < 1.3                     | ✅                | ❌         | ❌                | ❌                |
-| 1.3                       | ✅                | ✅         | ✅ <sup>(1)</sup> | ✅ <sup>(2)</sup> |
-| 1.4                       | ✅                | ✅         | ✅                | ✅ <sup>(2)</sup> |
-| 1.5                       | ⚠ <sup>(3)</sup> | ✅         | ✅                | ✅                |
-| 1.6                       | ⚠ <sup>(3)</sup> | ✅         | ✅                | ✅                |
-
-<sup>(1)</sup> **Note** The new Service/Object/Workflow constructor fields and the decorator fields `inactivity_timeout`, `abort_timeout`, `journal_retention`, `idempotency_retention`, `ingress_private`, `workflow_retention` work only from Restate 1.4 onward. Check the in-code documentation for more details.
+| Restate Server\sdk-python | 0.10 - 0.18      | 1.0                 |
+|---------------------------|------------------|---------------------|
+| < 1.3                     | ❌                | ❌                   |
+| 1.3 - 1.4                 | ✅ <sup>(1)</sup> | ✅ <sup>(1)(2)</sup> |
+| 1.5 - 1.6                 | ✅                | ✅ <sup>(2)</sup>    |
+| 1.7                       | ✅                | ✅                   |
 
 <sup>(1)</sup> **Note** The new Service/Object/Workflow constructor field and the decorator field `invocation_retry_policy` works only from Restate 1.4 onward. Check the in-code documentation for more details.
 
-<sup>(3)</sup> **Warning** SDK versions < 0.6 are deprecated, and cannot be registered anymore. Check the [Restate 1.5 release notes](https://github.com/restatedev/restate/releases/tag/v1.5.0) for more info.
+<sup>(2)</sup> **Note** Scopes and limit keys work only from Restate 1.7 onward. Check the in-code documentation for more details.
 
 ## Contributing
 
