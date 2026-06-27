@@ -12,7 +12,6 @@ from pydantic_ai import models
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.agent.abstract import AbstractAgent, AgentMetadata, EventStreamHandler, RunOutputDataT, Instructions
 from pydantic_ai.agent.wrapper import WrapperAgent
-from pydantic_ai.builtin_tools import AbstractBuiltinTool
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import AgentStreamEvent, ModelMessage, UserContent
 from pydantic_ai.models import Model
@@ -20,12 +19,36 @@ from pydantic_ai.output import OutputDataT, OutputSpec
 from pydantic_ai.result import StreamedRunResult
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.tools import DeferredToolResults, RunContext, BuiltinToolFunc
+from pydantic_ai.tools import DeferredToolResults, RunContext
+
+# pydantic-ai >= 2.0 renamed `builtin_tools` -> `native_tools` (and the matching
+# `BuiltinToolFunc` -> `NativeToolFunc`). The new names are also available on the
+# pydantic-ai 1.x deprecation shim, so import the v2 names first and fall back to the
+# v1 module only when running against an older 1.x release that predates the rename.
+try:
+    from pydantic_ai.native_tools import AbstractNativeTool
+    from pydantic_ai.tools import NativeToolFunc
+except ImportError:  # pragma: no cover - pydantic-ai < the native_tools rename
+    from pydantic_ai.builtin_tools import (  # type: ignore[import-not-found, no-redef]
+        AbstractBuiltinTool as AbstractNativeTool,
+    )
+    from pydantic_ai.tools import BuiltinToolFunc as NativeToolFunc  # type: ignore[attr-defined, no-redef]
 from pydantic_ai.toolsets.abstract import AbstractToolset
 from pydantic_ai.toolsets.function import FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 from ._model import RestateModelWrapper
 from ._toolset import RestateContextRunToolSet
+
+# pydantic-ai >= 2.0 removed the `builtin_tools=` run-time argument (and its deprecation
+# shim): native tools must now be supplied as `capabilities=[NativeTool(tool), ...]`.
+# pydantic-ai 1.68+ already exposes the `NativeTool` capability alongside the legacy
+# `builtin_tools=` argument, so when `NativeTool` is importable we translate uniformly
+# (works on both lines); otherwise we fall back to forwarding `builtin_tools=` for the
+# oldest supported 1.x releases that predate the capability.
+try:
+    from pydantic_ai.capabilities import NativeTool
+except ImportError:  # pragma: no cover - pydantic-ai < the NativeTool capability
+    NativeTool = None  # type: ignore[assignment, misc]
 
 
 class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
@@ -111,13 +134,15 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
             if isinstance(toolset, FunctionToolset) and auto_wrap_tools:
                 return RestateContextRunToolSet(toolset, run_options)
             try:
-                from pydantic_ai.mcp import MCPServer
-
-                from ._toolset import RestateMCPServer
+                # `MCP_TOOLSET_CLASSES` is the tuple of MCP toolset base classes present
+                # in the installed pydantic-ai (`MCPServer` on 1.x, `MCPToolset` on >= 2.0;
+                # the concrete servers subclass different bases across the rename), resolved
+                # once in `_toolset` so the version detection lives in a single place.
+                from ._toolset import MCP_TOOLSET_CLASSES, RestateMCPServer
             except ImportError:
                 pass
             else:
-                if isinstance(toolset, MCPServer):
+                if MCP_TOOLSET_CLASSES and isinstance(toolset, MCP_TOOLSET_CLASSES):
                     return RestateMCPServer(toolset, run_options)
 
             return toolset
@@ -184,7 +209,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         metadata: AgentMetadata[AgentDepsT] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        builtin_tools: Sequence[AbstractBuiltinTool | BuiltinToolFunc[AgentDepsT]] | None = None,
+        builtin_tools: Sequence[AbstractNativeTool | NativeToolFunc[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
     ) -> AgentRunResult[OutputDataT]: ...
 
@@ -205,7 +230,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         metadata: AgentMetadata[AgentDepsT] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        builtin_tools: Sequence[AbstractBuiltinTool | BuiltinToolFunc[AgentDepsT]] | None = None,
+        builtin_tools: Sequence[AbstractNativeTool | NativeToolFunc[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
     ) -> AgentRunResult[RunOutputDataT]: ...
 
@@ -225,7 +250,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         metadata: AgentMetadata[AgentDepsT] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        builtin_tools: Sequence[AbstractBuiltinTool | BuiltinToolFunc[AgentDepsT]] | None = None,
+        builtin_tools: Sequence[AbstractNativeTool | NativeToolFunc[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
     ) -> AgentRunResult[Any]:
         """Run the agent with a user prompt in async mode.
@@ -269,6 +294,19 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
             raise TerminalError(
                 "An agent needs to have a `model` in order to be used with Restate, it cannot be set at agent run time."
             )
+
+        # pydantic-ai >= 2.0 removed the `builtin_tools=` run-time argument; native tools
+        # must be supplied through `capabilities=[NativeTool(tool), ...]`. When the
+        # `NativeTool` capability is available (pydantic-ai 1.68+) translate uniformly so
+        # the same code path works on both lines; only the oldest 1.x releases that
+        # predate the capability still take the legacy `builtin_tools=` argument.
+        forward_kwargs: dict[str, Any] = {}
+        if NativeTool is not None:
+            if builtin_tools:
+                forward_kwargs["capabilities"] = [NativeTool(tool) for tool in builtin_tools]
+        elif builtin_tools is not None:  # pragma: no cover - pydantic-ai < the NativeTool capability
+            forward_kwargs["builtin_tools"] = builtin_tools
+
         with self._restate_overrides():
             return await super(WrapperAgent, self).run(
                 user_prompt=user_prompt,
@@ -284,8 +322,8 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
                 metadata=metadata,
                 infer_name=infer_name,
                 toolsets=toolsets,
-                builtin_tools=builtin_tools,
                 event_stream_handler=event_stream_handler,
+                **forward_kwargs,
             )
 
     @overload
@@ -305,7 +343,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         metadata: AgentMetadata[AgentDepsT] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        builtin_tools: Sequence[AbstractBuiltinTool | BuiltinToolFunc[AgentDepsT]] | None = None,
+        builtin_tools: Sequence[AbstractNativeTool | NativeToolFunc[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
     ) -> AbstractAsyncContextManager[StreamedRunResult[AgentDepsT, OutputDataT]]: ...
 
@@ -326,7 +364,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         metadata: AgentMetadata[AgentDepsT] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        builtin_tools: Sequence[AbstractBuiltinTool | BuiltinToolFunc[AgentDepsT]] | None = None,
+        builtin_tools: Sequence[AbstractNativeTool | NativeToolFunc[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
     ) -> AbstractAsyncContextManager[StreamedRunResult[AgentDepsT, RunOutputDataT]]: ...
 
@@ -347,7 +385,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         metadata: AgentMetadata[AgentDepsT] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        builtin_tools: Sequence[AbstractBuiltinTool | BuiltinToolFunc[AgentDepsT]] | None = None,
+        builtin_tools: Sequence[AbstractNativeTool | NativeToolFunc[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         **_deprecated_kwargs: Any,
     ) -> AsyncIterator[StreamedRunResult[AgentDepsT, Any]]:
