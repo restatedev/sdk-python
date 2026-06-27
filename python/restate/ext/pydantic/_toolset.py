@@ -11,13 +11,37 @@ from restate.extensions import current_context
 from pydantic_ai import ToolDefinition
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.exceptions import ApprovalRequired, CallDeferred, ModelRetry, UserError
-from pydantic_ai.mcp import MCPServer, ToolResult
+from pydantic_ai.mcp import ToolResult  # unchanged across the v1 -> v2 rename
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets.abstract import AbstractToolset, ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from ._serde import PydanticTypeAdapter
 from ._utils import current_state
+
+# pydantic-ai renamed the MCP server toolset `pydantic_ai.mcp.MCPServer` ->
+# `pydantic_ai.mcp.MCPToolset`. Crucially the two are *separate* classes (both subclass
+# `AbstractToolset`, neither inherits the other): on pydantic-ai 1.x the concrete servers
+# (`MCPServerStdio`/`MCPServerSSE`/`MCPServerStreamableHTTP`) subclass `MCPServer`, while
+# on >= 2.0 only `MCPToolset` remains. We therefore match against *all* of the MCP base
+# classes that exist in the installed version (`isinstance` accepts a tuple), so an MCP
+# toolset is detected regardless of which base name its concrete class derives from.
+_mcp_bases: list[type] = []
+try:
+    from pydantic_ai.mcp import MCPServer  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - pydantic-ai dropped the legacy MCPServer name
+    pass
+else:
+    _mcp_bases.append(MCPServer)
+try:
+    from pydantic_ai.mcp import MCPToolset
+except ImportError:  # pragma: no cover - pydantic-ai < the MCPToolset rename
+    pass
+else:
+    _mcp_bases.append(MCPToolset)
+
+# Tuple for runtime `isinstance` checks (matches whichever MCP bases are installed).
+MCP_TOOLSET_CLASSES: tuple[type, ...] = tuple(_mcp_bases)
 
 
 @dataclass
@@ -119,7 +143,7 @@ class RestateContextRunToolSet(WrapperToolset[AgentDepsT]):
 class RestateMCPServer(WrapperToolset[AgentDepsT]):
     """A wrapper for MCPServer that integrates with restate."""
 
-    def __init__(self, wrapped: MCPServer, run_options: RunOptions):
+    def __init__(self, wrapped: AbstractToolset[AgentDepsT], run_options: RunOptions):
         super().__init__(wrapped)
         self._wrapped = wrapped
         self.get_tools_options = replace(run_options, serde=MCP_GET_TOOLS_SERDE)
@@ -151,8 +175,11 @@ class RestateMCPServer(WrapperToolset[AgentDepsT]):
             raise Exception("Internal error during get_tools call") from e
 
     def tool_for_tool_def(self, tool_def: ToolDefinition) -> ToolsetTool[AgentDepsT]:
-        assert isinstance(self.wrapped, MCPServer)
-        return self.wrapped.tool_for_tool_def(tool_def)
+        assert isinstance(self.wrapped, MCP_TOOLSET_CLASSES)
+        # `MCP_TOOLSET_CLASSES` is a runtime tuple, so it cannot narrow `self.wrapped`
+        # (typed `AbstractToolset` by `WrapperToolset`) for the type-checker; the assert
+        # above guarantees the concrete MCP toolset method is present.
+        return self.wrapped.tool_for_tool_def(tool_def)  # type: ignore[attr-defined]
 
     async def call_tool(
         self,
