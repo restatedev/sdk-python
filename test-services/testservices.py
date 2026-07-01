@@ -22,7 +22,7 @@ def test_services():
     return services.services_named(names.split(",")) if names else services.all_services()
 
 
-e2e_signing_key_env = os.environ.get("E2E_REQUEST_SIGNING_ENV")
+e2e_signing_key_env = os.environ.get("E2E_REQUEST_SIGNING")
 if e2e_signing_key_env is not None:
     e2e_signing_key_env = [e2e_signing_key_env]
 
