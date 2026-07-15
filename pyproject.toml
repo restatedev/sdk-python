@@ -52,6 +52,7 @@ include = [
     "examples/**/*.py",
     "tests/**/*.py",
     "test-services//**/*.py",
+    "ai-tests/**/*.py",
 ]
 
 [tool.ruff.lint]

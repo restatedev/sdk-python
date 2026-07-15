@@ -32,6 +32,10 @@ typecheck: typecheck-pyright typecheck-mypy
 test:
     uv run -m pytest tests/*
 
+# AI integration tests (needs docker + OPENAI_API_KEY).
+test-ai:
+    uv run -m pytest ai-tests/ -v
+
 
 # Recipe to run both mypy and pylint
 verify: format lint typecheck test
