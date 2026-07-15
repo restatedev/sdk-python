@@ -10,19 +10,13 @@
 #
 """
 A minimal OpenAI-agents service used by the AI integration tests.
-
-It mirrors the shape of the `openai-agents` examples in restatedev/ai-examples:
-a Virtual Object whose handler runs a tool-calling agent through Restate's
-``DurableRunner`` with a durable session. This exercises the surfaces most
-likely to break on an upstream ``openai-agents`` bump: LLM-call journaling,
-durable tool execution and session-state (de)serialization across replay.
 """
-
+import uuid
 import restate
 from restate import ObjectContext
 
 from agents import Agent
-from restate.ext.openai import DurableRunner, durable_function_tool
+from restate.ext.openai import DurableRunner, durable_function_tool, restate_object_context
 
 # A cheap model keeps cost negligible while still producing genuinely
 # non-deterministic output, which is exactly what surfaces replay bugs.
@@ -36,7 +30,9 @@ async def get_weather(city: str) -> str:
     Args:
         city: The city to get the weather for.
     """
-    return f"The weather in {city} is sunny and 22 degrees Celsius."
+    async def call_weather_api():
+        return f"The weather in {str(uuid.uuid4())} is sunny and 22 degrees Celsius."
+    return await restate_object_context().run_typed("call weather api", call_weather_api)
 
 
 agent = Agent(
