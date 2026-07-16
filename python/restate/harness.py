@@ -149,7 +149,8 @@ class RestateContainer(DockerContainer):
             self.with_env("RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT", "10m")
         self.with_env("RESTATE_WORKER__INVOKER__ABORT_TIMEOUT", "10m")
         if disable_retries:
-            self.with_env("RESTATE_WORKER__INVOKER__RETRY_POLICY__TYPE", "none")
+            self.with_env("RESTATE_DEFAULT_RETRY_POLICY__MAX_ATTEMPTS", "1")
+            self.with_env("RESTATE_DEFAULT_RETRY_POLICY__ON_MAX_ATTEMPTS", "kill")
 
         self.with_kwargs(extra_hosts={"host.docker.internal": "host-gateway"})
         self.waiting_for(
