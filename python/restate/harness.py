@@ -172,9 +172,9 @@ class RestateContainer(DockerContainer):
         """return an httpx client to access the admin interface"""
         return httpx.Client(base_url=self.admin_url())
 
-    def get_ingress_client(self):
+    def get_ingress_client(self, timeout: float | None = 30.0):
         """return an httpx client to access the ingress interface"""
-        return httpx.Client(base_url=self.ingress_url())
+        return httpx.Client(base_url=self.ingress_url(), timeout=timeout)
 
     def start(self, stream_logs=False):
         """start the container and wait for health checks to pass"""
@@ -200,6 +200,7 @@ class TestConfiguration:
     stream_logs: bool = False
     always_replay: bool = False
     disable_retries: bool = False
+    client_timeout: float | None = 30.0
 
 
 class RestateTestHarness:
@@ -256,7 +257,7 @@ class RestateTestHarness:
         """return an httpx client to access the restate server's ingress"""
         if self.restate is None:
             raise AssertionError("The Restate server has not been started. Use .start()")
-        return self.restate.get_ingress_client()
+        return self.restate.get_ingress_client(timeout=self.config.client_timeout)
 
     def __enter__(self):
         self.start()
@@ -318,6 +319,7 @@ def test_harness(
     restate_image: str = "docker.io/restatedev/restate:latest",
     always_replay: bool = False,
     disable_retries: bool = False,
+    client_timeout: float | None = 30.0,
 ) -> RestateTestHarness:
     """
     DEPRECATED: Use ctx.create_test_harness instead.
@@ -327,6 +329,7 @@ def test_harness(
         stream_logs=follow_logs,
         always_replay=always_replay,
         disable_retries=disable_retries,
+        client_timeout=client_timeout,
     )
     return RestateTestHarness(app, config)
 
@@ -338,6 +341,7 @@ async def create_test_harness(
     restate_image: str = "docker.io/restatedev/restate:latest",
     always_replay: bool = False,
     disable_retries: bool = False,
+    client_timeout: float | None = 30.0,
 ) -> typing.AsyncGenerator[HarnessEnvironment, None]:
     """
     Creates a test harness for running Restate services together with restate-server.
@@ -360,6 +364,7 @@ async def create_test_harness(
                           on a suspension point. This is useful to hunt non-deterministic bugs
                           that might prevent your code to replay correctly (default is False).
     :param disable_retries: When True, retries are disabled (default is False).
+    :param client_timeout: HTTP request timeout for the harness client in seconds. Set to None to disable it.
     """
     with (
         create_restate_container(
@@ -377,7 +382,7 @@ async def create_test_harness(
             msg = f"unable to register the services at {bind_address} - {res.status_code} {res.text}"
             raise AssertionError(msg)
 
-        async with create_client(runtime.ingress_url()) as client:
+        async with create_client(runtime.ingress_url(), timeout=client_timeout) as client:
             yield HarnessEnvironment(
                 ingress_url=runtime.ingress_url(), admin_api_url=runtime.admin_url(), client=client
             )

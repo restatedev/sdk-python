@@ -9,18 +9,29 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """
-A minimal OpenAI-agents service used by the AI integration tests.
+OpenAI-agents services used by the AI integration tests.
 """
-import uuid
+
 import restate
-from restate import ObjectContext
+from restate import Context, ObjectContext, TerminalError
+from pydantic import BaseModel
 
 from agents import Agent
-from restate.ext.openai import DurableRunner, durable_function_tool, restate_object_context
+from restate.ext.openai import (
+    DurableRunner,
+    durable_function_tool,
+    restate_context,
+    restate_object_context,
+)
 
 # A cheap model keeps cost negligible while still producing genuinely
 # non-deterministic output, which is exactly what surfaces replay bugs.
 MODEL = "gpt-4o-mini"
+
+
+# --------------------------------------------------------------------------
+# Chat / weather agent (tools + durable sessions + parallel tool calls)
+# --------------------------------------------------------------------------
 
 
 @durable_function_tool
@@ -30,16 +41,16 @@ async def get_weather(city: str) -> str:
     Args:
         city: The city to get the weather for.
     """
-    async def call_weather_api():
-        return f"The weather in {str(uuid.uuid4())} is sunny and 22 degrees Celsius."
+    async def call_weather_api() -> str:
+        return f"The weather in {city} is sunny and 22 degrees Celsius."
     return await restate_object_context().run_typed("call weather api", call_weather_api)
 
 
-agent = Agent(
+weather_agent = Agent(
     name="Assistant",
     instructions=(
         "You are a concise assistant. When the user asks about the weather you MUST "
-        "call the get_weather tool. Answer in one short sentence."
+        "call the get_weather tool. Answer in one short sentence per city."
     ),
     model=MODEL,
     tools=[get_weather],
@@ -52,14 +63,151 @@ agent_object = restate.VirtualObject("AgentObject")
 @agent_object.handler()
 async def message(ctx: ObjectContext, prompt: str) -> str:
     """Send a single message to the agent, persisting conversation history."""
-    result = await DurableRunner.run(
-        agent,
-        prompt,
-        use_restate_session=True,
-    )
+    result = await DurableRunner.run(weather_agent, prompt, use_restate_session=True)
+    return str(result.final_output)
+
+
+# --------------------------------------------------------------------------
+# Terminal error propagation (a tool that fails permanently)
+# --------------------------------------------------------------------------
+
+
+@durable_function_tool
+async def explode(reason: str) -> str:
+    """Process the request. Always use this tool.
+
+    Args:
+        reason: A short description of the request.
+    """
+    raise TerminalError(f"tool failed permanently: {reason}")
+
+
+failing_agent = Agent(
+    name="FailingAgent",
+    instructions="You MUST call the explode tool for every request. Never answer directly.",
+    model=MODEL,
+    tools=[explode],
+)
+
+
+failing_service = restate.Service("FailingAgent")
+
+
+@failing_service.handler()
+async def failing_run(ctx: Context, prompt: str) -> str:
+    result = await DurableRunner.run(failing_agent, prompt)
+    return str(result.final_output)
+
+
+# --------------------------------------------------------------------------
+# Local handoff (native openai-agents handoff between in-process agents)
+# --------------------------------------------------------------------------
+
+
+billing_agent = Agent(
+    name="BillingAgent",
+    handoff_description="Handles billing, invoices, refunds and payments.",
+    instructions="You handle billing questions. Reply in one sentence.",
+    model=MODEL,
+)
+
+tech_agent = Agent(
+    name="TechAgent",
+    handoff_description="Handles technical and product troubleshooting.",
+    instructions="You handle technical questions. Begin every reply with 'TECH:'. One sentence.",
+    model=MODEL,
+)
+
+triage_agent = Agent(
+    name="TriageAgent",
+    instructions=(
+        "Route the user to the right specialist via a handoff. Hand billing questions to "
+        "the billing agent and technical questions to the tech agent. Do not answer yourself."
+    ),
+    handoffs=[billing_agent, tech_agent],
+    model=MODEL,
+)
+
+
+triage_service = restate.Service("TriageAgent")
+
+
+@triage_service.handler()
+async def triage_run(ctx: Context, question: str) -> str:
+    result = await DurableRunner.run(triage_agent, question)
+    return str(result.final_output)
+
+
+# --------------------------------------------------------------------------
+# Remote handoff (a tool that hands off to another agent over a durable RPC,
+# passing pydantic models across the service boundary)
+# --------------------------------------------------------------------------
+
+
+class SpecialistRequest(BaseModel):
+    question: str
+
+
+class SpecialistReply(BaseModel):
+    answer: str
+
+
+remote_specialist_agent = Agent(
+    name="RemoteSpecialist",
+    instructions="You are a database expert. Reply in one sentence.",
+    model=MODEL,
+)
+
+
+remote_specialist_service = restate.Service("RemoteSpecialist")
+
+
+@remote_specialist_service.handler()
+async def specialist_answer(ctx: Context, req: SpecialistRequest) -> SpecialistReply:
+    result = await DurableRunner.run(remote_specialist_agent, req.question)
+    return SpecialistReply(answer=str(result.final_output))
+
+
+@durable_function_tool
+async def ask_specialist(question: str) -> str:
+    """Ask the remote database specialist a question.
+
+    Args:
+        question: The question to forward to the specialist.
+    """
+    ctx = restate_context()
+    reply = await ctx.service_call(specialist_answer, arg=SpecialistRequest(question=question))
+    return reply.answer
+
+
+coordinator_agent = Agent(
+    name="Coordinator",
+    instructions=(
+        "For any database or specialist question you MUST call the ask_specialist tool and "
+        "return its answer verbatim. Do not answer yourself."
+    ),
+    model=MODEL,
+    tools=[ask_specialist],
+)
+
+
+coordinator_service = restate.Service("Coordinator")
+
+
+@coordinator_service.handler()
+async def coordinator_run(ctx: Context, question: str) -> str:
+    result = await DurableRunner.run(coordinator_agent, question)
     return str(result.final_output)
 
 
 def app():
-    """Build the Restate ASGI app for this service."""
-    return restate.app([agent_object])
+    """Build the Restate ASGI app registering all test services."""
+    return restate.app(
+        [
+            agent_object,
+            failing_service,
+            triage_service,
+            remote_specialist_service,
+            coordinator_service,
+        ]
+    )

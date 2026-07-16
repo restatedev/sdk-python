@@ -21,18 +21,20 @@ typecheck-pyright:
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright examples/ 
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright tests
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright test-services/
+    PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright ai-tests/
 
 typecheck-mypy:
     uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional python/
     uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional examples/
     uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional tests/
+    uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional ai-tests/
 
 typecheck: typecheck-pyright typecheck-mypy
 
 test:
     uv run -m pytest tests/*
 
-# AI integration tests (needs docker + OPENAI_API_KEY).
+# AI integration tests: scripted (no key) + live (needs OPENAI_API_KEY). Runs both.
 test-ai:
     uv run -m pytest ai-tests/ -v
 
