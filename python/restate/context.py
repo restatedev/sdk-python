@@ -282,6 +282,41 @@ class ScopedContext(abc.ABC):
         """
 
     @abc.abstractmethod
+    def object_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[O]:
+        """
+        Invokes the given object handler with the given argument, within this scope.
+
+        NOTE: To use scopes with virtual objects you must enable the additional experimental feature in restate-server,
+        via RESTATE_EXPERIMENTAL_ENABLE_SCOPED_VIRTUAL_OBJECTS=true
+        """
+
+    @abc.abstractmethod
+    def object_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
+        """
+        Invokes the given object handler with the given argument, within this scope.
+
+        NOTE: To use scopes with virtual objects you must enable the additional experimental feature in restate-server,
+        via RESTATE_EXPERIMENTAL_ENABLE_SCOPED_VIRTUAL_OBJECTS=true
+        """
+
+    @abc.abstractmethod
     def workflow_call(
         self,
         tpe: HandlerType[I, O],
