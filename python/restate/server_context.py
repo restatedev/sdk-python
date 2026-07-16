@@ -260,6 +260,51 @@ class ServerScopedContext(ScopedContext):
         assert isinstance(send, SendHandle)
         return send
 
+    def object_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateDurableCallFuture[O]:
+        coro = self.context.do_call(
+            tpe,
+            arg,
+            key,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            scope=self.scope,
+            limit_key=limit_key,
+        )
+        assert not isinstance(coro, SendHandle)
+        return coro
+
+    def object_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> SendHandle:
+        send = self.context.do_call(
+            tpe=tpe,
+            key=key,
+            parameter=arg,
+            send_delay=send_delay,
+            send=True,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            scope=self.scope,
+            limit_key=limit_key,
+        )
+        assert isinstance(send, SendHandle)
+        return send
+
     def workflow_call(
         self,
         tpe: HandlerType[I, O],

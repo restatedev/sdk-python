@@ -380,6 +380,50 @@ class ScopedClient(RestateScopedClient):
         send = typing.cast(typing.Dict[str, str], send_handle)
         return RestateClientSendHandle(send.get("invocationId", ""), 200)
 
+    async def object_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> O:
+        return await self.client.do_call(
+            tpe,
+            arg,
+            key,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            scope=self.scope_key,
+            limit_key=limit_key,
+        )
+
+    async def object_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        send_handle = await self.client.do_call(
+            tpe,
+            parameter=arg,
+            key=key,
+            send=True,
+            send_delay=send_delay,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            force_json_output=True,
+            scope=self.scope_key,
+            limit_key=limit_key,
+        )
+        send = typing.cast(typing.Dict[str, str], send_handle)
+        return RestateClientSendHandle(send.get("invocationId", ""), 200)
+
     async def workflow_call(
         self,
         tpe: HandlerType[I, O],

@@ -95,6 +95,43 @@ class RestateScopedClient(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def object_call(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> O:
+        """
+        Make an RPC call to the given object handler, within this scope.
+
+        NOTE: To use scopes with virtual objects you must enable the additional experimental feature in restate-server,
+        via RESTATE_EXPERIMENTAL_ENABLE_SCOPED_VIRTUAL_OBJECTS=true
+        """
+        pass
+
+    @abc.abstractmethod
+    async def object_send(
+        self,
+        tpe: HandlerType[I, O],
+        key: str,
+        arg: I,
+        send_delay: typing.Optional[timedelta] = None,
+        limit_key: str | None = None,
+        idempotency_key: str | None = None,
+        headers: typing.Dict[str, str] | None = None,
+    ) -> RestateClientSendHandle:
+        """
+        Make a send operation to the given object handler, within this scope.
+
+        NOTE: To use scopes with virtual objects you must enable the additional experimental feature in restate-server,
+        via RESTATE_EXPERIMENTAL_ENABLE_SCOPED_VIRTUAL_OBJECTS=true
+        """
+        pass
+
+    @abc.abstractmethod
     async def workflow_call(
         self,
         tpe: HandlerType[I, O],
