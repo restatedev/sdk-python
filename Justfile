@@ -34,9 +34,18 @@ typecheck: typecheck-pyright typecheck-mypy
 test:
     uv run -m pytest tests/*
 
-# AI integration tests: scripted (no key) + live (needs OPENAI_API_KEY). Runs both.
-test-ai:
-    uv run -m pytest ai-tests/ -v
+# Each integration runs in its own dependency environment.
+test-ai-openai:
+    uv run --isolated --locked --extra test --extra harness --extra serde --extra openai -m pytest ai-tests/openai_test.py -v -s
+
+test-ai-pydantic:
+    uv run --isolated --locked --extra test --extra harness --extra serde --extra pydantic_ai -m pytest ai-tests/pydantic_test.py -v -s
+
+test-ai: test-ai-openai test-ai-pydantic
+
+test-ai-scripted:
+    uv run --isolated --locked --extra test --extra harness --extra serde --extra openai -m pytest ai-tests/openai_test.py -m "not live_model" -v -s
+    uv run --isolated --locked --extra test --extra harness --extra serde --extra pydantic_ai -m pytest ai-tests/pydantic_test.py -m "not live_model" -v -s
 
 
 # Recipe to run both mypy and pylint

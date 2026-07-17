@@ -18,7 +18,6 @@ API to catch real provider response-type drift through the journaling path.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import pytest
 import restate
@@ -35,7 +34,7 @@ from openai_service import (
     message,
     triage_run,
 )
-from model_stub import ScriptedModel
+from openai_model_stub import ScriptedModel
 
 
 AgentRunItems = list[dict[str, Any]]
