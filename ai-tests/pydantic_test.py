@@ -6,12 +6,12 @@ import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 import restate
-from restate.client_types import HttpError, RestateClient
+from restate import HarnessEnvironment
+from restate.client_types import HttpError
 from restate.ext.pydantic import RestateModelWrapper
 
 import pydantic_service
@@ -95,86 +95,124 @@ def model_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
     return mode
 
 
-@asynccontextmanager
-async def harness_client() -> AsyncIterator[RestateClient]:
+@pytest.fixture(scope="session")
+async def restate_test_harness() -> AsyncIterator[HarnessEnvironment]:
     async with restate.create_test_harness(
         pydantic_service.app(),
         follow_logs=True,
         disable_retries=True,
         always_replay=True,
     ) as harness:
-        yield harness.client
+        yield harness
 
 
-async def test_agent_tool_call_replays_cleanly(model_mode: str):
-    async with harness_client() as client:
-        messages = await client.object_call(message, key="user-1", arg="What is the weather in Paris?")
-        print_messages(f"weather tool ({model_mode})", messages)
-        assert_tool_executed(messages, "get_weather")
+async def test_agent_tool_call_replays_cleanly(
+    restate_test_harness: HarnessEnvironment,
+    model_mode: str,
+):
+    messages = await restate_test_harness.client.object_call(
+        message,
+        key=f"{model_mode}-weather",
+        arg="What is the weather in Paris?",
+    )
+    print_messages(f"weather tool ({model_mode})", messages)
+    assert_tool_executed(messages, "get_weather")
+    assert_completed(messages)
+
+
+async def test_multi_turn_session(
+    restate_test_harness: HarnessEnvironment,
+    model_mode: str,
+):
+    key = f"{model_mode}-multi-turn"
+    first_messages = await restate_test_harness.client.object_call(
+        message,
+        key=key,
+        arg="What is the capital of France?",
+    )
+    second_messages = await restate_test_harness.client.object_call(
+        message,
+        key=key,
+        arg="In which country is it?",
+    )
+    session_messages = await restate_test_harness.client.object_call(get_session_messages, key=key, arg=None)
+    print_messages(f"multi-turn first message ({model_mode})", first_messages)
+    print_messages(f"multi-turn second message ({model_mode})", second_messages)
+    print_messages(f"multi-turn session state ({model_mode})", session_messages)
+    assert_completed(first_messages)
+    assert_completed(second_messages)
+    assert "paris" in response_text(first_messages).lower()
+    assert session_messages, "Pydantic AI session state is empty"
+
+
+async def test_concurrent_distinct_keys(
+    restate_test_harness: HarnessEnvironment,
+    scripted_model: None,
+):
+    count = 20
+    results = await asyncio.gather(
+        *[
+            restate_test_harness.client.object_call(
+                message,
+                key=f"concurrent-user-{index}",
+                arg="Reply with exactly: OK",
+            )
+            for index in range(count)
+        ]
+    )
+    print_messages("concurrent distinct keys", results)
+    assert len(results) == count
+    for messages in results:
         assert_completed(messages)
 
 
-async def test_multi_turn_session(model_mode: str):
-    async with harness_client() as client:
-        first_messages = await client.object_call(message, key="u", arg="What is the capital of France?")
-        second_messages = await client.object_call(message, key="u", arg="In which country is it?")
-        session_messages = await client.object_call(get_session_messages, key="u", arg=None)
-        print_messages(f"multi-turn first message ({model_mode})", first_messages)
-        print_messages(f"multi-turn second message ({model_mode})", second_messages)
-        print_messages(f"multi-turn session state ({model_mode})", session_messages)
-        assert_completed(first_messages)
-        assert_completed(second_messages)
-        assert "paris" in response_text(first_messages).lower()
-        assert session_messages, "Pydantic AI session state is empty"
-
-
-async def test_concurrent_distinct_keys(scripted_model: None):
-    async with harness_client() as client:
-        count = 20
-        results = await asyncio.gather(
-            *[client.object_call(message, key=f"user-{index}", arg="Reply with exactly: OK") for index in range(count)]
-        )
-        print_messages("concurrent distinct keys", results)
-        assert len(results) == count
-        for messages in results:
-            assert_completed(messages)
-
-
-async def test_parallel_tools_turnstile(scripted_model: None):
+async def test_parallel_tools_turnstile(
+    restate_test_harness: HarnessEnvironment,
+    scripted_model: None,
+):
     cities = ["Paris", "London", "Tokyo", "Berlin", "Rome"]
-    async with harness_client() as client:
-        messages = await client.object_call(
-            message,
-            key="cities",
-            arg=f"What is the weather in {', '.join(cities)}? Give one line per city.",
-        )
-        print_messages("parallel weather tools", messages)
-        assert_tool_executed(messages, "get_weather", minimum_calls=len(cities))
-        assert_completed(messages)
+    messages = await restate_test_harness.client.object_call(
+        message,
+        key="parallel-weather",
+        arg=f"What is the weather in {', '.join(cities)}? Give one line per city.",
+    )
+    print_messages("parallel weather tools", messages)
+    assert_tool_executed(messages, "get_weather", minimum_calls=len(cities))
+    assert_completed(messages)
 
 
-async def test_terminal_tool_error_fails_fast(scripted_model: None):
-    async with harness_client() as client:
-        with pytest.raises(HttpError) as exc:
-            await client.service_call(failing_run, arg="please process my request")
-        print_messages("terminal tool error", {"status_code": exc.value.status_code, "body": exc.value.body})
-        assert exc.value.status_code == 500, f"unexpected status: {exc.value.status_code}"
-        assert "tool failed permanently" in (exc.value.body or "")
+async def test_terminal_tool_error_fails_fast(
+    restate_test_harness: HarnessEnvironment,
+    scripted_model: None,
+):
+    with pytest.raises(HttpError) as exc:
+        await restate_test_harness.client.service_call(failing_run, arg="please process my request")
+    print_messages("terminal tool error", {"status_code": exc.value.status_code, "body": exc.value.body})
+    assert exc.value.status_code == 500, f"unexpected status: {exc.value.status_code}"
+    assert "tool failed permanently" in (exc.value.body or "")
 
 
-async def test_local_handoff(scripted_model: None):
-    async with harness_client() as client:
-        messages = await client.service_call(triage_run, arg="I was double charged on my invoice, can I get a refund?")
-        print_messages("local handoff", messages)
-        assert_tool_executed(messages, "handoff_to_billing")
-        assert_completed(messages)
+async def test_local_handoff(
+    restate_test_harness: HarnessEnvironment,
+    scripted_model: None,
+):
+    messages = await restate_test_harness.client.service_call(
+        triage_run,
+        arg="I was double charged on my invoice, can I get a refund?",
+    )
+    print_messages("local handoff", messages)
+    assert_tool_executed(messages, "handoff_to_billing")
+    assert_completed(messages)
 
 
-async def test_remote_handoff_serializes_across_rpc(scripted_model: None):
-    async with harness_client() as client:
-        messages = await client.service_call(
-            coordinator_run, arg="How do I speed up a slow SQL query with a missing index?"
-        )
-        print_messages("remote specialist tool", messages)
-        assert_tool_executed(messages, "ask_specialist")
-        assert_completed(messages)
+async def test_remote_handoff_serializes_across_rpc(
+    restate_test_harness: HarnessEnvironment,
+    scripted_model: None,
+):
+    messages = await restate_test_harness.client.service_call(
+        coordinator_run,
+        arg="How do I speed up a slow SQL query with a missing index?",
+    )
+    print_messages("remote specialist tool", messages)
+    assert_tool_executed(messages, "ask_specialist")
+    assert_completed(messages)

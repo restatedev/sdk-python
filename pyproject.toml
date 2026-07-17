@@ -21,7 +21,7 @@ Source = "https://github.com/restatedev/sdk-python"
 "Bug Tracker" = "https://github.com/restatedev/sdk-python/issues"
 
 [project.optional-dependencies]
-test = ["pytest", "hypercorn", "anyio"]
+test = ["pytest", "hypercorn", "anyio", "langchain-openai>=1.0.0"]
 lint = ["mypy>=1.11.2", "pyright>=1.1.390", "ruff>=0.6.9"]
 harness = ["testcontainers", "hypercorn", "httpx"]
 serde = ["dacite", "pydantic", "msgspec"]
@@ -29,7 +29,11 @@ client = ["httpx[http2]"]
 adk = ["google-adk>=1.20.0"]
 openai = ["openai-agents>=0.6.1"]
 pydantic_ai = ["pydantic-ai-slim[mcp,openai]>=1.68.0"]
-langchain = ["langchain>=1.0.0", "langgraph>=1.0.0", "langchain-core>=1.0.0"]
+langchain = [
+    "langchain>=1.0.0",
+    "langchain-core>=1.0.0",
+    "langgraph>=1.0.0",
+]
 tracing = ["opentelemetry-api>=1.36.0"]
 zstd = [
     "backports.zstd ; python_version < '3.14'",
