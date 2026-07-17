@@ -90,8 +90,16 @@ matrix in its isolated environment.
 These tests are **not** part of `just test` / `just verify`. In CI they run on
 PRs to `main` (`AI Integration` workflow): the scripted tests on every PR
 (including forks), the live tests only when repository secrets are available.
-The `AI SDK Bump Test` workflow runs the full suite against a candidate
-agent-SDK version before bumping.
+The `AI SDK Bump Test` workflow accepts one of the four agent SDKs and a release
+tag. It temporarily pins that SDK to the requested version, re-resolves its
+dependency family, type-checks the integrations, and runs the selected scripted
+and live suite.
+
+Each integration has one versioned direct SDK dependency in `pyproject.toml`.
+LangChain's `langchain-core`, `langgraph`, and test-only `langchain-openai`
+dependencies are deliberately unversioned: changing the single `langchain`
+version floor (or selecting a workflow version) resolves compatible versions of
+the whole family.
 
 ## Extending
 

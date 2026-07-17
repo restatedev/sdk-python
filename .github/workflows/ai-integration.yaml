@@ -1,0 +1,61 @@
+name: AI Integration
+
+# Scripted and real-model integration tests for the AI SDK integrations
+# (openai-agents, pydantic-ai, Google ADK, and LangChain). Scripted tests run on
+# every PR; live-model tests require provider keys and are skipped on pull
+# requests from forks (which don't get secrets). Together they catch durable
+# replay and provider API/type breakage.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ai-integration:
+    name: "AI integration (scripted, Python 3.12)"
+    runs-on: warp-ubuntu-latest-x64-4x
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: just sync
+      - name: Build
+        run: just build
+      # Scripted only here: this job has no provider keys and runs on forks.
+      - name: Run scripted AI integration tests
+        run: just test-ai-scripted
+
+  ai-integration-live:
+    if: >-
+      github.repository_owner == 'restatedev' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login != 'dependabot[bot]'))
+    name: "AI integration (live model, Python 3.12)"
+    runs-on: warp-ubuntu-latest-x64-4x
+    env:
+      UV_PYTHON: "3.12"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: just sync
+      - name: Build
+        run: just build
+      # Full suite (scripted + live) -- this job has the key.
+      - name: Run AI integration tests
+        run: just test-ai
