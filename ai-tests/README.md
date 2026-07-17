@@ -1,71 +1,68 @@
 # AI integration tests
 
-End-to-end tests for the AI SDK integrations that live in this repo
-(`restate.ext.*`). They run the integration against a **real** restate-server
-in two complementary model modes:
+End-to-end tests for the AI SDK integrations in `restate.ext.*`:
 
-- **Scripted:** deterministic models emit real agent-SDK response objects. This
-  forces each integration's protocol paths under replay without credentials.
-- **Live:** real (cheap) LLM calls validate the upstream provider's response
-  types and formats under replay.
+- OpenAI Agents
+- Pydantic AI
+- Google ADK
+- LangChain
 
-The goal is to catch, when an upstream agent SDK (or this SDK) is bumped:
+The tests run each integration against a real Restate server. Their purpose is
+to catch breaking changes when either Restate or an upstream agent SDK is
+upgraded.
 
-- **journal mismatches / non-determinism** (Restate error `RT0016`),
-- **infinite error/retry loops**,
-- interference between concurrent invocations (turnstile / session state).
+## What we test
 
-## What is covered
+Every scenario runs with `always_replay=True`, forcing Restate to suspend and
+replay on each await. This exercises the path most likely to expose:
 
-Integrations: **openai-agents** (`openai_service.py`), **pydantic-ai**
-(`pydantic_service.py`), **Google ADK** (`google_adk_service.py`), and
-**LangChain** (`langchain_service.py`). Each integration runs in its own
-isolated dependency environment. Every scenario uses `always_replay=True`
-(forces a suspend/replay on every await -- the HTTP/1.1-style path and the
-strongest non-determinism detector) and `disable_retries=True`. Tool-call and
-multi-turn scenarios also run against the live OpenAI or Gemini API: 28
-scripted + 8 live runs.
+- journal mismatches and other non-determinism,
+- infinite failure or retry loops,
+- incompatible agent SDK response types,
+- interference between concurrent invocations or sessions.
 
-These are integration and durability tests, not agent evaluations. Scripted
-responses drive the intended agent SDK protocol paths deterministically
-(e.g. the turnstile test is guaranteed five parallel tool calls). Live runs
-only require normal completion and matching tool-call outputs -- their job is
-catching real provider response-type drift through the journaling path. The
-handlers return generated run items, messages, or normalized ADK event contents
-so tests can match tool calls to tool outputs with the same call ID, proving
-each tool executed.
+`disable_retries=True` makes ordinary handler failures surface immediately
+instead of hiding them behind retry backoff.
 
-LangChain's two live checks are separate `_live` tests. The service always uses
-normal module-level `ChatOpenAI` agents. Scripted tests replace only
-`ChatOpenAI._agenerate` at the provider boundary, leaving normal tool binding,
-agent compilation, and `RestateMiddleware` execution unchanged.
+The common scenarios cover:
 
-Google ADK follows the same shape: the service uses normal module-level Gemini
-agents and explicit `App` / `Runner` setup. Scripted tests replace only
-`Gemini.generate_content_async` at the provider boundary. All Google ADK tests
-except the remote-RPC scenario run through a virtual object backed by
-`RestateSessionService`; the remote-RPC scenario intentionally covers the
-stateless service and in-memory session path.
+| Scenario | What it checks |
+| --- | --- |
+| Tool call | The model requests a tool and receives its output |
+| Multi-turn session | Conversation state survives across virtual object calls |
+| Concurrent invocations | Distinct object keys do not interfere with each other |
+| Parallel tools | Multiple tool calls pass through the integration turnstile |
+| Terminal tool error | A permanent failure surfaces without retrying forever |
+| Local handoff | Delegation between agents is serialized correctly |
+| Remote handoff | Agent state and tool results survive a durable RPC |
 
-| Test | Model modes | Pattern it stresses |
-| ---- | ----------- | ------------------- |
-| `test_agent_tool_call_replays_cleanly` | scripted + live | single tool call and LLM-call journaling |
-| `test_multi_turn_session` | scripted + live | expected response content + non-empty durable VO session state |
-| `test_concurrent_distinct_keys` | scripted | 20 parallel invocations, no interference |
-| `test_parallel_tools_turnstile` | scripted | many tool calls in one turn and turnstile ordering |
-| `test_terminal_tool_error_fails_fast` | scripted | `TerminalError` -> terminal failure, no loop |
-| `test_local_handoff` | scripted | local agent delegation and agent-graph serialization |
-| `test_remote_handoff_serializes_across_rpc` | scripted | durable RPC and pydantic serde |
+These are integration tests, not model evaluations. They check that the agent
+SDK protocol remains compatible and deterministic, not whether an answer is
+subjectively good.
 
-Detection is deliberately simple: forced replay surfaces a journal mismatch in
-the SDK, and the harness client timeout prevents a mismatch retry loop from
-hanging CI indefinitely. `disable_retries=True` separately makes ordinary
-handler failures surface without retry backoff.
+## Model modes
 
-## Running locally
+The suite uses two complementary modes:
 
-Requires Docker. `just test-ai` runs the full suite -- both the scripted and
-live tests:
+- **Scripted:** deterministic provider responses exercise the real agent SDK
+  types and integration code without credentials.
+- **Live:** small real OpenAI or Gemini calls catch upstream response type and
+  format changes that scripted responses may miss.
+
+All scenarios run in scripted mode. The tool-call and multi-turn scenarios also
+run in live mode.
+
+## Running the tests
+
+Docker is required.
+
+Run all deterministic tests without provider credentials:
+
+```shell
+just test-ai-scripted
+```
+
+Run all scripted and live tests:
 
 ```shell
 export OPENAI_API_KEY=sk-...
@@ -73,38 +70,26 @@ export GOOGLE_API_KEY=...
 just test-ai
 ```
 
-The scripted tests need no key; the live tests require `OPENAI_API_KEY` for
-OpenAI Agents, Pydantic AI, and LangChain, and `GOOGLE_API_KEY` for Google ADK.
-They fail (rather than skip) without their key, since a configured live run is
-meaningless without a real model. The recipes print full generated messages or
-events with pytest capture disabled. To run all scripted suites without keys:
+Run one integration, including its live tests:
 
 ```shell
-just test-ai-scripted
+just test-ai-openai
+just test-ai-pydantic
+just test-ai-google-adk
+just test-ai-langchain
 ```
 
-Use `just test-ai-openai`, `just test-ai-pydantic`, `just test-ai-google-adk`,
-or `just test-ai-langchain` to run one integration's full scripted + live
-matrix in its isolated environment.
+Each integration runs in an isolated, locked dependency environment. Live tests
+fail when their required key is missing; they do not silently skip.
 
-These tests are **not** part of `just test` / `just verify`. In CI they run on
-PRs to `main` (`AI Integration` workflow): the scripted tests on every PR
-(including forks), the live tests only when repository secrets are available.
-The `AI SDK Bump Test` workflow accepts one of the four agent SDKs and a release
-tag. It temporarily pins that SDK to the requested version, re-resolves its
-dependency family, type-checks the integrations, and runs the selected scripted
-and live suite.
+## CI
 
-Each integration has one versioned direct SDK dependency in `pyproject.toml`.
-LangChain's `langchain-core`, `langgraph`, and test-only `langchain-openai`
-dependencies are deliberately unversioned: changing the single `langchain`
-version floor (or selecting a workflow version) resolves compatible versions of
-the whole family.
+The `AI Integration` workflow runs scripted tests on every pull request. Live
+tests run only for trusted pull requests where repository secrets are
+available.
 
-## Extending
+The manually triggered `AI SDK Bump Test` workflow accepts an agent SDK and a
+version, resolves that candidate dependency family, type-checks the integration,
+and runs its scripted and live tests.
 
-- **New integration:** add `<name>_service.py` (mirroring an app from
-  restatedev/ai-examples), `<name>_model_stub.py`, and `<name>_test.py`, plus an
-  isolated `Justfile` recipe containing only that integration's optional extra.
-- **More scenarios:** failure injection (kill the service mid-invocation),
-  higher concurrency (100), sequential/orchestrator workflows.
+These tests are intentionally separate from `just test` and `just verify`.
