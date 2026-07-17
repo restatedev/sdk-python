@@ -43,6 +43,7 @@ from .asyncio import as_completed, gather, wait_completed, select
 
 from .endpoint import app
 
+
 from .logging import getLogger, RestateLoggingFilter
 
 try:
