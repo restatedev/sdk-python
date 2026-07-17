@@ -27,13 +27,15 @@ additionally run against the live OpenAI API: 7 scripted + 2 live runs.
 These are integration and durability tests, not agent evaluations. Scripted
 responses drive the intended OpenAI Agents SDK protocol paths deterministically
 (e.g. the turnstile test is guaranteed five parallel tool calls). Live runs
-only require normal completion -- their job is catching real provider
-response-type drift through the journaling path.
+only require normal completion and matching tool-call outputs -- their job is
+catching real provider response-type drift through the journaling path. The
+handlers return all generated run items so tests can match each `function_call`
+to a `function_call_output` with the same call ID, proving the tool executed.
 
 | Test | Model modes | Pattern it stresses |
 | ---- | ----------- | ------------------- |
 | `test_agent_tool_call_replays_cleanly` | scripted + live | single tool call and LLM-call journaling |
-| `test_multi_turn_session` | scripted + live | durable session state across turns + replay |
+| `test_multi_turn_session` | scripted + live | expected response content + non-empty durable VO session state |
 | `test_concurrent_distinct_keys` | scripted | 20 parallel invocations, no interference |
 | `test_parallel_tools_turnstile` | scripted | many tool calls in one turn and turnstile ordering |
 | `test_terminal_tool_error_fails_fast` | scripted | `TerminalError` -> terminal failure, no loop |
@@ -70,10 +72,12 @@ just test-ai
 
 The scripted tests need no key; the live tests require `OPENAI_API_KEY` and
 fail (rather than skip) without one, since a configured live run is meaningless
-without a real model. To run only the scripted half (no key):
+without a real model. The tests print their full generated item lists; use `-s`
+to disable pytest output capture and see them. To run only the scripted half
+(no key):
 
 ```shell
-uv run -m pytest ai-tests/ -m "not live_model" -v
+uv run -m pytest ai-tests/ -m "not live_model" -v -s
 ```
 
 These tests are **not** part of `just test` / `just verify`. In CI they run on

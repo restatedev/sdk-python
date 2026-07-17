@@ -62,4 +62,7 @@ ignore = ["E741"]
 filterwarnings = [
    "ignore:The @wait_container_is_ready decorator is deprecated:DeprecationWarning",
 ]
+markers = [
+    "live_model: calls a live model provider",
+]
 anyio_mode = "auto"

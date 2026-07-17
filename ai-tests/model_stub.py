@@ -37,6 +37,12 @@ class ScriptedModel(Model):
         tool_names = {tool.name for tool in tools}
         input_text = self._input_text(input)
 
+        if "In which country is it?" in input_text:
+            return self._text_response("France")
+
+        if "What is the capital of France?" in input_text:
+            return self._text_response("Paris")
+
         if "get_weather" in tool_names:
             cities = [city for city in self.cities if city in input_text]
             if not cities:
@@ -44,9 +50,7 @@ class ScriptedModel(Model):
             call_ids = {f"weather-{city.lower()}" for city in cities}
             if self._has_tool_output(input, call_ids):
                 return self._text_response("Done.")
-            return self._tool_response(
-                *(("get_weather", {"city": city}, f"weather-{city.lower()}") for city in cities)
-            )
+            return self._tool_response(*(("get_weather", {"city": city}, f"weather-{city.lower()}") for city in cities))
 
         if "explode" in tool_names:
             return self._tool_response(("explode", {"reason": "scripted failure"}, "explode"))
