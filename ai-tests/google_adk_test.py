@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -25,11 +24,6 @@ from google_adk_service import (
 )
 
 AgentEvents = list[dict[str, Any]]
-
-
-def print_events(label: str, events: object) -> None:
-    print(f"\n--- {label}: new events ---", flush=True)
-    print(json.dumps(events, indent=2, sort_keys=True, default=str), flush=True)
 
 
 def event_parts(events: AgentEvents) -> list[dict[str, Any]]:
@@ -107,7 +101,6 @@ async def test_agent_tool_call_replays_cleanly(
         key="scripted-weather",
         arg="What is the weather in Paris?",
     )
-    print_events("weather tool (scripted)", events)
     assert_tool_executed(events, "get_weather")
     assert_completed(events)
 
@@ -122,7 +115,6 @@ async def test_agent_tool_call_live_replays_cleanly(
         key="live-weather",
         arg="What is the weather in Paris?",
     )
-    print_events("weather tool (live)", events)
     assert_tool_executed(events, "get_weather")
     assert_completed(events)
 
@@ -146,9 +138,6 @@ async def test_multi_turn_session(
         key="scripted-multi-turn",
         arg=None,
     )
-    print_events("multi-turn first message (scripted)", first_events)
-    print_events("multi-turn second message (scripted)", second_events)
-    print_events("multi-turn session state (scripted)", session_events)
     assert_completed(first_events)
     assert_completed(second_events)
     assert "france" in response_text(second_events).lower()
@@ -175,9 +164,6 @@ async def test_multi_turn_session_live(
         key="live-multi-turn",
         arg=None,
     )
-    print_events("multi-turn first message (live)", first_events)
-    print_events("multi-turn second message (live)", second_events)
-    print_events("multi-turn session state (live)", session_events)
     assert_completed(first_events)
     assert_completed(second_events)
     assert "france" in response_text(second_events).lower()
@@ -199,7 +185,6 @@ async def test_concurrent_distinct_keys(
             for index in range(count)
         ]
     )
-    print_events("concurrent distinct keys", results)
     assert len(results) == count
     for events in results:
         assert_completed(events)
@@ -215,7 +200,6 @@ async def test_parallel_tools_turnstile(
         key="parallel-weather",
         arg=f"What is the weather in {', '.join(cities)}? Give one line per city.",
     )
-    print_events("parallel weather tools", events)
     assert_tool_executed(events, "get_weather", minimum_calls=len(cities))
     assert_completed(events)
 
@@ -230,7 +214,6 @@ async def test_terminal_tool_error_fails_fast(
             key="terminal-error",
             arg="please process my request",
         )
-    print_events("terminal tool error", {"status_code": exc.value.status_code, "body": exc.value.body})
     assert exc.value.status_code == 500, f"unexpected status: {exc.value.status_code}"
     assert "tool failed permanently" in (exc.value.body or "")
 
@@ -244,7 +227,6 @@ async def test_local_handoff(
         key="local-handoff",
         arg="I was double charged on my invoice, can I get a refund?",
     )
-    print_events("local handoff", events)
     assert_tool_executed(events, "transfer_to_agent")
     assert_completed(events)
 
@@ -257,6 +239,5 @@ async def test_remote_handoff_serializes_across_rpc(
         coordinator_run,
         arg="How do I speed up a slow SQL query with a missing index?",
     )
-    print_events("remote specialist tool", events)
     assert_tool_executed(events, "ask_specialist")
     assert_completed(events)

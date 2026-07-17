@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -25,11 +24,6 @@ from langchain_service import (
 )
 
 AgentMessages = list[dict[str, Any]]
-
-
-def print_messages(label: str, messages: object) -> None:
-    print(f"\n--- {label}: messages ---", flush=True)
-    print(json.dumps(messages, indent=2, sort_keys=True, default=str), flush=True)
 
 
 def response_text(messages: AgentMessages) -> str:
@@ -109,7 +103,6 @@ async def test_agent_tool_call_replays_cleanly(
         key="scripted-weather",
         arg="What is the weather in Paris?",
     )
-    print_messages("weather tool (scripted)", messages)
     assert_tool_executed(messages, "get_weather")
     assert_completed(messages)
 
@@ -124,7 +117,6 @@ async def test_agent_tool_call_live_replays_cleanly(
         key="live-weather",
         arg="What is the weather in Paris?",
     )
-    print_messages("weather tool (live)", messages)
     assert_tool_executed(messages, "get_weather")
     assert_completed(messages)
 
@@ -148,9 +140,6 @@ async def test_multi_turn_session(
         key="scripted-multi-turn",
         arg=None,
     )
-    print_messages("multi-turn first message (scripted)", first_messages)
-    print_messages("multi-turn second message (scripted)", second_messages)
-    print_messages("multi-turn session state (scripted)", session_messages)
     assert_completed(first_messages)
     assert_completed(second_messages)
     assert "france" in response_text(second_messages).lower()
@@ -177,9 +166,6 @@ async def test_multi_turn_session_live(
         key="live-multi-turn",
         arg=None,
     )
-    print_messages("multi-turn first message (live)", first_messages)
-    print_messages("multi-turn second message (live)", second_messages)
-    print_messages("multi-turn session state (live)", session_messages)
     assert_completed(first_messages)
     assert_completed(second_messages)
     assert "france" in response_text(second_messages).lower()
@@ -201,7 +187,6 @@ async def test_concurrent_distinct_keys(
             for index in range(count)
         ]
     )
-    print_messages("concurrent distinct keys", results)
     assert len(results) == count
     for messages in results:
         assert_completed(messages)
@@ -217,7 +202,6 @@ async def test_parallel_tools_turnstile(
         key="parallel-weather",
         arg=f"What is the weather in {', '.join(cities)}? Give one line per city.",
     )
-    print_messages("parallel weather tools", messages)
     assert_tool_executed(messages, "get_weather", minimum_calls=len(cities))
     assert_completed(messages)
 
@@ -228,7 +212,6 @@ async def test_terminal_tool_error_fails_fast(
 ):
     with pytest.raises(HttpError) as exc:
         await restate_test_harness.client.service_call(failing_run, arg="please process my request")
-    print_messages("terminal tool error", {"status_code": exc.value.status_code, "body": exc.value.body})
     assert exc.value.status_code == 500, f"unexpected status: {exc.value.status_code}"
     assert "tool failed permanently" in (exc.value.body or "")
 
@@ -241,7 +224,6 @@ async def test_local_handoff(
         triage_run,
         arg="I was double charged on my invoice, can I get a refund?",
     )
-    print_messages("local handoff", messages)
     assert_tool_executed(messages, "handoff_to_billing")
     assert_completed(messages)
 
@@ -254,6 +236,5 @@ async def test_remote_handoff_serializes_across_rpc(
         coordinator_run,
         arg="How do I speed up a slow SQL query with a missing index?",
     )
-    print_messages("remote specialist tool", messages)
     assert_tool_executed(messages, "ask_specialist")
     assert_completed(messages)

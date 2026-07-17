@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -25,11 +24,6 @@ from pydantic_service import (
 )
 
 AgentMessages = list[dict[str, Any]]
-
-
-def print_messages(label: str, messages: object) -> None:
-    print(f"\n--- {label}: new messages ---", flush=True)
-    print(json.dumps(messages, indent=2, sort_keys=True, default=str), flush=True)
 
 
 def message_parts(messages: AgentMessages) -> list[dict[str, Any]]:
@@ -115,7 +109,6 @@ async def test_agent_tool_call_replays_cleanly(
         key=f"{model_mode}-weather",
         arg="What is the weather in Paris?",
     )
-    print_messages(f"weather tool ({model_mode})", messages)
     assert_tool_executed(messages, "get_weather")
     assert_completed(messages)
 
@@ -136,9 +129,6 @@ async def test_multi_turn_session(
         arg="In which country is it?",
     )
     session_messages = await restate_test_harness.client.object_call(get_session_messages, key=key, arg=None)
-    print_messages(f"multi-turn first message ({model_mode})", first_messages)
-    print_messages(f"multi-turn second message ({model_mode})", second_messages)
-    print_messages(f"multi-turn session state ({model_mode})", session_messages)
     assert_completed(first_messages)
     assert_completed(second_messages)
     assert "paris" in response_text(first_messages).lower()
@@ -160,7 +150,6 @@ async def test_concurrent_distinct_keys(
             for index in range(count)
         ]
     )
-    print_messages("concurrent distinct keys", results)
     assert len(results) == count
     for messages in results:
         assert_completed(messages)
@@ -176,7 +165,6 @@ async def test_parallel_tools_turnstile(
         key="parallel-weather",
         arg=f"What is the weather in {', '.join(cities)}? Give one line per city.",
     )
-    print_messages("parallel weather tools", messages)
     assert_tool_executed(messages, "get_weather", minimum_calls=len(cities))
     assert_completed(messages)
 
@@ -187,7 +175,6 @@ async def test_terminal_tool_error_fails_fast(
 ):
     with pytest.raises(HttpError) as exc:
         await restate_test_harness.client.service_call(failing_run, arg="please process my request")
-    print_messages("terminal tool error", {"status_code": exc.value.status_code, "body": exc.value.body})
     assert exc.value.status_code == 500, f"unexpected status: {exc.value.status_code}"
     assert "tool failed permanently" in (exc.value.body or "")
 
@@ -200,7 +187,6 @@ async def test_local_handoff(
         triage_run,
         arg="I was double charged on my invoice, can I get a refund?",
     )
-    print_messages("local handoff", messages)
     assert_tool_executed(messages, "handoff_to_billing")
     assert_completed(messages)
 
@@ -213,6 +199,5 @@ async def test_remote_handoff_serializes_across_rpc(
         coordinator_run,
         arg="How do I speed up a slow SQL query with a missing index?",
     )
-    print_messages("remote specialist tool", messages)
     assert_tool_executed(messages, "ask_specialist")
     assert_completed(messages)
