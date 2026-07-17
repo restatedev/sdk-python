@@ -41,8 +41,10 @@ async def get_weather(city: str) -> str:
     Args:
         city: The city to get the weather for.
     """
+
     async def call_weather_api() -> str:
         return f"The weather in {city} is sunny and 22 degrees Celsius."
+
     return await restate_object_context().run_typed("call weather api", call_weather_api)
 
 
@@ -211,3 +213,4 @@ def app():
             coordinator_service,
         ]
     )
+

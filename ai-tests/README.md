@@ -40,10 +40,23 @@ response-type drift through the journaling path.
 | `test_local_handoff` | scripted | native openai-agents handoff and agent-graph serialization |
 | `test_remote_handoff_serializes_across_rpc` | scripted | durable RPC and pydantic serde |
 
-Detection is deliberately simple: with `disable_retries=True`, a journal
-mismatch (Restate error `RT0016`) fails the invocation, so the awaiting call
-raises and the test fails. Retries being off also means an "infinite error
-scenario" surfaces as a single fast failure instead of a loop.
+Detection is deliberately simple: forced replay surfaces a journal mismatch in
+the SDK, and the harness client timeout prevents a mismatch retry loop from
+hanging CI indefinitely. `disable_retries=True` separately makes ordinary
+handler failures surface without retry backoff.
+
+## Temporary replay probes
+
+Three tests marked `temporary_nondeterminism_probe` verify the test setup itself:
+two deliberately fail by introducing non-deterministic journal commands, while
+one proves randomness inside `ctx.run` replays cleanly. A correct probe run ends
+with **2 failed, 1 passed** and shows the journal-mismatch trace for both failures.
+Delete the marked block in `test_openai.py` and its marker registration once
+these deliberately red canaries are no longer useful.
+
+```shell
+uv run -m pytest ai-tests/test_openai.py -m temporary_nondeterminism_probe -v
+```
 
 ## Running locally
 

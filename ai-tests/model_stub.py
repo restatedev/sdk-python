@@ -1,3 +1,9 @@
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from typing import Any
+
 from agents.agent_output import AgentOutputSchemaBase
 from agents.handoffs import Handoff
 from agents.items import ModelResponse, TResponseInputItem, TResponseStreamEvent
@@ -7,6 +13,7 @@ from agents.tool import Tool
 from agents.usage import Usage
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.response_prompt_param import ResponsePromptParam
+
 
 class ScriptedModel(Model):
     """Returns valid OpenAI Agents SDK responses for each test scenario."""
@@ -37,7 +44,9 @@ class ScriptedModel(Model):
             call_ids = {f"weather-{city.lower()}" for city in cities}
             if self._has_tool_output(input, call_ids):
                 return self._text_response("Done.")
-            return self._tool_response(*(("get_weather", {"city": city}, f"weather-{city.lower()}") for city in cities))
+            return self._tool_response(
+                *(("get_weather", {"city": city}, f"weather-{city.lower()}") for city in cities)
+            )
 
         if "explode" in tool_names:
             return self._tool_response(("explode", {"reason": "scripted failure"}, "explode"))
