@@ -17,20 +17,35 @@ The goal is to catch, when an upstream agent SDK (or this SDK) is bumped:
 
 ## What is covered
 
-Integrations: **openai-agents** (`openai_service.py`) and **pydantic-ai**
-(`pydantic_service.py`). Each integration runs in its own isolated dependency
-environment. Every scenario uses `always_replay=True` (forces a suspend/replay
-on every await -- the HTTP/1.1-style path and the strongest non-determinism
-detector) and `disable_retries=True`. Tool-call and multi-turn scenarios also
-run against the live OpenAI API: 14 scripted + 4 live runs.
+Integrations: **openai-agents** (`openai_service.py`), **pydantic-ai**
+(`pydantic_service.py`), **Google ADK** (`google_adk_service.py`), and
+**LangChain** (`langchain_service.py`). Each integration runs in its own
+isolated dependency environment. Every scenario uses `always_replay=True`
+(forces a suspend/replay on every await -- the HTTP/1.1-style path and the
+strongest non-determinism detector) and `disable_retries=True`. Tool-call and
+multi-turn scenarios also run against the live OpenAI or Gemini API: 28
+scripted + 8 live runs.
 
 These are integration and durability tests, not agent evaluations. Scripted
 responses drive the intended agent SDK protocol paths deterministically
 (e.g. the turnstile test is guaranteed five parallel tool calls). Live runs
 only require normal completion and matching tool-call outputs -- their job is
 catching real provider response-type drift through the journaling path. The
-handlers return generated run items/messages so tests can match tool calls to
-tool outputs with the same call ID, proving each tool executed.
+handlers return generated run items, messages, or normalized ADK event contents
+so tests can match tool calls to tool outputs with the same call ID, proving
+each tool executed.
+
+LangChain's two live checks are separate `_live` tests. The service always uses
+normal module-level `ChatOpenAI` agents. Scripted tests replace only
+`ChatOpenAI._agenerate` at the provider boundary, leaving normal tool binding,
+agent compilation, and `RestateMiddleware` execution unchanged.
+
+Google ADK follows the same shape: the service uses normal module-level Gemini
+agents and explicit `App` / `Runner` setup. Scripted tests replace only
+`Gemini.generate_content_async` at the provider boundary. All Google ADK tests
+except the remote-RPC scenario run through a virtual object backed by
+`RestateSessionService`; the remote-RPC scenario intentionally covers the
+stateless service and in-memory session path.
 
 | Test | Model modes | Pattern it stresses |
 | ---- | ----------- | ------------------- |
@@ -54,20 +69,23 @@ live tests:
 
 ```shell
 export OPENAI_API_KEY=sk-...
+export GOOGLE_API_KEY=...
 just test-ai
 ```
 
-The scripted tests need no key; the live tests require `OPENAI_API_KEY` and
-fail (rather than skip) without one, since a configured live run is meaningless
-without a real model. The recipes print full generated messages with pytest
-capture disabled. To run both scripted suites without a key:
+The scripted tests need no key; the live tests require `OPENAI_API_KEY` for
+OpenAI Agents, Pydantic AI, and LangChain, and `GOOGLE_API_KEY` for Google ADK.
+They fail (rather than skip) without their key, since a configured live run is
+meaningless without a real model. The recipes print full generated messages or
+events with pytest capture disabled. To run all scripted suites without keys:
 
 ```shell
 just test-ai-scripted
 ```
 
-Use `just test-ai-openai` or `just test-ai-pydantic` to run one integration's
-full scripted + live matrix in its isolated environment.
+Use `just test-ai-openai`, `just test-ai-pydantic`, `just test-ai-google-adk`,
+or `just test-ai-langchain` to run one integration's full scripted + live
+matrix in its isolated environment.
 
 These tests are **not** part of `just test` / `just verify`. In CI they run on
 PRs to `main` (`AI Integration` workflow): the scripted tests on every PR
@@ -78,7 +96,7 @@ agent-SDK version before bumping.
 ## Extending
 
 - **New integration:** add `<name>_service.py` (mirroring an app from
-  restatedev/ai-examples), `<name>_model_stub.py`, and `test_<name>.py`, plus an
+  restatedev/ai-examples), `<name>_model_stub.py`, and `<name>_test.py`, plus an
   isolated `Justfile` recipe containing only that integration's optional extra.
 - **More scenarios:** failure injection (kill the service mid-invocation),
   higher concurrency (100), sequential/orchestrator workflows.

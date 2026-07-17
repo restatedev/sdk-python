@@ -41,11 +41,19 @@ test-ai-openai:
 test-ai-pydantic:
     uv run --isolated --locked --extra test --extra harness --extra serde --extra pydantic_ai -m pytest ai-tests/pydantic_test.py -v -s
 
-test-ai: test-ai-openai test-ai-pydantic
+test-ai-google-adk:
+    uv run --isolated --locked --extra test --extra harness --extra serde --extra adk -m pytest ai-tests/google_adk_test.py -v -s
+
+test-ai-langchain:
+    uv run --isolated --locked --extra test --extra harness --extra serde --extra langchain -m pytest ai-tests/langchain_test.py -v -s
+
+test-ai: test-ai-openai test-ai-pydantic test-ai-google-adk test-ai-langchain
 
 test-ai-scripted:
     uv run --isolated --locked --extra test --extra harness --extra serde --extra openai -m pytest ai-tests/openai_test.py -m "not live_model" -v -s
     uv run --isolated --locked --extra test --extra harness --extra serde --extra pydantic_ai -m pytest ai-tests/pydantic_test.py -m "not live_model" -v -s
+    uv run --isolated --locked --extra test --extra harness --extra serde --extra adk -m pytest ai-tests/google_adk_test.py -m "not live_model" -v -s
+    uv run --isolated --locked --extra test --extra harness --extra serde --extra langchain -m pytest ai-tests/langchain_test.py -m "not live_model" -v -s
 
 
 # Recipe to run both mypy and pylint
