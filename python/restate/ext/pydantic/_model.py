@@ -37,6 +37,7 @@ class RestateStreamedResponse(StreamedResponse):
     def get(self) -> ModelResponse:
         return self.response
 
+    @property
     def usage(self) -> RequestUsage:
         return self.response.usage  # pragma: no cover
 
@@ -54,7 +55,7 @@ class RestateStreamedResponse(StreamedResponse):
 
     @property
     def provider_url(self) -> str | None:
-        return None
+        return self.response.provider_url
 
 
 class RestateModelWrapper(WrapperModel):
