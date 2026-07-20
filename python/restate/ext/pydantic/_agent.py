@@ -9,10 +9,10 @@ from restate.ext.pydantic._utils import state_context
 from restate.extensions import current_context
 
 from pydantic_ai import models
+from pydantic_ai._instructions import AgentInstructions
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.agent.abstract import (
     AbstractAgent,
-    AgentInstructions,
     AgentMetadata,
     AgentModelSettings,
     AgentRetries,
