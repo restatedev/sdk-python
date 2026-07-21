@@ -2,29 +2,50 @@ name: AI Integration
 
 # Scripted and real-model integration tests for the AI SDK integrations
 # (openai-agents, pydantic-ai, Google ADK, and LangChain). Scripted tests run on
-# every PR; live-model tests require provider keys and are skipped on pull
-# requests from forks (which don't get secrets). Together they catch durable
-# replay and provider API/type breakage.
+# every PR against the newest allowed SDK versions outside the dependency
+# cooldown. Live-model tests use the committed lockfile, require provider keys,
+# and are skipped on pull requests from forks. Together they catch durable
+# replay and provider API/type breakage without exposing secrets to new packages.
 on:
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "17 5 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  # Reject dependencies reported as malicious by OSV/OpenSSF during sync.
+  UV_MALWARE_CHECK: "1"
+
 jobs:
   ai-integration:
-    name: "AI integration (scripted, Python 3.12)"
+    name: "AI integration (scripted, Python 3.14)"
     runs-on: warp-ubuntu-latest-x64-4x
     env:
-      UV_PYTHON: "3.12"
+      UV_PYTHON: "3.14"
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: Resolve the newest allowed AI SDKs
+        run: >-
+          uv lock
+          --upgrade-package google-adk
+          --upgrade-package google-genai
+          --upgrade-package openai
+          --upgrade-package openai-agents
+          --upgrade-package pydantic-ai-slim
+          --upgrade-package pydantic-graph
+          --upgrade-package langchain
+          --upgrade-package langchain-core
+          --upgrade-package langchain-openai
+          --upgrade-package langgraph
+          --upgrade-package langgraph-prebuilt
       - name: Install dependencies
         run: just sync
       - name: Build
@@ -40,10 +61,10 @@ jobs:
        (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         github.event.pull_request.user.login != 'dependabot[bot]'))
-    name: "AI integration (live model, Python 3.12)"
+    name: "AI integration (live model, Python 3.14)"
     runs-on: warp-ubuntu-latest-x64-4x
     env:
-      UV_PYTHON: "3.12"
+      UV_PYTHON: "3.14"
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
     steps:

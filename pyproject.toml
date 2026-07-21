@@ -26,21 +26,27 @@ lint = ["mypy>=1.11.2", "pyright>=1.1.390", "ruff>=0.6.9"]
 harness = ["testcontainers", "hypercorn", "httpx"]
 serde = ["dacite", "pydantic", "msgspec"]
 client = ["httpx[http2]"]
-# Keep one version floor per agent SDK. Companion packages are intentionally
-# unversioned so bumping the direct SDK re-resolves its compatible family.
-adk = ["google-adk>=1.20.0"]
-openai = ["openai-agents>=0.6.1"]
-pydantic_ai = ["pydantic-ai-slim[mcp,openai]>=1.68.0"]
+# Version floors are the oldest releases we support. Stable SDKs are capped at
+# the next major version; pre-1.0 SDKs are reviewed minor by minor.
+# Google ADK 1.x and 2.x are both supported by the integration.
+adk = ["google-adk>=1.20.0,<3"]
+openai = ["openai-agents>=0.6.1,<1"]
+pydantic_ai = ["pydantic-ai-slim[mcp,openai]>=1.68.0,<2"]
 langchain = [
-    "langchain>=1.0.0",
-    "langchain-core",
-    "langgraph",
+    "langchain>=1.0.0,<2",
+    "langchain-core>=1.0.0,<2",
+    "langgraph>=1.0.0,<2",
 ]
-langchain_test = ["langchain-openai"]
+langchain_test = ["langchain-openai>=1.0.0,<2"]
 tracing = ["opentelemetry-api>=1.36.0"]
 zstd = [
     "backports.zstd ; python_version < '3.14'",
 ]
+
+[tool.uv]
+# Give newly published packages time for ecosystem and security review before
+# dependency refreshes consider them.
+exclude-newer = "2 weeks"
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]
