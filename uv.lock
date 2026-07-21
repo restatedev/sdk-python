@@ -2915,7 +2915,7 @@ requires-dist = [
     { name = "anyio", marker = "extra == 'test'" },
     { name = "backports-zstd", marker = "python_full_version < '3.14' and extra == 'zstd'" },
     { name = "dacite", marker = "extra == 'serde'" },
-    { name = "google-adk", marker = "extra == 'adk'", specifier = ">=1.20.0" },
+    { name = "google-adk", marker = "extra == 'adk'", specifier = ">=2.5.0" },
     { name = "httpx", marker = "extra == 'harness'" },
     { name = "httpx", extras = ["http2"], marker = "extra == 'client'" },
     { name = "hypercorn", marker = "extra == 'harness'" },
