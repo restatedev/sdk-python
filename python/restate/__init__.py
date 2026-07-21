@@ -58,6 +58,7 @@ except ImportError:
         restate_image: str = "docker.io/restatedev/restate:latest",
         always_replay: bool = False,
         disable_retries: bool = False,
+        client_timeout: float | None = 30.0,
     ) -> typing.AsyncGenerator[HarnessEnvironment, None]:
         """a dummy harness constructor to raise ImportError. Install restate-sdk[harness] to use this feature"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
@@ -69,6 +70,7 @@ except ImportError:
         restate_image: str = "docker.io/restatedev/restate:latest",
         always_replay: bool = False,
         disable_retries: bool = False,
+        client_timeout: float | None = 30.0,
     ):
         """a dummy harness constructor to raise ImportError. Install restate-sdk[harness] to use this feature"""
         raise ImportError("Install restate-sdk[harness] to use this feature")  # type: ignore
@@ -81,7 +83,7 @@ except ImportError:
 
     @asynccontextmanager
     async def create_client(
-        ingress: str, headers: typing.Optional[dict] = None
+        ingress: str, headers: typing.Optional[dict] = None, timeout: float | None = 30.0
     ) -> typing.AsyncGenerator[RestateClient, None]:
         """a dummy client constructor to raise ImportError. Install restate-sdk[client] to use this feature"""
         raise ImportError("Install restate-sdk[client] to use this feature")

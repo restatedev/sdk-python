@@ -26,14 +26,27 @@ lint = ["mypy>=1.11.2", "pyright>=1.1.390", "ruff>=0.6.9"]
 harness = ["testcontainers", "hypercorn", "httpx"]
 serde = ["dacite", "pydantic", "msgspec"]
 client = ["httpx[http2]"]
-adk = ["google-adk>=1.20.0"]
-openai = ["openai-agents>=0.6.1"]
-pydantic_ai = ["pydantic-ai-slim>=1.68.0"]
-langchain = ["langchain>=1.0.0", "langgraph>=1.0.0", "langchain-core>=1.0.0"]
+# Version floors are the oldest releases we support. Stable SDKs are capped at
+# the next major version; pre-1.0 SDKs are reviewed minor by minor.
+# Google ADK 1.x and 2.x are both supported by the integration.
+adk = ["google-adk>=1.20.0,<3"]
+openai = ["openai-agents>=0.6.1,<1"]
+pydantic_ai = ["pydantic-ai-slim[mcp,openai]>=1.68.0,<1.71.0"]
+langchain = [
+    "langchain>=1.0.0,<2",
+    "langchain-core>=1.0.0,<2",
+    "langgraph>=1.0.0,<2",
+]
+langchain_test = ["langchain-openai>=1.0.0,<2"]
 tracing = ["opentelemetry-api>=1.36.0"]
 zstd = [
     "backports.zstd ; python_version < '3.14'",
 ]
+
+[tool.uv]
+# Give newly published packages time for ecosystem and security review before
+# dependency refreshes consider them.
+exclude-newer = "2 weeks"
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]
@@ -52,6 +65,7 @@ include = [
     "examples/**/*.py",
     "tests/**/*.py",
     "test-services//**/*.py",
+    "ai-tests/**/*.py",
 ]
 
 [tool.ruff.lint]
@@ -60,5 +74,8 @@ ignore = ["E741"]
 [tool.pytest.ini_options]
 filterwarnings = [
    "ignore:The @wait_container_is_ready decorator is deprecated:DeprecationWarning",
+]
+markers = [
+    "live_model: calls a live model provider",
 ]
 anyio_mode = "auto"

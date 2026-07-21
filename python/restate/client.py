@@ -471,10 +471,10 @@ class ScopedClient(RestateScopedClient):
 
 @asynccontextmanager
 async def create_client(
-    ingress: str, headers: typing.Optional[dict] = None
+    ingress: str, headers: typing.Optional[dict] = None, timeout: typing.Optional[float] = None
 ) -> typing.AsyncGenerator[RestateClient, None]:
     """
     Create a new Restate client.
     """
-    async with httpx.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
+    async with httpx.AsyncClient(base_url=ingress, headers=headers, http2=True, timeout=timeout) as http_client:
         yield Client(http_client, headers)
