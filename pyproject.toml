@@ -31,7 +31,7 @@ client = ["httpx[http2]"]
 # Google ADK 1.x and 2.x are both supported by the integration.
 adk = ["google-adk>=1.20.0,<3"]
 openai = ["openai-agents>=0.6.1,<1"]
-pydantic_ai = ["pydantic-ai-slim[mcp,openai]>=1.68.0,<2"]
+pydantic_ai = ["pydantic-ai-slim[mcp,openai]>=1.68.0,<1.71.0"]
 langchain = [
     "langchain>=1.0.0,<2",
     "langchain-core>=1.0.0,<2",
