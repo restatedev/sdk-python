@@ -13,7 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from restate.server import Endpoint
+from restate.endpoint import Endpoint
 
 
 @pytest.fixture(scope="session")
