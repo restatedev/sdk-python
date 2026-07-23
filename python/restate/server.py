@@ -228,7 +228,7 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             loop = asyncio.get_running_loop()
             try:
                 loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
-            except (NotImplementedError, RuntimeError):
+            except (NotImplementedError, RuntimeError, ValueError):
                 pass  # Windows or non-main thread
             sigterm_installed = True
         try:
