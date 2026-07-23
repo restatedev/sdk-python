@@ -59,4 +59,5 @@ async def test_signal_handler_rejection_does_not_fail_request(monkeypatch: pytes
         send,
     )
 
-    assert {message.get("status") for message in sent} == {200}
+    response_starts = [message for message in sent if message["type"] == "http.response.start"]
+    assert [message["status"] for message in response_starts] == [200]
