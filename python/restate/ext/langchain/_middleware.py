@@ -101,7 +101,12 @@ class RestateMiddleware(AgentMiddleware):
         state = get_or_create_state(ctx)
         if ai_message is not None:
             tool_call_ids = [tid for tc in (ai_message.tool_calls or []) if (tid := tc.get("id")) is not None]
-            state.turnstile = Turnstile(tool_call_ids)
+            turnstile = Turnstile(tool_call_ids)
+            # Register this turn's turnstile under EACH of its tool-call ids.
+            # Keyed by (unique) id rather than a single shared slot, so concurrent
+            # agents in parallel LangGraph nodes don't clobber each other.
+            for tid in tool_call_ids:
+                state.turnstiles[tid] = turnstile
 
         # Turn into ModelResponse as expected by the agent
         return ModelResponse(
@@ -122,7 +127,16 @@ class RestateMiddleware(AgentMiddleware):
         assert ctx is not None, "RestateMiddleware must run inside a Restate handler"
         state = state_from_ctx(ctx)
         assert state is not None, "RestateMiddleware must run inside a Restate handler"
-        turnstile = state.turnstile
+        turnstile = state.turnstiles.get(tool_call_id)
+
+        if turnstile is None:
+            # No turnstile registered for this id (e.g. a tool call not produced
+            # by a journaled model turn). Run it without ordering rather than
+            # deadlock/KeyError.
+            result = await handler(request)
+            if isinstance(result, ToolMessage):
+                result.id = str(ctx.uuid())
+            return result
 
         try:
             await turnstile.wait_for(tool_call_id)

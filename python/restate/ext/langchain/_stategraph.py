@@ -12,26 +12,34 @@
 
 ``RestateMiddleware`` (see ``_middleware.py``) makes a ``create_agent`` agent
 durable and linearizes its parallel *tool-call batch*. This module generalizes
-the same idea to an arbitrary ``StateGraph``: parallel branches, ``Send`` /
+the guarantee to an arbitrary ``StateGraph``: parallel branches, ``Send`` /
 map-reduce, and nested parallel subgraphs.
 
 The problem
 -----------
-LangGraph runs the nodes of a superstep concurrently on asyncio. ``ctx.run_typed``
-synchronously creates a journal command at call time, so parallel nodes create
+LangGraph runs a superstep's nodes concurrently on asyncio. ``ctx.run_typed``
+creates a journal command synchronously at call time, so parallel nodes create
 commands in I/O-completion order — non-deterministic, and different on replay
-(journaled results resolve instantly). Restate matches the journal by position, so
-replay mismatches raise ``TerminalError`` / journal-mismatch and the invocation
-cannot recover.
+(journaled results resolve instantly). Restate matches the journal by position,
+so replay mismatches and the invocation cannot recover.
 
-The approach
-------------
-``durable_scope(ctx)`` yields a context wrapper; nodes call ``dctx.run_typed(...)``
-exactly as usual (no node wrappers, no ``config`` threading). Under the hood a
-per-invocation coordinator batches durable ops and creates each round's commands
-in a stable, sorted order (deterministic journal) while awaiting the actual I/O
-concurrently via :func:`restate.gather`. Task identity comes from LangGraph's
-replay-stable ``name``/``path`` metadata, composed hierarchically for nesting.
+The approach — fully hidden, no user code change
+------------------------------------------------
+Wrap the handler body in ``with durable_scope(ctx):``. That is the *only* change:
+nodes, agents, ``RestateMiddleware()`` and ``restate_context().run_typed(...)``
+are all written exactly as usual. Under the scope:
+
+  * ``ServerInvocationContext.run_typed`` is patched (once, lazily) so that when a
+    coordinator is active it routes durable ops through a per-invocation
+    coordinator instead of journaling them immediately. The context object stays a
+    real ``ServerInvocationContext`` (so ``extension_data`` etc. keep working).
+  * ``langgraph.pregel._runner.arun_with_retry`` is patched to tag each task with a
+    hierarchical, replay-stable key (parent + ``name|path``; the path carries the
+    Send index — no task-id UUIDs, which are not replay-stable).
+
+The coordinator batches durable ops and creates each round's commands in stable,
+sorted-key order (deterministic journal) while awaiting the actual I/O
+concurrently via :func:`restate.gather`.
 
 Usage::
 
@@ -39,23 +47,22 @@ Usage::
 
     @svc.handler()
     async def run(ctx: restate.Context, req: Req) -> Resp:
-        with durable_scope(ctx) as dctx:
-            graph = build_graph(dctx)          # nodes call dctx.run_typed(...)
-            return await graph.ainvoke(state)  # no config, no node wrappers
+        with durable_scope(ctx):
+            return await graph.ainvoke(state)   # plain nodes, middleware, tools
 
 .. warning::
-   **RFC / draft.** Membership and per-task keying are obtained by monkeypatching
-   a *private* LangGraph function (``langgraph.pregel._runner.arun_with_retry``),
-   applied lazily the first time :class:`durable_scope` is entered. This is
-   brittle across LangGraph versions; a merge-ready version wants a *supported*
-   LangGraph runner/executor hook. See the PR discussion.
+   **RFC / draft.** Task keying is obtained by monkeypatching a *private* LangGraph
+   function (``langgraph.pregel._runner.arun_with_retry``). Brittle across LangGraph
+   versions; a merge-ready version wants a supported runner/executor hook.
 
 .. note::
-   Current limitations: (1) round batching imposes a cross-branch barrier per
-   durable-op round, so heterogeneous per-branch latencies run slower than native;
-   (2) assumes one durable op in flight per task at a time — a node that fires
-   multiple durable ops *concurrently* (intra-node ``gather``) needs op-level
-   sub-keys, not handled here.
+   Limitations: (1) round batching imposes a cross-branch barrier per durable-op
+   round, so heterogeneous per-branch latencies run slower than native; (2) assumes
+   one durable op in flight per task at a time — a node that fires multiple durable
+   ops *concurrently* (intra-node ``gather``) needs op-level sub-keys, not handled;
+   (3) a routed ``run_typed`` returns a coroutine rather than a ``RestateDurableFuture``,
+   so code that starts an op without awaiting it (to combine via ``restate.gather``)
+   must run outside ``durable_scope``.
 """
 
 import asyncio
@@ -71,10 +78,10 @@ import restate
 
 
 class _Pending:
-    __slots__ = ("name", "fn", "ctx", "event", "value", "error")
+    __slots__ = ("make_future", "event", "value", "error")
 
-    def __init__(self, name: str, fn: Callable[[], Any], ctx: Any) -> None:
-        self.name, self.fn, self.ctx = name, fn, ctx
+    def __init__(self, make_future: Callable[[], Any]) -> None:
+        self.make_future = make_future  # () -> RestateDurableFuture, called at flush
         self.event = asyncio.Event()
         self.value: Any = None
         self.error: Optional[BaseException] = None
@@ -96,12 +103,7 @@ def _await_all(futs: list) -> Any:
 class _Coordinator:
     """Nesting-aware coordinator. Flushes a round when every active *leaf* task
     (an active task with no active descendant) has a pending op, creating that
-    round's commands in sorted-key order, then awaiting them concurrently.
-
-    With eager registration via the runner hook the full sibling set is known up
-    front, so ``settle_turns == 0`` (flush as soon as every active leaf is
-    pending). A positive ``settle_turns`` tolerates lazy registration.
-    """
+    round's commands in sorted-key order, then awaiting them concurrently."""
 
     def __init__(self, settle_turns: int = 0) -> None:
         self.settle_turns = settle_turns
@@ -138,9 +140,6 @@ class _Coordinator:
 
     async def _flush_when_stable(self) -> None:
         try:
-            # settle_turns == 0 (hook installed): flush immediately. Otherwise
-            # wait until the ready leaf-set is stable across a few turns so
-            # lazily-registering siblings can appear first.
             stable = 0
             prev: Optional[frozenset] = None
             while stable < self.settle_turns:
@@ -161,7 +160,7 @@ class _Coordinator:
             entries = []
             for k in sorted(ready):
                 p = self.pending.pop(k)
-                fut = p.ctx.run_typed(p.name, p.fn)  # sync create -> deterministic order
+                fut = p.make_future()  # sync create -> deterministic order
                 entries.append((p, fut))
             asyncio.create_task(self._drive(entries))
         finally:
@@ -183,8 +182,8 @@ class _Coordinator:
             self._flushing = False
             self._try_flush()
 
-    async def submit(self, full_key: str, ctx: Any, name: str, fn: Callable[[], Any]) -> Any:
-        p = _Pending(name, fn, ctx)
+    async def submit(self, full_key: str, make_future: Callable[[], Any]) -> Any:
+        p = _Pending(make_future)
         self.pending[full_key] = p
         self._try_flush()
         await p.event.wait()
@@ -194,7 +193,8 @@ class _Coordinator:
 
 
 # ---------------------------------------------------------------------------
-# Runner hook + context wrapper (the integration surface).
+# Patches + activation. No context wrapper: the real ServerInvocationContext's
+# run_typed is patched, so restate_context()/middleware code routes transparently.
 # ---------------------------------------------------------------------------
 
 # (coordinator, full_key) for the task currently executing on this async task.
@@ -205,19 +205,24 @@ _active_coord: contextvars.ContextVar[Optional[_Coordinator]] = contextvars.Cont
 )
 
 _installed = False
+_auto_enabled = False
+_orig_run_typed: Any = None
 
 
 def install() -> None:
-    """Idempotently patch LangGraph's task runner. Called lazily by
-    :class:`durable_scope`, so the monkeypatch is only applied when the feature
-    is actually used (not merely on import)."""
-    global _installed  # pylint: disable=global-statement
+    """Idempotently install the routing patches (LangGraph task runner + Restate
+    ``run_typed``). Both are no-ops unless a coordinator is active on the current
+    context — so this alone changes nothing until either :class:`durable_scope`
+    (scoped) or :func:`enable` (global) activates one."""
+    global _installed, _orig_run_typed  # pylint: disable=global-statement
     if _installed:
         return
     _installed = True
 
     import langgraph.pregel._runner as _runner_mod  # pylint: disable=import-outside-toplevel
+    from restate.server_context import ServerInvocationContext  # pylint: disable=import-outside-toplevel
 
+    # --- 1. tag each LangGraph task with a hierarchical, replay-stable key ---
     orig_arun = _runner_mod.arun_with_retry
 
     @functools.wraps(orig_arun)
@@ -227,8 +232,6 @@ def install() -> None:
             return await orig_arun(task, *args, **kwargs)
         parent = _current.get()
         parent_key = parent[1] if parent else ""
-        # Hierarchical, replay-stable key: parent + this task's name + path
-        # (path carries the Send index). No task-id UUIDs (those aren't stable).
         full = f"{parent_key}/{task.name}|{task.path}"
         coord.register(full)  # eager: at task start, before any deep await
         token = _current.set((coord, full))
@@ -240,45 +243,67 @@ def install() -> None:
 
     _runner_mod.arun_with_retry = patched_arun
 
+    # --- 2. route ctx.run_typed through the coordinator when one is active ---
+    _orig_run_typed = ServerInvocationContext.run_typed
 
-class DurableContext:
-    """Wraps a Restate ``Context`` so ``run_typed`` routes through the active
-    coordinator. Everything else delegates to the real context — node code calls
-    ``ctx.run_typed`` exactly as normal and the determinism is invisible."""
-
-    def __init__(self, ctx: Any) -> None:
-        self._ctx = ctx
-
-    def run_typed(self, name: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def patched_run_typed(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        coord = _active_coord.get()
         cur = _current.get()
-        if cur is None:
-            return self._ctx.run_typed(name, fn, *args, **kwargs)
-        coord, full = cur
-        bound = fn if not (args or kwargs) else functools.partial(fn, *args, **kwargs)
-        return coord.submit(full, self._ctx, name, bound)
+        if coord is None or cur is None:
+            return _orig_run_typed(self, *args, **kwargs)
+        _, full = cur
+        # Defer command creation to the coordinator's sorted flush; the flush
+        # calls the ORIGINAL run_typed (no recursion) to create the command.
+        return coord.submit(full, lambda: _orig_run_typed(self, *args, **kwargs))
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._ctx, name)
+    ServerInvocationContext.run_typed = patched_run_typed  # type: ignore[method-assign]
+
+
+def enable() -> None:
+    """Turn on StateGraph determinism **globally** — call once at app startup and
+    every handler activates a fresh per-invocation coordinator automatically. NO
+    per-handler code, no ``durable_scope``: existing handlers, ``RestateMiddleware()``
+    and ``restate_context().run_typed(...)`` become deterministic as-is.
+
+    Implemented by wrapping the SDK's per-invocation ``invoke_handler`` entry point.
+    The coordinator is a no-op for any handler that doesn't run parallel LangGraph
+    nodes (the run_typed patch only routes when inside a LangGraph task)."""
+    global _auto_enabled  # pylint: disable=global-statement
+    install()
+    if _auto_enabled:
+        return
+    _auto_enabled = True
+
+    import restate.server_context as _sc  # pylint: disable=import-outside-toplevel
+
+    orig_invoke_handler = _sc.invoke_handler
+
+    async def patched_invoke_handler(handler, ctx, in_buffer):  # type: ignore[no-untyped-def]
+        token = _active_coord.set(_Coordinator(settle_turns=0))
+        try:
+            return await orig_invoke_handler(handler=handler, ctx=ctx, in_buffer=in_buffer)
+        finally:
+            _active_coord.reset(token)
+
+    _sc.invoke_handler = patched_invoke_handler  # server_context.enter() resolves this name
 
 
 class durable_scope:  # pylint: disable=invalid-name
-    """Handler helper. ``with durable_scope(ctx) as dctx:`` installs the runner
-    hook (lazily, idempotent) and a fresh per-invocation coordinator, and yields
-    a durable-wrapped context. Build the graph with ``dctx`` and invoke normally
-    — no node wrapping, no ``config``."""
+    """Scoped opt-in alternative to :func:`enable`: ``with durable_scope(ctx):``
+    activates a coordinator for just this handler body. Useful if you don't want
+    the global :func:`enable`. Redundant (harmless) once :func:`enable` is set."""
 
-    def __init__(self, ctx: Any) -> None:
+    def __init__(self, ctx: Any = None) -> None:
         install()
-        self.ctx = ctx
-        self.coord = _Coordinator(settle_turns=0)
+        self._ctx = ctx  # accepted for a natural call site; not otherwise needed
         self._token: Any = None
 
-    def __enter__(self) -> DurableContext:
-        self._token = _active_coord.set(self.coord)
-        return DurableContext(self.ctx)
+    def __enter__(self) -> "durable_scope":
+        self._token = _active_coord.set(_Coordinator(settle_turns=0))
+        return self
 
     def __exit__(self, *exc: Any) -> None:
         _active_coord.reset(self._token)
 
 
-__all__ = ["durable_scope", "DurableContext", "install"]
+__all__ = ["enable", "durable_scope", "install"]

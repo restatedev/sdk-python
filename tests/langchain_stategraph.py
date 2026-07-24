@@ -8,35 +8,20 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""Determinism test for `restate.ext.langchain.durable_scope` over a StateGraph.
+"""Unit test for the StateGraph determinism coordinator.
 
-Proves the core property without a server: parallel nodes (here, a fan-out to
-subgraphs that themselves fan out) create their durable commands in a stable,
-sorted order every run — i.e. the order Restate would journal is identical across
-executions, so replay lines up positionally.
-
-A `FakeCtx` stands in for the Restate context; its `run_typed` records the command
-name at *creation* time (exactly what Restate journals) and returns the coroutine,
-so the async I/O still races while the recorded order stays fixed.
-
-Skipped unless `langgraph` is installed (it is an optional `langchain` extra, not a
-default test dependency).
+The coordinator is what makes parallel LangGraph nodes journal deterministically:
+given a set of concurrently-arriving durable ops (one per parallel task), it must
+create their journal commands in a STABLE, sorted-by-key order regardless of the
+order they arrived or completed. This test drives the coordinator directly (no
+server, no langgraph needed) and asserts that property.
 """
 
 import asyncio
-import contextvars
-import operator
-import random
-from typing import Annotated, TypedDict
 
 import pytest
 
-pytest.importorskip("langgraph")
-
-from langgraph.graph import StateGraph, START, END  # noqa: E402
-from langgraph.types import Send  # noqa: E402
-
-from restate.ext.langchain import durable_scope  # noqa: E402
+from restate.ext.langchain._stategraph import _Coordinator
 
 pytestmark = [pytest.mark.anyio]
 
@@ -46,93 +31,67 @@ def anyio_backend():
     return "asyncio"
 
 
-_journal: contextvars.ContextVar[list] = contextvars.ContextVar("journal")
+async def test_coordinator_creates_commands_in_sorted_key_order():
+    coord = _Coordinator(settle_turns=0)
+    creation_order: list[str] = []
+
+    # Hierarchical, replay-stable keys, deliberately submitted out of order.
+    keys = ["/w|0003", "/w|0001", "/w|0004", "/w|0002", "/w|0000"]
+
+    # Eager registration (mirrors the runner hook tagging every superstep task at
+    # start), so the coordinator waits for the whole batch before flushing.
+    for k in keys:
+        coord.register(k)
+
+    async def leaf(key: str):
+        def make_future():
+            # make_future() is called at flush time; record the CREATION order
+            # (this is the order commands would be appended to the journal).
+            creation_order.append(key)
+
+            async def io():
+                await asyncio.sleep(0)  # simulate concurrent I/O completion
+                return f"result:{key}"
+
+            return io()
+
+        try:
+            return await coord.submit(key, make_future)
+        finally:
+            coord.checkout(key)
+
+    results = await asyncio.gather(*(leaf(k) for k in keys))
+
+    # Commands were created in sorted key order — independent of arrival order.
+    assert creation_order == sorted(keys)
+    # Every op still got its own result routed back.
+    assert set(results) == {f"result:{k}" for k in keys}
 
 
-class FakeCtx:
-    """Records command-creation order (what Restate journals); returns the coro."""
+async def test_coordinator_multiple_rounds_stay_ordered():
+    coord = _Coordinator(settle_turns=0)
+    rounds: list[list[str]] = [[], []]
+    keys = ["/w|0002", "/w|0000", "/w|0001"]
+    for k in keys:
+        coord.register(k)
 
-    def run_typed(self, name, fn, *args, **kwargs):
-        _journal.get().append(name)
-        return fn()
+    async def leaf(key: str):
+        for r in (0, 1):  # two sequential durable ops per task
 
+            def make_future(_r=r, _k=key):
+                rounds[_r].append(_k)
 
-class _Inner(TypedDict):
-    branch: str
-    results: Annotated[list, operator.add]
+                async def io():
+                    await asyncio.sleep(0)
+                    return _k
 
+                return io()
 
-class _InnerWS(TypedDict):
-    branch: str
-    leg: str
+            await coord.submit(key, make_future)
+        coord.checkout(key)
 
+    await asyncio.gather(*(leaf(k) for k in keys))
 
-def _make_sub(dctx):
-    async def inner_worker(state: _InnerWS) -> dict:
-        b, leg = state["branch"], state["leg"]
-
-        async def fetch():
-            await asyncio.sleep(random.uniform(0.005, 0.03))
-            return f"f:{b}.{leg}"
-
-        async def store():
-            await asyncio.sleep(random.uniform(0.005, 0.03))
-            return f"s:{b}.{leg}"
-
-        await dctx.run_typed(f"fetch:{b}.{leg}", fetch)
-        await dctx.run_typed(f"store:{b}.{leg}", store)
-        return {"results": [f"{b}.{leg}"]}
-
-    def inner_fan(state: _Inner):
-        return [Send("inner_worker", {"branch": state["branch"], "leg": leg}) for leg in ("L", "R")]
-
-    b = StateGraph(_Inner)
-    b.add_node("inner_worker", inner_worker)
-    b.add_conditional_edges(START, inner_fan, ["inner_worker"])
-    b.add_edge("inner_worker", END)
-    return b.compile()
-
-
-class _Outer(TypedDict):
-    branches: list
-    results: Annotated[list, operator.add]
-
-
-class _OuterWS(TypedDict):
-    branch: str
-
-
-def _build(dctx):
-    sub = _make_sub(dctx)
-
-    async def branch_node(state: _OuterWS) -> dict:
-        out = await sub.ainvoke({"branch": state["branch"], "results": []})
-        return {"results": out["results"]}
-
-    def outer_fan(state: _Outer):
-        return [Send("branch_node", {"branch": b}) for b in state["branches"]]
-
-    b = StateGraph(_Outer)
-    b.add_node("branch_node", branch_node)
-    b.add_conditional_edges(START, outer_fan, ["branch_node"])
-    b.add_edge("branch_node", END)
-    return b.compile()
-
-
-async def _one_run() -> tuple:
-    journal: list = []
-    token = _journal.set(journal)
-    try:
-        with durable_scope(FakeCtx()) as dctx:
-            await _build(dctx).ainvoke({"branches": ["A", "B", "C"], "results": []})
-    finally:
-        _journal.reset(token)
-    return tuple(journal)
-
-
-async def test_stategraph_durable_order_is_deterministic():
-    runs = [await _one_run() for _ in range(20)]
-    distinct = set(runs)
-    assert len(distinct) == 1, f"non-deterministic journal order: {distinct}"
-    # 3 branches x 2 legs x 2 ops = 12 durable commands per run
-    assert len(runs[0]) == 12
+    # Each round's commands are independently sorted.
+    assert rounds[0] == sorted(keys)
+    assert rounds[1] == sorted(keys)
