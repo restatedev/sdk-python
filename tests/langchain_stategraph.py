@@ -68,6 +68,43 @@ async def test_coordinator_creates_commands_in_sorted_key_order():
     assert set(results) == {f"result:{k}" for k in keys}
 
 
+async def test_coordinator_orders_concurrent_tool_call_tasks():
+    # A node's concurrent tool calls run as SEPARATE Pregel push tasks with
+    # distinct hierarchical keys (verified against LangGraph: a tool-using node
+    # "deep" spawns .../tools|('__pregel_push', N, False) tasks). The coordinator
+    # must order those distinct-key ops deterministically and never collide,
+    # alongside sibling single-op nodes — all in one flush round.
+    coord = _Coordinator(settle_turns=0)
+    order: list[str] = []
+    tool_tasks = [f"/deep|(pull)/tools|(push,{i})" for i in range(3)]
+    sibling_tasks = ["/branch_b|(pull)", "/branch_a|(pull)"]
+    all_keys = tool_tasks + sibling_tasks
+    for k in all_keys:
+        coord.register(k)
+
+    async def leaf(key: str):
+        def make_future():
+            order.append(key)
+
+            async def io():
+                await asyncio.sleep(0)
+                return key
+
+            return io()
+
+        try:
+            return await coord.submit(key, make_future)
+        finally:
+            coord.checkout(key)
+
+    results = await asyncio.gather(*(leaf(k) for k in all_keys))
+
+    # All ops created (none lost to a same-key collision), in sorted key order.
+    assert len(order) == len(all_keys)
+    assert order == sorted(all_keys)
+    assert set(results) == set(all_keys)
+
+
 async def test_coordinator_multiple_rounds_stay_ordered():
     coord = _Coordinator(settle_turns=0)
     rounds: list[list[str]] = [[], []]
