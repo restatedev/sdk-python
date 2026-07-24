@@ -23,6 +23,7 @@ from restate import Context, ObjectContext
 from restate.server_context import current_context
 
 from ._middleware import RestateMiddleware
+from ._stategraph import DurableContext, durable_scope
 
 
 def restate_context() -> Context:
@@ -51,4 +52,6 @@ __all__ = [
     "RestateMiddleware",
     "restate_context",
     "restate_object_context",
+    "durable_scope",
+    "DurableContext",
 ]
