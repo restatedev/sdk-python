@@ -21,9 +21,22 @@ import asyncio
 
 import pytest
 
-from restate.ext.langchain._stategraph import _Coordinator
+from restate.ext.langchain._stategraph import _active_coord, _Coordinator, coordinator_active
 
 pytestmark = [pytest.mark.anyio]
+
+
+async def test_coordinator_active_flag_gates_the_turnstile():
+    # RestateMiddleware.awrap_tool_call consults coordinator_active() to skip its
+    # turnstile when the StateGraph coordinator is on (the turnstile is redundant
+    # there and would deadlock against the coordinator's all-leaves-pending flush).
+    assert coordinator_active() is False
+    token = _active_coord.set(_Coordinator())
+    try:
+        assert coordinator_active() is True
+    finally:
+        _active_coord.reset(token)
+    assert coordinator_active() is False
 
 
 @pytest.fixture(scope="session")

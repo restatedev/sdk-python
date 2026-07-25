@@ -204,6 +204,14 @@ _active_coord: contextvars.ContextVar[Optional[_Coordinator]] = contextvars.Cont
     "_restate_lg_active_coord", default=None
 )
 
+
+def coordinator_active() -> bool:
+    """True if a StateGraph determinism coordinator is active on the current
+    context. RestateMiddleware uses this to skip its tool-call turnstile, which
+    is redundant with — and would deadlock against — the coordinator."""
+    return _active_coord.get() is not None
+
+
 _installed = False
 _auto_enabled = False
 _orig_run_typed: Any = None

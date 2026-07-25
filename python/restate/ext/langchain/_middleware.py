@@ -36,6 +36,7 @@ from restate.extensions import current_context
 from restate.ext.turnstile import Turnstile
 
 from ._state import get_or_create_state, state_from_ctx
+from ._stategraph import coordinator_active as _stategraph_coordinator_active
 
 ToolCallResult = ToolMessage | Command
 
@@ -125,6 +126,20 @@ class RestateMiddleware(AgentMiddleware):
 
         ctx = current_context()
         assert ctx is not None, "RestateMiddleware must run inside a Restate handler"
+
+        if _stategraph_coordinator_active():
+            # The StateGraph determinism coordinator is active. A node's tool
+            # calls are separate Pregel tasks with distinct keys that the
+            # coordinator already orders deterministically; the turnstile is
+            # redundant here AND would deadlock against the coordinator's
+            # "flush when every active leaf is pending" barrier (a turnstile
+            # blocks later tool calls *before* they submit, so they never become
+            # pending, so the first never flushes). Skip the turnstile.
+            result = await handler(request)
+            if isinstance(result, ToolMessage):
+                result.id = str(ctx.uuid())
+            return result
+
         state = state_from_ctx(ctx)
         assert state is not None, "RestateMiddleware must run inside a Restate handler"
         turnstile = state.turnstiles.get(tool_call_id)
