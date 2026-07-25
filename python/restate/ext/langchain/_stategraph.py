@@ -264,7 +264,7 @@ def install() -> None:
         # calls the ORIGINAL run_typed (no recursion) to create the command.
         return coord.submit(full, lambda: _orig_run_typed(self, *args, **kwargs))
 
-    ServerInvocationContext.run_typed = patched_run_typed  # type: ignore[method-assign]
+    ServerInvocationContext.run_typed = patched_run_typed  # type: ignore[method-assign, assignment]
 
 
 def enable() -> None:
@@ -284,7 +284,9 @@ def enable() -> None:
 
     import restate.server_context as _sc  # pylint: disable=import-outside-toplevel
 
-    orig_invoke_handler = _sc.invoke_handler
+    # getattr/setattr: invoke_handler is imported into server_context but not
+    # re-exported, so plain attribute access trips pyright's private-import check.
+    orig_invoke_handler = getattr(_sc, "invoke_handler")
 
     async def patched_invoke_handler(handler, ctx, in_buffer):  # type: ignore[no-untyped-def]
         token = _active_coord.set(_Coordinator(settle_turns=0))
@@ -293,7 +295,7 @@ def enable() -> None:
         finally:
             _active_coord.reset(token)
 
-    _sc.invoke_handler = patched_invoke_handler  # server_context.enter() resolves this name
+    setattr(_sc, "invoke_handler", patched_invoke_handler)  # server_context.enter() resolves this name
 
 
 class durable_scope:  # pylint: disable=invalid-name
