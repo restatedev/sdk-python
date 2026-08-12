@@ -14,4 +14,8 @@ doc = false
 [dependencies]
 pyo3 = { version = "0.25.1", features = ["extension-module"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-restate-sdk-shared-core = { version = "7.0.1", features = ["request_identity", "sha2_random_seed", "rust_crypto"] }
+serde_json = "1"
+# Pinned to the `relay` branch, which adds the embedded relay-tunnel receiver
+# behind the `tunnel` feature (the RelayTunnel pyclass in src/lib.rs wraps it).
+# Swap back to a crates.io `version = "…"` once the `tunnel` feature ships.
+restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core.git", branch = "relay", features = ["request_identity", "sha2_random_seed", "rust_crypto", "tunnel"] }

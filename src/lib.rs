@@ -1,4 +1,5 @@
 use pyo3::create_exception;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone, PyString};
 use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
@@ -71,7 +72,6 @@ impl From<ResponseHead> for PyResponseHead {
         }
     }
 }
-
 
 type PyNotificationHandle = u32;
 
@@ -981,6 +981,62 @@ For further info on error handling, refer to https://docs.restate.dev/develop/py
     }
 }
 
+// =========================================================================
+// Relay tunnel — embedded receiver (control plane only)
+// =========================================================================
+//
+// A thin PyO3 wrapper over the shared-core loopback engine
+// (`restate_sdk_shared_core::relay`), the same engine the Java (FFM) and
+// TypeScript (napi) SDKs drive. The engine dials the relay on its own tokio
+// runtime and bridges each forwarded request over a loopback socket into a
+// local HTTP/2 (h2c) server; the FFI boundary carries only start / status /
+// stop, never per-request data. The Hypercorn wiring lives in
+// `python/restate/tunnel.py`.
+
+use restate_sdk_shared_core::relay::{
+    Config as RelayConfig, Engine as RelayEngine, Handle as RelayHandle,
+};
+
+#[pyclass]
+struct RelayTunnel {
+    handle: Option<RelayHandle>,
+}
+
+#[pymethods]
+impl RelayTunnel {
+    /// Parse the JSON config (the `relay::Config` shape: `relay_addr`, `env`,
+    /// `tunnel`, `api_key`, `local_port`, optional `connections`/`instance_id`/
+    /// `tls`/…) and start the engine. Returns immediately; the receiver dials
+    /// the relay in the background.
+    #[staticmethod]
+    fn start(config_json: &str) -> PyResult<RelayTunnel> {
+        let config: RelayConfig = serde_json::from_str(config_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid tunnel config JSON: {e}")))?;
+        let handle =
+            RelayEngine::start(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(RelayTunnel {
+            handle: Some(handle),
+        })
+    }
+
+    /// Engine status as JSON: `{"running": bool, "last_error": string|null}`.
+    fn status(&self) -> String {
+        match &self.handle {
+            Some(h) => h.status_json(),
+            None => r#"{"running":false,"last_error":null}"#.to_string(),
+        }
+    }
+
+    /// Signal a graceful shutdown and join the engine's runtime. Idempotent.
+    /// Releases the GIL while the runtime drains (the engine never calls back
+    /// into Python, so this cannot deadlock).
+    fn stop(&mut self, py: Python<'_>) {
+        if let Some(mut h) = self.handle.take() {
+            py.allow_threads(|| h.stop());
+        }
+    }
+}
+
 #[pymodule]
 fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use tracing_subscriber::EnvFilter;
@@ -1006,6 +1062,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyUnresolvedFuture>()?;
     m.add_class::<PyCallHandle>()?;
     m.add_class::<PyRun>()?;
+    m.add_class::<RelayTunnel>()?;
 
     m.add("VMException", m.py().get_type::<VMException>())?;
     m.add(
