@@ -13,7 +13,7 @@
 import asyncio
 import logging
 import signal
-from typing import Dict, Set, TypedDict, Literal
+from typing import Any, Dict, Set, TypedDict, Literal
 
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
@@ -216,18 +216,34 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
 
     active_channels: Set[ReceiveChannel] = set()
     sigterm_installed = False
+    displaced_sigterm_handler: Any = None
 
     def _on_sigterm() -> None:
         """Notify all active receive channels of graceful shutdown."""
         for ch in active_channels:
             ch.notify_shutdown()
+        # Re-dispatch to the handler we displaced when installing this one, so a
+        # host ASGI server still learns about SIGTERM and can start its own
+        # graceful shutdown. Called from the event loop rather than from signal
+        # context, which is why frame is None; handlers must accept that.
+        handler = displaced_sigterm_handler
+        if callable(handler):
+            handler(signal.SIGTERM, None)
 
     async def app(scope: Scope, receive: Receive, send: Send):
-        nonlocal sigterm_installed
+        nonlocal sigterm_installed, displaced_sigterm_handler
         if not sigterm_installed:
             loop = asyncio.get_running_loop()
             try:
+                # add_signal_handler installs a dummy handler via signal.signal
+                # underneath, silently displacing whatever the host ASGI server
+                # registered (uvicorn's Server.handle_exit, for one). Remember it
+                # so _on_sigterm can re-dispatch: without that the host never
+                # sees SIGTERM, never drains, and is force-killed when the
+                # supervisor's stop grace period expires.
+                displaced = signal.getsignal(signal.SIGTERM)
                 loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+                displaced_sigterm_handler = displaced
             except (NotImplementedError, RuntimeError, ValueError):
                 pass  # Windows or non-main thread
             sigterm_installed = True
