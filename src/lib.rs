@@ -4,9 +4,9 @@ use pyo3::types::{PyBytes, PyNone, PyString};
 use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
 use restate_sdk_shared_core::{
     AwaitResponse, AwakeableHandle, CallHandle, CoreVM, Error, Header, IdentityVerifier, Input,
-    NonEmptyValue, NotificationHandle, OnMaxAttempts, ResponseHead, RetryPolicy, RunExitResult,
-    RunHandle, Target, TerminalFailure, UnresolvedFuture, VMOptions, Value,
-    CANCEL_NOTIFICATION_HANDLE, VM,
+    NonDeterministicChecksOption, NonEmptyValue, NotificationHandle, OnMaxAttempts, ResponseHead,
+    RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture, VMOptions,
+    Value, CANCEL_NOTIFICATION_HANDLE, VM,
 };
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -371,9 +371,24 @@ struct PyVM {
 #[pymethods]
 impl PyVM {
     #[new]
-    fn new(headers: Vec<(String, String)>) -> Result<Self, PyVMError> {
+    #[pyo3(signature = (headers, disable_payload_checks=false))]
+    fn new(
+        headers: Vec<(String, String)>,
+        disable_payload_checks: bool,
+    ) -> Result<Self, PyVMError> {
+        // When a journal value codec is configured, the serialized payloads written to the journal
+        // may legitimately differ between attempts (e.g. encryption with a random nonce), so we
+        // must disable the VM's payload determinism checks.
+        let options = VMOptions {
+            non_determinism_checks: if disable_payload_checks {
+                NonDeterministicChecksOption::PayloadChecksDisabled
+            } else {
+                NonDeterministicChecksOption::Enabled
+            },
+            ..Default::default()
+        };
         Ok(Self {
-            vm: CoreVM::new(headers, VMOptions::default())?,
+            vm: CoreVM::new(headers, options)?,
         })
     }
 

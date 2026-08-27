@@ -205,8 +205,8 @@ class VMWrapper:
     It provides a type-friendly interface to our shared vm.
     """
 
-    def __init__(self, headers: typing.List[typing.Tuple[str, str]]):
-        self.vm = PyVM(headers)
+    def __init__(self, headers: typing.List[typing.Tuple[str, str]], disable_payload_checks: bool = False):
+        self.vm = PyVM(headers, disable_payload_checks)
 
     def get_response_head(self) -> typing.Tuple[int, typing.Iterable[typing.Tuple[str, str]]]:
         """

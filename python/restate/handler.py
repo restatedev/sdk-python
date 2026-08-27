@@ -34,6 +34,7 @@ from typing import (
 from restate.retry_policy import InvocationRetryPolicy
 
 from restate.context import HandlerType
+from restate.entry_codec import JournalValueCodec
 from restate.exceptions import TerminalError
 from restate.serde import DefaultSerde, PydanticJsonSerde, MsgspecJsonSerde, Serde, is_pydantic, Msgspec
 from restate.types import extract_core_type
@@ -350,11 +351,18 @@ def handler_from_callable(wrapper: HandlerType[I, O]) -> Handler[I, O]:
         raise ValueError("Handler not found")  # pylint: disable=raise-missing-from
 
 
-async def invoke_handler(handler: Handler[I, O], ctx: Any, in_buffer: bytes) -> bytes:
+async def invoke_handler(
+    handler: Handler[I, O], ctx: Any, in_buffer: bytes, journal_codec: Optional[JournalValueCodec] = None
+) -> bytes:
     """
     Invoke the handler with the given context and input.
     """
     if handler.arity == 2:
+        if journal_codec is not None:
+            try:
+                in_buffer = await journal_codec.decode(in_buffer)
+            except Exception as e:
+                raise TerminalError(message="Failed to decode input using journal value codec", status_code=400) from e
         try:
             in_arg = handler.handler_io.input_serde.deserialize(in_buffer)
         except Exception as e:
@@ -363,4 +371,6 @@ async def invoke_handler(handler: Handler[I, O], ctx: Any, in_buffer: bytes) -> 
     else:
         out_arg = await handler.fn(ctx)  # type: ignore [call-arg]
     out_buffer = handler.handler_io.output_serde.serialize(out_arg)
+    if journal_codec is not None:
+        out_buffer = journal_codec.encode(bytes(out_buffer))
     return bytes(out_buffer)

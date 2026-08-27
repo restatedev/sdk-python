@@ -17,6 +17,7 @@ import typing
 from restate.service import Service
 from restate.object import VirtualObject
 from restate.workflow import Workflow
+from restate.entry_codec import JournalValueCodec, JournalValueCodecProvider
 
 
 # disable too few methods in a class
@@ -31,6 +32,7 @@ class Endpoint:
     services: typing.Dict[str, typing.Union[Service, VirtualObject, Workflow]]
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]]
     identity_keys: typing.List[str]
+    journal_value_codec: typing.Optional[typing.Union[JournalValueCodec, JournalValueCodecProvider]]
 
     def __init__(self):
         """
@@ -43,6 +45,10 @@ class Endpoint:
         self.protocol = None
 
         self.identity_keys = []
+
+        # An optional journal value codec (or async provider building one). When set, the SDK
+        # transforms serialized journal values through it. None means no codec is configured.
+        self.journal_value_codec = None
 
     def bind(self, *services: typing.Union[Service, VirtualObject, Workflow]):
         """
@@ -79,6 +85,23 @@ class Endpoint:
         """Add an identity key to this endpoint."""
         self.identity_keys.append(identity_key)
 
+    def set_journal_value_codec(self, codec_or_provider: typing.Union[JournalValueCodec, JournalValueCodecProvider]):
+        """
+        Set the journal value codec for this endpoint.
+
+        NOTE: This is experimental and may change in future releases.
+
+        Args:
+            codec_or_provider: Either a :class:`JournalValueCodec` instance, or an async provider
+                (a zero-arg callable returning an awaitable of a codec) that is invoked once and
+                cached for the lifetime of the endpoint.
+
+        Returns:
+            The updated Endpoint instance.
+        """
+        self.journal_value_codec = codec_or_provider
+        return self
+
     def app(self):
         """
         Returns the ASGI application for this endpoint.
@@ -101,6 +124,7 @@ def app(
     services: typing.Iterable[typing.Union[Service, VirtualObject, Workflow]],
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None,
     identity_keys: typing.Optional[typing.List[str]] = None,
+    journal_value_codec: typing.Optional[typing.Union[JournalValueCodec, JournalValueCodecProvider]] = None,
 ):
     """A restate ASGI application that hosts the given services."""
     endpoint = Endpoint()
@@ -113,4 +137,6 @@ def app(
     if identity_keys:
         for key in identity_keys:
             endpoint.identity_key(key)
+    if journal_value_codec is not None:
+        endpoint.set_journal_value_codec(journal_value_codec)
     return endpoint.app()

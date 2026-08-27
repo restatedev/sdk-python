@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from .client_types import RestateClient, RestateClientSendHandle, RestateScopedClient, HttpError
 
 from .context import HandlerType
+from .entry_codec import JournalValueCodec
 from .serde import BytesSerde, JsonSerde, Serde
 from .handler import handler_from_callable
 
@@ -32,9 +33,15 @@ class Client(RestateClient):
     A basic client for connecting to the Restate service.
     """
 
-    def __init__(self, client: httpx.AsyncClient, headers: typing.Optional[dict] = None):
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        headers: typing.Optional[dict] = None,
+        journal_codec: typing.Optional[JournalValueCodec] = None,
+    ):
         self.headers = headers or {}
         self.client = client
+        self.journal_codec = journal_codec
 
     def scope(self, scope: str) -> RestateScopedClient:
         return ScopedClient(self, scope)
@@ -103,6 +110,8 @@ class Client(RestateClient):
     ) -> O:
         """Make an RPC call to the given handler"""
         parameter = input_serde.serialize(input_param)
+        if self.journal_codec is not None:
+            parameter = self.journal_codec.encode(parameter)
         if headers is not None:
             headers_kvs = list(headers.items())
         else:
@@ -124,6 +133,9 @@ class Client(RestateClient):
             scope=scope,
             limit_key=limit_key,
         )
+        # A send returns the invocation-id envelope, not a codec'd payload, so skip decode for it.
+        if not send and self.journal_codec is not None:
+            res = await self.journal_codec.decode(res)
         return output_serde.deserialize(res)  # type: ignore
 
     async def post(
@@ -471,10 +483,19 @@ class ScopedClient(RestateScopedClient):
 
 @asynccontextmanager
 async def create_client(
-    ingress: str, headers: typing.Optional[dict] = None
+    ingress: str,
+    headers: typing.Optional[dict] = None,
+    journal_value_codec: typing.Optional[JournalValueCodec] = None,
 ) -> typing.AsyncGenerator[RestateClient, None]:
     """
     Create a new Restate client.
+
+    Args:
+        ingress: The base URL of the Restate ingress.
+        headers: Optional default headers to send with every request.
+        journal_value_codec: Optional journal value codec. When set, request bodies are encoded and
+            call responses decoded through it. It must match the codec configured on the endpoint.
+            NOTE: This is experimental and may change in future releases.
     """
     async with httpx.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
-        yield Client(http_client, headers)
+        yield Client(http_client, headers, journal_codec=journal_value_codec)

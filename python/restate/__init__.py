@@ -38,6 +38,7 @@ from .context import (
     SendHandle,
     RunOptions,
 )
+from .entry_codec import JournalValueCodec, JournalValueCodecProvider
 from .exceptions import TerminalError, SdkInternalBaseException, is_internal_exception
 from .asyncio import as_completed, gather, wait_completed, select
 
@@ -58,6 +59,7 @@ except ImportError:
         restate_image: str = "docker.io/restatedev/restate:latest",
         always_replay: bool = False,
         disable_retries: bool = False,
+        journal_value_codec: typing.Optional[JournalValueCodec] = None,
     ) -> typing.AsyncGenerator[HarnessEnvironment, None]:
         """a dummy harness constructor to raise ImportError. Install restate-sdk[harness] to use this feature"""
         raise ImportError("Install restate-sdk[harness] to use this feature")
@@ -81,7 +83,9 @@ except ImportError:
 
     @asynccontextmanager
     async def create_client(
-        ingress: str, headers: typing.Optional[dict] = None
+        ingress: str,
+        headers: typing.Optional[dict] = None,
+        journal_value_codec: typing.Optional[JournalValueCodec] = None,
     ) -> typing.AsyncGenerator[RestateClient, None]:
         """a dummy client constructor to raise ImportError. Install restate-sdk[client] to use this feature"""
         raise ImportError("Install restate-sdk[client] to use this feature")
@@ -105,6 +109,8 @@ __all__ = [
     "ScopedContext",
     "RunOptions",
     "TerminalError",
+    "JournalValueCodec",
+    "JournalValueCodecProvider",
     "app",
     "create_test_harness",
     "test_harness",
