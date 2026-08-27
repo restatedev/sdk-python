@@ -11,12 +11,14 @@
 """This module contains the ASGI server for the restate framework."""
 
 import asyncio
+import functools
 import logging
 import signal
-from typing import Dict, Set, TypedDict, Literal
+from typing import Dict, Optional, Set, TypedDict, Literal
 
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
+from restate.entry_codec import JournalValueCodec
 from restate.server_context import ServerInvocationContext, DisconnectedException
 from restate.server_types import Receive, ReceiveChannel, RestateAppT, Scope, Send, binary_to_header, header_to_binary  # pylint: disable=line-too-long
 from restate.vm import VMWrapper
@@ -125,7 +127,12 @@ async def send_health_check(send: Send):
 
 
 async def process_invocation_to_completion(
-    vm: VMWrapper, handler, attempt_headers: Dict[str, str], receive: ReceiveChannel, send: Send
+    vm: VMWrapper,
+    handler,
+    attempt_headers: Dict[str, str],
+    receive: ReceiveChannel,
+    send: Send,
+    journal_codec: Optional[JournalValueCodec] = None,
 ):
     """Invoke the user code."""
     status, res_headers = vm.get_response_head()
@@ -155,7 +162,13 @@ async def process_invocation_to_completion(
     # ========================================
     invocation = vm.sys_input()
     context = ServerInvocationContext(
-        vm=vm, handler=handler, invocation=invocation, attempt_headers=attempt_headers, send=send, receive=receive
+        vm=vm,
+        handler=handler,
+        invocation=invocation,
+        attempt_headers=attempt_headers,
+        send=send,
+        receive=receive,
+        journal_codec=journal_codec,
     )
     try:
         await context.enter()
@@ -216,6 +229,27 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
 
     active_channels: Set[ReceiveChannel] = set()
     sigterm_installed = False
+
+    # Journal value codec resolution.
+    # A codec (or an async provider building one) may be configured on the endpoint. Whether one is
+    # configured is known synchronously and drives the VM's payload-checks flag. An async provider
+    # is resolved once, lazily on the first invocation, and the resulting codec is reused.
+    codec_config = endpoint.journal_value_codec
+    disable_payload_checks = codec_config is not None
+
+    # Memoize the provider's resolution. functools.cache can't wrap the async provider directly
+    # (it would cache a coroutine, which can't be awaited twice), so we cache a sync factory that
+    # returns the Task instead: the provider runs once and every caller awaits the same Task.
+    @functools.cache
+    def _codec_task() -> "asyncio.Task[JournalValueCodec]":
+        assert callable(codec_config)
+        return asyncio.ensure_future(codec_config())
+
+    async def get_codec() -> Optional[JournalValueCodec]:
+        if codec_config is None or isinstance(codec_config, JournalValueCodec):
+            # Nothing configured, or an already-built instance: nothing to await.
+            return codec_config
+        return await _codec_task()
 
     def _on_sigterm() -> None:
         """Notify all active receive channels of graceful shutdown."""
@@ -284,8 +318,14 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             receive_channel = ReceiveChannel(receive)
             active_channels.add(receive_channel)
             try:
+                journal_codec = await get_codec()
                 await process_invocation_to_completion(
-                    VMWrapper(request_headers), handler, dict(request_headers), receive_channel, send
+                    VMWrapper(request_headers, disable_payload_checks=disable_payload_checks),
+                    handler,
+                    dict(request_headers),
+                    receive_channel,
+                    send,
+                    journal_codec=journal_codec,
                 )
             finally:
                 active_channels.discard(receive_channel)

@@ -21,6 +21,7 @@ from contextlib import contextmanager, asynccontextmanager
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from restate.client import create_client
+from restate.entry_codec import JournalValueCodec
 from restate.server_types import RestateAppT
 from restate.types import HarnessEnvironment
 from testcontainers.core.container import DockerContainer  # type: ignore
@@ -338,6 +339,7 @@ async def create_test_harness(
     restate_image: str = "docker.io/restatedev/restate:latest",
     always_replay: bool = False,
     disable_retries: bool = False,
+    journal_value_codec: typing.Optional[JournalValueCodec] = None,
 ) -> typing.AsyncGenerator[HarnessEnvironment, None]:
     """
     Creates a test harness for running Restate services together with restate-server.
@@ -360,6 +362,8 @@ async def create_test_harness(
                           on a suspension point. This is useful to hunt non-deterministic bugs
                           that might prevent your code to replay correctly (default is False).
     :param disable_retries: When True, retries are disabled (default is False).
+    :param journal_value_codec: Optional journal value codec to configure on the ingress client, so
+                          it matches a codec configured on the endpoint under test (default is None).
     """
     with (
         create_restate_container(
@@ -377,7 +381,7 @@ async def create_test_harness(
             msg = f"unable to register the services at {bind_address} - {res.status_code} {res.text}"
             raise AssertionError(msg)
 
-        async with create_client(runtime.ingress_url()) as client:
+        async with create_client(runtime.ingress_url(), journal_value_codec=journal_value_codec) as client:
             yield HarnessEnvironment(
                 ingress_url=runtime.ingress_url(), admin_api_url=runtime.admin_url(), client=client
             )

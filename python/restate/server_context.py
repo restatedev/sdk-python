@@ -54,6 +54,7 @@ from restate.exceptions import (
     SuspendedException,
     RetryableError,
 )
+from restate.entry_codec import JournalValueCodec
 from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_types import ReceiveChannel, Send
@@ -371,7 +372,7 @@ class ServerDurablePromise(DurablePromise):
     def resolve(self, value: Any) -> Awaitable[None]:
         vm: VMWrapper = self.server_context.vm
         assert self.serde is not None
-        value_buffer = self.serde.serialize(value)
+        value_buffer = self.server_context._encode(self.serde.serialize(value))  # pylint: disable=protected-access
         handle = vm.sys_complete_promise_success(self.name, value_buffer)
         update_restate_context_is_replaying(self.server_context.vm)
 
@@ -518,6 +519,7 @@ class ServerInvocationContext(ObjectContext):
         attempt_headers: Dict[str, str],
         send: Send,
         receive: ReceiveChannel,
+        journal_codec: Optional[JournalValueCodec] = None,
     ) -> None:
         super().__init__()
         self.vm = vm
@@ -527,10 +529,17 @@ class ServerInvocationContext(ObjectContext):
         self.send = send
         self.random_instance = Random(invocation.random_seed)
         self.receive = receive
+        self.journal_codec = journal_codec
         self.run_coros_to_execute: dict[int, Callable[[], Awaitable[None]]] = {}
         self.request_finished_event = asyncio.Event()
         self.tasks = Tasks()
         self.extension_data: Dict[str, Any] = {}
+
+    def _encode(self, buffer: bytes) -> bytes:
+        """Apply the journal value codec encode step, if a codec is configured."""
+        if self.journal_codec is None:
+            return buffer
+        return self.journal_codec.encode(buffer)
 
     async def enter(self):
         """Invoke the user code."""
@@ -543,7 +552,9 @@ class ServerInvocationContext(ObjectContext):
                     await stack.enter_async_context(manager())
                 await stack.enter_async_context(auto_close_extension_data(self.extension_data))
 
-                out_buffer = await invoke_handler(handler=self.handler, ctx=self, in_buffer=in_buffer)
+                out_buffer = await invoke_handler(
+                    handler=self.handler, ctx=self, in_buffer=in_buffer, journal_codec=self.journal_codec
+                )
             restate_context_is_replaying.set(False)
             self.vm.sys_write_output_success(bytes(out_buffer))
             self.vm.sys_end()
@@ -721,6 +732,8 @@ class ServerInvocationContext(ObjectContext):
             if res is None or serde is None:
                 return res
             if isinstance(res, bytes):
+                if self.journal_codec is not None:
+                    res = await self.journal_codec.decode(res)
                 return serde.deserialize(res)
             return res
 
@@ -770,7 +783,7 @@ class ServerInvocationContext(ObjectContext):
         """Set the value associated with the given name."""
         if isinstance(serde, DefaultSerde):
             serde = serde.with_maybe_type(type(value))
-        buffer = serde.serialize(value)
+        buffer = self._encode(serde.serialize(value))
         self.vm.sys_set_state(name, bytes(buffer))
         update_restate_context_is_replaying(self.vm)
 
@@ -810,7 +823,7 @@ class ServerInvocationContext(ObjectContext):
         """Resolve a named signal on a target invocation."""
         if isinstance(serde, DefaultSerde):
             serde = serde.with_maybe_type(type(value))
-        buf = serde.serialize(value)
+        buf = self._encode(serde.serialize(value))
         self.vm.sys_resolve_signal(invocation_id, name, buf)
         update_restate_context_is_replaying(self.vm)
 
@@ -854,7 +867,7 @@ class ServerInvocationContext(ObjectContext):
                 self.tasks.add(action_result_future)
                 action_result = typing.cast(T, await action_result_future)
 
-            buffer = serde.serialize(action_result)
+            buffer = self._encode(serde.serialize(action_result))
             self.vm.propose_run_completion_success(handle, buffer)
         except TerminalError as t:
             failure = Failure(code=t.status_code, message=t.message, metadata=t.metadata)
@@ -1026,7 +1039,7 @@ class ServerInvocationContext(ObjectContext):
         limit_key: str | None = None,
     ) -> RestateDurableCallFuture[O] | SendHandle:
         """Make an RPC call to the given handler"""
-        parameter = input_serde.serialize(input_param)
+        parameter = self._encode(input_serde.serialize(input_param))
         if headers is not None:
             headers_kvs = list(headers.items())
         else:
@@ -1226,7 +1239,7 @@ class ServerInvocationContext(ObjectContext):
     def resolve_awakeable(self, name: str, value: I, serde: Serde[I] = DefaultSerde()) -> None:
         if isinstance(serde, DefaultSerde):
             serde = serde.with_maybe_type(type(value))
-        buf = serde.serialize(value)
+        buf = self._encode(serde.serialize(value))
         self.vm.sys_resolve_awakeable(name, buf)
         update_restate_context_is_replaying(self.vm)
 
