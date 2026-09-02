@@ -346,17 +346,19 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                     description=handler.description,
                     metadata=handler.metadata,
                     inactivityTimeout=int(handler.inactivity_timeout.total_seconds() * 1000)
-                    if handler.inactivity_timeout
+                    if handler.inactivity_timeout is not None
                     else None,
-                    abortTimeout=int(handler.abort_timeout.total_seconds() * 1000) if handler.abort_timeout else None,
+                    abortTimeout=int(handler.abort_timeout.total_seconds() * 1000)
+                    if handler.abort_timeout is not None
+                    else None,
                     journalRetention=int(handler.journal_retention.total_seconds() * 1000)
-                    if handler.journal_retention
+                    if handler.journal_retention is not None
                     else None,
                     idempotencyRetention=int(handler.idempotency_retention.total_seconds() * 1000)
-                    if handler.idempotency_retention
+                    if handler.idempotency_retention is not None
                     else None,
                     workflowCompletionRetention=int(handler.workflow_retention.total_seconds() * 1000)
-                    if handler.workflow_retention
+                    if handler.workflow_retention is not None
                     else None,
                     enableLazyState=handler.enable_lazy_state,
                     ingressPrivate=handler.ingress_private,
@@ -394,14 +396,16 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                 description=description,
                 metadata=metadata,
                 inactivityTimeout=int(service.inactivity_timeout.total_seconds() * 1000)
-                if service.inactivity_timeout
+                if service.inactivity_timeout is not None
                 else None,
-                abortTimeout=int(service.abort_timeout.total_seconds() * 1000) if service.abort_timeout else None,
+                abortTimeout=int(service.abort_timeout.total_seconds() * 1000)
+                if service.abort_timeout is not None
+                else None,
                 journalRetention=int(service.journal_retention.total_seconds() * 1000)
-                if service.journal_retention
+                if service.journal_retention is not None
                 else None,
                 idempotencyRetention=int(service.idempotency_retention.total_seconds() * 1000)
-                if service.idempotency_retention
+                if service.idempotency_retention is not None
                 else None,
                 enableLazyState=service.enable_lazy_state if isinstance(service, (Workflow, VirtualObject)) else None,
                 ingressPrivate=service.ingress_private,
