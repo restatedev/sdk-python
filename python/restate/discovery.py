@@ -358,7 +358,7 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                     if handler.idempotency_retention is not None
                     else None,
                     workflowCompletionRetention=int(handler.workflow_retention.total_seconds() * 1000)
-                    if handler.workflow_retention
+                    if handler.workflow_retention is not None
                     else None,
                     enableLazyState=handler.enable_lazy_state,
                     ingressPrivate=handler.ingress_private,
