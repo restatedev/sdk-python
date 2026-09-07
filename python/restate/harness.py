@@ -26,7 +26,7 @@ from restate.types import HarnessEnvironment
 from testcontainers.core.container import DockerContainer  # type: ignore
 from testcontainers.core.wait_strategies import CompositeWaitStrategy, HttpWaitStrategy
 
-import httpx
+import httpx2
 
 
 def find_free_port():
@@ -169,12 +169,12 @@ class RestateContainer(DockerContainer):
         return f"http://{self.get_container_host_ip()}:{self.get_exposed_port(9070)}"
 
     def get_admin_client(self):
-        """return an httpx client to access the admin interface"""
-        return httpx.Client(base_url=self.admin_url())
+        """return an HTTPX2 client to access the admin interface"""
+        return httpx2.Client(base_url=self.admin_url())
 
     def get_ingress_client(self):
-        """return an httpx client to access the ingress interface"""
-        return httpx.Client(base_url=self.ingress_url())
+        """return an HTTPX2 client to access the ingress interface"""
+        return httpx2.Client(base_url=self.ingress_url())
 
     def start(self, stream_logs=False):
         """start the container and wait for health checks to pass"""
@@ -253,7 +253,7 @@ class RestateTestHarness:
             self.bind_address.cleanup()
 
     def ingress_client(self):
-        """return an httpx client to access the restate server's ingress"""
+        """return an HTTPX2 client to access the restate server's ingress"""
         if self.restate is None:
             raise AssertionError("The Restate server has not been started. Use .start()")
         return self.restate.get_ingress_client()
