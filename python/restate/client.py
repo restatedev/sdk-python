@@ -13,7 +13,7 @@ This is a basic remote client for the Restate service.
 """
 
 from datetime import timedelta
-import httpx
+import httpx2
 import typing
 from contextlib import asynccontextmanager
 
@@ -35,7 +35,7 @@ class Client(RestateClient):
 
     def __init__(
         self,
-        client: httpx.AsyncClient,
+        client: httpx2.AsyncClient,
         headers: typing.Optional[dict] = None,
         journal_codec: typing.Optional[JournalValueCodec] = None,
     ):
@@ -497,5 +497,5 @@ async def create_client(
             call responses decoded through it. It must match the codec configured on the endpoint.
             NOTE: This is experimental and may change in future releases.
     """
-    async with httpx.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
+    async with httpx2.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
         yield Client(http_client, headers, journal_codec=journal_value_codec)

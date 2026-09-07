@@ -90,7 +90,7 @@ async def test_retryable_exception():
         invocation_retry_policy=InvocationRetryPolicy(
             max_attempts=3,
             # Something really long to trigger a test timeout.
-            # Default httpx client timeout is 5 seconds.
+            # Default HTTPX2 client timeout is 5 seconds.
             initial_interval=timedelta(hours=1),
         ),
     )
@@ -120,7 +120,7 @@ async def test_accidentally_wrapped_retryable_exception():
         invocation_retry_policy=InvocationRetryPolicy(
             max_attempts=3,
             # Something really long to trigger a test timeout.
-            # Default httpx client timeout is 5 seconds.
+            # Default HTTPX2 client timeout is 5 seconds.
             initial_interval=timedelta(hours=1),
         ),
     )
