@@ -161,6 +161,105 @@ async def test_empty_body_frames_do_not_cause_hotloop():
         await receive_channel.close()
 
 
+async def test_cancel_signal_drains_in_flight_run_before_raising():
+    """
+    When the cancel signal arrives while a ctx.run closure is still executing, the closure must
+    observe CancelledError and finish its cleanup before the handler sees TerminalError(409).
+    """
+    from restate.exceptions import TerminalError
+    from restate.server_context import ServerInvocationContext, Tasks
+    from restate.vm import (
+        DoProgressCancelSignalReceived,
+        DoProgressExecuteRun,
+        DoProgressWaitExternalProgress,
+        SingleUnresolvedFuture,
+    )
+
+    run_started = asyncio.Event()
+    events: list[str] = []
+
+    async def run_action():
+        run_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("run cancelled")
+            raise
+        finally:
+            # Cleanup that itself awaits, so it only completes if the canceller waits for it.
+            await asyncio.sleep(0.01)
+            events.append("run cleanup done")
+
+    class FakeReceive:
+        async def __call__(self) -> ASGIReceiveEvent:
+            # Hand control to the run task until it is actually executing the closure.
+            await run_started.wait()
+            return cast(ASGIReceiveEvent, {"type": "restate.run_completed", "data": None})
+
+        async def enqueue_restate_event(self, what):
+            pass
+
+    vm = MagicMock()
+    vm.take_output.return_value = None
+    vm.do_progress.side_effect = [
+        DoProgressExecuteRun(handle=1),
+        DoProgressWaitExternalProgress(),
+        DoProgressCancelSignalReceived(),
+    ]
+
+    ctx = ServerInvocationContext.__new__(ServerInvocationContext)
+    ctx.vm = vm
+    ctx.receive = FakeReceive()  # type: ignore[assignment]
+    ctx.run_coros_to_execute = {1: run_action}
+    ctx.tasks = Tasks()
+
+    with pytest.raises(TerminalError) as exc_info:
+        await asyncio.wait_for(ctx.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(1)), timeout=2.0)
+    events.append("handler saw TerminalError")
+
+    assert exc_info.value.status_code == 409
+    assert events == ["run cancelled", "run cleanup done", "handler saw TerminalError"]
+    assert not ctx.tasks.tasks
+
+
+async def test_cancel_and_drain_finishes_cleanup_when_caller_is_cancelled():
+    """Cancelling the drainer must not interrupt a child that is still awaiting in its finally block."""
+    from restate.server_context import Tasks
+
+    in_cleanup = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    events: list[str] = []
+
+    async def child():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            in_cleanup.set()
+            await release_cleanup.wait()
+            events.append("child cleanup done")
+
+    tasks = Tasks()
+    child_task = asyncio.create_task(child())
+    tasks.add(child_task)
+    await asyncio.sleep(0)
+
+    drainer = asyncio.create_task(tasks.cancel_and_drain())
+    await asyncio.wait_for(in_cleanup.wait(), timeout=1.0)
+
+    drainer.cancel()
+    await asyncio.sleep(0.01)
+    assert not drainer.done()
+    assert not child_task.done()
+
+    release_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(drainer, timeout=1.0)
+    events.append("drainer cancelled")
+
+    assert events == ["child cleanup done", "drainer cancelled"]
+    assert child_task.cancelled()
+
+
 # ---- Shutdown / SIGTERM tests ----
 
 

@@ -447,6 +447,26 @@ class Tasks:
         for task in to_cancel:
             task.cancel()
 
+    async def cancel_and_drain(self):
+        """Cancel all tasks in the list and wait until they have finished unwinding."""
+        to_cancel = list(self.tasks)
+        self.tasks.clear()
+        for task in to_cancel:
+            task.cancel()
+        if not to_cancel:
+            return
+        # Shield the children: cancelling the caller must not re-cancel tasks that are still
+        # running their cleanup. The caller's cancellation is re-raised once they have finished.
+        gather_fut = asyncio.gather(*to_cancel, return_exceptions=True)
+        caller_cancelled = False
+        while not gather_fut.done():
+            try:
+                await asyncio.shield(gather_fut)
+            except asyncio.CancelledError:
+                caller_cancelled = True
+        if caller_cancelled:
+            raise asyncio.CancelledError()
+
 
 restate_context_is_replaying = contextvars.ContextVar("restate_context_is_replaying", default=False)
 
@@ -694,6 +714,9 @@ class ServerInvocationContext(ObjectContext):
                 # One of the handles completed
                 return
             if isinstance(do_progress_response, DoProgressCancelSignalReceived):
+                # In-flight ctx.run closures must finish unwinding before the handler's
+                # cancellation handling (e.g. compensation) starts running.
+                await self.tasks.cancel_and_drain()
                 raise TerminalError("cancelled", 409)
             if isinstance(do_progress_response, DoProgressExecuteRun):
                 fn = self.run_coros_to_execute[do_progress_response.handle]
