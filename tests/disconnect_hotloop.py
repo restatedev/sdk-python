@@ -18,11 +18,13 @@ Covers:
 
 import asyncio
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
+from restate.exceptions import SdkInternalBaseException, SdkInternalException, SuspendedException
+from restate.server_context import ServerInvocationContext
 from restate.server_types import ASGIReceiveEvent, ReceiveChannel
+from restate.vm import SingleUnresolvedFuture, Suspended
 
 
 @pytest.fixture(scope="session")
@@ -254,3 +256,59 @@ async def test_shutdown_unblocks_concurrent_waiters():
         assert sorted(results) == [0, 1, 2]
     finally:
         await channel.close()
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize(
+    "origin", ["user", "notification_error", "notification_suspended", "progress_error", "progress_suspended"]
+)
+async def test_internal_exception_reports_only_without_vm_abort(monkeypatch, caplog, wrapped, origin):
+    vm = MagicMock()
+    vm.take_output.return_value = None
+    handler = MagicMock()
+    handler.context_managers = []
+    invocation = MagicMock(random_seed=0, input_buffer=b"")
+    ctx = ServerInvocationContext(vm, handler, invocation, {}, AsyncMock(), MagicMock())
+    raised: list[BaseException] = []
+
+    async def invoke(**kwargs):
+        try:
+            if origin == "user":
+                raise SdkInternalException()
+            if origin.startswith("notification"):
+                vm.take_notification.return_value = (
+                    Suspended() if origin.endswith("suspended") else ValueError("VM notification failed")
+                )
+                await ctx.must_take_notification(0)
+            else:
+                vm.do_progress.return_value = (
+                    Suspended() if origin.endswith("suspended") else ValueError("VM progress failed")
+                )
+                await ctx.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(0))
+        except SdkInternalBaseException as e:
+            assert isinstance(e, SuspendedException if origin.endswith("suspended") else SdkInternalException)
+            if wrapped:
+                error = RuntimeError("wrapper failed")
+                raised.append(error)
+                raise error from e
+            raised.append(e)
+            raise
+
+    monkeypatch.setattr("restate.server_context.invoke_handler", invoke)
+    await ctx.enter()
+
+    assert len(raised) == 1
+    vm.sys_end.assert_not_called()
+    vm.sys_write_output_success.assert_not_called()
+    vm.sys_write_output_failure.assert_not_called()
+    if origin == "user":
+        vm.notify_error.assert_called_once()
+        message, stacktrace = vm.notify_error.call_args.args
+        assert message == repr(raised[0])
+        assert "SdkInternalException" in stacktrace
+        if wrapped:
+            assert "RuntimeError: wrapper failed" in stacktrace
+        assert "Internal SDK exception raised without a VM abort" in caplog.text
+    else:
+        vm.notify_error.assert_not_called()
+        assert "Internal SDK exception raised without a VM abort" not in caplog.text

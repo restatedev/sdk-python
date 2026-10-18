@@ -534,12 +534,19 @@ class ServerInvocationContext(ObjectContext):
         self.request_finished_event = asyncio.Event()
         self.tasks = Tasks()
         self.extension_data: Dict[str, Any] = {}
+        self._sdk_internal_abort = False
 
     def _encode(self, buffer: bytes) -> bytes:
         """Apply the journal value codec encode step, if a codec is configured."""
         if self.journal_codec is None:
             return buffer
         return self.journal_codec.encode(buffer)
+
+    def _handle_internal_exception(self, error: BaseException) -> None:
+        if not self._sdk_internal_abort:
+            logger.warning("Internal SDK exception raised without a VM abort", exc_info=error)
+            stacktrace = "".join(traceback.format_exception(error))
+            self.vm.notify_error(repr(error), stacktrace)
 
     async def enter(self):
         """Invoke the user code."""
@@ -570,8 +577,8 @@ class ServerInvocationContext(ObjectContext):
         # pylint: disable=W0718
         except asyncio.CancelledError:
             pass
-        except SdkInternalBaseException:
-            pass
+        except SdkInternalBaseException as e:
+            self._handle_internal_exception(e)
         except DisconnectedException:
             raise
         except Exception as e:
@@ -591,6 +598,7 @@ class ServerInvocationContext(ObjectContext):
                     self.vm.notify_error(cause.message, stacktrace, cause.retry_after)
                     break
                 elif isinstance(cause, SdkInternalBaseException):
+                    self._handle_internal_exception(e)
                     break
                 cause = cause.__cause__
             else:
@@ -667,10 +675,12 @@ class ServerInvocationContext(ObjectContext):
             # We might need to write out something at this point.
             await self.take_and_send_output()
             logger.exception("Exception in take_notification", exc_info=res)
+            self._sdk_internal_abort = True
             raise SdkInternalException() from res
         if isinstance(res, Suspended):
             # We might need to write out something at this point.
             await self.take_and_send_output()
+            self._sdk_internal_abort = True
             raise SuspendedException()
         if isinstance(res, NotReady):
             raise ValueError(f"Unexpected value error: {handle}")
@@ -687,8 +697,10 @@ class ServerInvocationContext(ObjectContext):
             do_progress_response = self.vm.do_progress(unresolved_future)
             if isinstance(do_progress_response, BaseException):
                 logger.exception("Exception in do_progress", exc_info=do_progress_response)
+                self._sdk_internal_abort = True
                 raise SdkInternalException() from do_progress_response
             if isinstance(do_progress_response, Suspended):
+                self._sdk_internal_abort = True
                 raise SuspendedException()
             if isinstance(do_progress_response, DoProgressAnyCompleted):
                 # One of the handles completed
