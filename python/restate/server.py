@@ -251,26 +251,33 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             return codec_config
         return await _codec_task()
 
-    def _on_sigterm() -> None:
-        """Notify all active receive channels of graceful shutdown."""
-        for ch in active_channels:
-            ch.notify_shutdown()
-
     async def app(scope: Scope, receive: Receive, send: Send):
         nonlocal sigterm_installed
+        if scope["type"] == "lifespan":
+            raise LifeSpanNotImplemented()
+        if scope["type"] != "http":
+            raise NotImplementedError(f"Unknown scope type {scope['type']}")
+
         if not sigterm_installed:
             loop = asyncio.get_running_loop()
+            prev_handle = getattr(loop, "_signal_handlers", {}).get(signal.SIGTERM)
+            prev_signal = signal.getsignal(signal.SIGTERM)
+
+            def _on_sigterm() -> None:
+                for ch in active_channels:
+                    ch.notify_shutdown()
+                # ASGI hosts use either asyncio or signal.signal for shutdown.
+                if prev_handle is not None:
+                    prev_handle._run()
+                elif callable(prev_signal):
+                    prev_signal(signal.SIGTERM, None)
+
             try:
                 loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
             except (NotImplementedError, RuntimeError, ValueError):
                 pass  # Windows or non-main thread
             sigterm_installed = True
         try:
-            if scope["type"] == "lifespan":
-                raise LifeSpanNotImplemented()
-            if scope["type"] != "http":
-                raise NotImplementedError(f"Unknown scope type {scope['type']}")
-
             request_path = scope["path"]
             assert isinstance(request_path, str)
             request: ParsedPath = parse_path(request_path)
@@ -330,8 +337,6 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             finally:
                 active_channels.discard(receive_channel)
                 await receive_channel.close()
-        except LifeSpanNotImplemented as e:
-            raise e
         except Exception as e:
             logger.exception("Exception in ASGI app")
             raise e
