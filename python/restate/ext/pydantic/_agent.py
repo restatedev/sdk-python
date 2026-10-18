@@ -27,7 +27,7 @@ from pydantic_ai.messages import AgentStreamEvent, ModelMessage, UserContent
 from pydantic_ai.models import Model
 from pydantic_ai.output import OutputDataT, OutputSpec
 from pydantic_ai.result import StreamedRunResult
-from pydantic_ai.run import AgentRunResult
+from pydantic_ai.run import AgentRun, AgentRunResult
 from pydantic_ai.tools import DeferredToolResults, RunContext
 from pydantic_ai.toolsets.abstract import AbstractToolset
 from pydantic_ai.toolsets.function import FunctionToolset
@@ -307,6 +307,48 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
                 capabilities=capabilities,
                 spec=spec,
             )
+
+    @overload
+    def iter(
+        self,
+        user_prompt: str | Sequence[UserContent] | None = None,
+        *,
+        output_type: None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        **kwargs: Any,
+    ) -> AbstractAsyncContextManager[AgentRun[AgentDepsT, OutputDataT]]: ...
+
+    @overload
+    def iter(
+        self,
+        user_prompt: str | Sequence[UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT],
+        model: models.Model | models.KnownModelName | str | None = None,
+        **kwargs: Any,
+    ) -> AbstractAsyncContextManager[AgentRun[AgentDepsT, RunOutputDataT]]: ...
+
+    @asynccontextmanager
+    async def iter(
+        self,
+        user_prompt: str | Sequence[UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[AgentRun[AgentDepsT, Any]]:
+        """Iterate over the agent graph's nodes with the same durable model and toolsets as `run()`.
+
+        The remaining keyword arguments are forwarded unchanged so that this override accepts every
+        argument `AbstractAgent.run()` passes to `iter()` across supported pydantic-ai versions.
+        """
+        if model is not None:
+            raise TerminalError(
+                "An agent needs to have a `model` in order to be used with Restate, it cannot be set at agent run time."
+            )
+        with self._restate_overrides():
+            async with super().iter(user_prompt, output_type=output_type, model=model, **kwargs) as agent_run:
+                yield agent_run
 
     @overload
     def run_stream(
