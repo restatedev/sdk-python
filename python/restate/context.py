@@ -178,7 +178,11 @@ class KeyValueStore(abc.ABC):
 
     @abc.abstractmethod
     def get(
-        self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+        self,
+        name: str,
+        serde: Serde[T] = DefaultSerde(),
+        type_hint: Optional[typing.Type[T]] = None,
+        entry_name: Optional[str] = None,
     ) -> Awaitable[Optional[T]]:
         """
         Retrieves the value associated with the given name.
@@ -188,23 +192,48 @@ class KeyValueStore(abc.ABC):
             serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
                     See also 'type_hint'.
             type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
+            entry_name: The name of the journal entry, shown in the Restate journal for observability.
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> Awaitable[List[str]]:
-        """Returns the list of keys in the store."""
+    def state_keys(self, entry_name: Optional[str] = None) -> Awaitable[List[str]]:
+        """
+        Returns the list of keys in the store.
+
+        Args:
+            entry_name: The name of the journal entry, shown in the Restate journal for observability.
+        """
 
     @abc.abstractmethod
-    def set(self, name: str, value: T, serde: Serde[T] = DefaultSerde()) -> None:
-        """set the value associated with the given name."""
+    def set(self, name: str, value: T, serde: Serde[T] = DefaultSerde(), entry_name: Optional[str] = None) -> None:
+        """
+        set the value associated with the given name.
+
+        Args:
+            name: The state name
+            value: The value to set
+            serde: The serialization/deserialization mechanism.
+            entry_name: The name of the journal entry, shown in the Restate journal for observability.
+        """
 
     @abc.abstractmethod
-    def clear(self, name: str) -> None:
-        """clear the value associated with the given name."""
+    def clear(self, name: str, entry_name: Optional[str] = None) -> None:
+        """
+        clear the value associated with the given name.
+
+        Args:
+            name: The state name
+            entry_name: The name of the journal entry, shown in the Restate journal for observability.
+        """
 
     @abc.abstractmethod
-    def clear_all(self) -> None:
-        """clear all the values in the store."""
+    def clear_all(self, entry_name: Optional[str] = None) -> None:
+        """
+        clear all the values in the store.
+
+        Args:
+            entry_name: The name of the journal entry, shown in the Restate journal for observability.
+        """
 
 
 # pylint: disable=R0903
@@ -797,7 +826,11 @@ class ObjectSharedContext(Context):
 
     @abc.abstractmethod
     def get(
-        self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+        self,
+        name: str,
+        serde: Serde[T] = DefaultSerde(),
+        type_hint: Optional[typing.Type[T]] = None,
+        entry_name: Optional[str] = None,
     ) -> RestateDurableFuture[Optional[T]]:
         """
         Retrieves the value associated with the given name.
@@ -807,12 +840,16 @@ class ObjectSharedContext(Context):
             serde: The serialization/deserialization mechanism. - if the default serde is used, a default serializer will be used based on the type.
                     See also 'type_hint'.
             type_hint: The type hint of the return value. This is used to pick the serializer. If None, the type hint will be inferred from the action's return type, or the provided serializer.
+            entry_name: The name of the journal entry, shown in the Restate journal for observability.
         """
 
     @abc.abstractmethod
-    def state_keys(self) -> Awaitable[List[str]]:
+    def state_keys(self, entry_name: Optional[str] = None) -> Awaitable[List[str]]:
         """
         Returns the list of keys in the store.
+
+        Args:
+            entry_name: The name of the journal entry, shown in the Restate journal for observability.
         """
 
 

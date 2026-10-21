@@ -320,7 +320,11 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             try:
                 journal_codec = await get_codec()
                 await process_invocation_to_completion(
-                    VMWrapper(request_headers, disable_payload_checks=disable_payload_checks),
+                    VMWrapper(
+                        request_headers,
+                        disable_payload_checks=disable_payload_checks,
+                        explicit_recovery=handler.explicit_recovery or service.explicit_recovery,
+                    ),
                     handler,
                     dict(request_headers),
                     receive_channel,

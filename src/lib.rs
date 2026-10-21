@@ -4,9 +4,9 @@ use pyo3::types::{PyBytes, PyNone, PyString};
 use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
 use restate_sdk_shared_core::{
     AwaitResponse, AwakeableHandle, CallHandle, CoreVM, Error, Header, IdentityVerifier, Input,
-    NonDeterministicChecksOption, NonEmptyValue, NotificationHandle, OnMaxAttempts, ResponseHead,
-    RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture, VMOptions,
-    Value, CANCEL_NOTIFICATION_HANDLE, VM,
+    JournalReplay, NonDeterministicChecksOption, NonEmptyValue, NotificationHandle, OnMaxAttempts,
+    ResponseHead, RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture,
+    VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
 };
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -71,7 +71,6 @@ impl From<ResponseHead> for PyResponseHead {
         }
     }
 }
-
 
 type PyNotificationHandle = u32;
 
@@ -371,10 +370,11 @@ struct PyVM {
 #[pymethods]
 impl PyVM {
     #[new]
-    #[pyo3(signature = (headers, disable_payload_checks=false))]
+    #[pyo3(signature = (headers, disable_payload_checks=false, explicit_recovery=false))]
     fn new(
         headers: Vec<(String, String)>,
         disable_payload_checks: bool,
+        explicit_recovery: bool,
     ) -> Result<Self, PyVMError> {
         // When a journal value codec is configured, the serialized payloads written to the journal
         // may legitimately differ between attempts (e.g. encryption with a random nonce), so we
@@ -384,6 +384,11 @@ impl PyVM {
                 NonDeterministicChecksOption::PayloadChecksDisabled
             } else {
                 NonDeterministicChecksOption::Enabled
+            },
+            journal_replay: if explicit_recovery {
+                JournalReplay::Disabled
+            } else {
+                JournalReplay::Enabled
             },
             ..Default::default()
         };
@@ -468,6 +473,11 @@ impl PyVM {
             Ok(AwaitResponse::CancelSignalReceived) => {
                 Ok(Bound::new(py, PyDoProgressCancelSignalReceived)?.into_any())
             }
+            // The SDK doesn't issue ephemeral commands
+            Ok(AwaitResponse::EphemeralNotificationReady(_)) => Err(PyVMError::from(Error::new(
+                restate_sdk_shared_core::error::codes::INTERNAL,
+                "unexpected ephemeral notification",
+            )))?,
         }
     }
 
@@ -510,44 +520,64 @@ impl PyVM {
         self_.vm.sys_input().map(Into::into).map_err(Into::into)
     }
 
+    #[pyo3(signature = (key, name=None))]
     fn sys_get_state(
         mut self_: PyRefMut<'_, Self>,
         key: String,
+        name: Option<String>,
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
-            .sys_state_get(key, Default::default())
+            .sys_state_get(key, name, Default::default())
             .map(Into::into)
             .map_err(Into::into)
     }
 
+    #[pyo3(signature = (name=None))]
     fn sys_get_state_keys(
         mut self_: PyRefMut<'_, Self>,
+        name: Option<String>,
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
-            .sys_state_get_keys()
+            .sys_state_get_keys(name)
             .map(Into::into)
             .map_err(Into::into)
     }
 
+    #[pyo3(signature = (key, buffer, name=None))]
     fn sys_set_state(
         mut self_: PyRefMut<'_, Self>,
         key: String,
         buffer: &Bound<'_, PyBytes>,
+        name: Option<String>,
     ) -> Result<(), PyVMError> {
         self_
             .vm
-            .sys_state_set(key, buffer.as_bytes().to_vec().into(), Default::default())
+            .sys_state_set(
+                key,
+                buffer.as_bytes().to_vec().into(),
+                name,
+                Default::default(),
+            )
             .map_err(Into::into)
     }
 
-    fn sys_clear_state(mut self_: PyRefMut<'_, Self>, key: String) -> Result<(), PyVMError> {
-        self_.vm.sys_state_clear(key).map_err(Into::into)
+    #[pyo3(signature = (key, name=None))]
+    fn sys_clear_state(
+        mut self_: PyRefMut<'_, Self>,
+        key: String,
+        name: Option<String>,
+    ) -> Result<(), PyVMError> {
+        self_.vm.sys_state_clear(key, name).map_err(Into::into)
     }
 
-    fn sys_clear_all_state(mut self_: PyRefMut<'_, Self>) -> Result<(), PyVMError> {
-        self_.vm.sys_state_clear_all().map_err(Into::into)
+    #[pyo3(signature = (name=None))]
+    fn sys_clear_all_state(
+        mut self_: PyRefMut<'_, Self>,
+        name: Option<String>,
+    ) -> Result<(), PyVMError> {
+        self_.vm.sys_state_clear_all(name).map_err(Into::into)
     }
 
     fn sys_sleep(
