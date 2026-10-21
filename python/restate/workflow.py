@@ -107,6 +107,7 @@ class Workflow:
         self.ingress_private = ingress_private
         self.invocation_retry_policy = invocation_retry_policy
         self.context_managers = invocation_context_managers
+        self.explicit_recovery = False
 
     @property
     def name(self):

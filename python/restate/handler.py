@@ -239,6 +239,7 @@ class Handler(Generic[I, O]):
         enable_lazy_state: If true, lazy state is enabled.
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
         invocation_retry_policy: Optional retry policy configuration applied to this handler.
+        explicit_recovery: If true, the handler runs with explicit recovery, see restate._preview.explicit_recovery.
     """
 
     service_tag: ServiceTag
@@ -258,6 +259,7 @@ class Handler(Generic[I, O]):
     ingress_private: Optional[bool] = None
     invocation_retry_policy: Optional[InvocationRetryPolicy] = None
     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None
+    explicit_recovery: bool = False
 
 
 # disable too many arguments warning

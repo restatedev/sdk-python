@@ -766,33 +766,37 @@ class ServerInvocationContext(ObjectContext):
         return ServerCallDurableFuture(self, handle, self._create_fetch_result_coroutine(handle, serde), inv_id_factory)
 
     def get(
-        self, name: str, serde: Serde[T] = DefaultSerde(), type_hint: Optional[typing.Type[T]] = None
+        self,
+        name: str,
+        serde: Serde[T] = DefaultSerde(),
+        type_hint: Optional[typing.Type[T]] = None,
+        entry_name: Optional[str] = None,
     ) -> Awaitable[Optional[T]]:
-        handle = self.vm.sys_get_state(name)
+        handle = self.vm.sys_get_state(name, entry_name)
         update_restate_context_is_replaying(self.vm)
         if isinstance(serde, DefaultSerde):
             serde = serde.with_maybe_type(type_hint)
         return self.create_future(handle, serde)  # type: ignore
 
-    def state_keys(self) -> Awaitable[List[str]]:
-        handle = self.vm.sys_get_state_keys()
+    def state_keys(self, entry_name: Optional[str] = None) -> Awaitable[List[str]]:
+        handle = self.vm.sys_get_state_keys(entry_name)
         update_restate_context_is_replaying(self.vm)
         return self.create_future(handle)
 
-    def set(self, name: str, value: T, serde: Serde[T] = DefaultSerde()) -> None:
+    def set(self, name: str, value: T, serde: Serde[T] = DefaultSerde(), entry_name: Optional[str] = None) -> None:
         """Set the value associated with the given name."""
         if isinstance(serde, DefaultSerde):
             serde = serde.with_maybe_type(type(value))
         buffer = self._encode(serde.serialize(value))
-        self.vm.sys_set_state(name, bytes(buffer))
+        self.vm.sys_set_state(name, bytes(buffer), entry_name)
         update_restate_context_is_replaying(self.vm)
 
-    def clear(self, name: str) -> None:
-        self.vm.sys_clear_state(name)
+    def clear(self, name: str, entry_name: Optional[str] = None) -> None:
+        self.vm.sys_clear_state(name, entry_name)
         update_restate_context_is_replaying(self.vm)
 
-    def clear_all(self) -> None:
-        self.vm.sys_clear_all_state()
+    def clear_all(self, entry_name: Optional[str] = None) -> None:
+        self.vm.sys_clear_all_state(entry_name)
         update_restate_context_is_replaying(self.vm)
 
     def request(self) -> Request:

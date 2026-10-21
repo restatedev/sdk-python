@@ -205,8 +205,13 @@ class VMWrapper:
     It provides a type-friendly interface to our shared vm.
     """
 
-    def __init__(self, headers: typing.List[typing.Tuple[str, str]], disable_payload_checks: bool = False):
-        self.vm = PyVM(headers, disable_payload_checks)
+    def __init__(
+        self,
+        headers: typing.List[typing.Tuple[str, str]],
+        disable_payload_checks: bool = False,
+        explicit_recovery: bool = False,
+    ):
+        self.vm = PyVM(headers, disable_payload_checks, explicit_recovery)
 
     def get_response_head(self) -> typing.Tuple[int, typing.Iterable[typing.Tuple[str, str]]]:
         """
@@ -345,47 +350,52 @@ class VMWrapper:
         res = PyFailure(output.code, output.message, metadata=metadata)
         self.vm.sys_write_output_failure(res)
 
-    def sys_get_state(self, name) -> int:
+    def sys_get_state(self, name, entry_name: typing.Optional[str] = None) -> int:
         """
         Retrieves a key-value binding.
 
         Args:
             name: The name of the value to be retrieved.
+            entry_name: The name of the journal entry.
 
         Returns:
             The value associated with the given name.
         """
-        return self.vm.sys_get_state(name)
+        return self.vm.sys_get_state(name, entry_name)
 
-    def sys_get_state_keys(self) -> int:
+    def sys_get_state_keys(self, entry_name: typing.Optional[str] = None) -> int:
         """
         Retrieves all keys.
+
+        Args:
+            entry_name: The name of the journal entry.
 
         Returns:
             The state keys
         """
-        return self.vm.sys_get_state_keys()
+        return self.vm.sys_get_state_keys(entry_name)
 
-    def sys_set_state(self, name: str, value: bytes):
+    def sys_set_state(self, name: str, value: bytes, entry_name: typing.Optional[str] = None):
         """
         Sets a key-value binding.
 
         Args:
             name: The name of the value to be set.
             value: The value to be set.
+            entry_name: The name of the journal entry.
 
         Returns:
             None
         """
-        self.vm.sys_set_state(name, value)
+        self.vm.sys_set_state(name, value, entry_name)
 
-    def sys_clear_state(self, name: str):
+    def sys_clear_state(self, name: str, entry_name: typing.Optional[str] = None):
         """Clear the state associated with the given name."""
-        self.vm.sys_clear_state(name)
+        self.vm.sys_clear_state(name, entry_name)
 
-    def sys_clear_all_state(self):
+    def sys_clear_all_state(self, entry_name: typing.Optional[str] = None):
         """Clear the state associated with the given name."""
-        self.vm.sys_clear_all_state()
+        self.vm.sys_clear_all_state(entry_name)
 
     def sys_sleep(self, millis: int, name: typing.Optional[str] = None):
         """Ask to sleep for a given duration"""
