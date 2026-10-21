@@ -31,19 +31,27 @@ class _State:
     the sibling ``awrap_tool_call`` tasks spawned by langgraph's
     ``tool_node``; ``ctx.extension_data`` does.
 
-    Holds the current turnstile — replaced on every model call to
-    describe that turn's batch of tool calls. ``aafter_agent`` resets
-    it so subsequent agent runs in the same handler start clean.
+    Holds a map of ``tool_call_id -> Turnstile``. Each model turn creates one
+    turnstile and registers it under every tool-call id in that batch, so
+    ``awrap_tool_call`` finds it by its own id. Keying by the (globally unique)
+    tool-call id — rather than a single shared slot — is what makes this safe
+    when multiple agents run concurrently in parallel LangGraph nodes: sibling
+    branches write to distinct keys and never clobber each other.
     """
 
-    __slots__ = ("turnstile",)
+    __slots__ = ("turnstiles",)
 
     def __init__(self) -> None:
-        self.turnstile: Turnstile = Turnstile([])
+        self.turnstiles: dict[str, Turnstile] = {}
 
     def __close__(self) -> None:
-        # Called at handler end via auto_close_extension_data.
-        self.turnstile.cancel_all()
+        # Called at handler end via auto_close_extension_data. Cancel each
+        # distinct turnstile once (ids in a batch share one instance).
+        seen: set[int] = set()
+        for t in self.turnstiles.values():
+            if id(t) not in seen:
+                seen.add(id(t))
+                t.cancel_all()
 
 
 def get_or_create_state(ctx: Context) -> _State:
