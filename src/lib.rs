@@ -16,7 +16,7 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Data model
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 struct PyHeader {
     #[pyo3(get, set)]
@@ -80,7 +80,7 @@ struct PyVoid;
 #[pyclass]
 struct PySuspended;
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 struct PyFailure {
     #[pyo3(get, set)]
@@ -112,7 +112,7 @@ impl PyFailure {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 struct PyExponentialRetryConfig {
     #[pyo3(get, set)]
@@ -210,7 +210,7 @@ impl From<PyFailure> for Error {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 struct PyStateKeys {
     #[pyo3(get, set)]
@@ -267,7 +267,7 @@ struct PyDoProgressExecuteRun {
 #[pyclass]
 struct PyDoProgressCancelSignalReceived;
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PyUnresolvedFuture {
     inner: UnresolvedFuture,
@@ -1026,7 +1026,7 @@ For further info on error handling, refer to https://docs.restate.dev/develop/py
     }
 }
 
-#[pymodule]
+#[pymodule(gil_used = true)]
 fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use tracing_subscriber::EnvFilter;
 

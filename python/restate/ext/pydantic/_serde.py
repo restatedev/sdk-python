@@ -15,7 +15,7 @@ class PydanticTypeAdapter(Serde[T]):
         Args:
             model_type (typing.Type[T]): The Pydantic model type to serialize/deserialize.
         """
-        self._model_type = TypeAdapter(model_type)
+        self._model_type: TypeAdapter[T] = TypeAdapter(model_type)
 
     def deserialize(self, buf: bytes) -> T | None:
         """Deserializes a bytearray to a Pydantic model.
@@ -41,5 +41,5 @@ class PydanticTypeAdapter(Serde[T]):
         """
         if obj is None:
             return b""
-        tpe = TypeAdapter(type(obj))
+        tpe: TypeAdapter[T] = TypeAdapter(type(obj))
         return tpe.dump_json(obj)
