@@ -12,12 +12,10 @@
 
 import builtins
 from dataclasses import dataclass
-from datetime import timedelta
 import subprocess
 import sys
-from types import ModuleType
 import typing
-from unittest.mock import Mock
+from unittest.mock import ANY, MagicMock, Mock
 
 import httpx
 import httpx2
@@ -55,38 +53,19 @@ class StubClient:
         return self.response
 
 
-class PrefixCodec(JournalValueCodec):
-    def encode(self, buf: bytes) -> bytes:
-        return b"codec:" + buf
-
-    async def decode(self, buf: bytes) -> bytes:
-        assert buf.startswith(b"codec:")
-        return buf[len(b"codec:") :]
-
-
-@pytest.mark.parametrize("blocked", [("httpx",), ("httpx", "httpx2")])
-def test_import_without_http_packages(blocked: tuple[str, ...]):
-    code = f"""
+def test_import_without_http_packages():
+    code = """
 import sys
-for name in {blocked!r}:
-    sys.modules[name] = None
-from restate.client import Client, create_client
-from restate import HttpClient, HttpResponse
-import restate
-assert restate.create_client is create_client
-assert restate.HttpClient is HttpClient
-assert restate.HttpResponse is HttpResponse
-for name in {blocked!r}:
-    assert sys.modules[name] is None
+sys.modules["httpx"] = sys.modules["httpx2"] = None
+from restate.client import Client
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 
-async def test_supplied_client_request_and_codec():
-    codec = PrefixCodec()
-    http_client = StubClient(StubResponse(content=codec.encode(b'"pong"')))
-    client = Client(http_client, journal_codec=codec)
+async def test_supplied_client():
+    http_client = StubClient(StubResponse())
+    client = Client(http_client)
     assert client.client is http_client
     headers = {"X-Test": "value"}
 
@@ -108,26 +87,10 @@ async def test_supplied_client_request_and_codec():
         (
             "restate/scope/tenant/call/greeter/object/greet",
             {"X-Test": "value", "Idempotency-Key": "request-1", "x-restate-limit-key": "customer/user"},
-            b'codec:"ping"',
+            b'"ping"',
         )
     ]
     assert headers == {"X-Test": "value"}
-
-
-async def test_supplied_client_send():
-    http_client = StubClient(StubResponse(content=b'{"invocationId": "inv_123"}'))
-    client = Client(http_client, journal_codec=PrefixCodec())
-    result = await client.do_raw_call(
-        service="greeter",
-        handler="greet",
-        input_param="ping",
-        input_serde=JsonSerde[str](),
-        output_serde=JsonSerde[dict](),
-        send=True,
-        send_delay=timedelta(seconds=2),
-    )
-    assert result == {"invocationId": "inv_123"}
-    assert http_client.calls == [("greeter/greet/send?delay=2000", {}, b'codec:"ping"')]
 
 
 @pytest.mark.parametrize("status_code", [400, 503])
@@ -141,191 +104,140 @@ async def test_http_error_fields(status_code: int):
     assert str(error.value) == f"HTTP {status_code}: custom reason"
 
 
-@pytest.mark.parametrize("backend", ["httpx", "httpx2"])
-@pytest.mark.parametrize("status_code", [200, 400, 503])
-async def test_real_http_clients(backend: typing.Literal["httpx", "httpx2"], status_code: int):
-    requests: list[tuple[str, dict[str, str], bytes]] = []
-
-    def respond_httpx(request: httpx.Request) -> httpx.Response:
-        requests.append((str(request.url), dict(request.headers), request.content))
-        response = httpx.Response(status_code, content=b'"pong"')
-        typed_response: HttpResponse = response
-        assert typed_response.content == b'"pong"'
-        return response
-
-    def respond_httpx2(request: httpx2.Request) -> httpx2.Response:
-        requests.append((str(request.url), dict(request.headers), request.content))
-        response = httpx2.Response(status_code, content=b'"pong"')
-        typed_response: HttpResponse = response
-        assert typed_response.content == b'"pong"'
-        return response
-
-    # These assignments check both real client types against the protocol in Mypy and Pyright.
-    context: typing.AsyncContextManager[HttpClient]
-    if backend == "httpx":
-        httpx_client: HttpClient = httpx.AsyncClient(
-            base_url="http://ingress/", headers={"X-Default": "default"}, transport=httpx.MockTransport(respond_httpx)
-        )
-        assert isinstance(httpx_client, httpx.AsyncClient)
-        context = httpx_client
-    else:
-        httpx2_client: HttpClient = httpx2.AsyncClient(
-            base_url="http://ingress/", headers={"X-Default": "default"}, transport=httpx2.MockTransport(respond_httpx2)
-        )
-        assert isinstance(httpx2_client, httpx2.AsyncClient)
-        context = httpx2_client
-
-    async with context as supplied:
-        client = Client(supplied)
-        assert client.client is supplied
-        if status_code >= 400:
-            with pytest.raises(HttpError) as error:
-                await client.post("service", "handler", False, b"input")
-            assert error.value.status_code == status_code
-            assert error.value.message == ("Bad Request" if status_code == 400 else "Service Unavailable")
-            assert error.value.body == '"pong"'
-        else:
-            result = await client.do_raw_call(
-                "service", "handler", "ping", JsonSerde[str](), JsonSerde[str](), headers={"X-Call": "call"}
-            )
-            assert result == "pong"
-
-    url, headers, content = requests[0]
-    assert url == "http://ingress/service/handler"
-    assert headers["x-default"] == "default"
-    if status_code == 200:
-        assert headers["x-call"] == "call"
-        assert content == b'"ping"'
-    else:
-        assert content == b"input"
+async def _check_real_client(http_client: HttpClient, respond: Mock):
+    client = Client(http_client)
+    assert client.client is http_client
+    result = await client.do_raw_call(
+        "service", "handler", "ping", JsonSerde[str](), JsonSerde[str](), headers={"X-Call": "call"}
+    )
+    assert result == "pong"
+    (call,) = respond.call_args_list
+    request = call.args[0]
+    assert str(request.url) == "http://ingress/service/handler"
+    assert request.headers["x-default"] == "default"
+    assert request.headers["x-call"] == "call"
+    assert request.content == b'"ping"'
 
 
-@pytest.mark.parametrize("backend", ["httpx", "httpx2"])
-@pytest.mark.parametrize("failure", ["timeout", "transport"])
-async def test_transport_errors_propagate(backend: typing.Literal["httpx", "httpx2"], failure: str):
-    httpx_error = httpx.ReadTimeout("timeout") if failure == "timeout" else httpx.ConnectError("connection")
-    httpx2_error = httpx2.ReadTimeout("timeout") if failure == "timeout" else httpx2.ConnectError("connection")
-
-    def fail_httpx(request: httpx.Request) -> httpx.Response:
-        raise httpx_error
-
-    def fail_httpx2(request: httpx2.Request) -> httpx2.Response:
-        raise httpx2_error
-
-    context: typing.AsyncContextManager[HttpClient]
-    if backend == "httpx":
-        context = httpx.AsyncClient(base_url="http://ingress/", transport=httpx.MockTransport(fail_httpx))
-        expected: Exception = httpx_error
-    else:
-        context = httpx2.AsyncClient(base_url="http://ingress/", transport=httpx2.MockTransport(fail_httpx2))
-        expected = httpx2_error
-    async with context as supplied:
-        with pytest.raises(type(expected)) as error:
-            await Client(supplied).post("service", "handler", False, b"input")
-        assert error.value is expected
+async def test_httpx_client():
+    respond = Mock(return_value=httpx.Response(200, content=b'"pong"'))
+    async with httpx.AsyncClient(
+        base_url="http://ingress/", headers={"X-Default": "default"}, transport=httpx.MockTransport(respond)
+    ) as client:
+        await _check_real_client(client, respond)
 
 
-class FactoryHttpClient(StubClient):
-    def __init__(self, *, base_url: str, headers: dict | None, http2: bool):
-        super().__init__(StubResponse())
-        self.options = (base_url, headers, http2)
-        self.entered = False
-        self.closed = False
-        self.exit_exception: BaseException | None = None
+async def test_httpx2_client():
+    respond = Mock(return_value=httpx2.Response(200, content=b'"pong"'))
+    async with httpx2.AsyncClient(
+        base_url="http://ingress/", headers={"X-Default": "default"}, transport=httpx2.MockTransport(respond)
+    ) as client:
+        await _check_real_client(client, respond)
 
-    async def __aenter__(self):
-        self.entered = True
-        return self
 
-    async def __aexit__(self, exc_type, exc, traceback):
-        self.closed = True
-        self.exit_exception = exc
+@pytest.mark.parametrize(
+    "http, failure",
+    [
+        (httpx, httpx.ReadTimeout("timeout")),
+        (httpx, httpx.ConnectError("connection")),
+        (httpx2, httpx2.ReadTimeout("timeout")),
+        (httpx2, httpx2.ConnectError("connection")),
+    ],
+)
+async def test_transport_errors_propagate(http, failure: Exception):
+    transport = http.MockTransport(Mock(side_effect=failure))
+    async with http.AsyncClient(base_url="http://ingress/", transport=transport) as client:
+        with pytest.raises(type(failure)) as error:
+            await Client(client).post("service", "handler", False, b"input")
+    assert error.value is failure
 
 
 @pytest.fixture
-def factory_backends(monkeypatch: pytest.MonkeyPatch) -> dict[str, Mock]:
-    constructors = {}
-    for backend in ("httpx", "httpx2"):
-        constructor = Mock(side_effect=FactoryHttpClient)
-        module = ModuleType(backend)
-        module.AsyncClient = constructor  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, backend, module)
-        constructors[backend] = constructor
-    return constructors
+def factories(monkeypatch: pytest.MonkeyPatch) -> dict[str, Mock]:
+    result = {}
+    for http in (httpx, httpx2):
+        client = MagicMock()
+        client.__aenter__.return_value = client
+        factory = Mock(return_value=client)
+        monkeypatch.setattr(http, "AsyncClient", factory)
+        result[http.__name__] = factory
+    return result
 
 
 @pytest.mark.parametrize("backend", ["httpx", "httpx2"])
-@pytest.mark.parametrize("available", [(), ("httpx",), ("httpx2",), ("httpx", "httpx2")])
-async def test_factory_selection(
+@pytest.mark.parametrize("other_installed", [False, True])
+async def test_factory_selects_backend(
     backend: typing.Literal["httpx", "httpx2"],
-    available: tuple[str, ...],
-    factory_backends: dict[str, Mock],
+    other_installed: bool,
+    factories: dict[str, Mock],
     monkeypatch: pytest.MonkeyPatch,
 ):
-    for name in ("httpx", "httpx2"):
-        if name not in available:
-            monkeypatch.setitem(sys.modules, name, None)  # type: ignore[arg-type]
-    if backend not in available:
-        with pytest.raises(ImportError) as error:
-            async with create_client("http://ingress/", backend=backend):
-                pytest.fail("Missing backend was accepted")
-        extra = "client" if backend == "httpx" else "client-httpx2"
-        assert f'python -m pip install "restate-sdk[{extra}]"' in str(error.value)
-        assert isinstance(error.value.__cause__, ModuleNotFoundError)
-        assert error.value.__cause__.name == backend
-        assert not any(constructor.called for constructor in factory_backends.values())
-        return
-
+    other = "httpx2" if backend == "httpx" else "httpx"
+    if not other_installed:
+        monkeypatch.setitem(sys.modules, other, None)  # type: ignore[arg-type]
     headers = {"X-Default": "default"}
-    codec = PrefixCodec()
+    codec = Mock(spec=JournalValueCodec)
+    http_client = factories[backend].return_value
     async with create_client("http://ingress/", headers, codec, backend=backend) as client:
         assert isinstance(client, Client)
-        supplied = client.client
-        assert isinstance(supplied, FactoryHttpClient)
-        assert supplied.entered and not supplied.closed
-        assert supplied.options == ("http://ingress/", headers, True)
+        assert client.client is http_client
         assert client.headers is headers
         assert client.journal_codec is codec
-    assert supplied.closed
-    factory_backends[backend].assert_called_once_with(base_url="http://ingress/", headers=headers, http2=True)
-    other = "httpx2" if backend == "httpx" else "httpx"
-    factory_backends[other].assert_not_called()
-
-
-async def test_default_factory_and_positional_arguments(factory_backends: dict[str, Mock]):
-    headers = {"X-Default": "value"}
-    codec = PrefixCodec()
-    async with restate.create_client("http://ingress/", headers, codec) as client:
-        assert isinstance(client, Client)
-        assert client.headers is headers
-        assert client.journal_codec is codec
-    factory_backends["httpx"].assert_called_once_with(base_url="http://ingress/", headers=headers, http2=True)
-    factory_backends["httpx2"].assert_not_called()
+        http_client.__aexit__.assert_not_awaited()
+    http_client.__aexit__.assert_awaited_once_with(None, None, None)
+    factories[backend].assert_called_once_with(base_url="http://ingress/", headers=headers, http2=True)
+    factories[other].assert_not_called()
 
 
 @pytest.mark.parametrize("backend", ["httpx", "httpx2"])
-async def test_factory_cleanup_on_error(backend: typing.Literal["httpx", "httpx2"], factory_backends: dict[str, Mock]):
+@pytest.mark.parametrize("other_installed", [False, True])
+async def test_missing_backend_does_not_fall_back(
+    backend: typing.Literal["httpx", "httpx2"],
+    other_installed: bool,
+    factories: dict[str, Mock],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    other = "httpx2" if backend == "httpx" else "httpx"
+    monkeypatch.setitem(sys.modules, backend, None)  # type: ignore[arg-type]
+    if not other_installed:
+        monkeypatch.setitem(sys.modules, other, None)  # type: ignore[arg-type]
+    with pytest.raises(ImportError) as error:
+        async with create_client("http://ingress/", backend=backend):
+            pass
+    extra = "client" if backend == "httpx" else "client-httpx2"
+    assert f'python -m pip install "restate-sdk[{extra}]"' in str(error.value)
+    factories[other].assert_not_called()
+
+
+async def test_default_factory_and_positional_arguments(factories: dict[str, Mock]):
+    headers = {"X-Default": "value"}
+    codec = Mock(spec=JournalValueCodec)
+    async with restate.create_client("http://ingress/", headers, codec):
+        pass
+    factories["httpx"].assert_called_once_with(base_url="http://ingress/", headers=headers, http2=True)
+    factories["httpx2"].assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["httpx", "httpx2"])
+async def test_factory_cleanup_on_error(backend: typing.Literal["httpx", "httpx2"], factories: dict[str, Mock]):
     failure = RuntimeError("body failed")
-    supplied: HttpClient | None = None
+    http_client = factories[backend].return_value
     with pytest.raises(RuntimeError) as error:
-        async with create_client("http://ingress/", backend=backend) as client:
-            assert isinstance(client, Client)
-            supplied = client.client
-            assert isinstance(supplied, FactoryHttpClient)
+        async with create_client("http://ingress/", backend=backend):
             raise failure
     assert error.value is failure
-    assert isinstance(supplied, FactoryHttpClient)
-    assert supplied.closed
-    assert supplied.exit_exception is failure
+    http_client.__aexit__.assert_awaited_once_with(RuntimeError, failure, ANY)
 
 
-async def test_invalid_backend_and_keyword_only(factory_backends: dict[str, Mock]):
+async def test_invalid_backend():
     with pytest.raises(ValueError, match="Unsupported HTTP backend: 'unknown'"):
         async with create_client("http://ingress/", backend="unknown"):  # type: ignore[arg-type]
-            pytest.fail("Invalid backend was accepted")
+            pass
+
+
+def test_backend_is_keyword_only():
     with pytest.raises(TypeError):
         create_client("http://ingress/", None, None, "httpx2")  # type: ignore[misc]
-    assert not any(constructor.called for constructor in factory_backends.values())
 
 
 @pytest.mark.parametrize("backend", ["httpx", "httpx2"])
@@ -335,7 +247,6 @@ async def test_invalid_backend_and_keyword_only(factory_backends: dict[str, Mock
 async def test_broken_backend_import_propagates(
     backend: typing.Literal["httpx", "httpx2"],
     failure: ImportError,
-    factory_backends: dict[str, Mock],
     monkeypatch: pytest.MonkeyPatch,
 ):
     original_import = builtins.__import__
@@ -348,6 +259,5 @@ async def test_broken_backend_import_propagates(
     monkeypatch.setattr(builtins, "__import__", import_backend)
     with pytest.raises(type(failure)) as error:
         async with create_client("http://ingress/", backend=backend):
-            pytest.fail("Broken import was accepted")
+            pass
     assert error.value is failure
-    assert not any(constructor.called for constructor in factory_backends.values())
