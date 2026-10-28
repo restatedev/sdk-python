@@ -142,6 +142,11 @@ dependencies:
         commit: 'sha1-c7c53464625b32c7a7e944ae62b3e17d2b600130'
         owner_id: 5429470
         repo_id: 288487894
+    'enricomi/publish-unit-test-result-action@v2':
+        ref: 'v2'
+        commit: 'sha1-7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d'
+        owner_id: 44700269
+        repo_id: 290227969
     'extractions/setup-just@v2.0.0':
         ref: 'v2.0.0'
         commit: 'sha1-dd310ad5a97d8e7b41793f8ef055398d51ad4de6'
@@ -160,3 +165,4 @@ dependencies:
         uses:
             - 'actions/setup-java@v4'
             - 'actions/upload-artifact@v4'
+            - 'enricomi/publish-unit-test-result-action@v2'
