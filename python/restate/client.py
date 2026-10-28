@@ -13,6 +13,7 @@ This is a basic remote client for the Restate service.
 """
 
 from datetime import timedelta
+from urllib.parse import quote
 import httpx
 import typing
 from contextlib import asynccontextmanager
@@ -162,14 +163,14 @@ class Client(RestateClient):
             verb = "send" if send else "call"
             endpoint = f"restate/scope/{scope}/{verb}/{service}"
             if key:
-                endpoint += f"/{key}"
+                endpoint += f"/{quote(key, safe='')}"
             endpoint += f"/{handler}"
             if send and delay is not None:
                 endpoint = endpoint + f"?delay={delay}"
         else:
             endpoint = service
             if key:
-                endpoint += f"/{key}"
+                endpoint += f"/{quote(key, safe='')}"
             endpoint += f"/{handler}"
             if send:
                 endpoint += "/send"
