@@ -120,6 +120,7 @@ class RestateModelWrapper(WrapperModel):
             )
         try:
             response = await context.run_typed("Model stream call", request_stream_run, self._options)
+            current_state().turnstile = Turnstile([c.tool_call_id for c in response.tool_calls])
             yield RestateStreamedResponse(model_request_parameters, response)
         except SdkInternalBaseException as e:
             raise Exception("Internal error during model stream call") from e

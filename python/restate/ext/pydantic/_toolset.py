@@ -11,6 +11,7 @@ from restate.extensions import current_context
 from pydantic_ai import ToolDefinition
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.exceptions import ApprovalRequired, CallDeferred, ModelRetry, UserError
+from pydantic_ai.messages import ToolReturn
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets.abstract import AbstractToolset, ToolsetTool
@@ -27,6 +28,9 @@ class RestateContextRunResult:
     kind: Literal["output", "call_deferred", "approval_required", "model_retry"]
     output: Any
     error: str | None = None
+    # `output: Any` round-trips a ToolReturn as a plain dict, so it is journaled in its own typed field.
+    tool_return: ToolReturn | None = None
+    metadata: dict[str, Any] | None = None
 
 
 CONTEXT_RUN_SERDE = PydanticTypeAdapter(RestateContextRunResult)
@@ -69,13 +73,15 @@ class RestateContextRunToolSet(WrapperToolset[AgentDepsT]):
                 # Since, restate ctx.run() will retry this exception we need to convert these exceptions
                 # to a return value and handle them outside of the ctx.run().
                 output = await self.wrapped.call_tool(name, tool_args, ctx, tool)
+                if isinstance(output, ToolReturn):
+                    return RestateContextRunResult(kind="output", output=None, tool_return=output)
                 return RestateContextRunResult(kind="output", output=output, error=None)
             except ModelRetry as e:
                 return RestateContextRunResult(kind="model_retry", output=None, error=e.message)
-            except CallDeferred:
-                return RestateContextRunResult(kind="call_deferred", output=None, error=None)
-            except ApprovalRequired:
-                return RestateContextRunResult(kind="approval_required", output=None, error=None)
+            except CallDeferred as e:
+                return RestateContextRunResult(kind="call_deferred", output=None, metadata=e.metadata)
+            except ApprovalRequired as e:
+                return RestateContextRunResult(kind="approval_required", output=None, metadata=e.metadata)
             except UserError as e:
                 raise TerminalError(str(e)) from e
 
@@ -93,16 +99,25 @@ class RestateContextRunToolSet(WrapperToolset[AgentDepsT]):
             res = await context.run_typed(f"Calling {name}", action, self.options)
 
             if res.kind == "call_deferred":
-                raise CallDeferred()
+                # Deferring, approval and retry concern only this call; parallel siblings still
+                # need to run so the agent can continue with their results.
+                turnstile.allow_next_after(id)
+                raise CallDeferred(metadata=res.metadata)
             elif res.kind == "approval_required":
-                raise ApprovalRequired()
+                turnstile.allow_next_after(id)
+                raise ApprovalRequired(metadata=res.metadata)
             elif res.kind == "model_retry":
                 assert res.error is not None
+                turnstile.allow_next_after(id)
                 raise ModelRetry(res.error)
             else:
                 assert res.kind == "output"
                 turnstile.allow_next_after(id)
+                if res.tool_return is not None:
+                    return res.tool_return
                 return res.output
+        except (CallDeferred, ApprovalRequired, ModelRetry):
+            raise
         except Exception as e:
             turnstile.cancel_all_after(id)
             raise e from None
