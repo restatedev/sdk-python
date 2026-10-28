@@ -501,7 +501,8 @@ async def create_client(
             or restate-sdk[client-httpx2] for httpx2. The selected package must be installed.
     """
     if backend not in ("httpx", "httpx2"):
-        raise ValueError(f"Unsupported HTTP backend: {backend!r}. Expected 'httpx' or 'httpx2'.")
+        msg = f"Unsupported HTTP backend: {backend!r}. Expected 'httpx' or 'httpx2'."
+        raise ValueError(msg)
 
     http_client_context: typing.AsyncContextManager[HttpClient]
     try:
@@ -517,9 +518,8 @@ async def create_client(
         if exc.name != backend:
             raise
         extra = "client" if backend == "httpx" else "client-httpx2"
-        raise ImportError(
-            f'The {backend} backend requires {backend}. Install it with: python -m pip install "restate-sdk[{extra}]"'
-        ) from exc
+        msg = f'The {backend} backend requires {backend}. Install it with: python -m pip install "restate-sdk[{extra}]"'
+        raise ImportError(msg) from exc
 
     async with http_client_context as http_client:
         yield Client(http_client, headers, journal_codec=journal_value_codec)
