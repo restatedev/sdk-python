@@ -19,7 +19,7 @@ workflows:
         - 'docker/setup-buildx-action@v3.12.0'
         - 'docker/setup-docker-action@v4.7.0'
         - 'docker/setup-qemu-action@v3.7.0'
-        - 'restatedev/e2e@v2.2'
+        - 'restatedev/e2e@v2.3'
     '.github/workflows/release.yml':
         - 'actions/attest-build-provenance@v2.4.0'
         - 'actions/checkout@v4.4.0'
@@ -142,11 +142,6 @@ dependencies:
         commit: 'sha1-c7c53464625b32c7a7e944ae62b3e17d2b600130'
         owner_id: 5429470
         repo_id: 288487894
-    'enricomi/publish-unit-test-result-action@v2':
-        ref: 'v2'
-        commit: 'sha1-7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d'
-        owner_id: 44700269
-        repo_id: 290227969
     'extractions/setup-just@v2.0.0':
         ref: 'v2.0.0'
         commit: 'sha1-dd310ad5a97d8e7b41793f8ef055398d51ad4de6'
@@ -157,12 +152,11 @@ dependencies:
         commit: 'sha1-e83996d129638aa358a18fbd1dfb82f0b0fb5d3b'
         owner_id: 28156855
         repo_id: 363801746
-    'restatedev/e2e@v2.2':
-        ref: 'v2.2'
-        commit: 'sha1-edd926b59e51af418b95c143220c0a2a62b7fd7b'
+    'restatedev/e2e@v2.3':
+        ref: 'v2.3'
+        commit: 'sha1-167318ba8820f18ee74c9358d2d3f0640dbb5149'
         owner_id: 97341811
         repo_id: 489007488
         uses:
             - 'actions/setup-java@v4'
             - 'actions/upload-artifact@v4'
-            - 'enricomi/publish-unit-test-result-action@v2'
