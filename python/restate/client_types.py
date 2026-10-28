@@ -23,6 +23,28 @@ I = typing.TypeVar("I")
 O = typing.TypeVar("O")
 
 
+class HttpResponse(typing.Protocol):
+    """The buffered HTTP response used by the ingress client."""
+
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def reason_phrase(self) -> str: ...
+
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def content(self) -> bytes: ...
+
+
+class HttpClient(typing.Protocol):
+    """An HTTP client that can send ingress requests asynchronously."""
+
+    async def post(self, url: str, *, headers: dict[str, str], content: bytes) -> HttpResponse: ...
+
+
 class RestateClientSendHandle:
     """
     A handle for a send operation.

@@ -26,6 +26,39 @@ To use this SDK, add the dependency to your project:
 pip install restate_sdk
 ```
 
+### Ingress client
+
+The ingress client factory uses httpx by default. Install its optional dependency with:
+
+```shell
+python -m pip install "restate-sdk[client]"
+```
+
+```python
+from restate import create_client
+
+async with create_client("http://localhost:8080") as client:
+    ...
+```
+
+To use httpx2, install `restate-sdk[client-httpx2]` and select it explicitly:
+
+```python
+async with create_client("http://localhost:8080", backend="httpx2") as client:
+    ...
+```
+
+The factory enables HTTP/2 and closes the HTTP client on exit. It requires the
+selected package and does not fall back to another package.
+
+You can also pass an existing async HTTP client to `restate.client.Client`.
+The `HttpClient` and `HttpResponse` protocols in `restate.client_types` describe
+the required interface. They are also available from `restate`. Both
+`httpx.AsyncClient` and `httpx2.AsyncClient` satisfy this interface. `Client`
+keeps the supplied object and leaves its lifetime to the caller. Importing
+`Client` requires neither HTTP package. Transport errors keep the supplied
+client's exception types.
+
 ## Versions
 
 The compatibility with Restate is described in the following table. sdk-python versions < 0.10 are deprecated and no longer supported.
