@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 import dataclasses
 
-from restate import RunOptions, SdkInternalBaseException
+from restate import RunOptions
 from restate.ext.pydantic._utils import current_state
 from restate.extensions import current_context
 from restate.ext.turnstile import Turnstile
@@ -76,13 +76,10 @@ class RestateModelWrapper(WrapperModel):
             raise UserError(
                 "A model cannot be used without a Restate context. Make sure to run it within an agent or a run context."
             )
-        try:
-            res = await context.run_typed("Model call", self.wrapped.request, self._options, *args, **kwargs)
-            ids = [c.tool_call_id for c in res.tool_calls]
-            current_state().turnstile = Turnstile(ids)
-            return res
-        except SdkInternalBaseException as e:
-            raise Exception("Internal error during model call") from e
+        res = await context.run_typed("Model call", self.wrapped.request, self._options, *args, **kwargs)
+        ids = [c.tool_call_id for c in res.tool_calls]
+        current_state().turnstile = Turnstile(ids)
+        return res
 
     @asynccontextmanager
     async def request_stream(
@@ -118,8 +115,5 @@ class RestateModelWrapper(WrapperModel):
             raise UserError(
                 "A model cannot be used without a Restate context. Make sure to run it within an agent or a run context."
             )
-        try:
-            response = await context.run_typed("Model stream call", request_stream_run, self._options)
-            yield RestateStreamedResponse(model_request_parameters, response)
-        except SdkInternalBaseException as e:
-            raise Exception("Internal error during model stream call") from e
+        response = await context.run_typed("Model stream call", request_stream_run, self._options)
+        yield RestateStreamedResponse(model_request_parameters, response)
