@@ -26,7 +26,7 @@ from .workflow import Workflow
 from .context import Context, ObjectContext, ObjectSharedContext
 from .context import WorkflowContext, WorkflowSharedContext
 from .retry_policy import InvocationRetryPolicy
-from .client_types import RestateClient, HttpError, RestateClientSendHandle
+from .client_types import HttpClient, HttpResponse, RestateClient, HttpError, RestateClientSendHandle
 
 # pylint: disable=line-too-long
 from .context import (
@@ -76,20 +76,7 @@ except ImportError:
         raise ImportError("Install restate-sdk[harness] to use this feature")  # type: ignore
 
 
-try:
-    from .client import create_client
-except ImportError:
-    # we don't have the appropriate dependencies installed
-
-    @asynccontextmanager
-    async def create_client(
-        ingress: str,
-        headers: typing.Optional[dict] = None,
-        journal_value_codec: typing.Optional[JournalValueCodec] = None,
-    ) -> typing.AsyncGenerator[RestateClient, None]:
-        """a dummy client constructor to raise ImportError. Install restate-sdk[client] to use this feature"""
-        raise ImportError("Install restate-sdk[client] to use this feature")
-        yield  # type: ignore
+from .client import create_client
 
 
 __all__ = [
@@ -128,5 +115,7 @@ __all__ = [
     "RestateClient",
     "RestateClientSendHandle",
     "HttpError",
+    "HttpClient",
+    "HttpResponse",
     "create_client",
 ]

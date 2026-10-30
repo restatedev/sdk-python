@@ -13,11 +13,10 @@ This is a basic remote client for the Restate service.
 """
 
 from datetime import timedelta
-import httpx
 import typing
 from contextlib import asynccontextmanager
 
-from .client_types import RestateClient, RestateClientSendHandle, RestateScopedClient, HttpError
+from .client_types import HttpClient, RestateClient, RestateClientSendHandle, RestateScopedClient, HttpError
 
 from .context import HandlerType
 from .entry_codec import JournalValueCodec
@@ -35,7 +34,7 @@ class Client(RestateClient):
 
     def __init__(
         self,
-        client: httpx.AsyncClient,
+        client: HttpClient,
         headers: typing.Optional[dict] = None,
         journal_codec: typing.Optional[JournalValueCodec] = None,
     ):
@@ -486,6 +485,8 @@ async def create_client(
     ingress: str,
     headers: typing.Optional[dict] = None,
     journal_value_codec: typing.Optional[JournalValueCodec] = None,
+    *,
+    backend: typing.Literal["httpx", "httpx2"] = "httpx",
 ) -> typing.AsyncGenerator[RestateClient, None]:
     """
     Create a new Restate client.
@@ -496,6 +497,29 @@ async def create_client(
         journal_value_codec: Optional journal value codec. When set, request bodies are encoded and
             call responses decoded through it. It must match the codec configured on the endpoint.
             NOTE: This is experimental and may change in future releases.
+        backend: HTTP package to use. Defaults to httpx. Install restate-sdk[client] for httpx
+            or restate-sdk[client-httpx2] for httpx2. The selected package must be installed.
     """
-    async with httpx.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
+    if backend not in ("httpx", "httpx2"):
+        msg = f"Unsupported HTTP backend: {backend!r}. Expected 'httpx' or 'httpx2'."
+        raise ValueError(msg)
+
+    http_client_context: typing.AsyncContextManager[HttpClient]
+    try:
+        if backend == "httpx":
+            import httpx
+
+            http_client_context = httpx.AsyncClient(base_url=ingress, headers=headers, http2=True)
+        else:
+            import httpx2
+
+            http_client_context = httpx2.AsyncClient(base_url=ingress, headers=headers, http2=True)
+    except ModuleNotFoundError as exc:
+        if exc.name != backend:
+            raise
+        extra = "client" if backend == "httpx" else "client-httpx2"
+        msg = f'The {backend} backend requires {backend}. Install it with: python -m pip install "restate-sdk[{extra}]"'
+        raise ImportError(msg) from exc
+
+    async with http_client_context as http_client:
         yield Client(http_client, headers, journal_codec=journal_value_codec)
