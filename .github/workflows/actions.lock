@@ -20,6 +20,11 @@ workflows:
         - 'docker/setup-docker-action@v4.7.0'
         - 'docker/setup-qemu-action@v3.7.0'
         - 'restatedev/e2e@v2.3'
+    '.github/workflows/pullfrog.yml':
+        - 'actions/checkout@v6.1.0'
+        - 'astral-sh/setup-uv@v5.4.2'
+        - 'extractions/setup-just@v2.0.0'
+        - 'pullfrog/pullfrog@v0.1.110'
     '.github/workflows/release.yml':
         - 'actions/attest-build-provenance@v2.4.0'
         - 'actions/checkout@v4.4.0'
@@ -55,6 +60,11 @@ dependencies:
     'actions/checkout@v4.4.0':
         ref: 'v4.4.0'
         commit: 'sha1-11d5960a326750d5838078e36cf38b85af677262'
+        owner_id: 44036562
+        repo_id: 197814629
+    'actions/checkout@v6.1.0':
+        ref: 'v6.1.0'
+        commit: 'sha1-d23441a48e516b6c34aea4fa41551a30e30af803'
         owner_id: 44036562
         repo_id: 197814629
     'actions/checkout@v7.0.1':
@@ -152,6 +162,11 @@ dependencies:
         commit: 'sha1-dd310ad5a97d8e7b41793f8ef055398d51ad4de6'
         owner_id: 64203070
         repo_id: 258510356
+    'pullfrog/pullfrog@v0.1.110':
+        ref: 'v0.1.110'
+        commit: 'sha1-895164fc90f5c493e72693c919c6cf269af158eb'
+        owner_id: 223181266
+        repo_id: 1032749534
     'pyo3/maturin-action@v1.51.0':
         ref: 'v1.51.0'
         commit: 'sha1-e83996d129638aa358a18fbd1dfb82f0b0fb5d3b'
