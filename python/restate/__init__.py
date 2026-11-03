@@ -43,6 +43,7 @@ from .exceptions import TerminalError, SdkInternalBaseException, is_internal_exc
 from .asyncio import as_completed, gather, wait_completed, select
 
 from .endpoint import app
+from .connect import connect, Connection, ConnectError
 
 from .logging import getLogger, RestateLoggingFilter
 
@@ -83,7 +84,7 @@ except ImportError:
 
     @asynccontextmanager
     async def create_client(
-        ingress: str,
+        ingress: typing.Optional[str] = None,
         headers: typing.Optional[dict] = None,
         journal_value_codec: typing.Optional[JournalValueCodec] = None,
     ) -> typing.AsyncGenerator[RestateClient, None]:
@@ -112,6 +113,9 @@ __all__ = [
     "JournalValueCodec",
     "JournalValueCodecProvider",
     "app",
+    "connect",
+    "Connection",
+    "ConnectError",
     "create_test_harness",
     "test_harness",
     "HarnessEnvironment",

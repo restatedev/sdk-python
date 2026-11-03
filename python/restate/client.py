@@ -481,9 +481,33 @@ class ScopedClient(RestateScopedClient):
         return RestateClientSendHandle(send.get("invocationId", ""), 200)
 
 
+def resolve_ingress(
+    ingress: typing.Optional[str], headers: typing.Optional[dict]
+) -> typing.Tuple[str, typing.Optional[dict]]:
+    """
+    The ingress URL and default headers: the given ones, or the URL and bearer token of
+    ``RESTATE_INGRESS_KEY`` (an ingress key from the Cloud UI, Development → Configure Client).
+    """
+    if ingress:
+        return ingress, headers
+    # pylint: disable=import-error,no-name-in-module,import-outside-toplevel
+    from restate._internal import INGRESS_KEY_URL, ConnectError, IngressKey
+
+    key = IngressKey.from_env()
+    if key is None:
+        raise ConnectError(
+            "create_client(): ingress is required — pass the ingress URL, or set RESTATE_INGRESS_KEY "
+            f"with an ingress key from {INGRESS_KEY_URL}"
+        )
+    merged = dict(headers or {})
+    if not any(name.lower() == "authorization" for name in merged):
+        merged["Authorization"] = key.bearer()
+    return key.ingress_url(), merged
+
+
 @asynccontextmanager
 async def create_client(
-    ingress: str,
+    ingress: typing.Optional[str] = None,
     headers: typing.Optional[dict] = None,
     journal_value_codec: typing.Optional[JournalValueCodec] = None,
 ) -> typing.AsyncGenerator[RestateClient, None]:
@@ -491,11 +515,14 @@ async def create_client(
     Create a new Restate client.
 
     Args:
-        ingress: The base URL of the Restate ingress.
+        ingress: The base URL of the Restate ingress. When omitted, the URL and the bearer
+            token come from ``RESTATE_INGRESS_KEY``, an ingress key from the Cloud UI
+            (Development → Configure Client).
         headers: Optional default headers to send with every request.
         journal_value_codec: Optional journal value codec. When set, request bodies are encoded and
             call responses decoded through it. It must match the codec configured on the endpoint.
             NOTE: This is experimental and may change in future releases.
     """
+    ingress, headers = resolve_ingress(ingress, headers)
     async with httpx.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
         yield Client(http_client, headers, journal_codec=journal_value_codec)

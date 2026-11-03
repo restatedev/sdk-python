@@ -14,7 +14,8 @@ import asyncio
 import functools
 import logging
 import signal
-from typing import Dict, Optional, Set, TypedDict, Literal
+import weakref
+from typing import Callable, Dict, List, Optional, Set, TypedDict, Literal
 
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
@@ -28,6 +29,39 @@ from restate._internal import PyIdentityVerifier, IdentityVerificationException 
 from restate._internal import SDK_VERSION  # pylint: disable=import-error,no-name-in-module
 
 logger = logging.getLogger(__name__)
+
+# Shutdown hooks, keyed by event loop and signal. asyncio keeps one handler per signal, so
+# everything that wants to react to SIGTERM (the ASGI app, `python -m restate connect`)
+# registers a hook here and a single dispatcher is installed per loop.
+_shutdown_hooks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[int, List[Callable[[], None]]]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def install_shutdown_hook(
+    loop: asyncio.AbstractEventLoop, hook: Callable[[], None], signum: int = signal.SIGTERM
+) -> None:
+    """
+    Run ``hook`` when ``signum`` (default SIGTERM) is received while ``loop`` runs.
+
+    Raises what ``loop.add_signal_handler`` raises when signals cannot be handled here
+    (Windows, or a non-main thread).
+    """
+    hooks = _shutdown_hooks.setdefault(loop, {})
+    if signum not in hooks:
+        registered: List[Callable[[], None]] = []
+
+        def dispatch() -> None:
+            for registered_hook in list(registered):
+                try:
+                    registered_hook()
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception("Shutdown hook failed")
+
+        loop.add_signal_handler(signum, dispatch)
+        hooks[signum] = registered
+    hooks[signum].append(hook)
+
 
 X_RESTATE_SERVER = header_to_binary([("x-restate-server", f"restate-sdk-python/{SDK_VERSION}")])
 
@@ -261,7 +295,7 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
         if not sigterm_installed:
             loop = asyncio.get_running_loop()
             try:
-                loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+                install_shutdown_hook(loop, _on_sigterm, signal.SIGTERM)
             except (NotImplementedError, RuntimeError, ValueError):
                 pass  # Windows or non-main thread
             sigterm_installed = True

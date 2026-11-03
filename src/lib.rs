@@ -1,3 +1,6 @@
+mod asgi;
+mod tunnel;
+
 use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone, PyString};
@@ -1030,9 +1033,15 @@ For further info on error handling, refer to https://docs.restate.dev/develop/py
 fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use tracing_subscriber::EnvFilter;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_env("RESTATE_CORE_LOG"))
-        .init();
+    // RESTATE_CORE_LOG controls everything when set. When it is not, the Restate Cloud
+    // tunnel still reports its lifecycle (the registration hint, connection changes).
+    let filter = match std::env::var("RESTATE_CORE_LOG") {
+        Ok(directives) => EnvFilter::new(directives),
+        Err(_) => EnvFilter::new(
+            "restate_sdk_shared_core::tunnel=info,restate_sdk_shared_core::cloud=warn",
+        ),
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     m.add_class::<PyHeader>()?;
     m.add_class::<PyResponseHead>()?;
@@ -1051,6 +1060,12 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyUnresolvedFuture>()?;
     m.add_class::<PyCallHandle>()?;
     m.add_class::<PyRun>()?;
+    m.add_class::<tunnel::PyTunnelEngineOptions>()?;
+    m.add_class::<tunnel::PyTunnelEngine>()?;
+    m.add_class::<tunnel::PyTunnelInfo>()?;
+    m.add_class::<tunnel::PyIngressKey>()?;
+    m.add("ConnectError", m.py().get_type::<tunnel::ConnectError>())?;
+    m.add("INGRESS_KEY_URL", tunnel::INGRESS_KEY_HELP_URL)?;
 
     m.add("VMException", m.py().get_type::<VMException>())?;
     m.add(
