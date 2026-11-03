@@ -12,17 +12,18 @@
 This is a basic remote client for the Restate service.
 """
 
-from datetime import timedelta
-import httpx
 import typing
 from contextlib import asynccontextmanager
+from datetime import timedelta
+from urllib.parse import quote
 
-from .client_types import RestateClient, RestateClientSendHandle, RestateScopedClient, HttpError
+import httpx
 
+from .client_types import HttpError, RestateClient, RestateClientSendHandle, RestateScopedClient
 from .context import HandlerType
 from .entry_codec import JournalValueCodec
-from .serde import BytesSerde, JsonSerde, Serde
 from .handler import handler_from_callable
+from .serde import BytesSerde, JsonSerde, Serde
 
 I = typing.TypeVar("I")
 O = typing.TypeVar("O")
@@ -155,6 +156,15 @@ class Client(RestateClient):
         """
         Send a POST request to the Restate service.
         """
+        # Each identifier is one path segment, even when a key or scope
+        # contains a slash, query delimiter, fragment, or literal percent.
+        service = quote(service, safe="")
+        handler = quote(handler, safe="")
+        if key is not None:
+            key = quote(key, safe="")
+        if scope is not None:
+            scope = quote(scope, safe="")
+
         if scope is not None:
             # Scoped invocations use the dedicated ingress path:
             #   restate/scope/{scope}/call/{service}[/{key}]/{handler}
