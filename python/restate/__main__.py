@@ -18,19 +18,12 @@ connection to Restate Cloud, until SIGINT or SIGTERM.
 """
 
 import argparse
-import asyncio
 import importlib
 import os
-import signal
 import sys
 import typing
 
-from restate.connect import ConnectError, connect
-from restate.server import install_shutdown_hook
-
-# What the first signal gives in-flight invocations before the second one (or the
-# deadline) cuts the connections.
-SIGNAL_SHUTDOWN_GRACE_SECONDS = 120.0
+from restate.connection import ConnectError, connect
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -51,45 +44,6 @@ def _load_app(spec: str) -> typing.Any:
         return getattr(module, attribute)
     except AttributeError as error:
         raise ValueError(f"module {module_name!r} has no attribute {attribute!r}") from error
-
-
-async def _serve(app: typing.Any, name: typing.Optional[str], key: typing.Optional[str]) -> int:
-    loop = asyncio.get_running_loop()
-    async with connect(app, name=name, key=key) as connection:
-        stopped = loop.create_future()
-        signals_seen = 0
-
-        def on_signal() -> None:
-            nonlocal signals_seen
-            signals_seen += 1
-            if signals_seen == 1:
-                print(
-                    f"Shutting down: waiting up to {SIGNAL_SHUTDOWN_GRACE_SECONDS:.0f}s for in-flight "
-                    "invocations (send the signal again to stop now)",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                loop.create_task(connection.shutdown(SIGNAL_SHUTDOWN_GRACE_SECONDS))
-            elif signals_seen == 2:
-                print("Stopping now", file=sys.stderr, flush=True)
-                loop.create_task(connection.shutdown(0.0))
-
-        # The application installs its own SIGTERM hook (it unblocks invocations waiting
-        # for Restate to close their input); both run through the same dispatcher.
-        install_shutdown_hook(loop, on_signal, signal.SIGTERM)
-        install_shutdown_hook(loop, on_signal, signal.SIGINT)
-
-        print(
-            f"Connected to Restate Cloud as {connection.name}. Register this deployment as "
-            f"{connection.registration_identifier}",
-            file=sys.stderr,
-            flush=True,
-        )
-        try:
-            await connection.wait()
-        finally:
-            stopped.cancel()
-        return EXIT_OK
 
 
 def main(argv: typing.Optional[typing.Sequence[str]] = None) -> int:
@@ -127,12 +81,11 @@ def main(argv: typing.Optional[typing.Sequence[str]] = None) -> int:
         return EXIT_USAGE  # pragma: no cover - parser.error exits
 
     try:
-        return asyncio.run(_serve(app, args.name, args.key))
+        connect(app, name=args.name, key=args.key)
     except ConnectError as error:
         print(f"error: {error}", file=sys.stderr, flush=True)
         return EXIT_FAILURE
-    except KeyboardInterrupt:
-        return EXIT_OK
+    return EXIT_OK
 
 
 if __name__ == "__main__":

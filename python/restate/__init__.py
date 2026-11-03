@@ -43,7 +43,7 @@ from .exceptions import TerminalError, SdkInternalBaseException, is_internal_exc
 from .asyncio import as_completed, gather, wait_completed, select
 
 from .endpoint import app
-from .connect import connect, Connection, ConnectError
+from .connection import connect, ConnectError
 
 from .logging import getLogger, RestateLoggingFilter
 
@@ -114,7 +114,6 @@ __all__ = [
     "JournalValueCodecProvider",
     "app",
     "connect",
-    "Connection",
     "ConnectError",
     "create_test_harness",
     "test_harness",
