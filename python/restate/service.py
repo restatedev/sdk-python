@@ -203,6 +203,7 @@ class Service:
                 idempotency_retention,
                 None,
                 None,
+                None,
                 ingress_private,
                 invocation_retry_policy,
                 combined_context_managers,

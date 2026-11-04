@@ -105,14 +105,16 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
     # Negotiate discovery protocol version
     version = 2
     if accept_header:
-        if "application/vnd.restate.endpointmanifest.v4+json" in accept_header:
+        if "application/vnd.restate.endpointmanifest.v5+json" in accept_header:
+            version = 5
+        elif "application/vnd.restate.endpointmanifest.v4+json" in accept_header:
             version = 4
         elif "application/vnd.restate.endpointmanifest.v3+json" in accept_header:
             version = 3
         elif "application/vnd.restate.endpointmanifest.v2+json" in accept_header:
             version = 2
         else:
-            await send_status_with_error_text(send, 415, f"Unsupported discovery version ${accept_header}")
+            await send_status_with_error_text(send, 415, f"Unsupported discovery version {accept_header}")
             return
 
     try:
@@ -128,7 +130,7 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
             }
         )
     except ValueError as e:
-        await send_status_with_error_text(send, 500, f"Error when computing discovery ${e}")
+        await send_status_with_error_text(send, 500, f"Error when computing discovery {e}")
         return
 
 
