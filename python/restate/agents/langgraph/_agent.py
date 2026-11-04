@@ -51,6 +51,7 @@ from pydantic import PrivateAttr
 
 from restate.agents._common import (
     CANCELLED,
+    MODEL_ENV,
     UNANSWERED,
     ModelError,
     PerSession,
@@ -107,7 +108,7 @@ def _provider_of_model(named: str) -> tuple[str, str]:
     """``provider/model-id`` as its provider and model id, for a provider the usual graph takes."""
     provider, model_id = provider_of(named)
     if provider not in _PROVIDERS or not model_id:
-        from_env = " (from MODEL)" if os.environ.get("MODEL") == named else ""
+        from_env = f" (from {MODEL_ENV})" if os.environ.get(MODEL_ENV) == named else ""
         raise ModelError(f'the model "{named}"{from_env} is neither openai/<model-id> nor anthropic/<model-id>')
     return provider, model_id
 
@@ -320,7 +321,7 @@ async def prompt(
         ctx: The handler's context.
         text: The prompt.
         model: ``"openai/<model-id>"`` or ``"anthropic/<model-id>"``, or a
-            LangChain chat model that calls tools. Defaults to ``$MODEL``,
+            LangChain chat model that calls tools. Defaults to ``$RESTATE_AGENT_MODEL``,
             else ``"openai/gpt-6-sol"``.
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.
@@ -370,7 +371,7 @@ def agent(
         name: The object's name, as Restate serves it.
         model: ``"openai/<model-id>"`` (needs ``langchain-openai``) or
             ``"anthropic/<model-id>"`` (needs ``langchain-anthropic``), or a
-            LangChain chat model that calls tools. Defaults to ``$MODEL``,
+            LangChain chat model that calls tools. Defaults to ``$RESTATE_AGENT_MODEL``,
             else ``"openai/gpt-6-sol"``.
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.

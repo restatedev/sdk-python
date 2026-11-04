@@ -375,7 +375,7 @@ async def prompt(
             Defaults to one with ``system`` as its instructions.
         model: ``"<provider>/<model-id>"`` of any of Pydantic AI's providers,
             or a Pydantic AI model. Defaults to ``agent``'s own, else
-            ``$MODEL``, else ``"openai/gpt-6-sol"``.
+            ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
         system: The instructions, when there is no ``agent``.
         tools: ``restate.agents`` tools, Pydantic AI tools or tool functions,
             beside ``agent``'s own.
@@ -438,7 +438,7 @@ def agent(
         model: ``"<provider>/<model-id>"`` of any of Pydantic AI's providers
             (each needs its extra, such as ``pydantic-ai-slim[openai]``), or a
             Pydantic AI model. Defaults to ``pydantic_agent``'s own, else
-            ``$MODEL``, else ``"openai/gpt-6-sol"``.
+            ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
         system: The instructions, when there is no ``pydantic_agent``.
         tools: ``restate.agents`` tools, Pydantic AI tools or tool functions.
         description: The object's description, shown in Restate's UI.

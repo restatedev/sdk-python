@@ -9,7 +9,7 @@ stored step: a tool call already made is not made again::
     curl localhost:8080/assistant/alice/chat -d 'What is the weather in Lisbon?'
     curl localhost:8080/assistant/alice/messages --json '{}'                        # the conversation
 
-The model is ``openai/gpt-6-sol`` unless MODEL names another, of any of
+The model is ``openai/gpt-6-sol`` unless RESTATE_AGENT_MODEL names another, of any of
 Pydantic AI's providers: ``anthropic/<model-id>`` takes
 ``pydantic-ai-slim[anthropic]`` (and ANTHROPIC_API_KEY) instead.
 """

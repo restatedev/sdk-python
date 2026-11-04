@@ -63,6 +63,9 @@ def next_prompt_id(ctx: SessionContext) -> str:
     return ctx.request.id if n == 1 else f"{ctx.request.id}:{n}"
 
 
+MODEL_ENV = "RESTATE_AGENT_MODEL"
+"""The environment variable of the model that agents use when given none."""
+
 DEFAULT_MODEL = "openai/gpt-6-sol"
 """The default model of the frameworks that take any provider's, with OPENAI_API_KEY."""
 
@@ -71,8 +74,8 @@ CLAUDE_MODEL = "anthropic/claude-sonnet-5-5"
 
 
 def model_of(model: str | None, fallback: str = DEFAULT_MODEL) -> str:
-    """The model, as ``provider/model-id``: ``model``, or else MODEL, or else the framework's default."""
-    return model or os.environ.get("MODEL") or fallback
+    """Return ``model``, else ``$RESTATE_AGENT_MODEL``, else the framework's default (``fallback``)."""
+    return model or os.environ.get(MODEL_ENV) or fallback
 
 
 def provider_of(model: str) -> tuple[str, str]:
@@ -95,7 +98,7 @@ The error code of a message the model's provider refused (a missing or wrong
 API key, an unknown model): Failed Dependency, as its HTTP status.
 """
 
-CHECK_MODEL = "check the agent's model (its `model` option, or MODEL) and its provider's API key"
+CHECK_MODEL = f"check the agent's model (its `model` option, or {MODEL_ENV}) and its provider's API key"
 """What to check when a model's provider refuses a request."""
 
 
@@ -120,7 +123,7 @@ def model_id_of(model: str, provider: str) -> str:
     """The model id of ``model``, for a framework with only ``provider``'s models: ``provider/model-id``, or the id alone."""
     named, model_id = provider_of(model) if "/" in model or ":" in model else (provider, model)
     if named != provider or not model_id:
-        from_env = " (from MODEL)" if os.environ.get("MODEL") == model else ""
+        from_env = f" (from {MODEL_ENV})" if os.environ.get(MODEL_ENV) == model else ""
         raise ModelError(f'the model "{model}"{from_env} is not {provider}\'s: this agent takes {provider}/<model-id>')
     return model_id
 

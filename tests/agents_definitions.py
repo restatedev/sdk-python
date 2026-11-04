@@ -16,7 +16,7 @@ import pytest
 
 from restate import sessions
 from restate.agents import AgentObject
-from restate.agents.internal import provider_of
+from restate.agents.internal import DEFAULT_MODEL, model_of, provider_of
 
 
 def test_migrations_given_as_one_string_are_refused():
@@ -88,3 +88,12 @@ def test_a_model_names_its_provider_with_a_slash_or_a_colon():
     assert provider_of("anthropic:claude-sonnet-5-5") == ("anthropic", "claude-sonnet-5-5")
     assert provider_of("openai/ft:gpt-4o:acme") == ("openai", "ft:gpt-4o:acme")
     assert provider_of("gpt") == ("", "gpt")
+
+
+def test_the_default_model_comes_from_restate_agent_model(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MODEL", "openai/ignored")
+    monkeypatch.delenv("RESTATE_AGENT_MODEL", raising=False)
+    assert model_of(None) == DEFAULT_MODEL
+    monkeypatch.setenv("RESTATE_AGENT_MODEL", "anthropic:claude-sonnet-5-5")
+    assert model_of(None) == "anthropic:claude-sonnet-5-5"
+    assert model_of("openai/gpt-6-sol") == "openai/gpt-6-sol"
