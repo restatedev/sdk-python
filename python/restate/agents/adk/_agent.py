@@ -26,7 +26,8 @@ its stored events:
   asking the model again), which a tool can pass on to stay idempotent.
 - A tool's error fails the attempt, and Restate retries it. A
   ``restate.TerminalError``, which a retry would only repeat, is instead the
-  tool's answer to the model.
+  tool's answer to the model, and so is a call to a tool the agent does not
+  have (which ADK fails the run for).
 - A transfer to a sub-agent holds for the next messages, as ADK's sessions do.
 """
 
@@ -200,9 +201,14 @@ class _Restate(BasePlugin):
 
     async def on_tool_error_callback(
         self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext, error: Exception
-    ) -> None:
+    ) -> dict[str, Any] | None:
+        if type(tool) is BaseTool:
+            # A tool the agent does not have (ADK stands in a bare BaseTool for it): the model's to fix. Failing
+            # the attempt would not help, as the retry resumes the same call.
+            return {"result": f"Error: there is no tool named {tool.name!r}"}
         # Never mistaken for the model provider refusing; the attempt fails with it.
         from_tool(self.ctx, error)
+        return None
 
 
 # --- Tools ----------------------------------------------------------------------------------------

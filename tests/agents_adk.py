@@ -78,7 +78,7 @@ def reply(system: str, contents: list[types.Content]) -> list[types.Part]:
         call = types.FunctionCall(id=f"call-{rest}", name="transfer_to_agent", args={"agent_name": "refunds"})
         return [types.Part(function_call=call)]
     names = {"weather": "get_weather", "crash": "flaky", "wait": "blocking", "wrong": "get_weather"}
-    names |= {"forbidden": "forbidden"}
+    names |= {"forbidden": "forbidden", "unknown": "nonexistent"}
     if word in names and not responses:
         args: dict[str, Any] = {"town": 3} if word == "wrong" else {"city": rest}
         return [types.Part(function_call=types.FunctionCall(id=f"call-{rest}", name=names[word], args=args))]
@@ -239,6 +239,12 @@ async def test_arguments_that_do_not_fit_are_the_models_to_fix(harness: HarnessE
     k = key()
     wrong = (await chat(harness, k, f"wrong {k}")).json()
     assert wrong.startswith("tool said: Error: the arguments do not fit")
+
+
+async def test_a_call_to_a_tool_the_agent_does_not_have_is_the_models_to_fix(harness: HarnessEnvironment):
+    k = key()
+    unknown = (await chat(harness, k, f"unknown {k}")).json()
+    assert unknown == "tool said: Error: there is no tool named 'nonexistent'"
 
 
 async def test_a_tools_terminal_error_is_its_answer(harness: HarnessEnvironment):
