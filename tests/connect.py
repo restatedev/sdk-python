@@ -19,7 +19,6 @@ import base64
 import hashlib
 import json
 import sys
-import threading
 import time
 import typing
 
@@ -32,7 +31,6 @@ from h2.exceptions import ProtocolError
 import restate
 import restate._internal as _internal  # pylint: disable=import-error,no-name-in-module
 from restate.client import resolve_ingress
-from restate.connection import Connection
 from restate.__main__ import _load_app
 
 pytestmark = [pytest.mark.anyio]
@@ -703,90 +701,95 @@ class OptionsWithServers:
         )
 
 
-async def test_connection_start_wait_shutdown(monkeypatch: pytest.MonkeyPatch):
+async def test_with_connection(monkeypatch: pytest.MonkeyPatch):
     async with FakeCloud() as cloud:
         monkeypatch.setattr(sys.modules["restate.connection"], "TunnelEngineOptions", OptionsWithServers(cloud))
-        conn = Connection(restate.app(services=[greeter]), name=TUNNEL_NAME, key=connect_key())
-        assert conn.name == TUNNEL_NAME
-        assert conn.registration_identifier == f"connect://{TUNNEL_NAME}"
-        assert not conn.started and conn.info is None
-        await conn.shutdown()  # a no-op before start
 
-        starting = asyncio.ensure_future(conn.start())
+        async def run() -> None:
+            async with restate.with_connection(
+                restate.app(services=[greeter]), name=TUNNEL_NAME, key=connect_key()
+            ) as conn:
+                assert conn.name == TUNNEL_NAME
+                assert conn.registration_identifier == f"connect://{TUNNEL_NAME}"
+                assert conn.info.name == TUNNEL_NAME
+                response = await cloud.request("/http/h/9080/discover", identity_headers("/discover"))
+                assert response.status == 200
+                waiter = asyncio.ensure_future(conn.wait())
+                await asyncio.sleep(0.05)
+                assert not waiter.done()
+                await conn.shutdown(0.0)
+                await asyncio.wait_for(waiter, TEST_TIMEOUT)
+                # Leaving the block shuts down again: a no-op that never raises.
+
+        task = asyncio.ensure_future(run())
         await cloud.handshake()
         await cloud.establish()
-        info = await asyncio.wait_for(starting, TEST_TIMEOUT)
-        assert conn.started and conn.info is info and info.name == TUNNEL_NAME
-        with pytest.raises(RuntimeError, match="already called"):
-            await conn.start()
-
-        response = await cloud.request("/http/h/9080/discover", identity_headers("/discover"))
-        assert response.status == 200
-
-        waiter = asyncio.ensure_future(conn.wait())
-        await asyncio.sleep(0.05)
-        assert not waiter.done()
-        await conn.shutdown(0.0)
-        await asyncio.wait_for(waiter, TEST_TIMEOUT)
+        await asyncio.wait_for(task, TEST_TIMEOUT)
         await cloud.wait_closed()
 
 
-def test_connection_reports_configuration_errors(monkeypatch: pytest.MonkeyPatch):
+async def test_with_connection_leaves_the_block_with_a_drain(monkeypatch: pytest.MonkeyPatch):
+    async with FakeCloud() as cloud:
+        monkeypatch.setattr(sys.modules["restate.connection"], "TunnelEngineOptions", OptionsWithServers(cloud))
+
+        async def run() -> None:
+            async with restate.with_connection(restate.app(services=[greeter]), name=TUNNEL_NAME, key=connect_key()):
+                pass
+
+        task = asyncio.ensure_future(run())
+        await cloud.handshake()
+        await cloud.establish()
+        # Leaving the block drains: the peer is told to stop opening streams.
+        await cloud.wait_goaway()
+        assert not task.done()
+    # python-h2 cannot finish the drain handshake; closing the peer ends the connection.
+    await asyncio.wait_for(task, TEST_TIMEOUT)
+
+
+async def test_connection_reports_configuration_errors(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("RESTATE_CONNECT_KEY", raising=False)
     monkeypatch.delenv("RESTATE_INPROC_ENVIRONMENT_ID", raising=False)
     app = restate.app(services=[greeter])
     with pytest.raises(restate.ConnectError, match="RESTATE_CONNECT_KEY"):
-        Connection(app, name="greeter")
+        async with restate.with_connection(app, name="greeter"):
+            pass
     with pytest.raises(restate.ConnectError, match="RESTATE_CONNECT_KEY"):
-        restate.connect(app, name="greeter")
+        await restate.connect(app, name="greeter")
 
 
-async def test_connection_start_fails_fast_after_a_fatal_error(monkeypatch: pytest.MonkeyPatch):
+async def test_with_connection_fails_fast_after_a_fatal_error(monkeypatch: pytest.MonkeyPatch):
     async with FakeCloud() as cloud:
         monkeypatch.setattr(sys.modules["restate.connection"], "TunnelEngineOptions", OptionsWithServers(cloud))
-        conn = Connection(restate.app(services=[greeter]), name=TUNNEL_NAME, key=connect_key())
-        starting = asyncio.ensure_future(conn.start())
+
+        async def run() -> None:
+            async with restate.with_connection(restate.app(services=[greeter]), name=TUNNEL_NAME, key=connect_key()):
+                raise AssertionError("must not enter")
+
+        task = asyncio.ensure_future(run())
         await cloud.handshake()
         await cloud.establish(status="unauthorized")
         with pytest.raises(restate.ConnectError, match="unauthorized"):
-            await asyncio.wait_for(starting, TEST_TIMEOUT)
-        assert not conn.started
-        # The failure stays observable afterwards.
-        with pytest.raises(restate.ConnectError, match="unauthorized"):
-            await conn.wait()
-        await conn.shutdown(0.0)
+            await asyncio.wait_for(task, TEST_TIMEOUT)
 
 
-async def test_connect_blocks_until_the_connection_stops(monkeypatch: pytest.MonkeyPatch):
-    # restate.connect() owns its own event loop, so it runs in a thread here; there it
-    # cannot install signal handlers, so the fake peer going away (with a reconnect
-    # policy that gives up at once) is what stops it, as a ConnectError.
+async def test_connect_runs_until_the_connection_stops(monkeypatch: pytest.MonkeyPatch):
+    # The fake peer going away (with a reconnect policy that gives up at once) is what
+    # stops connect() here, as a ConnectError; signals are covered manually.
     async with FakeCloud() as cloud:
         monkeypatch.setattr(
             sys.modules["restate.connection"],
             "TunnelEngineOptions",
             OptionsWithServers(cloud, reconnect_max_attempts=1),
         )
-        app = restate.app(services=[greeter])
-        outcome: typing.List[typing.Any] = []
-
-        def run() -> None:
-            try:
-                restate.connect(app, name=TUNNEL_NAME, key=connect_key())
-                outcome.append(None)
-            except BaseException as error:  # pylint: disable=broad-except
-                outcome.append(error)
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
+        task = asyncio.ensure_future(
+            restate.connect(restate.app(services=[greeter]), name=TUNNEL_NAME, key=connect_key())
+        )
         await cloud.handshake()
         await cloud.establish()
         response = await cloud.request("/http/h/9080/discover", identity_headers("/discover"))
         assert response.status == 200
-        assert thread.is_alive()
+        assert not task.done()
 
-    # Leaving the block closes the peer: the engine gives up and connect() returns.
-    await asyncio.get_running_loop().run_in_executor(None, thread.join, TEST_TIMEOUT)
-    assert not thread.is_alive()
-    assert isinstance(outcome[0], restate.ConnectError), outcome
-    assert "max_attempts" in str(outcome[0])
+    # Leaving the block closes the peer: the engine gives up and connect() raises.
+    with pytest.raises(restate.ConnectError, match="max_attempts"):
+        await asyncio.wait_for(task, TEST_TIMEOUT)

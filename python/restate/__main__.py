@@ -18,6 +18,7 @@ connection to Restate Cloud, until SIGINT or SIGTERM.
 """
 
 import argparse
+import asyncio
 import importlib
 import os
 import sys
@@ -81,7 +82,7 @@ def main(argv: typing.Optional[typing.Sequence[str]] = None) -> int:
         return EXIT_USAGE  # pragma: no cover - parser.error exits
 
     try:
-        connect(app, name=args.name, key=args.key)
+        asyncio.run(connect(app, name=args.name, key=args.key))
     except ConnectError as error:
         print(f"error: {error}", file=sys.stderr, flush=True)
         return EXIT_FAILURE

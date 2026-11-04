@@ -36,14 +36,20 @@ RESTATE_CONNECT_KEY=rstcloudv1_... python -m restate connect app:app --name gree
 ```
 
 where `app:app` is the module and attribute holding the application returned by `restate.app(...)`.
-Then register the deployment as `connect://greeter`. The same from code, blocking until stopped:
+Then register the deployment as `connect://greeter`. The same from code, running until stopped:
 
 ```python
-restate.connect(app, name="greeter")
+if __name__ == "__main__":
+    asyncio.run(restate.connect(app, name="greeter"))
 ```
 
-Programs that already run an event loop use `restate.connection.Connection` instead: `await start()`,
-`await wait()`, `await shutdown(grace)`.
+To do something while connected, use the context manager:
+
+```python
+async with restate.with_connection(app, name="greeter") as connection:
+    print(connection.info.deployment_url)
+    await connection.wait()
+```
 
 Clients can read an ingress key the same way: `restate.create_client()` without an URL uses
 `RESTATE_INGRESS_KEY` (Development → Configure Client).
