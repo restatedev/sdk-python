@@ -160,6 +160,8 @@ def _text(message: BaseMessage) -> str:
 class _Items:
     """LangChain's messages, as the conversation keeps them."""
 
+    framework = "langgraph"
+
     def prompt(self, text: str) -> Item:
         return _item(HumanMessage(text))
 
@@ -269,6 +271,7 @@ async def prompt(
     model: ChatModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
+    conversation: str | None = None,
 ) -> str:
     """Answer a prompt with a LangGraph agent, exactly once.
 
@@ -289,11 +292,15 @@ async def prompt(
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.
 
+        conversation: The name of a conversation beside the agent's own (a
+            lowercase identifier, such as ``planner``): for another agent in
+            the same key (of any framework), or for a prompt asked at the same
+            time as another. The ``messages`` view shows the agent's own only.
     Returns:
         The agent's answer.
     """
 
-    return await answer_once(ctx, text, ITEMS, _run(ctx, model, system, tools))
+    return await answer_once(ctx, text, ITEMS, _run(ctx, model, system, tools), name=conversation)
 
 
 def agent(

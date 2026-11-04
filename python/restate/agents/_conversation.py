@@ -8,10 +8,13 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""The conversation of an agent's key, which every framework integration stores the same way.
+"""The conversations of an agent's key, which every framework integration stores the same way.
 
-The conversation is one table of the framework's own items (its messages, as
-JSON), one row each, in order. A prompt's item carries the prompt's id, and
+A conversation is one table of the framework's own items (its messages, as
+JSON), one row each, in order. The key's database is its agent's, so the
+agent's own conversation is ``restate_agent_conversation``; one beside it has
+a name of its own (``restate_agent_conversation__planner``). A conversation
+holds one framework's messages, which its prompts record. A prompt's item carries the prompt's id, and
 its answer once there is one; a model reply's items carry the reply's id (the
 position of its first item) and the agent that gave it. Rows are only ever appended, but for a reply that is
 dropped (to ask the model again), and a prompt's answer is one update of its
@@ -28,6 +31,7 @@ conversation to the answer, storing each step with ``append`` as it goes).
 from __future__ import annotations
 
 import json
+import re
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -39,7 +43,7 @@ from restate.agents._transcript import Transcript
 from restate.agents._turn import AttemptEnded, stop_signal_of, transcribing
 from restate.exceptions import TerminalError
 from restate.sessions import Database, DatabaseReader, SessionContext
-from restate.sessions.internal import Schema
+from restate.sessions.internal import Schema, ScopeKey
 
 _CANCELLATION = 409
 """The status code of Restate's cancellation error, which a stopped turn fails with."""
@@ -47,20 +51,38 @@ _CANCELLATION = 409
 Item: typing.TypeAlias = Any
 """An item of the conversation: a framework's message, as JSON (a dict, mostly)."""
 
-SCHEMA = Schema(
-    "restate_agents.conversation",
-    [
-        """CREATE TABLE restate_agent_conversation (
+_NAME = re.compile(r"[a-z][a-z0-9_]*")
+"""A conversation's name: it names a table."""
+
+
+def table_of(name: str | None = None) -> str:
+    """Return the table of conversation ``name``: the agent's own, if ``None``.
+
+    Raises:
+        ValueError: If ``name`` is not a lowercase identifier (``planner``, ``plan_2``).
+    """
+    if name is not None and not _NAME.fullmatch(name):
+        raise ValueError(f"a conversation's name is a lowercase identifier, such as planner, not {name!r}")
+    return "restate_agent_conversation" + (f"__{name}" if name else "")
+
+
+_SCHEMAS: dict[str, Schema] = {}
+
+
+def _schema(table: str) -> Schema:
+    """Return the schema of the conversation in ``table``."""
+    if table not in _SCHEMAS:
+        create = f"""CREATE TABLE {table} (
             n INTEGER PRIMARY KEY,
             item TEXT NOT NULL,
             prompt TEXT UNIQUE,
             answer TEXT,
             reply INTEGER,
-            agent TEXT
-        )""",
-        "CREATE INDEX restate_agent_conversation_reply ON restate_agent_conversation (reply)",
-    ],
-)
+            agent TEXT,
+            framework TEXT
+        )"""
+        _SCHEMAS[table] = Schema(f"restate_agents.{table}", [create, f"CREATE INDEX {table}_reply ON {table} (reply)"])
+    return _SCHEMAS[table]
 
 
 @dataclass
@@ -99,6 +121,9 @@ class Result(typing.NamedTuple):
 class Items(Protocol):
     """What a framework's items are: how the shared code reads and makes them."""
 
+    framework: str
+    """The framework's name (``openai``, say), which a conversation's prompts record."""
+
     def prompt(self, text: str) -> Item:
         """Return the item of a prompt (the user's message)."""
         ...
@@ -131,18 +156,33 @@ class Conversation:
     database and to memory alike.
     """
 
-    def __init__(self, db: Database, items: Items, entries: list[Entry]) -> None:
+    def __init__(self, db: Database, items: Items, table: str, entries: list[Entry]) -> None:
         self.db = db
         self.items = items
+        self.table = table
         self.entries = entries
         self._transcript: Transcript | None = None
         self.closed = False
         """Whether a stop closed the run: the run, unwinding, then stores nothing more."""
 
     @classmethod
-    async def load(cls, db: Database, items: Items) -> Conversation:
-        await SCHEMA.ensure(db)
-        return cls(db, items, await _entries(db))
+    async def load(cls, db: Database, items: Items, name: str | None = None) -> Conversation:
+        """Load conversation ``name`` (the agent's own, if ``None``) from ``db``, for a prompt of ``items``' framework.
+
+        Raises:
+            TerminalError: If the conversation holds another framework's messages.
+        """
+        table = table_of(name)
+        await _schema(table).ensure(db)
+        rows = await db.values(f"SELECT DISTINCT framework FROM {table} WHERE framework IS NOT NULL")
+        other = next((str(row[0]) for row in rows if row[0] != items.framework), None)
+        if other is not None:
+            named = f"the conversation {name!r}" if name else "the agent's conversation"
+            raise TerminalError(
+                f"{named} holds {other}'s messages, not {items.framework}'s: "
+                "give this prompt a conversation of its own (conversation=...)"
+            )
+        return cls(db, items, table, await _entries(db, table))
 
     # --- Reading ---
 
@@ -208,29 +248,29 @@ class Conversation:
 
     async def ask(self, prompt_id: str, text: str) -> None:
         """Append prompt ``prompt_id``, with ``text``."""
-        await self._insert([Entry(self._next(), self.items.prompt(text), prompt=prompt_id)])
+        await self._insert([Entry(self._next(), self.items.prompt(text), prompt=prompt_id)], framework=True)
 
     async def answered(self, prompt_id: str, answer: str) -> None:
         """Store ``answer`` as the answer of prompt ``prompt_id``."""
-        await self.db.execute("UPDATE restate_agent_conversation SET answer = ? WHERE prompt = ?", [answer, prompt_id])
+        await self.db.execute(f"UPDATE {self.table} SET answer = ? WHERE prompt = ?", [answer, prompt_id])
         for entry in self.entries:
             if entry.prompt == prompt_id:
                 entry.answer = answer
 
     async def drop(self, reply: int) -> None:
         """Drop the items of the model's reply ``reply``, to ask the model again."""
-        await self.db.execute("DELETE FROM restate_agent_conversation WHERE reply = ?", [reply])
+        await self.db.execute(f"DELETE FROM {self.table} WHERE reply = ?", [reply])
         self.entries = [e for e in self.entries if e.reply != reply]
         self._transcript = None
 
-    async def _insert(self, added: list[Entry]) -> None:
+    async def _insert(self, added: list[Entry], *, framework: bool = False) -> None:
         if self.closed:
             raise RuntimeError("the run was stopped: it stores nothing more")
         async with self.db.transaction() as tx:
             for e in added:
                 await tx.execute(
-                    "INSERT INTO restate_agent_conversation (n, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?)",
-                    [e.n, json.dumps(e.item), e.prompt, e.reply, e.agent],
+                    f"INSERT INTO {self.table} (n, item, prompt, reply, agent, framework) VALUES (?, ?, ?, ?, ?, ?)",
+                    [e.n, json.dumps(e.item), e.prompt, e.reply, e.agent, self.items.framework if framework else None],
                 )
         self.entries.extend(added)
         if self._transcript is not None:
@@ -238,8 +278,8 @@ class Conversation:
                 self._transcribe(e.item)
 
 
-async def _entries(db: DatabaseReader) -> list[Entry]:
-    rows = await db.values("SELECT n, item, prompt, answer, reply, agent FROM restate_agent_conversation ORDER BY n")
+async def _entries(db: DatabaseReader, table: str) -> list[Entry]:
+    rows = await db.values(f"SELECT n, item, prompt, answer, reply, agent FROM {table} ORDER BY n")
     return [
         Entry(int(typing.cast(int, n)), json.loads(str(item)), _str(prompt), _str(answer), _int(reply), _str(agent))
         for n, item, prompt, answer, reply, agent in rows
@@ -279,19 +319,42 @@ async def close(ctx: SessionContext, conversation: Conversation, text: str) -> N
     await conversation.answered(running.prompt, text)
 
 
-async def answer_once(ctx: SessionContext, text: str, items: Items, run: Run) -> str:
-    """Answer the prompt ``text`` with a framework's ``run``, exactly once.
+_ANSWERING: ScopeKey[set[str]] = ScopeKey("the conversations answering a prompt")
+"""The tables of the conversations that the attempt is answering a prompt in."""
+
+
+async def answer_once(ctx: SessionContext, text: str, items: Items, run: Run, *, name: str | None = None) -> str:
+    """Answer the prompt ``text`` with a framework's ``run``, exactly once, in conversation ``name``.
 
     The prompt's id is the invocation's (``next_prompt_id``), so a retried
     attempt returns the stored answer, or finishes the run first. A run that
     an earlier prompt left unfinished is finished before this one starts.
+
+    The agent's own conversation (``name`` is ``None``) is the one its
+    ``messages`` view shows. A conversation answers one prompt at a time: two
+    prompts at once (``asyncio.gather``) need conversations of their own.
+
+    Raises:
+        TerminalError: If the conversation is already answering a prompt in this invocation.
+        ValueError: If ``name`` is not a lowercase identifier.
     """
-    conversation = await Conversation.load(ctx.db, items)
+    conversation = await Conversation.load(ctx.db, items, name)
+    answering = _ANSWERING.of(ctx, set[str])
+    if conversation.table in answering:
+        named = f"the conversation {name!r}" if name else "the agent's conversation"
+        raise TerminalError(
+            f"{named} is already answering a prompt: give the other prompt a conversation of its own (conversation=...)"
+        )
+    answering.add(conversation.table)
 
     async def work() -> str:
         return await _answer(ctx, conversation, text, run)
 
-    return await transcribing(ctx, _read(conversation), work)
+    try:
+        # Only the agent's own conversation is shown by its `messages` view.
+        return await (transcribing(ctx, _read(conversation), work) if name is None else work())
+    finally:
+        answering.discard(conversation.table)
 
 
 def _read(conversation: Conversation) -> Callable[[], Awaitable[Transcript]]:

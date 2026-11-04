@@ -105,6 +105,8 @@ def _output(value: Any) -> str:
 class _Items:
     """The Responses API's input items, as the SDK keeps a conversation."""
 
+    framework = "openai"
+
     def prompt(self, text: str) -> Item:
         return {"role": "user", "content": text}
 
@@ -393,6 +395,7 @@ async def prompt(
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
+    conversation: str | None = None,
 ) -> str:
     """Answer a prompt with an OpenAI Agents SDK agent, exactly once.
 
@@ -417,6 +420,10 @@ async def prompt(
         tools: ``restate.agents`` tools, or tools of the SDK, beside
             ``agent``'s own. For the agents it hands off to, see ``tools()``.
 
+        conversation: The name of a conversation beside the agent's own (a
+            lowercase identifier, such as ``planner``): for another agent in
+            the same key (of any framework), or for a prompt asked at the same
+            time as another. The ``messages`` view shows the agent's own only.
     Returns:
         The agent's answer.
 
@@ -425,7 +432,7 @@ async def prompt(
     """
     _check(agent, system)
 
-    return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
+    return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools), name=conversation)
 
 
 def agent(

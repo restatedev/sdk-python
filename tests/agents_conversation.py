@@ -12,6 +12,7 @@
 
 # pylint: disable=missing-function-docstring,import-error
 
+import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -21,7 +22,7 @@ from sessions_object import Host, request
 
 import restate
 from restate import sessions
-from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Result, answer_once, table_of
 from restate.agents.internal import CANCELLED
 from restate.sessions.internal import invoke
 
@@ -39,6 +40,8 @@ PUBLISHED = {"publish": b"null"}
 
 class Items:
     """A made-up framework's items: ``{"role", "text"}`` messages, a reply's ``calls``, and ``{"result", "output"}``."""
+
+    framework = "made_up"
 
     def prompt(self, text: str) -> Item:
         return {"role": "user", "text": text}
@@ -156,3 +159,80 @@ async def test_the_transcript_follows_appends_and_drops():
         return "done"
 
     assert await asking(run)("hi") == "done"
+
+
+class OtherItems(Items):
+    """Another made-up framework, of the same items."""
+
+    framework = "other"
+
+
+def reply_with(text: str, seen: list[list[str]] | None = None) -> Run:
+    """Return a run that replies ``text``, after keeping the prompts it saw (in ``seen``)."""
+
+    async def run(conversation: Conversation) -> str:
+        if seen is not None:
+            seen.append([e.item["text"] for e in conversation.entries if e.prompt is not None])
+        await asyncio.sleep(0.01)
+        await conversation.append_reply({"role": "assistant", "text": text})
+        return text
+
+    return run
+
+
+def handler(body: Callable[[sessions.SessionContext], Awaitable[Any]]) -> Callable[[], Awaitable[Any]]:
+    """Return how to invoke a handler that runs ``body``, in a backend of its own."""
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def run(ctx: sessions.SessionContext, text: str) -> Any:
+        return await body(ctx)
+
+    async def invoked() -> Any:
+        return await invoke(obj, "run", Host(Backend(), service="asker", answers=PUBLISHED), request(), "")
+
+    return invoked
+
+
+async def test_two_prompts_at_once_need_conversations_of_their_own():
+    async def same(ctx: sessions.SessionContext) -> Any:
+        one = answer_once(ctx, "a", ITEMS, reply_with("one"))
+        return await asyncio.gather(one, answer_once(ctx, "b", ITEMS, reply_with("two")))
+
+    with pytest.raises(restate.TerminalError, match="conversation of its own"):
+        await handler(same)()
+
+    async def apart(ctx: sessions.SessionContext) -> Any:
+        one = answer_once(ctx, "a", ITEMS, reply_with("one"))
+        return await asyncio.gather(one, answer_once(ctx, "b", ITEMS, reply_with("two"), name="summaries"))
+
+    assert await handler(apart)() == ["one", "two"]
+
+
+async def test_two_agents_of_a_key_keep_conversations_of_their_own_by_name():
+    seen: list[list[str]] = []
+
+    async def both(ctx: sessions.SessionContext) -> Any:
+        first = await answer_once(ctx, "to the planner", ITEMS, reply_with("p", seen), name="planner")
+        second = await answer_once(ctx, "to the writer", OtherItems(), reply_with("w", seen), name="writer")
+        third = await answer_once(ctx, "to the planner again", ITEMS, reply_with("p", seen), name="planner")
+        return [first, second, third]
+
+    assert await handler(both)() == ["p", "w", "p"]
+    assert seen == [["to the planner"], ["to the writer"], ["to the planner", "to the planner again"]]
+
+
+async def test_a_conversation_holds_one_frameworks_messages():
+    async def mixed(ctx: sessions.SessionContext) -> Any:
+        await answer_once(ctx, "to made_up", ITEMS, reply_with("m"))
+        return await answer_once(ctx, "to other", OtherItems(), reply_with("o"))
+
+    with pytest.raises(restate.TerminalError, match="holds made_up's messages, not other's"):
+        await handler(mixed)()
+
+
+def test_a_conversations_name_is_an_identifier():
+    with pytest.raises(ValueError, match="lowercase identifier"):
+        table_of("x; DROP TABLE y")
+    assert table_of() == "restate_agent_conversation"
+    assert table_of("planner") == "restate_agent_conversation__planner"

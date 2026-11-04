@@ -122,6 +122,8 @@ def _text(response: ModelMessage) -> str:
 class _Items:
     """Pydantic AI's messages, as the conversation keeps them."""
 
+    framework = "pydantic_ai"
+
     def prompt(self, text: str) -> Item:
         return _item(ModelRequest(parts=[UserPromptPart(text)]))
 
@@ -285,6 +287,7 @@ async def prompt(
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
+    conversation: str | None = None,
 ) -> str:
     """Answer a prompt with a Pydantic AI agent, exactly once.
 
@@ -308,6 +311,10 @@ async def prompt(
         tools: ``restate.agents`` tools, Pydantic AI tools or tool functions,
             beside ``agent``'s own.
 
+        conversation: The name of a conversation beside the agent's own (a
+            lowercase identifier, such as ``planner``): for another agent in
+            the same key (of any framework), or for a prompt asked at the same
+            time as another. The ``messages`` view shows the agent's own only.
     Returns:
         The agent's answer.
 
@@ -316,7 +323,7 @@ async def prompt(
     """
     _check(agent, system)
 
-    return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
+    return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools), name=conversation)
 
 
 def agent(
