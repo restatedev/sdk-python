@@ -654,23 +654,20 @@ class SessionObject(VirtualObject):
                 raise ValueError(reserved)
             if chosen in self.handlers:
                 raise ValueError(self._taken(chosen))
-            explicit = bool(options.get("explicit_cancellation"))
-            sdk_options = {key: value for key, value in options.items() if key != "explicit_cancellation"}
             entry = _Entry(
                 fn=self._attempt_fn(fn, view),
                 view=view,
                 config=self._config,
                 definition=weakref.ref(self),
-                explicit_cancellation=explicit,
+                explicit_cancellation=bool(options.get("explicit_cancellation")),
             )
-            registered = VirtualObject.handler(self, name, kind="shared" if view else "exclusive", **sdk_options)(
-                _sdk_handler(entry)
-            )
+            # Attempts are not replayed (explicit_recovery): each runs from the
+            # start, against the current state, so it may read differently from
+            # earlier attempts.
+            registered = VirtualObject.handler(
+                self, name, kind="shared" if view else "exclusive", explicit_recovery=True, **options
+            )(_sdk_handler(entry))
             sdk: Handler[Any, Any] = handler_from_callable(registered)
-            # Attempts are not replayed: each runs from the start, against the
-            # current state, so it may read differently from earlier attempts.
-            sdk.explicit_recovery = True
-            sdk.explicit_cancellation = explicit
             entries = ENTRIES.of(self)
             assert entries is not None
             entries[sdk.name] = entry
