@@ -53,6 +53,20 @@ cache-keys = [
     { file = "src/**/*.rs" },
 ]
 
+# The packages written to be fully typed: strict in both type checkers.
+[tool.pyright]
+strict = ["python/restate/sessions", "python/restate/agents"]
+
+[[tool.mypy.overrides]]
+module = ["restate.sessions.*", "restate.agents.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_return_any = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+strict_equality = true
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

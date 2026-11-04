@@ -48,7 +48,7 @@ One record, so that ``reset`` clears all of them, a library's this process
 never loaded too.
 """
 
-Step = typing.Union[str, Callable[[Any], Awaitable[None]]]
+Step = str | Callable[[Any], Awaitable[None]]
 """A statement, or an async function of the transaction."""
 
 _ENSURE = "_restate_sessions_ensure"
@@ -167,11 +167,11 @@ async def _children_first(tx: ConnectionTransaction, tables: list[str]) -> list[
         own = name.lower()
         parents[name] = {typing.cast(str, table).lower() for (table,) in keys} - {own}
     ordered: list[str] = []
-    left = tables
+    left: list[str] = tables
     while left:
-        named = {parent for name in left for parent in parents[name]}
-        unnamed = [name for name in left if name.lower() not in named]
+        named = {parent for table in left for parent in parents[table]}
+        unnamed = [table for table in left if table.lower() not in named]
         step = unnamed or left
         ordered.extend(step)
-        left = [name for name in left if name not in step]
+        left = [table for table in left if table not in step]
     return ordered

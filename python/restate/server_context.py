@@ -418,9 +418,9 @@ class Tasks:
     """
 
     def __init__(self) -> None:
-        self.tasks: set[asyncio.Future] = set()
+        self.tasks: set[asyncio.Future[Any]] = set()
 
-    def add(self, task: asyncio.Future):
+    def add(self, task: asyncio.Future[Any]) -> None:
         """Add a task to the list."""
         self.tasks.add(task)
 

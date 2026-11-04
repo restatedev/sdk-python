@@ -31,7 +31,7 @@ import asyncio
 import functools
 import typing
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -43,12 +43,13 @@ from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_context import DisconnectedException, ServerInvocationContext
-from restate.vm import SingleUnresolvedFuture
 from restate.sessions import _selector
 from restate.sessions._calls import CallFuture, Rpc, Send, send_now
 from restate.sessions._database import Store
+from restate.sessions._link import Link
 from restate.sessions._schema import Schema, Step
 from restate.sessions._session import Attempt, Database, DatabaseReader, ObjectConfig, SqlHost, reader_of, with_attempt
+from restate.vm import SingleUnresolvedFuture
 
 F = typing.TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
@@ -73,7 +74,7 @@ ended does nothing, so a new attempt that cancels it again is harmless.
 """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class SessionContext:
     """
     The context of a session object's handler. A handler runs in attempts:
@@ -99,13 +100,9 @@ class SessionContext:
     """Sends, made at once; a transaction's (``tx.send``) are made once it commits."""
     cancel: Cancel
     """Cancel an invocation, by its id: see ``Cancel``."""
-    _sdk: Any = field(default=None, repr=False, compare=False)
-    """The SDK's context of the attempt, for ``cancelled`` and ``cancel_calls``."""
-    _explicit_cancellation: bool = field(default=False, repr=False, compare=False)
-    """Whether its handler has ``explicit_cancellation=True``."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ViewContext:
     """
     The context of a session object's view: it runs beside the handlers, and
@@ -238,6 +235,20 @@ def _cancel_of(host: Any) -> Cancel:
 
 
 @dataclass(frozen=True)
+class Scope:
+    """An attempt's own, as this package made it, on its context (``SCOPE``)."""
+
+    sdk: ServerInvocationContext | None
+    """The SDK's context of the attempt: none over a test's own host."""
+    explicit_cancellation: bool = False
+    """Whether its handler has ``explicit_cancellation=True``."""
+
+
+SCOPE: Link[Scope] = Link("scope")
+"""The attempt's scope, on its context."""
+
+
+@dataclass(frozen=True)
 class _Entry:
     """A handler or view of a session object: its function, kind, and object's config."""
 
@@ -247,22 +258,21 @@ class _Entry:
     explicit_cancellation: bool = False
 
 
+ENTRIES: Link[dict[str, _Entry]] = Link("entries")
+"""A session object's handlers and views, by name: for ``invoke``."""
+
+
 def _context_of(entry: _Entry, host: SqlHost, request: Request, attempt: Attempt) -> SessionContext | ViewContext:
     """The context of an attempt of ``entry``."""
     rpc = Rpc(host)
     cancel = _cancel_of(host)
     if entry.view:
         return ViewContext(key=host.key, request=request, db=reader_of(attempt.db), rpc=rpc, cancel=cancel)
-    return SessionContext(
-        key=host.key,
-        request=request,
-        db=attempt.db,
-        rpc=rpc,
-        send=Send(send_now(host)),
-        cancel=cancel,
-        _sdk=getattr(host, "context", None),
-        _explicit_cancellation=entry.explicit_cancellation,
+    context = SessionContext(
+        key=host.key, request=request, db=attempt.db, rpc=rpc, send=Send(send_now(host)), cancel=cancel
     )
+    sdk = typing.cast("ServerInvocationContext | None", getattr(host, "context", None))
+    return SCOPE.on(context, Scope(sdk=sdk, explicit_cancellation=entry.explicit_cancellation))
 
 
 async def _attempt(entry: _Entry, host: SqlHost, request: Request, args: Sequence[Any]) -> Any:
@@ -284,13 +294,14 @@ def _sdk_handler(entry: _Entry) -> Callable[..., Awaitable[Any]]:
     return handler
 
 
-def _explicit_of(ctx: SessionContext, operation: str) -> Any:
+def _explicit_of(ctx: SessionContext, operation: str) -> ServerInvocationContext:
     """The SDK's context behind ``ctx``, a handler's with ``explicit_cancellation=True``."""
-    if not isinstance(ctx, SessionContext) or ctx._sdk is None:  # pylint: disable=protected-access
+    scope = SCOPE.of(ctx)
+    if scope is None or scope.sdk is None:
         raise TerminalError(f"{operation} takes a session object's ctx")
-    if not ctx._explicit_cancellation:  # pylint: disable=protected-access
+    if not scope.explicit_cancellation:
         raise TerminalError(f"{operation} takes the ctx of a handler with explicit_cancellation=True")
-    return ctx._sdk  # pylint: disable=protected-access
+    return scope.sdk
 
 
 async def cancelled(ctx: SessionContext) -> None:
@@ -326,7 +337,7 @@ async def cancel_calls(ctx: SessionContext) -> list[str]:
 
 async def invoke(obj: SessionObject, name: str, host: SqlHost, request: Request, *args: Any) -> Any:
     """Run handler or view ``name`` of ``obj`` for one attempt over ``host``, a context of a test's own, without Restate."""
-    entry = obj._entries.get(name)  # pylint: disable=protected-access
+    entry = (ENTRIES.of(obj) or {}).get(name)
     if entry is None:
         raise ValueError(f"{obj.name}.{name} is no handler or view of a session object")
     return await _attempt(entry, host, request, args)
@@ -379,7 +390,7 @@ class SessionObject(VirtualObject):
             invocation_retry_policy=invocation_retry_policy,
         )
         self.config = ObjectConfig(schema=Schema(name, schema) if schema else None)
-        self._entries: dict[str, _Entry] = {}
+        ENTRIES.on(self, {})
 
     @typing.overload  # type: ignore[override]
     def handler(self, fn: F, /) -> F: ...  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -437,20 +448,20 @@ class SessionObject(VirtualObject):
         return self._decorate(
             False,
             name,
-            dict(
-                explicit_cancellation=explicit_cancellation,
-                accept=accept,
-                content_type=content_type,
-                input_serde=input_serde,
-                output_serde=output_serde,
-                metadata=metadata,
-                inactivity_timeout=inactivity_timeout,
-                abort_timeout=abort_timeout,
-                journal_retention=journal_retention,
-                idempotency_retention=idempotency_retention,
-                ingress_private=ingress_private,
-                invocation_retry_policy=invocation_retry_policy,
-            ),
+            {
+                "explicit_cancellation": explicit_cancellation,
+                "accept": accept,
+                "content_type": content_type,
+                "input_serde": input_serde,
+                "output_serde": output_serde,
+                "metadata": metadata,
+                "inactivity_timeout": inactivity_timeout,
+                "abort_timeout": abort_timeout,
+                "journal_retention": journal_retention,
+                "idempotency_retention": idempotency_retention,
+                "ingress_private": ingress_private,
+                "invocation_retry_policy": invocation_retry_policy,
+            },
         )
 
     @typing.overload
@@ -507,19 +518,19 @@ class SessionObject(VirtualObject):
         return self._decorate(
             True,
             name,
-            dict(
-                accept=accept,
-                content_type=content_type,
-                input_serde=input_serde,
-                output_serde=output_serde,
-                metadata=metadata,
-                inactivity_timeout=inactivity_timeout,
-                abort_timeout=abort_timeout,
-                journal_retention=journal_retention,
-                idempotency_retention=idempotency_retention,
-                ingress_private=ingress_private,
-                invocation_retry_policy=invocation_retry_policy,
-            ),
+            {
+                "accept": accept,
+                "content_type": content_type,
+                "input_serde": input_serde,
+                "output_serde": output_serde,
+                "metadata": metadata,
+                "inactivity_timeout": inactivity_timeout,
+                "abort_timeout": abort_timeout,
+                "journal_retention": journal_retention,
+                "idempotency_retention": idempotency_retention,
+                "ingress_private": ingress_private,
+                "invocation_retry_policy": invocation_retry_policy,
+            },
         )
 
     def _decorate(self, view: bool, name: str | F | None, options: dict[str, Any]) -> F | Callable[[F], F]:
@@ -546,7 +557,9 @@ class SessionObject(VirtualObject):
             # would have: each runs from the start, against the state as it is.
             sdk.explicit_recovery = True
             sdk.explicit_cancellation = explicit
-            self._entries[sdk.name] = entry
+            entries = ENTRIES.of(self)
+            assert entries is not None
+            entries[sdk.name] = entry
             return typing.cast(F, registered)
 
         return register

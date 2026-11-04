@@ -23,6 +23,7 @@ module orders the calls and runs transactions::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import inspect
 import typing
@@ -37,14 +38,16 @@ from restate._internal import (  # pylint: disable=import-error,no-name-in-modul
     SQL_SET,
     SQL_SYNC,
     SQL_WAIT,
+    PySqlDatabase,
     SqlRefusedException,
+    SqlReply,
     sql_open,
 )
 
-SqlValue = typing.Union[None, int, float, str, bytes]
+SqlValue = None | int | float | str | bytes
 """An SQL value: ``None``, ``int`` (64 bits), ``float``, ``str``, or ``bytes`` (BLOB)."""
 
-SqlParam = typing.Union[SqlValue, bool, bytearray, memoryview]
+SqlParam = SqlValue | bool | bytearray | memoryview
 """An SQL parameter: an ``SqlValue``, a ``bool`` (stored as 0 or 1), or a BLOB as any bytes-like object."""
 
 Row = dict[str, SqlValue]
@@ -95,6 +98,18 @@ class Store(Protocol):
     def sync(self) -> None | Awaitable[None]: ...
 
 
+class _ListsKeys(Protocol):
+    """A store that lists its keys (see ``Store``)."""
+
+    def keys(self) -> Sequence[str] | Awaitable[Sequence[str]]: ...
+
+
+class _Waits(Protocol):
+    """A store over the invocation's VM, which waits for a read (see ``Store``)."""
+
+    def wait(self, handle: int) -> Awaitable[None]: ...
+
+
 async def open(namespace: str, store: Store, *, reader: bool = False) -> Connection:  # pylint: disable=redefined-builtin
     """
     Open the database of ``namespace`` over ``store``. One process-wide page
@@ -114,9 +129,14 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Connect
     return Connection(native, boundary)
 
 
-async def _settled(answer: Any) -> Any:
+T = typing.TypeVar("T")
+
+
+async def _settled(answer: T | Awaitable[T]) -> T:
     """A call's answer: its value, as it gave it, or once the asyncio future it gave is done."""
-    return await answer if inspect.isawaitable(answer) else answer
+    if inspect.isawaitable(answer):
+        return await answer
+    return answer
 
 
 class _Boundary:
@@ -147,7 +167,7 @@ class _Boundary:
         if self.failed is None:
             self.failed = error
 
-    def dispatch(self, op: int, key: Any, value: bytes | None, reply: Any) -> None:
+    def dispatch(self, op: int, key: Any, value: bytes | None, reply: SqlReply | None) -> None:
         """One request of the extension's: ``key`` is a key of the store, or for ``SQL_WAIT`` a handle of the VM."""
         if op in (SQL_SET, SQL_CLEAR):
             try:
@@ -160,13 +180,15 @@ class _Boundary:
                 if self._write_failed is None:
                     self._write_failed = error
             return
+        # Every request but a write has a reply (src/sessions.rs).
+        assert reply is not None
         try:
             if op == SQL_GET:
-                result: Any = self.store.get(key)
+                result: object = self.store.get(key)
             elif op == SQL_KEYS:
-                result = self.store.keys()  # type: ignore[attr-defined]
+                result = typing.cast(_ListsKeys, self.store).keys()
             elif op == SQL_WAIT:
-                result = self.store.wait(key)  # type: ignore[attr-defined]
+                result = typing.cast(_Waits, self.store).wait(key)
             elif self._write_failed is not None:
                 reply(None, str(self._write_failed))
                 return
@@ -184,8 +206,8 @@ class _Boundary:
         else:
             reply(_reply_value(op, result))
 
-    def _answer(self, op: int, reply: Any, awaitable: Awaitable[Any]) -> None:
-        def done(future: asyncio.Future) -> None:
+    def _answer(self, op: int, reply: SqlReply, awaitable: Awaitable[object]) -> None:
+        def done(future: asyncio.Future[object]) -> None:
             if future.cancelled():
                 self._keep(asyncio.CancelledError())
                 reply(None, "the store's request was cancelled")
@@ -199,27 +221,27 @@ class _Boundary:
         asyncio.ensure_future(awaitable, loop=self.loop).add_done_callback(done)
 
 
-def _reply_value(op: int, result: Any) -> Any:
+def _reply_value(op: int, result: object) -> object:
     """A request's answer as the extension reads it: a value, the keys as a list, or nothing for a sync."""
     if op in (SQL_SYNC, SQL_WAIT):
         return None
     if op == SQL_KEYS:
-        return list(result)
+        return list(typing.cast("Sequence[str]", result))
     return result
 
 
-def _objects(columns: list[str], rows: Rows) -> list[Row]:
+def objects_of(columns: list[str], rows: Rows) -> list[Row]:
     """The rows as dicts by column name; a column name twice is an ``SqlError``."""
     if len(set(columns)) != len(columns):
         twice = next(name for i, name in enumerate(columns) if name in columns[:i])
         raise SqlError(f"the column {twice} is named twice: alias one (AS), or read the rows with values()")
-    return [dict(zip(columns, row)) for row in rows]
+    return [dict(zip(columns, row, strict=True)) for row in rows]
 
 
 class _Sql:
     """SQL on a session of the extension: ``query``, ``get``, ``values`` and ``execute`` by way of ``query_columns``."""
 
-    def __init__(self, native: Any, boundary: _Boundary) -> None:
+    def __init__(self, native: PySqlDatabase, boundary: _Boundary) -> None:
         self._native = native
         self._boundary = boundary
 
@@ -234,7 +256,7 @@ class _Sql:
         expression needs ``AS``), and two of the same name are an
         ``SqlError``: alias them, or use ``values``.
         """
-        return _objects(*await self.query_columns(sql, params))
+        return objects_of(*await self.query_columns(sql, params))
 
     async def get(self, sql: str, params: Sequence[SqlParam] | None = None) -> Row | None:
         """The first row of ``query``, or ``None`` when there is none."""
@@ -249,7 +271,7 @@ class _Sql:
         """Run SQL (one or more statements), discarding rows; parameters only with a single statement."""
         await self.query_columns(sql, params)
 
-    async def _request(self, call: Callable[[], Any]) -> Any:
+    async def _request(self, call: Callable[[], T | Awaitable[T]]) -> T:
         """
         ``call``'s result, or its ``_failure``: ``call`` makes the request, as
         the extension raises as it is called (arguments it cannot convert, and
@@ -257,10 +279,7 @@ class _Sql:
         awaitable of it.
         """
         try:
-            result = call()
-            if inspect.isawaitable(result):
-                result = await result
-            return result
+            return await _settled(call())
         except Exception as error:
             raise self._failure(error) from None
 
@@ -297,7 +316,7 @@ class Connection(_Sql):
     as it would wait for that body: the body uses its ``tx``.
     """
 
-    def __init__(self, native: Any, boundary: _Boundary) -> None:
+    def __init__(self, native: PySqlDatabase, boundary: _Boundary) -> None:
         super().__init__(native, boundary)
         # FIFO: calls run in the order they were made.
         self._lock = asyncio.Lock()
@@ -336,19 +355,17 @@ class Connection(_Sql):
             try:
                 yield tx
             except BaseException:
-                await tx._end()  # pylint: disable=protected-access
+                await tx.end()
                 await self._rollback()
                 raise
             finally:
                 _running.reset(token)
-            records = await tx._end()  # pylint: disable=protected-access
+            records = await tx.end()
             # Its commit's sync runs what the body gave `with_commit`; one that
             # wrote nothing synced nothing, and it runs after.
-            self._boundary.with_sync = tx._commit_runs()  # pylint: disable=protected-access
+            self._boundary.with_sync = tx.commit_runs()
             try:
-                result = self._native.commit(records)
-                if inspect.isawaitable(result):
-                    await result
+                await _settled(self._native.commit(records))
             except Exception as error:
                 # A COMMIT that fails (a deferred constraint) leaves the
                 # transaction open: without the rollback, the calls after it
@@ -384,12 +401,8 @@ class Connection(_Sql):
 
     async def _rollback(self) -> None:
         """Roll back, unless a storage error ended the session: the caller raises its own error, which says why."""
-        try:
-            result = self._native.rollback()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
+        with contextlib.suppress(Exception):
+            await _settled(self._native.rollback())
 
 
 class ConnectionTransaction(_Sql):
@@ -400,7 +413,9 @@ class ConnectionTransaction(_Sql):
     before its commit or rollback, so none outlives it.
     """
 
-    def __init__(self, native: Any, boundary: _Boundary, connection: Connection, outer: ConnectionTransaction | None):
+    def __init__(
+        self, native: PySqlDatabase, boundary: _Boundary, connection: Connection, outer: ConnectionTransaction | None
+    ) -> None:
         super().__init__(native, boundary)
         self._connection = connection
         # The transaction whose body this one's runs in, if any: of another
@@ -457,14 +472,14 @@ class ConnectionTransaction(_Sql):
         self._refuse_ended()
         self._with_commits.append(run)
 
-    async def _end(self) -> dict[str, bytes]:
+    async def end(self) -> dict[str, bytes]:
         """End it, refusing calls from now on, once the calls made before have completed; then the records it set."""
         self._ended = True
         async with self._lock:
             pass
         return dict(self._records)
 
-    def _commit_runs(self) -> Callable[[], None] | None:
+    def commit_runs(self) -> Callable[[], None] | None:
         """What runs with its commit, once it ended: see ``with_commit``."""
         runs = self._with_commits
         if not runs:
