@@ -36,7 +36,6 @@ import importlib
 import os
 import typing
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import Annotated, Any, TypedDict
 
@@ -90,19 +89,11 @@ class State(TypedDict, total=False):
     """The answer to each prompt, by id."""
 
 
-@dataclass(frozen=True)
-class Options:
-    """
-    A LangGraph agent's options. ``model``: ``openai/model-id`` or
-    ``anthropic/model-id`` (MODEL, or else ``openai/gpt-6-sol``), or a
-    LangChain chat model that calls tools. ``system``: the system prompt.
-    ``tools``: ``restate.agents`` tools (``tool``, ``call``, ``signal``...), or
-    LangChain's.
-    """
+ChatModel: typing.TypeAlias = str | BaseChatModel
+"""A model: ``"openai/<model-id>"`` or ``"anthropic/<model-id>"``, or a LangChain chat model that calls tools."""
 
-    model: str | BaseChatModel | None = None
-    system: str | None = None
-    tools: Sequence[Tool | BaseTool] = ()
+AnyTool: typing.TypeAlias = Tool | BaseTool
+"""A tool: one of ``restate.agents`` (``tool``, ``call``, ``signal``...), or a LangChain tool."""
 
 
 _PROVIDERS = {
@@ -218,11 +209,13 @@ def _graph(ctx: SessionContext, model: BaseChatModel, tools: list[BaseTool], sys
 Compiled = CompiledStateGraph[Any, Any, Any, Any]
 
 
-async def _answer_once(ctx: SessionContext, text: str, options: Options) -> str:
-    model = options.model if isinstance(options.model, BaseChatModel) else _chat_model(model_of(options.model))
-    tools = [_native(t, ctx) if isinstance(t, Tool) else t for t in options.tools]
+async def _answer_once(
+    ctx: SessionContext, text: str, model: ChatModel | None, system: str | None, given: Sequence[AnyTool]
+) -> str:
+    chat_model = model if isinstance(model, BaseChatModel) else _chat_model(model_of(model))
+    tools = [_native(t, ctx) if isinstance(t, Tool) else t for t in given]
     # The latest checkpoint is all an agent resumes from: earlier ones would store the conversation again at each step.
-    app: Compiled = _graph(ctx, model, tools, options.system).compile(
+    app: Compiled = _graph(ctx, chat_model, tools, system).compile(
         checkpointer=SqlCheckpointSaver(ctx.db, history="latest")
     )
     config: RunnableConfig = {"configurable": {"thread_id": ctx.key}}
@@ -236,9 +229,9 @@ async def _answer_once(ctx: SessionContext, text: str, options: Options) -> str:
         # A run is unfinished while its prompt has no answer.
         last = values.get("prompt")
         interrupted = last is not None and last not in answers
-        given: State | None = None if interrupted else {"messages": [HumanMessage(text)], "prompt": prompt_id}
+        start: State | None = None if interrupted else {"messages": [HumanMessage(text)], "prompt": prompt_id}
         stop = stop_signal_of(ctx)
-        run = app.ainvoke(given, config, durability="sync")
+        run = app.ainvoke(start, config, durability="sync")
         try:
             await (stop.guard(run) if stop is not None else run)
         except AttemptEnded:
@@ -305,52 +298,52 @@ async def _transcript(ctx: SessionContext) -> Transcript:
     return transcript
 
 
-async def prompt(ctx: SessionContext, text: str, options: Options | None = None) -> str:
-    """
-    Answer ``text`` with a LangGraph agent of ``options``, once: a retried
-    attempt resumes the same prompt. Each prompt of an invocation is a prompt
-    of its own. The thread is the object's key. In a handler of your own::
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    model: ChatModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+) -> str:
+    """Answer a prompt with a LangGraph agent, exactly once.
+
+    For a handler of your own; the conversation is the object's key, shared
+    with its ``chat``. A retried attempt resumes the same prompt rather than
+    asking again, and each prompt of an invocation is answered on its own::
 
         @assistant.handler
         async def summarize(ctx: sessions.SessionContext, topic: str) -> str:
             return await langgraph.prompt(ctx, f"Summarize what we said about {topic}")
+
+    Args:
+        ctx: The handler's context.
+        text: The prompt.
+        model: ``"openai/<model-id>"`` or ``"anthropic/<model-id>"``, or a
+            LangChain chat model that calls tools. Defaults to ``$MODEL``,
+            else ``"openai/gpt-6-sol"``.
+        system: The system prompt.
+        tools: ``restate.agents`` tools, or LangChain tools.
+
+    Returns:
+        The agent's answer.
     """
-    chosen = options or Options()
 
     async def read() -> Transcript:
         return await _transcript(ctx)
 
     async def work() -> str:
-        return await _answer_once(ctx, text, chosen)
+        return await _answer_once(ctx, text, model, system, tools)
 
     return await transcribing(ctx, read, work)
-
-
-def chat(options: Configure[Options] | None = None) -> Callable[[SessionContext, str], Awaitable[str]]:
-    """
-    A chat turn for ``AgentObject.chat``: each message answered by ``prompt``
-    with ``options``, or the options a function of the invocation's context
-    gives (each user's system prompt, say)::
-
-        assistant = AgentObject("assistant")
-        assistant.chat(langgraph.chat(lambda ctx: langgraph.Options(system=system_of(ctx))))
-    """
-    given: Configure[Options] = options if options is not None else Options()
-    if isinstance(given, Options) and not isinstance(given.model, BaseChatModel):
-        _provider_of_model(model_of(given.model))
-
-    async def answer(ctx: SessionContext, text: str) -> str:
-        return await prompt(ctx, text, await configured(given, ctx))
-
-    return answer
 
 
 def agent(
     name: str,
     *,
-    model: str | BaseChatModel | None = None,
-    system: str | None = None,
-    tools: Sequence[Tool | BaseTool] = (),
+    model: Configure[ChatModel | None] = None,
+    system: Configure[str | None] = None,
+    tools: Configure[Sequence[AnyTool]] = (),
     description: str | None = None,
     schema: Sequence[Step] = (),
     background: bool = False,
@@ -360,14 +353,45 @@ def agent(
     ingress_private: bool | None = None,
     invocation_retry_policy: InvocationRetryPolicy | None = RETRIES,
 ) -> AgentObject:
-    """
-    A LangGraph agent: an ``AgentObject`` ``name``, one conversation per key,
-    whose ``chat`` answers with the usual graph of ``model``, ``system`` and
-    ``tools`` (see ``Options``)::
+    """Create a LangGraph agent: a virtual object with one conversation per key.
+
+    Its ``chat`` handler answers each message with LangGraph's tool-calling
+    loop; LangGraph's checkpoints are kept in the key's database. Add
+    handlers of your own with ``@assistant.handler``::
 
         assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
-        sessions.serve(assistant)
+
+    ``model``, ``system`` and ``tools`` may each be a function of the
+    invocation's context, sync or async, for values that differ per user::
+
+        assistant = langgraph.agent("assistant", system=lambda ctx: f"You help {ctx.key}.")
+
+    Args:
+        name: The object's name, as Restate serves it.
+        model: ``"openai/<model-id>"`` (needs ``langchain-openai``) or
+            ``"anthropic/<model-id>"`` (needs ``langchain-anthropic``), or a
+            LangChain chat model that calls tools. Defaults to ``$MODEL``,
+            else ``"openai/gpt-6-sol"``.
+        system: The system prompt.
+        tools: ``restate.agents`` tools, or LangChain tools.
+        description: The object's description, shown in Restate's UI.
+        schema: Tables of your own, beside the agent's.
+        background: Whether it works unwatched (a subagent, say): it then
+            publishes its progress once a turn ends, not at each step.
+        metadata: The object's metadata.
+        inactivity_timeout: Restate's inactivity timeout for its handlers.
+        abort_timeout: Restate's abort timeout for its handlers.
+        ingress_private: Whether only other services may call it.
+        invocation_retry_policy: How Restate retries a failed turn.
+
+    Returns:
+        The agent, to serve with ``sessions.serve`` or ``sessions.app``.
+
+    Raises:
+        TerminalError: If ``model`` names a provider other than OpenAI or Anthropic.
     """
+    if model is None or isinstance(model, str):
+        _provider_of_model(model_of(model))
     obj = AgentObject(
         name,
         description=description,
@@ -379,5 +403,15 @@ def agent(
         ingress_private=ingress_private,
         invocation_retry_policy=invocation_retry_policy,
     )
-    obj.chat(chat(Options(model=model, system=system, tools=tools)))
+
+    async def answer(ctx: SessionContext, text: str) -> str:
+        return await prompt(
+            ctx,
+            text,
+            model=await configured(model, ctx),
+            system=await configured(system, ctx),
+            tools=await configured(tools, ctx),
+        )
+
+    obj.chat(answer)
     return obj

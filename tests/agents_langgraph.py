@@ -33,7 +33,7 @@ from langchain_core.tools import tool as langchain_tool  # noqa: E402
 
 import restate  # noqa: E402
 from restate import HarnessEnvironment, sessions  # noqa: E402
-from restate.agents import CANCELLED, AgentObject, tool  # noqa: E402
+from restate.agents import CANCELLED, tool  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
 from restate.agents._api import Messages  # noqa: E402
 
@@ -153,14 +153,24 @@ assistant = langgraph.agent(
 @assistant.handler
 async def twice(ctx: sessions.SessionContext, text: str) -> list[str]:
     """Two prompts of one invocation: each its own."""
-    options = langgraph.Options(model=Scripted())
-    return [await langgraph.prompt(ctx, text, options), await langgraph.prompt(ctx, f"again {text}", options)]
+    model = Scripted()
+    return [await langgraph.prompt(ctx, text, model=model), await langgraph.prompt(ctx, f"again {text}", model=model)]
+
+
+async def tools_of(ctx: sessions.SessionContext) -> list[Any]:
+    """Each user's tools, as an async function of the context gives them."""
+    return [get_weather]
+
+
+per_user = langgraph.agent(
+    "lg_per_user", model=lambda ctx: Scripted(), system=lambda ctx: f"You help {ctx.key}.", tools=tools_of
+)
 
 
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(assistant), restate_image="ghcr.io/restatedev/restate:latest"
+        sessions.app(assistant, per_user), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -272,7 +282,7 @@ def test_an_agent_refuses_a_model_it_cannot_name():
     with pytest.raises(restate.TerminalError, match="neither openai/<model-id> nor anthropic/<model-id>"):
         langgraph.agent("bad", model="mistral/large")
     with pytest.raises(restate.TerminalError, match="neither"):
-        AgentObject("bad2").chat(langgraph.chat(langgraph.Options(model="gpt")))
+        langgraph.agent("bad2", model="gpt")
 
 
 def test_a_named_model_whose_provider_package_is_missing_says_which_to_install(monkeypatch: pytest.MonkeyPatch):
@@ -292,3 +302,11 @@ async def test_a_langchain_tools_terminal_error_ends_the_turn_and_the_next_messa
     assert failed.status_code == 500 and f"no access to {k}" in failed.text
     assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
     assert ("assistant", f"Error: no access to {k}") in await messages(harness, k)
+
+
+async def test_options_may_be_functions_of_the_context(harness: HarnessEnvironment):
+    k = key()
+    async with httpx.AsyncClient(timeout=60) as ingress:
+        url = f"{harness.ingress_url}/lg_per_user/{k}/chat"
+        assert (await ingress.post(url, content=f"system {k}", headers=TEXT)).json() == f"system: You help {k}."
+        assert (await ingress.post(url, content=f"weather {k}", headers=TEXT)).json() == f"tool said: sunny in {k}"

@@ -23,12 +23,13 @@ are in the object's database. As sdk-sessions' ``@restatedev/agents/langgraph``:
     assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
     sessions.serve(assistant)
 
-It needs the ``langgraph`` extra (``pip install restate-sdk[langgraph]``);
-a model named ``openai/...`` needs ``langchain-openai`` beside it, and
-``anthropic/...`` ``langchain-anthropic``. Or bring a LangChain chat model of
-your own (``model=``). ``agent`` makes an agent; ``chat`` is the turn of an
-``AgentObject`` of your own, ``prompt`` a prompt of a handler of your own,
-and ``SqlCheckpointSaver`` the checkpointer, for a graph of your own.
+``agent`` creates an agent; ``prompt`` answers a prompt in a handler of your
+own; ``SqlCheckpointSaver`` keeps a graph of your own in ``ctx.db``.
+
+Install the ``langgraph`` extra (``pip install restate-sdk[langgraph]``). A
+model named ``openai/...`` also needs ``langchain-openai``, and
+``anthropic/...`` needs ``langchain-anthropic``; or pass any LangChain chat
+model as ``model``.
 """
 
 try:
@@ -40,7 +41,7 @@ except ImportError as error:
         "restate.agents.langgraph needs LangGraph: install the langgraph extra, pip install restate-sdk[langgraph]"
     ) from error
 
-from restate.agents.langgraph._agent import Options, agent, chat, prompt
+from restate.agents.langgraph._agent import AnyTool, ChatModel, agent, prompt
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
 
-__all__ = ["Options", "SqlCheckpointSaver", "agent", "chat", "prompt"]
+__all__ = ["AnyTool", "ChatModel", "SqlCheckpointSaver", "agent", "prompt"]
