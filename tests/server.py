@@ -26,11 +26,8 @@ pytestmark = [pytest.mark.anyio]
 
 async def test_signal_handler_rejection_does_not_fail_request(monkeypatch: pytest.MonkeyPatch):
     loop = asyncio.get_running_loop()
-    monkeypatch.setattr(
-        loop,
-        "add_signal_handler",
-        Mock(side_effect=ValueError("add_signal_handler() can only be called from the main thread")),
-    )
+    rejected = Mock(side_effect=ValueError("add_signal_handler() can only be called from the main thread"))
+    monkeypatch.setattr(loop, "add_signal_handler", rejected)
 
     app = Endpoint().app()
     sent = []
@@ -61,3 +58,5 @@ async def test_signal_handler_rejection_does_not_fail_request(monkeypatch: pytes
 
     response_starts = [message for message in sent if message["type"] == "http.response.start"]
     assert [message["status"] for message in response_starts] == [200]
+    # The request went through although installing the hook failed.
+    assert rejected.called

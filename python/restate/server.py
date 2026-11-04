@@ -56,7 +56,8 @@ def install_shutdown_hook(
       ``restate.connect``.
     - With ``chain=True``, as a handler that also calls the process's previous handler. That is
       right for an app run by an ASGI server (uvicorn, hypercorn...): the server has installed
-      its own handler to shut down, and replacing it would keep the server running.
+      its own handler to shut down, and replacing it would keep the server running. Without a
+      previous handler to keep, it is installed as by default.
 
     Raises what ``loop.add_signal_handler`` or ``signal.signal`` raise when signals cannot be
     handled here (Windows, or a non-main thread).
@@ -72,12 +73,23 @@ def install_shutdown_hook(
                 except Exception:  # pylint: disable=broad-except
                     logger.exception("Shutdown hook failed")
 
-        if chain:
+        if chain and _handled_in_python(signum):
             _install_chained_handler(loop, signum, dispatch)
         else:
             loop.add_signal_handler(signum, dispatch)
         hooks[signum] = registered
     hooks[signum].append(hook)
+
+
+def _handled_in_python(signum: int) -> bool:
+    """
+    Return whether a server has a Python-level handler for ``signum`` to keep.
+
+    Python's default SIGINT handler does not count: calling it would raise ``KeyboardInterrupt``
+    into whatever code happens to be running.
+    """
+    previous = signal.getsignal(signum)
+    return callable(previous) and previous is not signal.default_int_handler
 
 
 def _install_chained_handler(loop: asyncio.AbstractEventLoop, signum: int, dispatch: Callable[[], None]) -> None:
@@ -91,15 +103,15 @@ def _install_chained_handler(loop: asyncio.AbstractEventLoop, signum: int, dispa
     - one installed with ``loop.add_signal_handler`` (hypercorn's) keeps running regardless, because
       asyncio delivers those through the loop's wakeup fd, not through the Python-level handler.
 
-    Python's default SIGINT handler is not called: it would raise ``KeyboardInterrupt`` into
-    whatever code happens to be running.
+    It is only installed over such a handler, which the server (or ``loop.close()``) restores when
+    it stops; so it never outlives the server.
     """
     previous = signal.getsignal(signum)
 
     def handler(received: int, frame: Optional[FrameType]) -> None:
         if not loop.is_closed():
             loop.call_soon_threadsafe(dispatch)
-        if callable(previous) and previous is not signal.default_int_handler:
+        if callable(previous):
             previous(received, frame)
 
     signal.signal(signum, handler)

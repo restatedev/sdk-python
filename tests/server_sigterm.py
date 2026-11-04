@@ -69,6 +69,26 @@ def test_a_server_handler_installed_with_signal_signal_still_runs(loop: asyncio.
     assert raise_sigterm_and_wait(loop, heard) == ["app", "server"]
 
 
+AFTER_THE_LOOP = """
+import asyncio, os, signal, time
+from restate.server import install_shutdown_hook
+
+async def main():
+    install_shutdown_hook(asyncio.get_running_loop(), lambda: None, signal.SIGTERM, chain=True)
+
+asyncio.run(main())
+os.kill(os.getpid(), signal.SIGTERM)
+time.sleep(5)
+"""
+
+
+def test_without_a_server_handler_sigterm_still_stops_the_process_once_the_loop_has_closed():
+    ran = subprocess.run(
+        [sys.executable, "-c", AFTER_THE_LOOP], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert ran.returncode == -signal.SIGTERM, ran.stderr
+
+
 # --- Real servers, each in a process of its own ---------------------------------------------------
 
 APP = """
