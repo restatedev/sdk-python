@@ -26,33 +26,78 @@ To use this SDK, add the dependency to your project:
 pip install restate_sdk
 ```
 
-## Connecting to Restate Cloud
+## Serving using an ASGI server
 
-An application can connect outbound to Restate Cloud instead of exposing a port. Copy a connect key
-from the Cloud UI (Development → Configure SDK), pick a name for the deployment, and run:
+Given an `app.py`:
 
-```shell
-RESTATE_CONNECT_KEY=rstcloudv1_... python -m restate connect app:app --name greeter
+```python
+import restate
+
+greeter = restate.Service("greeter")
+
+@greeter.handler()
+async def greet(ctx: restate.Context, name: str) -> str:
+    return f"Hello {name}!"
+
+app = restate.app(services=[greeter])
 ```
 
-where `app:app` is the module and attribute holding the application returned by `restate.app(...)`.
-Then register the deployment as `connect://greeter`. The same from code, running until stopped:
+`restate.app(...)` returns an ASGI application, so it can be served by any ASGI server.
+
+With [Hypercorn](https://github.com/pgjones/hypercorn):
+
+```shell
+pip install hypercorn
+python -m hypercorn app:app --bind "0.0.0.0:9080"
+```
+
+Or start it from code:
 
 ```python
 if __name__ == "__main__":
-    asyncio.run(restate.connect(app, name="greeter"))
+    import asyncio
+    import hypercorn
+    import hypercorn.asyncio
+
+    conf = hypercorn.Config()
+    conf.bind = ["0.0.0.0:9080"]
+    asyncio.run(hypercorn.asyncio.serve(app, conf))
 ```
 
-To do something while connected, use the context manager:
+Once served, register the deployment with `restate deployments register http://localhost:9080`.
+
+## Connecting to Restate Cloud
+
+An application can connect outbound to Restate Cloud instead of exposing a port. Copy a connect key
+from the [Cloud UI -> Development → Configure SDK](https://cloud.restate.dev/to/developers/integration#configure-sdk), pick a name for the deployment, and run:
+
+```shell
+RESTATE_CONNECT_KEY=rstcloudv1_... python -m restate connect app:app --name greeter-v1
+```
+
+Then register the deployment as `connect://greeter-v1`.
+
+The same from code:
 
 ```python
-async with restate.with_connection(app, name="greeter") as connection:
+if __name__ == "__main__":
+    import asyncio
+    
+    asyncio.run(restate.connect(app, name="greeter-v1"))
+```
+
+Or using the context manager, for finer control:
+
+```python
+async with restate.with_connection(app, name="greeter-v1") as connection:
     print(connection.info.deployment_url)
     await connection.wait()
 ```
 
-Clients can read an ingress key the same way: `restate.create_client()` without an URL uses
-`RESTATE_INGRESS_KEY` (Development → Configure Client).
+### Clients
+
+`restate.create_client()` without a URL connects to Restate Cloud using the ingress key in
+[Cloud UI -> Development → Configure SDK](https://cloud.restate.dev/to/developers/integration#configure-sdk).
 
 ## Versions
 
