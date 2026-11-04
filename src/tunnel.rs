@@ -271,7 +271,7 @@ impl PyIngressKey {
     fn parse(value: &str, what: &str) -> PyResult<Self> {
         IngressKey::parse(value)
             .map(Self::from)
-            .map_err(|error| ConnectError::new_err(error.describe(what, INGRESS_KEY_URL)))
+            .map_err(|error| ConnectError::new_err(key_error(what, &error)))
     }
 
     /// Read and parse `RESTATE_INGRESS_KEY`; `None` when it is unset or empty.
@@ -279,9 +279,7 @@ impl PyIngressKey {
     fn from_env() -> PyResult<Option<Self>> {
         IngressKey::from_env()
             .map(|key| key.map(Self::from))
-            .map_err(|error| {
-                ConnectError::new_err(error.describe(INGRESS_KEY_ENV, INGRESS_KEY_URL))
-            })
+            .map_err(|error| ConnectError::new_err(key_error(INGRESS_KEY_ENV, &error)))
     }
 
     /// `https://<id>.env.<region>:8080`
@@ -324,3 +322,7 @@ impl From<IngressKey> for PyIngressKey {
 
 /// The Cloud UI page where ingress keys are created.
 pub const INGRESS_KEY_HELP_URL: &str = INGRESS_KEY_URL;
+
+fn key_error(what: &str, error: &restate_sdk_shared_core::cloud::KeyError) -> String {
+    format!("{what} {error} — copy it again from {INGRESS_KEY_URL}")
+}
