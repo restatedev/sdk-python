@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 import typing
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
@@ -46,9 +47,8 @@ from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_context import DisconnectedException, ServerInvocationContext
 from restate.sessions._api import Cancel, Database, DatabaseReader, Rpc, Send, SessionContext, ViewContext
 from restate.sessions._calls import Caller, Sender, send_now
-from restate.sessions._database import Store
 from restate.sessions._link import Link
-from restate.sessions._schema import Schema, Step
+from restate.sessions._schema import Schema, Step, steps_of
 from restate.sessions._scope import SCOPE, Scope
 from restate.sessions._selector import FutureSelector, hook
 from restate.sessions._session import Attempt, ObjectConfig, SqlHost, reader_of, with_attempt
@@ -367,8 +367,15 @@ class SessionObject(VirtualObject):
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
         )
-        self.config: ObjectConfig = ObjectConfig(schema=Schema(name, schema) if schema else None)
+        self._config: ObjectConfig = ObjectConfig(schema=Schema(name, schema) if steps_of(schema) else None)
         ENTRIES.on(self, {})
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.name!r})"
+
+    def _taken(self, name: str) -> str:
+        """Why ``name`` is taken already, for the error of a second handler of that name."""
+        return f"{self.name} has a handler or view named {name!r} already: give this one another name"
 
     @typing.overload  # type: ignore[override]
     def handler(self, fn: F, /) -> F: ...
@@ -535,12 +542,18 @@ class SessionObject(VirtualObject):
                     "in a restate.VirtualObject, Service or Workflow, and call it with ctx.rpc."
                 )
                 raise TypeError(f"{what} {instead}")
+            if not inspect.iscoroutinefunction(inspect.unwrap(fn)):
+                kind = "view" if view else "handler"
+                raise TypeError(f"{self.name}.{fn.__name__}: a {kind} must be a coroutine function (async def)")
+            chosen = name or fn.__name__
+            if chosen in self.handlers:
+                raise ValueError(self._taken(chosen))
             explicit = bool(options.get("explicit_cancellation"))
             sdk_options = {key: value for key, value in options.items() if key != "explicit_cancellation"}
             entry = _Entry(
                 fn=self._attempt_fn(fn, view),
                 view=view,
-                config=self.config,
+                config=self._config,
                 definition=weakref.ref(self),
                 explicit_cancellation=explicit,
             )
@@ -562,11 +575,6 @@ class SessionObject(VirtualObject):
             return fn
 
         return register
-
-    def with_store_wrapper(self, wrap: Callable[[Store], Store]) -> SessionObject:
-        """Wrap the stores of this object's attempts with ``wrap``: fault injection, in tests."""
-        self.config.wrap_store = wrap
-        return self
 
 
 __all__ = ["SessionObject", "cancel_calls", "cancelled", "definition_of"]

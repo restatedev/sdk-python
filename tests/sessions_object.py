@@ -289,7 +289,23 @@ async def test_an_sql_error_fails_the_handler_with_a_terminal_error():
 
     with pytest.raises(TerminalError, match="no such table") as error:
         await run(broken, "bad", host)
-    assert isinstance(error.value.__cause__, sessions.SqlError)
+    assert isinstance(error.value, sessions.SqlError)
+
+
+async def test_a_handler_catches_an_sql_error_and_goes_on():
+    host = Host(Backend())
+    users = sessions.SessionObject("users", schema=["CREATE TABLE users (email TEXT PRIMARY KEY)"])
+
+    @users.handler
+    async def register(ctx: sessions.SessionContext, email: str) -> str:
+        try:
+            await ctx.db.execute("INSERT INTO users (email) VALUES (?)", [email])
+        except sessions.SqlError:
+            return "taken"
+        return "registered"
+
+    assert await run(users, "register", host, "a@example.com") == "registered"
+    assert await run(users, "register", Host(host.backend), "a@example.com") == "taken"
 
 
 async def test_a_call_to_ctx_db_inside_its_transaction_is_refused():

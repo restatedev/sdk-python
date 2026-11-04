@@ -44,6 +44,7 @@ from restate._internal import (  # pylint: disable=import-error,no-name-in-modul
     SqlReply,
     sql_open,
 )
+from restate.exceptions import TerminalError
 
 SqlValue = None | int | float | str | bytes
 """An SQL value: ``None``, ``int`` (64 bits), ``float``, ``str``, or ``bytes`` (BLOB)."""
@@ -58,14 +59,22 @@ Rows = list[list[SqlValue]]
 """Rows as lists, in column order."""
 
 
-class SqlError(Exception):
-    """
-    A failure a retry would repeat: SQL the engine rejected (a syntax error, a
-    constraint, a missing table), which undid just that statement and leaves
-    the session usable; a parameter it cannot bind; or a call the session
-    refused, which may have ended it (a ``COMMIT`` in a transaction's body, a
-    transaction left open). A storage error, which ends the session, raises
-    as it is.
+class SqlError(TerminalError):
+    """A SQL statement failed, and retrying it would fail the same way.
+
+    Raised for SQL the engine rejects (a syntax error, a constraint violation,
+    a missing table), which undoes just that statement; for a parameter it
+    cannot bind; and for a call the database refuses (a ``COMMIT`` inside a
+    transaction's body, say). It is a ``TerminalError``: uncaught, it fails
+    the invocation instead of being retried. Catch it to handle, say, a
+    ``UNIQUE`` violation::
+
+        try:
+            await ctx.db.execute("INSERT INTO users (email) VALUES (?)", [email])
+        except sessions.SqlError:
+            return "taken"
+
+    Storage errors are not ``SqlError``: they are retried.
     """
 
 

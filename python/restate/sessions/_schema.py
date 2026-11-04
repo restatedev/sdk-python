@@ -55,12 +55,21 @@ _ENSURE = "_restate_sessions_ensure"
 """The attribute of a database of this package's: how it applies schemas (see ``Schema.ensure``)."""
 
 
+def steps_of(steps: Sequence[Step]) -> tuple[Step, ...]:
+    """``steps`` as a tuple; a lone string (a sequence of characters) is a mistake, not a list of statements."""
+    if isinstance(steps, str):
+        raise TypeError(
+            f"schema takes a list of steps, not a string: schema=[{steps[:40]!r}{'...' if len(steps) > 40 else ''}]"
+        )
+    return tuple(steps)
+
+
 class Schema:
     """A part of a database's schema: its ``name``, and the ``steps`` that make it, in order."""
 
     def __init__(self, name: str, steps: Sequence[Step]) -> None:
         self.name: str = name
-        self.steps: tuple[Step, ...] = tuple(steps)
+        self.steps: tuple[Step, ...] = steps_of(steps)
 
     async def ensure(self, db: Any) -> None:
         """

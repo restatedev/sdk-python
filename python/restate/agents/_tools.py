@@ -53,8 +53,8 @@ def _pydantic() -> Any:
         import pydantic
     except ImportError as error:
         raise ImportError(
-            "restate.agents' tools take their inputs' schemas from pydantic: install it, or an agent framework's "
-            "extra, which brings it (such as restate-sdk[anthropic])"
+            "restate.agents' tools take their inputs' schemas from pydantic: install pydantic, or a framework's "
+            "extra that includes it, such as restate-sdk[pydantic_ai] or restate-sdk[langgraph]"
         ) from error
     return pydantic
 
@@ -445,8 +445,8 @@ def subagent(
     continues the same task. The model reads what the agent is from its
     description::
 
-        coder = claude.agent("coder", description="Builds and tests code in Python")
-        lead = claude.agent("lead", tools=[subagent(coder)])
+        coder = langgraph.agent("coder", description="Builds and tests code in Python")
+        lead = langgraph.agent("lead", tools=[subagent(coder)])
     """
     agent_name = typing.cast(str, getattr(agent, "name"))  # noqa: B009 (an SDK's definition)
     tag = getattr(agent, "service_tag", None)

@@ -42,7 +42,6 @@ from restate.sessions._database import (
     ConnectionTransaction,
     Row,
     Rows,
-    SqlError,
     SqlParam,
     Store,
     objects_of,
@@ -125,29 +124,6 @@ class ObjectConfig:
 
 
 # --- Errors ---------------------------------------------------------------------------------------
-
-
-def handler_error(error: BaseException) -> BaseException:
-    """
-    What a failed call to the session fails the handler with: an ``SqlError``,
-    which a retry would repeat, becomes a ``TerminalError``, its cause the SQL
-    error. Anything else is as for any handler: a storage error, which ends the
-    session, or the handler's own (a failed call to another service, say) is
-    retried, unless it is a ``TerminalError`` itself.
-    """
-    if not isinstance(error, SqlError):
-        return error
-    terminal = TerminalError(str(error))
-    terminal.__cause__ = error
-    return terminal
-
-
-def _raise_for_handler(error: BaseException) -> typing.NoReturn:
-    """Raise what ``error`` fails the handler with (see ``handler_error``)."""
-    failure = handler_error(error)
-    if failure is error:
-        raise error
-    raise failure
 
 
 # --- The object's state as a store ----------------------------------------------------------------
@@ -374,10 +350,7 @@ class Reads(abc.ABC):
         them, or use ``values``.
         """
         columns, rows = await self.query_columns(sql, params)
-        try:
-            return objects_of(columns, rows)
-        except SqlError as error:
-            _raise_for_handler(error)
+        return objects_of(columns, rows)
 
     async def get(self, sql: str, params: Sequence[SqlParam] | None = None) -> Row | None:
         """The first row of ``query``, or ``None`` when there is none."""
@@ -405,10 +378,7 @@ class AttemptTransaction(Writes):
         self.send: Send = send
 
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
-        try:
-            return await self._handle.query_columns(sql, params)
-        except SqlError as error:
-            _raise_for_handler(error)
+        return await self._handle.query_columns(sql, params)
 
 
 class AttemptDatabase(Writes):
@@ -478,10 +448,7 @@ async def reset(tx: Transaction) -> None:
     empty = _RESET.of(tx)
     if empty is None:
         raise TerminalError("reset takes a transaction of an exclusive handler's ctx.db")
-    try:
-        await empty()
-    except SqlError as error:
-        _raise_for_handler(error)
+    await empty()
 
 
 # --- An attempt -----------------------------------------------------------------------------------
@@ -602,8 +569,7 @@ class Attempt:
     async def end(self, error: BaseException | None) -> None:
         """
         The handler ended, with ``error`` or not: the key's other databases end,
-        then this one. It raises what the handler fails with (see
-        ``handler_error``), or a failure to end the session.
+        then this one. It raises what the handler failed with, or a failure to end the session.
         """
         failures: list[BaseException] = []
         for other in self._databases.values():
@@ -624,10 +590,10 @@ class Attempt:
         session = self._current()
         try:
             return await call(await session.ready)
-        except BaseException as error:
+        except BaseException:
             if session.ended:
                 session.retired = True
-            _raise_for_handler(error)
+            raise
 
     @asynccontextmanager
     async def transaction(self) -> AsyncGenerator[AttemptTransaction, None]:
@@ -658,10 +624,10 @@ class Attempt:
                     outgoing = sends.close() if sends is not None else None
                 if self._has_outbox:
                     await self._commit_outbox(handle, outgoing)
-        except BaseException as error:
+        except BaseException:
             if session.ended:
                 session.retired = True
-            _raise_for_handler(error)
+            raise
         if outgoing is not None:
             await self.call(self._flush)
 
@@ -726,8 +692,7 @@ class Attempt:
 
     async def _end_session(self, error: BaseException | None) -> None:
         """
-        End the session, then raise as the handler did: an SQL error that
-        escaped it becomes terminal. The handler's error stands: what it
+        End the session, then raise as the handler did. The handler's error stands: what it
         committed is stored, and an outbox left full is made by the next open.
         A failure to end the session fails a handler that succeeded, which a
         retry then ends (a transaction it left open, say).
@@ -739,9 +704,9 @@ class Attempt:
         except BaseException as failure:  # pylint: disable=broad-exception-caught
             failed = failure
         if error is not None:
-            _raise_for_handler(error)
+            raise error
         if failed is not None:
-            _raise_for_handler(failed)
+            raise failed
 
     async def _close(self) -> None:
         """

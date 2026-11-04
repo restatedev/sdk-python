@@ -64,6 +64,7 @@ from restate.agents._common import (
     from_tool,
     model_of,
     next_prompt_id,
+    provider_of,
     refusal_of,
     stored_answer,
 )
@@ -228,7 +229,8 @@ def _model(model: str | Model | None) -> Model:
         return model
     named = model_of(model)
     try:
-        return infer_model(named if ":" in named else named.replace("/", ":", 1))
+        provider, model_id = provider_of(named)
+        return infer_model(f"{provider}:{model_id}" if provider else named)
     except (ImportError, UserError, ValueError) as error:
         raise ModelError(f'the model "{named}": {error}') from error
 

@@ -136,7 +136,7 @@ def serve(
 
 
 _NO_SERVER = (
-    "sessions.serve runs on uvicorn's HTTP/2: install restate_sdk[serve] (uvicorn 0.53 or later, and zttp; "
+    "sessions.serve runs on uvicorn's HTTP/2: install restate-sdk[serve] (uvicorn 0.53 or later, and zttp; "
     "Python 3.11 or later), or serve sessions.app(...) with an ASGI server of your own"
 )
 

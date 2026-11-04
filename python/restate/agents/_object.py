@@ -41,6 +41,8 @@ from restate.sessions import SessionContext, SessionObject, Step, ViewContext
 from restate.sessions.internal import reset
 
 T = typing.TypeVar("T")
+A = typing.TypeVar("A", bound=Callable[[SessionContext, str], Awaitable[Any]])
+"""A chat turn's answer function: a message in, the answer out."""
 
 RETRIES = InvocationRetryPolicy(
     initial_interval=timedelta(milliseconds=50),
@@ -87,6 +89,12 @@ def _start_after(page: Messages) -> _log.Start:
     """Where the log starts after the latest message of ``page``: past its ids and cursor."""
     latest = page["messages"][0] if page["messages"] else None
     return _log.Start(seq=page["cursor"], id=latest["id"] + 1 if latest else page.get("first", 0))
+
+
+BUILT_IN = frozenset(
+    {"signal", "pending", "status", "stop", "notifications", "watch", "chat", "messages", "clear", "sync", "erase"}
+)
+"""The names of the handlers and views every agent has (``chat`` and the rest once it chats)."""
 
 
 class AgentObject(SessionObject):
@@ -141,6 +149,14 @@ class AgentObject(SessionObject):
         _signals.with_companion(self)
         self._built_in()
 
+    def _taken(self, name: str) -> str:
+        if name in BUILT_IN:
+            return (
+                f"{name!r} is a built-in handler of every agent ({', '.join(sorted(BUILT_IN))}): "
+                f"give yours another name, such as @{self.name}.handler(name='my_{name}')"
+            )
+        return super()._taken(name)
+
     def _attempt_fn(self, fn: Callable[..., Awaitable[Any]], view: bool) -> Callable[..., Awaitable[Any]]:
         """A handler's attempt: a model provider's refusal it fails with ends its invocation, as ``chat``'s does."""
         if view:
@@ -194,12 +210,30 @@ class AgentObject(SessionObject):
             self.view(fn)
         self.view(inactivity_timeout=WAITS)(watch)
 
+    @typing.overload
     def chat(
         self,
-        answer: Callable[[SessionContext, str], Awaitable[T]],
+        answer: A,
+        /,
         *,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
-    ) -> None:
+    ) -> A: ...
+
+    @typing.overload
+    def chat(
+        self,
+        /,
+        *,
+        clear: Callable[[SessionContext], Awaitable[None]] | None = None,
+    ) -> Callable[[A], A]: ...
+
+    def chat(
+        self,
+        answer: Callable[[SessionContext, str], Awaitable[Any]] | None = None,
+        /,
+        *,
+        clear: Callable[[SessionContext], Awaitable[None]] | None = None,
+    ) -> Any:
         """
         Make this object an agent, which answers each message with ``answer``:
         a framework's turn, which keeps the conversation in the log
@@ -213,13 +247,23 @@ class AgentObject(SessionObject):
         A key answers one message at a time; one its model's provider refused
         (a missing API key, an unknown model) answers with an error (424).
         """
-        AGENT.on(self, AgentInfo(background=self.background, clear=clear))
+        if answer is None:
 
-        async def chat(ctx: SessionContext, text: str) -> T:
-            return await chat_turn(ctx, text, answer)
+            def decorate(
+                fn: Callable[[SessionContext, str], Awaitable[Any]],
+            ) -> Callable[[SessionContext, str], Awaitable[Any]]:
+                return self.chat(fn, clear=clear)
+
+            return decorate
+        AGENT.on(self, AgentInfo(background=self.background, clear=clear))
+        answering = answer
+
+        async def chat(ctx: SessionContext, text: str) -> Any:
+            return await chat_turn(ctx, text, answering)
 
         self.handler(name="chat", accept="*/*", input_serde=MessageSerde(), explicit_cancellation=True)(chat)
         _followed(self)
+        return answer
 
 
 def _companion(

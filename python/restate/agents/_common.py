@@ -36,8 +36,8 @@ Configure: typing.TypeAlias = T | Callable[[SessionContext], T | Awaitable[T]]
 A value, or a function of the invocation's context that gives it: the same for
 every message, or each user's (from the object's database, say)::
 
-    claude.agent("assistant", model="anthropic/claude-sonnet-5-5")
-    claude.agent("assistant", model=lambda ctx: user_model(ctx))
+    langgraph.agent("assistant", model="anthropic/claude-sonnet-5-5")
+    langgraph.agent("assistant", model=lambda ctx: user_model(ctx))
 """
 
 
@@ -67,7 +67,7 @@ DEFAULT_MODEL = "openai/gpt-6-sol"
 """The default model of the frameworks that take any provider's, with OPENAI_API_KEY."""
 
 CLAUDE_MODEL = "anthropic/claude-sonnet-5-5"
-"""The default model of Claude agents, with ANTHROPIC_API_KEY."""
+"""An Anthropic model, as a framework that takes only Anthropic's defaults to (with ANTHROPIC_API_KEY)."""
 
 
 def model_of(model: str | None, fallback: str = DEFAULT_MODEL) -> str:
@@ -76,9 +76,17 @@ def model_of(model: str | None, fallback: str = DEFAULT_MODEL) -> str:
 
 
 def provider_of(model: str) -> tuple[str, str]:
-    """``provider/model-id`` as its provider and model id, split at the first ``/``."""
-    provider, slash, model_id = model.partition("/")
-    return (provider, model_id) if slash else ("", model)
+    """Split ``"provider/model-id"`` (or the frameworks' ``"provider:model-id"``) into its provider and model id.
+
+    It splits at the first ``/``, else at the first ``:``, so model ids that
+    contain a colon (``"openai/ft:gpt-4o:acme"``) keep it. A name with neither
+    has no provider: ``("", model)``.
+    """
+    for separator in ("/", ":"):
+        provider, found, model_id = model.partition(separator)
+        if found:
+            return provider, model_id
+    return "", model
 
 
 REFUSED = 424
@@ -103,14 +111,14 @@ class ModelError(TerminalError):
 
 
 def check_model_name(framework: str, model: str | None) -> None:
-    """``model``, the explicit ``model`` option of ``framework``'s agent, if it is not ``provider/model-id``."""
-    if model is not None and not re.fullmatch(r"[^/\s]+/\S+", model):
+    """Raise ``ModelError`` if ``model``, given explicitly to ``framework``'s agent, names no provider."""
+    if model is not None and not re.fullmatch(r"[^/:\s]+[/:]\S+", model):
         raise ModelError(f'{framework}: the model "{model}" is not provider/model-id, such as {CLAUDE_MODEL}')
 
 
 def model_id_of(model: str, provider: str) -> str:
     """The model id of ``model``, for a framework with only ``provider``'s models: ``provider/model-id``, or the id alone."""
-    named, model_id = provider_of(model) if "/" in model else (provider, model)
+    named, model_id = provider_of(model) if "/" in model or ":" in model else (provider, model)
     if named != provider or not model_id:
         from_env = " (from MODEL)" if os.environ.get("MODEL") == model else ""
         raise ModelError(f'the model "{model}"{from_env} is not {provider}\'s: this agent takes {provider}/<model-id>')
