@@ -26,7 +26,9 @@ npx @restatedev/restate -y deployments register --force http://localhost:9080   
 curl localhost:8080/wallet/alice/hello
 ```
 
-Session objects need Restate 1.8 or later. Every example serves on port 9080 (or `PORT`): stop one before you start the
+Session objects need Restate 1.8 or later. An agent's framework comes with its extra, and its model's provider with
+its package: the comment at the top of each agent's file says which (`uv run
+--extra langgraph --with langchain-openai ...`, say). Every example serves on port 9080 (or `PORT`): stop one before you start the
 next, and register again. The comment at the top of each file lists the
 commands to try it.
 
@@ -64,6 +66,7 @@ the loop, a subagent), comes with the agents' framework integrations.
 | File                          | What                                            |
 | ----------------------------- | ----------------------------------------------- |
 | [`notes.py`](basic/notes.py)  | SQL in a virtual object, with `ctx.db`, and no agent |
+| [`langgraph_agent.py`](basic/langgraph_agent.py) | A LangGraph agent: its checkpoints in the key's database |
 
 ## Tips
 

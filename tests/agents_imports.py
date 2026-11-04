@@ -35,3 +35,21 @@ def test_sessions_and_agents_import_without_pydantic_and_a_tool_says_what_it_nee
     ran = subprocess.run([sys.executable, "-c", WITHOUT_PYDANTIC], capture_output=True, text=True, check=False)
     assert ran.returncode == 0, ran.stderr
     assert "tools take their inputs' schemas from pydantic" in ran.stdout
+
+
+WITHOUT_LANGGRAPH = """
+import sys
+for name in ("langgraph", "langchain_core"):
+    sys.modules[name] = None
+import restate.agents, restate.agents.internal
+try:
+    import restate.agents.langgraph
+except ImportError as error:
+    print(error)
+"""
+
+
+def test_agents_import_without_langgraph_and_its_integration_names_its_extra():
+    ran = subprocess.run([sys.executable, "-c", WITHOUT_LANGGRAPH], capture_output=True, text=True, check=False)
+    assert ran.returncode == 0, ran.stderr
+    assert "install the langgraph extra, pip install restate-sdk[langgraph]" in ran.stdout
