@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html
 import json
 import typing
 from collections.abc import Callable, Sequence
@@ -51,7 +52,9 @@ def webhook_message(name: str, delivery: str, event: object) -> str:
     Returns:
         The message.
     """
-    return f'<webhook name="{name}" delivery="{delivery}">\n{json.dumps(event, indent=2)}\n</webhook>'
+    # The delivery's id comes from a header that the signature does not cover: escaped, it cannot leave its attribute.
+    attributes = f'name="{html.escape(name)}" delivery="{html.escape(delivery)}"'
+    return f"<webhook {attributes}>\n{json.dumps(event, indent=2)}\n</webhook>"
 
 
 def _signed(body: bytes, signature: str | None, secret: str) -> bool:
@@ -73,6 +76,25 @@ def _parsed(body: bytes) -> Event:
     if not isinstance(event, dict):
         raise TerminalError("The webhook is not a JSON object", status_code=400)
     return typing.cast(Event, event)
+
+
+T = typing.TypeVar("T")
+
+
+def _read(name: str, what: str, read: Callable[[Event], T], event: Event) -> T:
+    """Return what ``read`` (a webhook's ``key`` or ``message``) reads of ``event``.
+
+    A delivery it cannot read is refused (400) rather than retried: every
+    retry would read the same delivery, and fail the same way.
+    """
+    try:
+        return read(event)
+    except TerminalError:
+        raise
+    except Exception as error:
+        raise TerminalError(
+            f"webhook {name}: its {what} cannot read this delivery: {error!r}", status_code=400
+        ) from error
 
 
 def webhook(
@@ -97,7 +119,7 @@ def webhook(
         issues = webhook(
             "linear",
             route=[triage],
-            key=lambda event: event["data"]["identifier"],
+            key=lambda event: event.get("data", {}).get("identifier"),
             secret=os.environ["LINEAR_WEBHOOK_SECRET"],
             signature_header="linear-signature",
             idempotency_header="linear-delivery",
@@ -113,8 +135,11 @@ def webhook(
         key: The key of the agents' objects that a delivery goes to, from its
             body (the issue, say: one conversation per issue); ``None`` drops
             the delivery. Defaults to the delivery's id: a conversation per delivery.
+            A ``key`` that raises refuses the delivery (400), as a retry
+            would raise again: read events you do not expect with ``.get``.
         message: What of a delivery the agents read, from its body. Defaults to
-            all of it; some systems send much more than an agent needs.
+            all of it; some systems send much more than an agent needs. A
+            ``message`` that raises refuses the delivery too.
         secret: The webhook's signing secret: a delivery without the
             HMAC-SHA256 of its body with it, in hex, in ``signature_header``,
             is refused (401). Without it, any delivery is taken.
@@ -160,10 +185,11 @@ def webhook(
             raise TerminalError(f"Not signed: no valid {signature_header}", status_code=401)
         event = _parsed(body)
         delivery = (idempotency_header and headers.get(idempotency_header.lower())) or request.id
-        to = key(event) if key is not None else delivery
+        to = _read(name, "key", key, event) if key is not None else delivery
         if to is None:
             return
-        text = webhook_message(name, delivery, message(event) if message is not None else event)
+        read = _read(name, "message", message, event) if message is not None else event
+        text = webhook_message(name, delivery, read)
         for agent in route:
             deliver(ctx, agent, to, text, idempotency_key=f"webhook:{name}:{delivery}")
 
