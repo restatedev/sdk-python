@@ -15,6 +15,7 @@
 import asyncio
 import importlib.util
 import os
+import pathlib
 import signal
 import subprocess
 import sys
@@ -68,25 +69,21 @@ def serves_http2() -> bool:
 
 @pytest.mark.anyio
 @pytest.mark.skipif(not serves_http2(), reason="needs the serve extra (Python 3.11+)")
-async def test_a_program_serves_its_app_over_http2_and_stops_on_sigterm():
-    port = find_free_port()
-    program = subprocess.Popen(
-        [sys.executable, "-c", PROGRAM],
-        env={**os.environ, "PORT": str(port)},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+async def test_a_program_serves_its_app_over_http2_and_stops_on_sigterm(tmp_path: pathlib.Path):
+    # Restate first: Docker maps its ports to free host ports, which could otherwise take the program's.
     container = RestateContainer("ghcr.io/restatedev/restate:latest", always_replay=False, disable_retries=False)
+    container.start()
+    port = find_free_port()
+    output = tmp_path / "program.log"
+    with output.open("wb") as log:
+        program = subprocess.Popen(
+            [sys.executable, "-c", PROGRAM], env={**os.environ, "PORT": str(port)}, stdout=log, stderr=log
+        )
     try:
-        container.start()
+        await listening(program, port, output)
         async with httpx.AsyncClient(base_url=container.admin_url(), timeout=30) as admin:
             uri = f"http://host.docker.internal:{port}"
             registered = await admin.post("/deployments", json={"uri": uri, "force": True})
-            for _ in range(100):  # until the program serves
-                if registered.status_code < 300:
-                    break
-                await asyncio.sleep(0.1)
-                registered = await admin.post("/deployments", json={"uri": uri, "force": True})
             assert registered.status_code < 300, registered.text
             deployment = (await admin.get(f"/deployments/{registered.json()['id']}")).json()
             assert deployment.get("http_version") == "HTTP/2.0", deployment
@@ -98,7 +95,22 @@ async def test_a_program_serves_its_app_over_http2_and_stops_on_sigterm():
         program.send_signal(signal.SIGTERM)
         started = time.monotonic()
         program.wait(timeout=10)
-        assert time.monotonic() - started < 10
+        assert time.monotonic() - started < 10, output.read_text()
     finally:
         program.kill()
         container.stop()
+
+
+async def listening(program: subprocess.Popen[bytes], port: int, output: pathlib.Path) -> None:
+    """Wait until ``program`` accepts connections on ``port``, or fail with what it printed."""
+    for _ in range(200):
+        assert program.poll() is None, f"the program exited:\n{output.read_text()}"
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            await asyncio.sleep(0.05)
+            continue
+        writer.close()
+        await writer.wait_closed()
+        return
+    raise AssertionError(f"the program never listened on {port}:\n{output.read_text()}")
