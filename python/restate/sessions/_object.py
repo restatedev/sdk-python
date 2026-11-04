@@ -128,6 +128,9 @@ class _ContextHost:
         """Done once the VM has the read whose handle is ``handle``: through the selector, as every wait."""
         return self.selector.wait(SingleUnresolvedFuture(handle))
 
+    def cancel_invocation(self, invocation_id: str) -> None:
+        self.context.cancel_invocation(invocation_id)
+
     def get(self, key: str) -> Awaitable[bytes | None]:
         return self.context.get(key, serde=BytesSerde(), entry_name=key)
 
@@ -197,7 +200,7 @@ async def _nothing() -> None:
     """The action of an empty run."""
 
 
-def _cancel_of(host: Any) -> Cancel:
+def _cancel_of(host: SqlHost) -> Cancel:
     """``Cancel`` over the SDK's context."""
 
     def cancel(invocation_id: str) -> None:
@@ -514,6 +517,15 @@ class SessionObject(VirtualObject):
             return self._register(view, None, options)(name)
         return self._register(view, name, options)
 
+    def _attempt_fn(self, fn: Callable[..., Awaitable[Any]], view: bool) -> Callable[..., Awaitable[Any]]:
+        """
+        What an attempt of handler (or view, with ``view``) ``fn`` runs: ``fn``
+        itself; a subclass's may wrap it (an agent's turns a model provider's
+        refusal into a terminal error).
+        """
+        del view
+        return fn
+
     def _register(self, view: bool, name: str | None, options: dict[str, Any]) -> Callable[[F], F]:
         def register(fn: F) -> F:
             if RESTATE_UNIQUE_HANDLER_SYMBOL in vars(fn):
@@ -526,7 +538,11 @@ class SessionObject(VirtualObject):
             explicit = bool(options.get("explicit_cancellation"))
             sdk_options = {key: value for key, value in options.items() if key != "explicit_cancellation"}
             entry = _Entry(
-                fn=fn, view=view, config=self.config, definition=weakref.ref(self), explicit_cancellation=explicit
+                fn=self._attempt_fn(fn, view),
+                view=view,
+                config=self.config,
+                definition=weakref.ref(self),
+                explicit_cancellation=explicit,
             )
             registered = VirtualObject.handler(self, name, kind="shared" if view else "exclusive", **sdk_options)(
                 _sdk_handler(entry)
