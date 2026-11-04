@@ -162,8 +162,8 @@ class Conversation:
     """The conversation in the key's database, loaded once and kept in step with it.
 
     It is read from memory; ``append``, ``answered`` and ``drop`` write to the
-    database and to memory alike. Each item is read (its calls and results)
-    once, as it is loaded or appended.
+    database and to memory alike. Each item is read (its text, calls and
+    results) once, as it is loaded or appended.
     """
 
     def __init__(self, db: Database, items: Items, entries: list[Entry]) -> None:
