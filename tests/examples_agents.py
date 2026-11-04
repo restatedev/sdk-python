@@ -163,6 +163,15 @@ async def test_basic_pydantic_ai_agent():
         assert (await ingress.post("assistant/alice/status")).json() == {"answering": None, "waiting": []}
 
 
+async def test_basic_adk_agent(monkeypatch: pytest.MonkeyPatch):
+    """The agent serves, with its companion; a message needs a model's provider, and is left to a real run."""
+    pytest.importorskip("google.adk")
+    monkeypatch.setenv("RESTATE_AGENT_MODEL", "google/gemini-x")  # an ADK agent needs a model
+    async with serving("basic/adk_agent.py") as ingress:
+        assert (await ingress.post("assistant/alice/messages", {})).json()["messages"] == []
+        assert (await ingress.post("assistant/alice/status")).json() == {"answering": None, "waiting": []}
+
+
 async def test_basic_openai_agent():
     """The agent serves, with its companion; a message needs a model's provider, and is left to a real run."""
     pytest.importorskip("agents")
