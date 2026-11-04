@@ -26,7 +26,7 @@ npx @restatedev/restate -y deployments register --force http://localhost:9080   
 curl localhost:8080/wallet/alice/hello
 ```
 
-Every example serves on port 9080 (or `PORT`): stop one before you start the
+Session objects need Restate 1.8 or later. Every example serves on port 9080 (or `PORT`): stop one before you start the
 next, and register again. The comment at the top of each file lists the
 commands to try it.
 

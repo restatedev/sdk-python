@@ -352,9 +352,6 @@ class SessionObject(VirtualObject):
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
     ) -> None:
-        # TODO: start an invocation with only the database's head
-        # (HEAD_KEY), once the SDK can say which keys to load eagerly: lazy
-        # state loads none, so the open's first read is a round trip.
         super().__init__(
             name,
             description=description,
@@ -363,7 +360,10 @@ class SessionObject(VirtualObject):
             abort_timeout=abort_timeout,
             journal_retention=journal_retention,
             idempotency_retention=idempotency_retention,
-            enable_lazy_state=True,
+            # An invocation starts with the database's head only, its first read as it opens: the rest it
+            # reads as it needs it (its tail entries and packs change keys with each flush: only the head
+            # can be named). As sdk-sessions' sqlOptions; restate-server 1.8 or later.
+            state_preload=[HEAD_KEY],
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
         )

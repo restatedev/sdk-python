@@ -24,9 +24,11 @@ import restate
 from restate import sessions
 from restate.sessions import internal
 from restate.context import AttemptFinishedEvent, Request
+from restate.discovery import compute_discovery
+from restate.endpoint import Endpoint
 from restate.exceptions import TerminalError
 from restate.handler import handler_from_callable
-from restate.sessions._object import invoke
+from restate.sessions._object import HEAD_KEY, invoke
 from sessions_database import Backend  # pylint: disable=import-error
 
 
@@ -405,11 +407,15 @@ def test_an_sdk_handler_is_refused():
         obj.handler()(add)
 
 
-def test_a_session_object_runs_its_handlers_with_explicit_recovery_and_lazy_state():
+def test_a_session_object_runs_its_handlers_with_explicit_recovery_and_its_head_preloaded():
     assert notes.handlers["add"].explicit_recovery
     assert notes.handlers["texts"].explicit_recovery
     assert notes.handlers["texts"].kind == "shared"
-    assert notes.enable_lazy_state
+    # Restate sends the database's head with each invocation, and the rest of the state as it is read.
+    manifest = compute_discovery(Endpoint().bind(notes), "bidi").services[0]
+    assert manifest.enableLazyState
+    assert manifest.eagerStateKeysWhitelist == [HEAD_KEY]
+    assert all(handler.eagerStateKeysWhitelist is None for handler in manifest.handlers)
     assert notes.service_tag.metadata is not None
     assert notes.service_tag.metadata["dev.restate.tooling.journal.hidden.name.prefix"] == "v22/"
 
