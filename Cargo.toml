@@ -36,3 +36,6 @@ percent-encoding = "2.3"
 tokio = { version = "1.49", default-features = false, features = ["sync", "rt-multi-thread"] }
 tokio-stream = { version = "0.1", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
+
+# Sessions (`src/sessions.rs`): the database's futures, polled on Python's event loop.
+futures = "0.3"

@@ -2468,6 +2468,7 @@ name = "restate-sdk-python-core"
 version = "1.3.0"
 dependencies = [
  "bytes",
+ "futures",
  "http",
  "http-body",
  "http-body-util",
