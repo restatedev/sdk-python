@@ -16,9 +16,12 @@ and the rest), and a model provider's refusal (``refusal_of``, ``from_tool``).
 """
 
 from restate.agents._common import (
+    CANCELLED,
     CHECK_MODEL,
     CLAUDE_MODEL,
     DEFAULT_MODEL,
+    REFUSED,
+    UNANSWERED,
     MessageSerde,
     ModelError,
     ToolError,
@@ -33,6 +36,7 @@ from restate.agents._common import (
     refusal_of,
     stored_answer,
 )
+from restate.agents._signals import Companion, companion_of, deliver, signals
 from restate.agents._tools import run_tool
 from restate.agents._transcript import Transcript
 from restate.agents._turn import (
@@ -47,10 +51,14 @@ from restate.agents._turn import (
 )
 
 __all__ = [
+    "CANCELLED",
     "CHECK_MODEL",
     "CLAUDE_MODEL",
     "DEFAULT_MODEL",
+    "REFUSED",
+    "UNANSWERED",
     "AttemptEnded",
+    "Companion",
     "MessageSerde",
     "ModelError",
     "Read",
@@ -58,7 +66,9 @@ __all__ = [
     "ToolError",
     "Transcript",
     "check_model_name",
+    "companion_of",
     "configured",
+    "deliver",
     "from_tool",
     "model_id_of",
     "model_of",
@@ -68,6 +78,7 @@ __all__ = [
     "refusal",
     "refusal_of",
     "run_tool",
+    "signals",
     "stop_signal_of",
     "stored_answer",
     "tool_call_ended",

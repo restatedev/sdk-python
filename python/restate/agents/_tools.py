@@ -35,7 +35,7 @@ from typing import Any
 
 from restate.agents import _signals
 from restate.agents._calls import call_of
-from restate.agents._common import Configure, ToolError, configured
+from restate.agents._common import PerSession, ToolError, configured
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable
@@ -308,7 +308,7 @@ def call(
     *,
     description: str,
     name: str | None = None,
-    key: Configure[str] | None = None,
+    key: PerSession[str] | None = None,
 ) -> Tool:
     """
     A tool that calls handler ``target`` and answers with its result::
@@ -349,7 +349,7 @@ def send(
     *,
     description: str,
     name: str | None = None,
-    key: Configure[str] | None = None,
+    key: PerSession[str] | None = None,
     delay: timedelta | None = None,
 ) -> Tool:
     """A tool that sends to handler ``target``, without waiting for it: a one-way call, made once, after ``delay``."""
@@ -388,7 +388,7 @@ def workflow(
     *,
     description: str,
     name: str | None = None,
-    key: Configure[str] | None = None,
+    key: PerSession[str] | None = None,
 ) -> Tool:
     """
     A tool that runs the workflow of ``target`` (its main handler) to the end,
@@ -482,34 +482,43 @@ def subagent(
     )
 
 
-def signal(name: str, *, description: str, input: Any = None, tool_name: str | None = None) -> Tool:
-    """
-    A tool that waits for the signal ``name`` to the agent, and answers with its
-    value: a person's approval, say, or another system's result. The agent
-    waits without holding a process. With an ``input`` type, the model says
-    what it waits for (such as the refund to approve), which ``pending`` shows::
+def wait_for_signal(signal: str, *, description: str, input: Any = None, name: str | None = None) -> Tool:
+    """Create a tool that waits for a signal to the agent, and answers with its value.
 
-        signal("approval", description="Wait for a manager to approve a refund.", input=Refund)
+    A person's approval, say, or another system's result. The agent waits
+    without holding a process, for as long as it takes::
 
-    Each wait has an id: the agent's ``pending`` lists them, and its ``signal``
-    resolves one, by its id, or the oldest wait for a name::
+        approval = wait_for_signal("approval", description="Wait for a manager to approve a refund.", input=Refund)
+
+    Each wait has an id. The agent's ``pending`` view lists the waits, and its
+    ``signal`` view resolves one, by its id or as the oldest wait for a name::
 
         curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'
+
+    Args:
+        signal: The signal's name.
+        description: What the tool waits for, for the model.
+        input: The type of what the model says it waits for (such as the
+            refund to approve), which ``pending`` shows. None if it says nothing.
+        name: The tool's name. Defaults to ``"wait_for_<signal>"``.
+
+    Returns:
+        The tool, for any framework's agent.
     """
     shape = _input_of(input, None)
 
     async def run(arguments: dict[str, Any], tool_call: ToolCall) -> Any:
         async def made(c: ToolCall) -> Any:
             wait_id = c.idempotency_key
-            request: _signals.WaitRequest = {"id": wait_id, "name": name}
+            request: _signals.WaitRequest = {"id": wait_id, "name": signal}
             if input is not None:
                 request["input"] = arguments["raw"]
             return await c.ctx.call(_signals.wait, request, key=_signals.signals_of(c.ctx), idempotency_key=wait_id)
 
-        return await _once(f"signal/{name}", arguments["raw"], tool_call, made)
+        return await _once(f"signal/{signal}", arguments["raw"], tool_call, made)
 
     return Tool(
-        name=tool_name or f"wait_for_{name}",
+        name=name or f"wait_for_{signal}",
         description=description,
         input_schema=shape.schema,
         _run=run,

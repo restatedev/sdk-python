@@ -24,7 +24,7 @@ from restate import sessions
 from restate.sessions import internal
 from restate.agents._common import ToolError
 from restate.agents._object import AgentObject
-from restate.agents._tools import Tool, ToolCall, call, signal, subagent, tool
+from restate.agents._tools import Tool, ToolCall, call, subagent, tool, wait_for_signal
 from restate.context import Request
 from sessions_database import Backend  # pylint: disable=import-error
 from sessions_object import Host, request  # pylint: disable=import-error
@@ -130,7 +130,7 @@ class Refund(pydantic.BaseModel):
 
 
 async def test_signal_waits_at_the_companion_of_the_agent_with_the_tool_calls_key():
-    tools["approval"] = signal("approval", description="Wait for a manager's approval.", input=Refund)
+    tools["approval"] = wait_for_signal("approval", description="Wait for a manager's approval.", input=Refund)
     assert tools["approval"].name == "wait_for_approval"
     assert set(tools["approval"].input_schema["properties"]) == {"order", "amount"}
     host = Host(Backend(), service="runner", key="alice", answers={"wait": b'"approved"'})

@@ -25,7 +25,7 @@ import restate
 from restate import HarnessEnvironment, sessions
 from restate.agents._api import Messages, Status
 from restate.agents._object import AgentObject
-from restate.agents._tools import ToolCall, run_tool, signal
+from restate.agents._tools import ToolCall, run_tool, wait_for_signal
 from restate.agents._transcript import Transcript
 from restate.agents._turn import stop_signal_of, transcribing
 
@@ -47,7 +47,7 @@ class Refund(pydantic.BaseModel):
     amount: float
 
 
-approval = signal("approval", description="Wait for a manager to approve a refund.", input=Refund)
+approval = wait_for_signal("approval", description="Wait for a manager to approve a refund.", input=Refund)
 
 # A scripted framework: it keeps each key's transcript in this process, and answers with an echo.
 transcripts: dict[str, Transcript] = {}

@@ -9,7 +9,7 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """
-What the frameworks share: their options (``Configure``, the model), the ids of
+What the frameworks share: their options (``PerSession``, the model), the ids of
 an invocation's prompts, a model provider's refusal, and the ``chat`` message.
 As sdk-sessions' ``common.ts``.
 """
@@ -31,17 +31,17 @@ from restate.sessions.internal import ScopeKey
 
 T = typing.TypeVar("T")
 
-Configure: typing.TypeAlias = T | Callable[[SessionContext], T | Awaitable[T]]
-"""
-A value, or a function of the invocation's context that gives it: the same for
-every message, or each user's (from the object's database, say)::
+PerSession: typing.TypeAlias = T | Callable[[SessionContext], T | Awaitable[T]]
+"""A value, or a function of the invocation's context (sync or async) that returns it.
+
+For options that are the same for every message, or that differ per user::
 
     langgraph.agent("assistant", model="anthropic/claude-sonnet-5-5")
-    langgraph.agent("assistant", model=lambda ctx: user_model(ctx))
+    langgraph.agent("assistant", system=lambda ctx: f"You help {ctx.key}.")
 """
 
 
-async def configured(value: Configure[T], ctx: SessionContext) -> T:
+async def configured(value: PerSession[T], ctx: SessionContext) -> T:
     """``value`` for the invocation of ``ctx``."""
     if not callable(value):
         return value

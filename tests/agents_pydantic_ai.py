@@ -38,7 +38,8 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel  # noqa: E402
 
 import restate  # noqa: E402
 from restate import HarnessEnvironment, sessions  # noqa: E402
-from restate.agents import CANCELLED, tool  # noqa: E402
+from restate.agents import tool  # noqa: E402
+from restate.agents.internal import CANCELLED  # noqa: E402
 from restate.agents import pydantic_ai  # noqa: E402
 from restate.agents._api import Messages  # noqa: E402
 

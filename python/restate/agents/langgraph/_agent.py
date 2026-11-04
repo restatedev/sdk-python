@@ -52,8 +52,8 @@ from pydantic import PrivateAttr
 from restate.agents._common import (
     CANCELLED,
     UNANSWERED,
-    Configure,
     ModelError,
+    PerSession,
     configured,
     from_tool,
     model_of,
@@ -341,9 +341,9 @@ async def prompt(
 def agent(
     name: str,
     *,
-    model: Configure[ChatModel | None] = None,
-    system: Configure[str | None] = None,
-    tools: Configure[Sequence[AnyTool]] = (),
+    model: PerSession[ChatModel | None] = None,
+    system: PerSession[str | None] = None,
+    tools: PerSession[Sequence[AnyTool]] = (),
     description: str | None = None,
     schema: Sequence[Step] = (),
     background: bool = False,
