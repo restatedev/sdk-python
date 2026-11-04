@@ -120,6 +120,11 @@ class RestateModelWrapper(WrapperModel):
             )
         try:
             response = await context.run_typed("Model stream call", request_stream_run, self._options)
+            # Arm the turnstile that orders journaled tool executions, exactly
+            # like the non-streaming request() does — without this the first
+            # tool call of a streamed run fails with KeyError in wait_for().
+            ids = [c.tool_call_id for c in response.tool_calls]
+            current_state().turnstile = Turnstile(ids)
             yield RestateStreamedResponse(model_request_parameters, response)
         except SdkInternalBaseException as e:
             raise Exception("Internal error during model stream call") from e

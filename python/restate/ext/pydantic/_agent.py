@@ -168,7 +168,13 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
             async def single_event():
                 yield event
 
-            await context.run_typed("run event", lambda: fn(ctx, single_event()))
+            async def run_event() -> None:
+                # An async action so ctx.run() awaits the handler; a sync lambda
+                # returning the coroutine would never run it and the un-awaited
+                # coroutine fails JSON serialization of the journal entry.
+                await fn(ctx, single_event())
+
+            await context.run_typed("run event", run_event)
 
     @property
     def toolsets(self) -> Sequence[AbstractToolset[AgentDepsT]]:
