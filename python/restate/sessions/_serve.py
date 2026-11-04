@@ -18,14 +18,19 @@ it with an ASGI server of your choice (hypercorn, uvicorn, ...), as you would
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib
 import os
 import re
+import signal
 import typing
 from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 
 import restate
 from restate.entry_codec import JournalValueCodec, JournalValueCodecProvider
+from restate.server import install_shutdown_hook
 from restate.server_types import RestateAppT
 from restate.sessions._link import Link
 
@@ -181,7 +186,28 @@ def serve(
         lifespan="off",
         timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN,
     )
-    uvicorn.Server(config).run()
+    asyncio.run(_until_stopped(uvicorn.Server(config)))
+
+
+async def _until_stopped(server: Any) -> None:
+    """Run the uvicorn ``server`` until SIGINT or SIGTERM.
+
+    The SDK's endpoint registers its own SIGTERM hook (to wind down the
+    invocations in flight) through ``install_shutdown_hook``, which keeps one
+    asyncio handler per signal. Uvicorn's handlers would be replaced by it on
+    the first request, so the server's exit is registered through the same
+    hook instead, and uvicorn captures no signals itself: both then run.
+    """
+    loop = asyncio.get_running_loop()
+
+    def exit_on(signum: int) -> Callable[[], None]:
+        return lambda: server.handle_exit(signum, None)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):  # Windows, or not the main thread
+            install_shutdown_hook(loop, exit_on(signum), signum)
+    server.capture_signals = contextlib.nullcontext
+    await server.serve()
 
 
 _NO_SERVER = (
