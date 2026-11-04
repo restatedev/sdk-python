@@ -20,7 +20,7 @@ import pytest
 
 import restate
 from restate import Context, HarnessEnvironment, Service, VirtualObject, Workflow
-from restate._preview import cancel_previous_calls, cancellation, explicit_cancellation
+from restate._preview import cancel_previous_calls, cancellation
 
 
 @pytest.fixture(scope="session")
@@ -42,18 +42,28 @@ def test_it_is_off_by_default():
     assert not greeter.handlers["greet"].explicit_cancellation
 
 
-def test_it_applies_to_a_whole_service_or_to_one_handler():
-    counter = explicit_cancellation(VirtualObject("counter"))
+def test_it_is_a_key_of_a_whole_service_or_of_one_handler():
+    assert Service("greeter", explicit_cancellation=True).explicit_cancellation
+    counter = VirtualObject("counter", explicit_cancellation=True)
     assert counter.explicit_cancellation
+
+    @counter.handler(explicit_cancellation=True)
+    async def add(ctx: restate.ObjectContext, n: int) -> None:
+        pass
 
     flow = Workflow("flow")
 
-    @explicit_cancellation
-    @flow.main()
+    @flow.main(explicit_cancellation=True)
     async def run(ctx: restate.WorkflowContext) -> None:
         pass
 
+    @flow.handler(explicit_cancellation=True)
+    async def poke(ctx: restate.WorkflowSharedContext) -> None:
+        pass
+
+    assert counter.handlers["add"].explicit_cancellation
     assert flow.handlers["run"].explicit_cancellation
+    assert flow.handlers["poke"].explicit_cancellation
 
 
 def test_cancellation_needs_the_context_of_a_handler():
@@ -77,7 +87,7 @@ async def echo(ctx: Context, n: int) -> int:
     return n
 
 
-explicit = explicit_cancellation(Service("explicit"))
+explicit = Service("explicit", explicit_cancellation=True)
 
 
 @explicit.handler()
@@ -89,7 +99,10 @@ async def wait_for_nap(ctx: Context) -> list[str]:
     return await cancel_previous_calls(ctx)
 
 
-@explicit.handler()
+on_one_handler = Service("on_one_handler")
+
+
+@on_one_handler.handler(explicit_cancellation=True)
 async def echo_twice(ctx: Context) -> list[str]:
     """Make two calls that complete: there is nothing left to cancel."""
     await ctx.service_call(echo, arg=1)
@@ -113,7 +126,7 @@ async def ask_for_cancellation(ctx: Context) -> None:
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([sleeper, explicit, implicit]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([sleeper, explicit, on_one_handler, implicit]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -166,4 +179,4 @@ async def test_without_it_cancellation_is_refused(harness: HarnessEnvironment):
     sent = await harness.client.service_send(ask_for_cancellation, arg=None)
     failed = await result_of(harness, sent.invocation_id)
     assert failed.status_code == 500
-    assert "needs a handler with restate._preview.explicit_cancellation" in failed.text
+    assert "needs a handler with explicit_cancellation=True" in failed.text

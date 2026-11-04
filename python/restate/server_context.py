@@ -534,7 +534,7 @@ class ServerInvocationContext(ObjectContext):
         self.request_finished_event = asyncio.Event()
         self.tasks = Tasks()
         self.extension_data: Dict[str, Any] = {}
-        # Explicit cancellation (restate._preview): this attempt's calls that may be in flight, and the
+        # Explicit cancellation (preview): this attempt's calls that may be in flight, and the
         # cancellation's future (the cancel notification can be taken only once).
         self._calls_in_flight: List[ServerCallDurableFuture[Any]] = []
         self._cancellation: Optional[ServerDurableFuture[None]] = None
@@ -802,7 +802,7 @@ class ServerInvocationContext(ObjectContext):
 
     def _require_explicit_cancellation(self, operation: str) -> None:
         if not self.vm.explicit_cancellation:
-            raise TerminalError(f"{operation}() needs a handler with restate._preview.explicit_cancellation")
+            raise TerminalError(f"{operation}() needs a handler with explicit_cancellation=True")
 
     def get(
         self,

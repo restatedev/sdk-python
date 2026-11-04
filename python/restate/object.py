@@ -75,6 +75,8 @@ class VirtualObject:
             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
             otherwise the service discovery will fail.
         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this virtual object.
+        explicit_cancellation (bool, optional): (Preview) Explicit cancellation for all handlers of this virtual object:
+            see the handler option of the same name. NOTE: in preview, it might change without notice.
     """
 
     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
@@ -95,6 +97,7 @@ class VirtualObject:
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_cancellation: bool = False,
     ):
         self.service_tag = ServiceTag("object", name, description, metadata)
         self.handlers = {}
@@ -109,7 +112,7 @@ class VirtualObject:
         self.invocation_retry_policy = invocation_retry_policy
         self.context_managers = invocation_context_managers
         self.explicit_recovery = False
-        self.explicit_cancellation = False
+        self.explicit_cancellation = explicit_cancellation
 
     @property
     def name(self):
@@ -139,6 +142,7 @@ class VirtualObject:
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_cancellation: bool = False,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -184,6 +188,9 @@ class VirtualObject:
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
+            explicit_cancellation: (Preview) If true, Restate cancelling an invocation neither fails the handler's
+                awaits nor cancels its calls: the handler awaits `restate._preview.cancellation(ctx)` and decides
+                what to stop. NOTE: in preview, it might change without notice.
 
         Returns:
             Callable: The decorated function.
@@ -229,6 +236,7 @@ class VirtualObject:
                 ingress_private,
                 invocation_retry_policy,
                 combined_context_managers,
+                explicit_cancellation=explicit_cancellation,
             )
             if handler.name in self.handlers:
                 raise ValueError(f"Handler {handler.name} already exists in {self.name}")
