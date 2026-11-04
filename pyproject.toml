@@ -48,6 +48,15 @@ features = ["pyo3/extension-module"]
 module-name = "restate._internal"
 python-source = "python"
 
+# Rebuilt by `uv sync` when the Rust changes, not only the Python.
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"
