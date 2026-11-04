@@ -14,6 +14,7 @@
 
 import asyncio
 import collections
+import re
 import typing
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -59,7 +60,8 @@ def _prompts(contents: list[types.Content]) -> list[str]:
         for content in contents
         if content.role == "user"
         for part in content.parts or []
-        if part.text and not part.text.startswith("For context:")
+        # Not what ADK shows an agent of other agents' events, as context.
+        if part.text and not part.text.startswith("For context:") and not re.match(r"\[\w+\] said:", part.text)
     ]
 
 
@@ -406,3 +408,77 @@ async def test_an_app_of_your_own_keeps_its_plugins_and_gets_this_packages_tools
     assert await asked("weather Rome") == "tool said: sunny in Rome"
     # The app's own plugin saw each model request: one, then two (the tool call, then the answer).
     assert requests == ["mine", "mine", "mine"]
+
+
+def asking(agent: Any = None, **options: Any) -> Callable[..., Awaitable[Any]]:
+    """Return how to ask, in process, an object whose handler answers with ``adk.prompt`` (in one backend)."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    asker = sessions.SessionObject("asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await adk.prompt(ctx, text, agent=agent, **options)
+
+    backend = Backend()
+
+    async def asked(text: str, invocation: Any = None) -> Any:
+        host = Host(backend, service="asker", answers={"publish": b"null"})
+        return await invoke(asker, "ask", host, invocation or request(), text)
+
+    return asked
+
+
+class Blocked(BaseLlm):
+    """A model whose every response is blocked, as a safety filter blocks one: an error code, no content."""
+
+    model: str = "blocked"
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        yield LlmResponse(error_code="SAFETY", error_message="the response was blocked")
+
+
+async def test_a_response_the_model_blocks_fails_the_prompt_for_good():
+    ask = asking(model=Blocked())
+    with pytest.raises(restate.TerminalError, match="SAFETY.*blocked"):
+        await asyncio.wait_for(ask("hi there"), timeout=10)
+
+
+async def test_a_model_given_reaches_the_sub_agents_without_one():
+    refunds = LlmAgent(name="refunds", instruction="You handle refunds.")
+    ask = asking(LlmAgent(name="triage", instruction="You triage.", sub_agents=[refunds]), model=Scripted())
+    await ask("handoff x")
+    assert await ask("system x") == "system: You handle refunds."
+
+
+async def test_a_workflows_first_step_stored_before_a_crash_is_not_its_answer(monkeypatch: pytest.MonkeyPatch):
+    from google.adk.agents import SequentialAgent  # pylint: disable=import-outside-toplevel
+    from sessions_object import request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents.adk import _agent  # pylint: disable=import-outside-toplevel
+
+    append_event = _agent._Sessions.append_event  # pyright: ignore[reportPrivateUsage]
+    crashed: list[bool] = []
+
+    async def crash_after_the_first_step(self: Any, session: Any, event: Any) -> Any:
+        stored = await append_event(self, session, event)
+        if event.author == "first" and final_response(event) and not crashed:
+            crashed.append(True)
+            raise RuntimeError("the process crashed after the first step")
+        return stored
+
+    monkeypatch.setattr(_agent._Sessions, "append_event", crash_after_the_first_step)  # pyright: ignore[reportPrivateUsage]
+    steps: list[Any] = [
+        LlmAgent(name="first", model=Scripted(), instruction="Step one."),
+        LlmAgent(name="second", model=Scripted(), instruction="Step two."),
+    ]
+    ask, invocation = asking(SequentialAgent(name="pipeline", sub_agents=steps)), request()
+    with pytest.raises(RuntimeError, match="crashed after the first step"):
+        await ask("system x", invocation)
+    # The retry goes on with the second step, whose response is the answer.
+    assert await ask("system x", invocation) == "system: Step two."

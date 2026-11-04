@@ -287,32 +287,59 @@ def _app(
                 update["tools"] = [*app.root_agent.tools, *tools(given)]
             if model is not None:
                 update["model"] = _model(model)
-            app = app.model_copy(update={"root_agent": app.root_agent.model_copy(update=update)})
+            # A clone, which also re-parents the sub-agents: those without a model of their own take the root's.
+            app = app.model_copy(update={"root_agent": app.root_agent.clone(update=update)})
     resumable = ResumabilityConfig(is_resumable=True)
     return app.model_copy(
         update={"name": _APP, "plugins": [*app.plugins, _Restate(ctx)], "resumability_config": resumable}
     )
 
 
-def _final(conversation: Conversation) -> str | None:
-    """Return the text of the agent's final response, if the run that the conversation ends with has one.
+def _final(conversation: Conversation, root: BaseAgent) -> str | None:
+    """Return the answer of the run that the conversation ends with, if its events already hold it.
 
-    The events without content after it (a resumable app's agent states, which mark the agent done) are
-    passed over: with them stored, ADK would end the invocation at once, without the response.
+    That is the case once the root agent is done (a resumable app stores an
+    event marking it, after which ADK would end the invocation at once), and
+    once an agent answered with no workflow agent above it to go on: then the
+    final response is the answer. A step of a workflow (a ``SequentialAgent``
+    say) is not: ADK resumes the workflow's next step.
     """
-    events = (_event(entry.item) for entry in reversed(conversation.entries))
-    last = next((event for event in events if event.content is not None), None)
-    if last is None or last.author == "user" or last.get_function_calls() or not last.is_final_response():
+    running = conversation.running()
+    if running is None:
+        return None
+    invocation = _event(running.item).invocation_id
+    events = [_event(e.item) for e in conversation.entries if e.n > running.n]
+    events = [event for event in events if event.invocation_id == invocation]
+    responses = [event for event in events if _is_final(event)]
+    if any(event.author == root.name and event.actions.end_of_agent for event in events):
+        return _text(responses[-1]) if responses else ""
+    last = next((event for event in reversed(events) if event.content is not None), None)
+    if last is None or not _is_final(last) or not _answers(root, last.author):
         return None
     return _text(last) or None
+
+
+def _is_final(event: Event) -> bool:
+    """Return whether ``event`` is an agent's final response: content, and no tool calls."""
+    return event.author != "user" and event.content is not None and event.is_final_response()
+
+
+def _answers(root: BaseAgent, name: str) -> bool:
+    """Return whether agent ``name``'s final response ends its run: no workflow agent above it goes on."""
+    agent = root.find_agent(name)
+    while agent is not None:
+        if not isinstance(agent, LlmAgent):
+            return False
+        agent = agent.parent_agent
+    return True
 
 
 def _run(ctx: SessionContext, app: App) -> Callable[[Conversation], Awaitable[str]]:
     """Return the run of a prompt: ADK's runner, resuming the prompt's invocation."""
 
     async def run(conversation: Conversation) -> str:
-        if (final := _final(conversation)) is not None:
-            # The run had stored its final response, but not its answer: that is the answer, rather than ask again.
+        if (final := _final(conversation, app.root_agent)) is not None:
+            # The run had stored its answer's events, but not its answer: that is the answer, rather than ask again.
             return final
         running = conversation.running()
         invocation = _event(running.item).invocation_id if running is not None else None
@@ -322,6 +349,9 @@ def _run(ctx: SessionContext, app: App) -> Callable[[Conversation], Awaitable[st
         try:
             events = runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation)
             async for event in events:
+                if event.error_code:
+                    # The model would not answer (a safety block, say), as it would not again: the prompt fails.
+                    raise TerminalError(f"the model returned {event.error_code}: {event.error_message or ''}")
                 if event.author != "user" and event.is_final_response() and (text := _text(event)):
                     answer = text
         finally:
