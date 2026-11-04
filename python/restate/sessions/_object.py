@@ -43,12 +43,13 @@ from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_context import DisconnectedException, ServerInvocationContext
-from restate.sessions._calls import CallFuture, Rpc, Send, send_now
+from restate.sessions._api import Cancel, Database, DatabaseReader, Rpc, Send, SessionContext, ViewContext
+from restate.sessions._calls import Caller, Sender, send_now
 from restate.sessions._database import Store
 from restate.sessions._link import Link
 from restate.sessions._schema import Schema, Step
 from restate.sessions._selector import FutureSelector, hook
-from restate.sessions._session import Attempt, Database, DatabaseReader, ObjectConfig, SqlHost, reader_of, with_attempt
+from restate.sessions._session import Attempt, ObjectConfig, SqlHost, reader_of, with_attempt
 from restate.vm import SingleUnresolvedFuture
 
 F = typing.TypeVar("F", bound=Callable[..., Awaitable[Any]])
@@ -66,50 +67,22 @@ the journal view (its head, tail, manifests and packs in the object's state,
 ``v22/...``; and the ``sync`` run after its writes).
 """
 
-Cancel = Callable[[str], None]
-"""
-Cancel invocation ``invocation_id`` (such as ``inv_1f…``), as Restate's admin
-API does: made at once, and not awaited. Cancelling an invocation that already
-ended does nothing, so a new attempt that cancels it again is harmless.
-"""
-
 
 @dataclass(frozen=True, eq=False)
-class SessionContext:
-    """
-    The context of a session object's handler. A handler runs in attempts:
-    Restate starts a new one after a crash, a retryable error or a suspension,
-    and each runs the handler from its first line, finding what the attempts
-    before it committed. Its operations can be awaited together
-    (``asyncio.gather``, ``asyncio.wait``).
-    """
+class AttemptContext:
+    """``SessionContext`` (see ``_api.py``): one attempt's, made as it starts. Compared by identity."""
 
     key: str
-    """The session's key."""
     request: Request
-    """The request: its id (the same on every attempt), headers, and the attempt's."""
     db: Database
-    """
-    The key's database. Each statement outside a transaction is its own commit,
-    and ``db.transaction()`` groups several; a commit is durable when its call
-    returns. Calls run one at a time, in call order.
-    """
     rpc: Rpc
-    """Calls, typed by the handler called: ``await ctx.rpc(handler, key="a")(input)``."""
     send: Send
-    """Sends, made at once; a transaction's (``tx.send``) are made once it commits."""
     cancel: Cancel
-    """Cancel an invocation, by its id: see ``Cancel``."""
 
 
 @dataclass(frozen=True, eq=False)
-class ViewContext:
-    """
-    The context of a session object's view: it runs beside the handlers, and
-    reads the database as committed when its invocation started, whatever they
-    commit meanwhile. It writes nothing, and sends nothing, but it can cancel an
-    invocation: a handler of its own object's, say, as a Stop button does.
-    """
+class AttemptViewContext:
+    """``ViewContext`` (see ``_api.py``): one attempt's, made as it starts. Compared by identity."""
 
     key: str
     request: Request
@@ -264,12 +237,12 @@ ENTRIES: Link[dict[str, _Entry]] = Link("entries")
 
 def _context_of(entry: _Entry, host: SqlHost, request: Request, attempt: Attempt) -> SessionContext | ViewContext:
     """The context of an attempt of ``entry``."""
-    rpc = Rpc(host)
+    rpc = Caller(host)
     cancel = _cancel_of(host)
     if entry.view:
-        return ViewContext(key=host.key, request=request, db=reader_of(attempt.db), rpc=rpc, cancel=cancel)
-    context = SessionContext(
-        key=host.key, request=request, db=attempt.db, rpc=rpc, send=Send(send_now(host)), cancel=cancel
+        return AttemptViewContext(key=host.key, request=request, db=reader_of(attempt.db), rpc=rpc, cancel=cancel)
+    context = AttemptContext(
+        key=host.key, request=request, db=attempt.db, rpc=rpc, send=Sender(send_now(host)), cancel=cancel
     )
     sdk = typing.cast("ServerInvocationContext | None", getattr(host, "context", None))
     return SCOPE.on(context, Scope(sdk=sdk, explicit_cancellation=entry.explicit_cancellation))
@@ -542,9 +515,10 @@ class SessionObject(VirtualObject):
     def _register(self, view: bool, name: str | None, options: dict[str, Any]) -> Callable[[F], F]:
         def register(fn: F) -> F:
             if RESTATE_UNIQUE_HANDLER_SYMBOL in vars(fn):
-                what = f"{self.name}.{fn.__name__} is an SDK handler: a session object's handlers are functions of its context."
+                what = f"{self.name}.{fn.__name__} is a handler already, of the SDK's or of a session object's."
                 instead = (
-                    "Put journaled work in a restate.VirtualObject, Service or Workflow, and call it with ctx.rpc."
+                    "A session object's handlers are functions of its context, of their own; put journaled work "
+                    "in a restate.VirtualObject, Service or Workflow, and call it with ctx.rpc."
                 )
                 raise TypeError(f"{what} {instead}")
             explicit = bool(options.get("explicit_cancellation"))
@@ -561,7 +535,11 @@ class SessionObject(VirtualObject):
             entries = ENTRIES.of(self)
             assert entries is not None
             entries[sdk.name] = entry
-            return typing.cast(F, registered)
+            # The function itself, marked as the handler it is: `ctx.rpc(fn, ...)`
+            # and the client find it, and a test calls it with a context of
+            # its own (a fake of the protocols).
+            vars(fn)[RESTATE_UNIQUE_HANDLER_SYMBOL] = sdk
+            return fn
 
         return register
 
@@ -571,4 +549,4 @@ class SessionObject(VirtualObject):
         return self
 
 
-__all__ = ["CallFuture", "Cancel", "SessionContext", "SessionObject", "ViewContext", "cancel_calls", "cancelled"]
+__all__ = ["SessionObject", "cancel_calls", "cancelled"]

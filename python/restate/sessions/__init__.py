@@ -31,23 +31,32 @@ object's state (``ctx.db``). The Python variant of ``@restatedev/sessions``::
     app = restate.app([notes])
 
 Session handlers don't replay a journal: a retried attempt runs again from its
-first line, against what the attempts before it committed. A session object
+first line, against what the attempts before it committed.
+
+The types a handler gets (``SessionContext``, ``Database``, ``Transaction``,
+``Rpc``, ``Send``, ...) are protocols: a decorated handler is still the plain
+function, so a test can call it with a fake context of its own. A session object
 serves beside the SDK's services, objects and workflows, which it calls with
 ``ctx.rpc`` for journaled work.
 """
 
-from restate.sessions._calls import CallFuture, Rpc, Send
-from restate.sessions._database import Row, Rows, SqlError, SqlParam, SqlValue
-from restate.sessions._object import Cancel, SessionContext, SessionObject, ViewContext, cancel_calls, cancelled
-from restate.sessions._schema import Schema, Step
-from restate.sessions._session import (
+# The API: protocols (_api.py), which handlers and views code against.
+from restate.sessions._api import (
+    Cancel,
     Database,
     DatabaseReader,
     DatabaseWriter,
+    Rpc,
+    Send,
+    SessionContext,
     Transaction,
-    database,
-    reset,
+    ViewContext,
 )
+from restate.sessions._calls import CallFuture
+from restate.sessions._database import Row, Rows, SqlError, SqlParam, SqlValue
+from restate.sessions._object import SessionObject, cancel_calls, cancelled
+from restate.sessions._schema import Schema, Step
+from restate.sessions._session import database, reset
 
 __all__ = [
     "CallFuture",

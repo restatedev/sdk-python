@@ -116,12 +116,8 @@ class CallFuture(RestateDurableCallFuture[O]):
         await self._call.cancel_invocation()
 
 
-class Rpc:
-    """
-    Calls: ``ctx.rpc(handler, key=...)`` returns a function of the handler's
-    input, if it takes one, which makes the call and returns its result's
-    awaitable. A call is made when that function is called, awaited or not.
-    """
+class Caller:
+    """``Rpc`` (see ``_api.py``) over the SDK's context: each call a generic call, its result read by its serde."""
 
     def __init__(self, host: CallHost) -> None:
         self._host: CallHost = host
@@ -192,12 +188,8 @@ class Rpc:
         return CallFuture(future, output_serde)
 
 
-class Send:
-    """
-    Sends, as ``Rpc``'s calls: ``ctx.send(handler, key=...)`` returns a function
-    of the handler's input, if it takes one, which makes the send at once
-    (``ctx.send``), or records it for its transaction's commit (``tx.send``).
-    """
+class Sender:
+    """``Send`` (see ``_api.py``) into a sink: ``send_now``'s for ``ctx.send``, a transaction's outbox for ``tx.send``."""
 
     def __init__(self, sink: Callable[[GenericSend], None]) -> None:
         self._sink: Callable[[GenericSend], None] = sink
@@ -236,7 +228,7 @@ class Send:
         """
         A sender to ``handler``, with ``key`` for an object's or a workflow's;
         ``delay`` is how long after the send (for ``tx.send``, after the
-        commit) the target runs. See ``Rpc`` for ``idempotency_key``.
+        commit) the target runs. See ``Caller`` for ``idempotency_key``.
         """
         service, name, input_serde, _ = _target(handler, key)
 
