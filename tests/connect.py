@@ -823,7 +823,7 @@ async def test_with_connection(monkeypatch: pytest.MonkeyPatch):
                 assert conn.info.name == TUNNEL_NAME
                 response = await cloud.request("/http/h/9080/discover", identity_headers("/discover"))
                 assert response.status == 200
-                waiter = asyncio.ensure_future(conn.wait())
+                waiter = asyncio.ensure_future(conn.wait_closed())
                 await asyncio.sleep(0.05)
                 assert not waiter.done()
                 await conn.shutdown(0.0)

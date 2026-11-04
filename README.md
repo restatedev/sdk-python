@@ -91,7 +91,7 @@ Or using the context manager, for finer control:
 ```python
 async with restate.with_connection(app, name="greeter-v1") as connection:
     print(connection.info.deployment_url)
-    await connection.wait()
+    await connection.wait_closed()
 ```
 
 ### Clients
