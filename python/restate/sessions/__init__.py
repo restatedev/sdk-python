@@ -58,7 +58,7 @@ from restate.sessions._calls import CallFuture
 from restate.sessions._database import Row, Rows, SqlError, SqlParam, SqlValue
 from restate.sessions._object import SessionObject
 from restate.sessions._schema import Step
-from restate.sessions._serve import app
+from restate.sessions._serve import app, serve
 
 __all__ = [
     "CallFuture",
@@ -79,4 +79,5 @@ __all__ = [
     "Transaction",
     "ViewContext",
     "app",
+    "serve",
 ]

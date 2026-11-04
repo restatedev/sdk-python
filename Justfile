@@ -24,12 +24,14 @@ lint-rust:
 typecheck-pyright:
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright python/
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright examples/ 
+    PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright examples-agents/
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright tests
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright test-services/
 
 typecheck-mypy:
     uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional python/
     uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional examples/
+    uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional examples-agents/
     uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional tests/
 
 typecheck: typecheck-pyright typecheck-mypy

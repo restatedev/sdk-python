@@ -17,9 +17,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import importlib
 import os
+import signal
 import typing
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Sequence
+from typing import Any
 
 import restate
 from restate.entry_codec import JournalValueCodec, JournalValueCodecProvider
@@ -91,3 +96,65 @@ def app(
         identity_keys=identity_keys,
         journal_value_codec=journal_value_codec,
     )
+
+
+def serve(
+    *services: Service,
+    port: int | None = None,
+    identity_keys: list[str] | None = None,
+    journal_value_codec: JournalValueCodec | JournalValueCodecProvider | None = None,
+) -> None:
+    """
+    Serve ``services`` (``app``'s: with what they need beside them, of those
+    ``RESTATE_SERVE_ONLY`` names) on ``port``, or PORT, or 9080, until the
+    process stops: a program of session objects and agents in one line::
+
+        if __name__ == "__main__":
+            sessions.serve(wallet, handle)
+
+    It runs them on hypercorn, imported here: install it, or serve ``app``'s
+    ASGI app with a server of your own.
+    """
+    try:
+        hypercorn_asyncio = importlib.import_module("hypercorn.asyncio")
+        hypercorn_config = importlib.import_module("hypercorn.config")
+    except ImportError as error:
+        raise ImportError(
+            "sessions.serve runs on hypercorn: install it, or serve sessions.app(...) with an ASGI server of your own"
+        ) from error
+    config: Any = hypercorn_config.Config()
+    config.bind = [f"0.0.0.0:{port or int(os.environ.get('PORT', '9080'))}"]
+    # Restate keeps its connections open and streams many invocations over each.
+    config.h2_max_concurrent_streams = 2147483647
+    config.keep_alive_max_requests = 2147483647
+    config.keep_alive_timeout = 2147483647
+    served_app = app(*services, identity_keys=identity_keys, journal_value_codec=journal_value_codec)
+    run = typing.cast(Callable[..., Coroutine[Any, Any, None]], hypercorn_asyncio.serve)
+    asyncio.run(_until_stopped(run, served_app, config))
+
+
+async def _until_stopped(run: Callable[..., Coroutine[Any, Any, None]], served_app: Any, config: Any) -> None:
+    """
+    Serve until SIGINT or SIGTERM, then shut down: gracefully, but not for
+    longer than hypercorn's graceful timeout and a little more. A graceful
+    shutdown waits for every open connection to close, and Restate keeps its
+    own open.
+    """
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    for name in ("SIGINT", "SIGTERM"):
+        with contextlib.suppress(NotImplementedError, AttributeError):
+            loop.add_signal_handler(getattr(signal, name), stop.set)
+    serving = asyncio.ensure_future(run(served_app, config, shutdown_trigger=stop.wait))
+    stopping = asyncio.ensure_future(stop.wait())
+    await asyncio.wait({serving, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    stopping.cancel()
+    if serving.done():
+        serving.result()
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(serving), timeout=float(config.graceful_timeout) + 2)
+    except asyncio.TimeoutError:
+        serving.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serving

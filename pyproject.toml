@@ -84,6 +84,7 @@ target-version = "py310"
 include = [
     "python/**/*.py",
     "examples/**/*.py",
+    "examples-agents/**/*.py",
     "tests/**/*.py",
     "test-services//**/*.py",
 ]
