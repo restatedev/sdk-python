@@ -31,4 +31,4 @@ tokio-util = { version = "0.7", default-features = false }
 
 # Until restate-sdk-shared-core with the `cloud` and `tunnel` features is released.
 [patch.crates-io]
-restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core", branch = "cloud-exp-revamp" }
+restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core", rev = "3ccd488" }
