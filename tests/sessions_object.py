@@ -455,3 +455,28 @@ async def test_cancelled_takes_the_ctx_of_a_handler_with_explicit_cancellation()
     # Over a test's own host there is no SDK context to cancel.
     with pytest.raises(TerminalError, match="takes a session object's ctx"):
         await run(obj, "explicit", Host(Backend(), service="cancelling"))
+
+
+async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first(monkeypatch):
+    from restate.exceptions import SuspendedException  # pylint: disable=import-outside-toplevel
+    from restate.sessions import _object  # pylint: disable=import-outside-toplevel
+
+    async def attempt_ended(_sdk: Any) -> None:
+        raise SuspendedException()
+
+    monkeypatch.setattr(_object._preview, "cancellation", attempt_ended)
+    host = Host(Backend())
+    ctx = sessions.SessionContext(
+        key="k",
+        request=request(),
+        db=typing.cast(Any, None),
+        rpc=sessions.Rpc(host),
+        send=sessions.Send(lambda send: None),
+        cancel=lambda invocation_id: None,
+        _sdk=object(),
+        _explicit_cancellation=True,
+    )
+    watcher = asyncio.ensure_future(sessions.cancelled(ctx))
+    await asyncio.wait({watcher})
+    # Cancelled, not failed: asyncio reports no exception nobody retrieved.
+    assert watcher.cancelled()

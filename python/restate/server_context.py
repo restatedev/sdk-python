@@ -771,6 +771,10 @@ class ServerInvocationContext(ObjectContext):
             self, handle, self._create_fetch_result_coroutine(handle, serde), inv_id_factory
         )
         if self.vm.explicit_cancellation:
+            # The completed ones need no cancelling: dropped as the list grows,
+            # so that a handler making many calls keeps only those in flight.
+            if len(self.calls) >= 32:
+                self.calls = [call for call in self.calls if not call.is_completed()]
             self.calls.append(future)
         return future
 

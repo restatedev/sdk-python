@@ -13,6 +13,7 @@
 # pylint: disable=missing-function-docstring
 
 import asyncio
+import typing
 from datetime import timedelta
 
 import httpx
@@ -21,6 +22,7 @@ import pytest
 import restate
 from restate import Context, HarnessEnvironment, Service, VirtualObject, Workflow
 from restate._preview import cancel_previous_calls, cancellation, explicit_cancellation
+from restate.server_context import ServerInvocationContext
 
 
 @pytest.fixture(scope="session")
@@ -77,6 +79,24 @@ async def wait(ctx: Context) -> list[str]:
     return await cancel_previous_calls(ctx)
 
 
+quick = Service("quick")
+
+
+@quick.handler()
+async def echo(ctx: Context, n: int) -> int:
+    return n
+
+
+@explicit_cancellation
+@waiter.handler()
+async def many(ctx: Context) -> list[int]:
+    """Many calls, all completed: none is left to cancel, and the context keeps few of them."""
+    for n in range(40):
+        await ctx.service_call(echo, arg=n)
+    kept = len(typing.cast(ServerInvocationContext, ctx).calls)
+    return [kept, len(await cancel_previous_calls(ctx))]
+
+
 implicit = Service("implicit")
 
 
@@ -90,7 +110,7 @@ async def wait_implicitly(ctx: Context) -> list[str]:
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([sleeper, waiter, implicit]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([sleeper, waiter, quick, implicit]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -138,3 +158,10 @@ async def test_without_it_the_cancellation_fails_the_handler(harness: HarnessEnv
 def test_cancellation_takes_a_handler_with_explicit_cancellation():
     with pytest.raises(restate.TerminalError, match="takes the context of a handler"):
         cancellation(object())  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_completed_calls_are_not_kept_nor_cancelled(harness: HarnessEnvironment):
+    kept, cancelled = await harness.client.service_call(many, arg=None)
+    assert kept < 40
+    assert cancelled == 0
