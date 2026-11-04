@@ -57,6 +57,16 @@ def test_an_agents_built_in_names_are_refused_with_what_to_do():
         agent.handler(status)
 
 
+def test_a_name_chat_will_take_is_refused_before_chat_registers_it():
+    agent = AgentObject("early")
+
+    async def messages(ctx: sessions.SessionContext) -> str:
+        return "mine"
+
+    with pytest.raises(ValueError, match="'messages' is a built-in handler of every agent"):
+        agent.handler(messages)
+
+
 def test_chat_is_a_decorator_too_and_returns_the_function():
     agent = AgentObject("decorated")
 

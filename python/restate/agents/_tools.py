@@ -449,13 +449,9 @@ def send(
         chosen, value = arguments["key"], arguments["value"]
 
         async def made(c: ToolCall) -> str:
-            target_key = chosen if key is None else await configured(key, c.ctx)
+            target_key = (chosen if key is None else await configured(key, c.ctx)) if _keyed(handler) else None
             _untyped(c.ctx).send(
-                target,
-                *_inputs(handler, value),
-                key=target_key if _keyed(handler) else None,
-                delay=delay,
-                idempotency_key=c.idempotency_key,
+                target, *_inputs(handler, value), key=target_key, delay=delay, idempotency_key=c.idempotency_key
             )
             return f"sent to {service}{'' if target_key is None else f'/{target_key}'}/{handler.name}"
 

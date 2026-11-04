@@ -445,6 +445,11 @@ class SessionObject(VirtualObject):
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.name!r})"
 
+    def _reserved(self, name: str) -> str | None:
+        """Return why ``name`` is reserved for a built-in handler, if it is (none are, for a plain session object)."""
+        del name
+        return None
+
     def _taken(self, name: str) -> str:
         """Return the error message for registering ``name`` a second time."""
         return f"{self.name} has a handler or view named {name!r} already: give this one another name"
@@ -644,6 +649,9 @@ class SessionObject(VirtualObject):
                 kind = "view" if view else "handler"
                 raise TypeError(f"{self.name}.{fn.__name__}: a {kind} must be a coroutine function (async def)")
             chosen = name or fn.__name__
+            reserved = self._reserved(chosen)
+            if reserved is not None:
+                raise ValueError(reserved)
             if chosen in self.handlers:
                 raise ValueError(self._taken(chosen))
             explicit = bool(options.get("explicit_cancellation"))

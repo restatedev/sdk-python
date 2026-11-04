@@ -182,15 +182,19 @@ class AgentObject(SessionObject):
         self._clear: Callable[[SessionContext], Awaitable[None]] | None = None
         AGENT.on(self, AgentInfo(background=background))
         _signals.with_companion(self)
-        self._built_in()
+        self._building = True
+        try:
+            self._built_in()
+        finally:
+            self._building = False
 
-    def _taken(self, name: str) -> str:
-        if name in BUILT_IN:
-            return (
-                f"{name!r} is a built-in handler of every agent ({', '.join(sorted(BUILT_IN))}): "
-                f"give yours another name, such as @{self.name}.handler(name='my_{name}')"
-            )
-        return super()._taken(name)
+    def _reserved(self, name: str) -> str | None:
+        if name not in BUILT_IN or getattr(self, "_building", False):
+            return None
+        return (
+            f"{name!r} is a built-in handler of every agent ({', '.join(sorted(BUILT_IN))}): "
+            f"give yours another name, such as @{self.name}.handler(name='my_{name}')"
+        )
 
     def _attempt_fn(self, fn: Callable[..., Awaitable[Any]], view: bool) -> Callable[..., Awaitable[Any]]:
         """Wrap a handler so that a model provider's refusal fails its invocation for good, as in ``chat``."""
@@ -308,8 +312,12 @@ class AgentObject(SessionObject):
         async def chat(ctx: SessionContext, text: str) -> Any:
             return await chat_turn(ctx, text, answering)
 
-        self.handler(name="chat", accept="*/*", input_serde=MessageSerde(), explicit_cancellation=True)(chat)
-        _followed(self)
+        self._building = True
+        try:
+            self.handler(name="chat", accept="*/*", input_serde=MessageSerde(), explicit_cancellation=True)(chat)
+            _followed(self)
+        finally:
+            self._building = False
         return answer
 
 
