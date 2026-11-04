@@ -15,7 +15,7 @@ import functools
 import logging
 import signal
 import weakref
-from typing import Callable, Dict, List, Optional, Set, TypedDict, Literal
+from typing import Any, Callable, Dict, List, Optional, Set, TypedDict, Literal
 
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
@@ -39,13 +39,18 @@ _shutdown_hooks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[int,
 
 
 def install_shutdown_hook(
-    loop: asyncio.AbstractEventLoop, hook: Callable[[], None], signum: int = signal.SIGTERM
+    loop: asyncio.AbstractEventLoop, hook: Callable[[], None], signum: int = signal.SIGTERM, *, chain: bool = False
 ) -> None:
     """
     Run ``hook`` when ``signum`` (default SIGTERM) is received while ``loop`` runs.
 
-    Raises what ``loop.add_signal_handler`` raises when signals cannot be handled here
-    (Windows, or a non-main thread).
+    With ``chain``, the handler the process already has for ``signum`` still runs too: the ASGI
+    server's (hypercorn's, uvicorn's), which stops it. ``loop.add_signal_handler`` keeps a single
+    handler per signal, and would replace it. Without, ``hook``'s dispatcher replaces it, for a
+    program that owns its signals (``restate.connect``). The first hook of a loop and signal decides.
+
+    Raises what ``loop.add_signal_handler`` (or ``signal.signal``, with ``chain``) raises when
+    signals cannot be handled here (Windows, or a non-main thread).
     """
     hooks = _shutdown_hooks.setdefault(loop, {})
     if signum not in hooks:
@@ -58,9 +63,31 @@ def install_shutdown_hook(
                 except Exception:  # pylint: disable=broad-except
                     logger.exception("Shutdown hook failed")
 
-        loop.add_signal_handler(signum, dispatch)
+        if chain:
+            _chain_signal(loop, signum, dispatch)
+        else:
+            loop.add_signal_handler(signum, dispatch)
         hooks[signum] = registered
     hooks[signum].append(hook)
+
+
+def _chain_signal(loop: asyncio.AbstractEventLoop, signum: int, on_signal: Callable[[], None]) -> None:
+    """
+    Call ``on_signal`` on ``loop`` when ``signum`` arrives, then the signal's previous handler.
+
+    A signal-module handler leaves the loop's own handlers working too (they are woken by its wakeup
+    fd). Python's default handlers are not chained: the default SIGINT handler would raise
+    KeyboardInterrupt into whatever runs.
+    """
+    previous = signal.getsignal(signum)
+
+    def handler(received: int, frame: Any) -> None:
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(on_signal)
+        if callable(previous) and previous is not signal.default_int_handler:
+            previous(received, frame)
+
+    signal.signal(signum, handler)
 
 
 X_RESTATE_SERVER = header_to_binary([("x-restate-server", f"restate-sdk-python/{SDK_VERSION}")])
@@ -295,9 +322,8 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
     async def app(scope: Scope, receive: Receive, send: Send):
         nonlocal sigterm_installed
         if not sigterm_installed:
-            loop = asyncio.get_running_loop()
             try:
-                install_shutdown_hook(loop, _on_sigterm, signal.SIGTERM)
+                install_shutdown_hook(asyncio.get_running_loop(), _on_sigterm, signal.SIGTERM, chain=True)
             except (NotImplementedError, RuntimeError, ValueError):
                 pass  # Windows or non-main thread
             sigterm_installed = True
