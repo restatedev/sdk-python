@@ -182,6 +182,7 @@ class Response:
         self.stream_id = 0
         self.headers: typing.Dict[str, str] = {}
         self.trailers: typing.Dict[str, str] = {}
+        self.trailer_pairs: typing.List[typing.Tuple[str, str]] = []
         self.body = bytearray()
         self.ended: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self.started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -300,7 +301,9 @@ class FakeCloud:
             self._responses[event.stream_id].body.extend(event.data)
             self._conn.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
         elif isinstance(event, TrailersReceived):
-            self._responses[event.stream_id].trailers = typing.cast(typing.Dict[str, str], dict(event.headers))
+            pairs = typing.cast(typing.List[typing.Tuple[str, str]], list(event.headers))
+            self._responses[event.stream_id].trailers = dict(pairs)
+            self._responses[event.stream_id].trailer_pairs = pairs
         elif isinstance(event, StreamEnded):
             response = self._responses[event.stream_id]
             if not response.ended.done():
@@ -601,7 +604,7 @@ async def test_send_validation_and_trailers():
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             await send({"type": "http.response.trailers", "headers": [(b"x-t", b"1")], "more_trailers": True})
-            await send({"type": "http.response.trailers", "headers": [(b"x-u", b"2")]})
+            await send({"type": "http.response.trailers", "headers": [(b"x-u", b"2"), (b"x-t", b"3"), (b"x-t", b"4")]})
             # The response is complete: receive reports the disconnect.
             assert (await receive())["type"] == "http.disconnect"
             return
@@ -623,7 +626,7 @@ async def test_send_validation_and_trailers():
         assert response.status == 200
         assert response.headers["x-a"] == "1"
         assert bytes(response.body) == b"onetwothree"
-        assert response.trailers == {"x-t": "1", "x-u": "2"}
+        assert response.trailer_pairs == [("x-t", "1"), ("x-t", "3"), ("x-t", "4"), ("x-u", "2")]
         await engine.shutdown(0.0)
 
 

@@ -591,10 +591,9 @@ impl SendInner {
                     more_trailers,
                 },
             ) => {
-                for (name, value) in headers {
-                    if let Some(name) = name {
-                        self.pending_trailers.append(name, value);
-                    }
+                // By reference: iterating an owned map names only the first value of each name.
+                for (name, value) in &headers {
+                    self.pending_trailers.append(name, value.clone());
                 }
                 if more_trailers {
                     return Ok(Step::Nothing);
