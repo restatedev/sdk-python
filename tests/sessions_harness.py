@@ -20,6 +20,7 @@ import pytest
 
 import restate
 from restate import HarnessEnvironment, sessions
+from restate.sessions import _object, _session
 
 
 @pytest.fixture(scope="session")
@@ -28,6 +29,33 @@ def anyio_backend():
 
 
 pytestmark = [pytest.mark.anyio]
+
+# The writes that went through the Python store, rather than straight to the VM.
+python_writes = 0
+
+
+@pytest.fixture(autouse=True, params=["vm", "python"])
+def store(request, monkeypatch):
+    """
+    Each test runs on both stores: the invocation's VM, which the extension
+    writes and reads directly, and the Python store over the context's state
+    commands, which an endpoint with a journal codec uses. The app serves in
+    this process, so the patch reaches its handlers.
+    """
+    global python_writes  # pylint: disable=global-statement
+    python_writes = 0
+    if request.param == "python":
+        monkeypatch.setattr(_object._ContextHost, "vm", property(lambda self: None))
+    set_state = _session._ObjectStore.set
+
+    def counted(self, key: str, value: bytes) -> None:
+        global python_writes  # pylint: disable=global-statement
+        python_writes += 1
+        set_state(self, key, value)
+
+    monkeypatch.setattr(_session._ObjectStore, "set", counted)
+    return request.param
+
 
 # --- A regular object, which session objects call and send to -----------------------------------
 
@@ -144,3 +172,8 @@ async def test_the_sends_of_a_transaction_are_made_once_it_commits(harness: Harn
             break
         await asyncio.sleep(0.1)
     assert delivered == ["hello"]
+
+
+async def test_the_writes_go_through_the_store_asked_for(harness: HarnessEnvironment, store: str):
+    await harness.client.object_call(add, key=str(uuid.uuid4()), arg="x")
+    assert (python_writes > 0) == (store == "python")
