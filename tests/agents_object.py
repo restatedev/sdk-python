@@ -172,6 +172,21 @@ async def test_a_sync_that_waited_returns_every_change_its_revision_counts(harne
     assert asyncio.get_running_loop().time() - started < timeout
 
 
+async def test_the_views_without_input_take_a_request_with_a_json_content_type(harness: HarnessEnvironment):
+    # Restate's TypeScript client sends `content-type: application/json` with every call, an argument or not.
+    key = str(uuid.uuid4())
+    async with httpx.AsyncClient(timeout=60) as ingress:
+        for view in ("status", "pending", "notifications", "stop", "clear"):
+            response = await ingress.post(
+                f"{harness.ingress_url}/assistant/{key}/{view}",
+                content=b"",
+                headers={"content-type": "application/json"},
+            )
+            assert response.status_code == 200, (view, response.text)
+        # And without a body, as `curl` sends it.
+        assert (await ingress.post(f"{harness.ingress_url}/assistant/{key}/status")).status_code == 200
+
+
 async def test_status_says_which_message_is_answered_and_stop_cancels_it(harness: HarnessEnvironment):
     key = str(uuid.uuid4())
     gate.clear()
