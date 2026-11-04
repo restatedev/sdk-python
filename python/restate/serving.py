@@ -49,7 +49,7 @@ async def serve(app: RestateAppT, *, host: str = "0.0.0.0", port: typing.Optiona
     Args:
         app: The app to serve, as ``restate.app`` returns it.
         host: The address to listen on. Defaults to all interfaces.
-        port: The port to listen on. Defaults to ``$PORT``, else 9080.
+        port: The port to listen on (0 for one the OS picks). Defaults to ``$PORT``, else 9080.
 
     Raises:
         ImportError: If the ``serve`` extra is not installed (``pip install restate-sdk[serve]``).
@@ -66,7 +66,7 @@ async def serve(app: RestateAppT, *, host: str = "0.0.0.0", port: typing.Optiona
     config = uvicorn.Config(
         app,
         host=host,
-        port=port or int(os.environ.get("PORT", "9080")),
+        port=port if port is not None else int(os.environ.get("PORT", "9080")),
         http="zttp",
         http2=True,
         # The app has no lifespan, and a graceful shutdown would otherwise wait for Restate's open connections.
@@ -79,10 +79,12 @@ async def serve(app: RestateAppT, *, host: str = "0.0.0.0", port: typing.Optiona
     # one asyncio handler per signal: it would replace uvicorn's handlers. So the server's exit goes through
     # the same hook, registered first, and uvicorn captures no signals itself: both then run.
     loop = asyncio.get_running_loop()
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):  # Windows, or not the main thread
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
             install_shutdown_hook(loop, _exit_on(server, signum), signum)
-    server.capture_signals = contextlib.nullcontext
+        server.capture_signals = contextlib.nullcontext
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass  # Windows, or not the main thread: uvicorn handles the signals itself, as it can
     await server.serve()
 
 

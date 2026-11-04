@@ -93,12 +93,12 @@ async def test_a_program_serves_its_app_over_http2_and_stops_on_sigterm():
         async with httpx.AsyncClient(timeout=30) as ingress:
             answer = await ingress.post(f"{container.ingress_url()}/greeter/greet", json="Alice")
         assert answer.json() == "Hello Alice!"
-    finally:
-        container.stop()
+
+        # Stopped while Restate still holds its connections open: it stops within its graceful timeout.
         program.send_signal(signal.SIGTERM)
         started = time.monotonic()
-        try:
-            program.wait(timeout=10)
-        finally:
-            program.kill()
-    assert time.monotonic() - started < 10
+        program.wait(timeout=10)
+        assert time.monotonic() - started < 10
+    finally:
+        program.kill()
+        container.stop()
