@@ -104,7 +104,7 @@ class CallFuture(RestateDurableCallFuture[O]):
         self._serde = serde
 
     async def _result(self) -> O:
-        return typing.cast(O, self._serde.deserialize(typing.cast(bytes, await self._call)))
+        return typing.cast(O, self._serde.deserialize(await self._call))
 
     def __await__(self) -> Generator[Any, Any, O]:
         return self._result().__await__()

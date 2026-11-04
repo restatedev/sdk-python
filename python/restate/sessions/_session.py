@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import re
 import time
@@ -41,9 +42,12 @@ from restate.sessions._database import (
     SqlError,
     SqlParam,
     Store,
-    _objects,
+    objects_of,
+)
+from restate.sessions._database import (
     open as open_connection,
 )
+from restate.sessions._link import Link
 from restate.sessions._schema import Schema, apply, drop_all, ensure_of, ensuring
 
 T = typing.TypeVar("T")
@@ -347,7 +351,8 @@ def _refused_send(_: GenericSend) -> None:
 class DatabaseReader:
     """Reads of a database, or of one transaction of it."""
 
-    async def _query_columns(self, sql: str, params: Sequence[SqlParam] | None) -> tuple[list[str], Rows]:
+    async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
+        """The rows of one statement as lists, with the column names of the statement: ``(columns, rows)``."""
         raise NotImplementedError
 
     async def query(self, sql: str, params: Sequence[SqlParam] | None = None) -> list[Row]:
@@ -357,9 +362,9 @@ class DatabaseReader:
         expression needs ``AS``), and two of the same name are an error: alias
         them, or use ``values``.
         """
-        columns, rows = await self._query_columns(sql, params)
+        columns, rows = await self.query_columns(sql, params)
         try:
-            return _objects(columns, rows)
+            return objects_of(columns, rows)
         except SqlError as error:
             _raise_for_handler(error)
 
@@ -370,7 +375,7 @@ class DatabaseReader:
 
     async def values(self, sql: str, params: Sequence[SqlParam] | None = None) -> Rows:
         """The rows of one statement as lists, in column order: for adapters, and for columns that share a name."""
-        return (await self._query_columns(sql, params))[1]
+        return (await self.query_columns(sql, params))[1]
 
 
 class DatabaseWriter(DatabaseReader):
@@ -378,7 +383,7 @@ class DatabaseWriter(DatabaseReader):
 
     async def execute(self, sql: str, params: Sequence[SqlParam] | None = None) -> None:
         """Run SQL (one or more statements), discarding rows; parameters only with a single statement."""
-        await self._query_columns(sql, params)
+        await self.query_columns(sql, params)
 
 
 class Transaction(DatabaseWriter):
@@ -391,12 +396,11 @@ class Transaction(DatabaseWriter):
     again is dropped.
     """
 
-    def __init__(self, handle: ConnectionTransaction, send: Send, reset: Callable[[], Awaitable[None]] | None) -> None:
+    def __init__(self, handle: ConnectionTransaction, send: Send) -> None:
         self._handle = handle
         self.send = send
-        self._reset = reset
 
-    async def _query_columns(self, sql: str, params: Sequence[SqlParam] | None) -> tuple[list[str], Rows]:
+    async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
         try:
             return await self._handle.query_columns(sql, params)
         except SqlError as error:
@@ -412,8 +416,9 @@ class Database(DatabaseWriter):
 
     def __init__(self, attempt: Attempt) -> None:
         self._attempt = attempt
+        _ATTEMPT.on(self, attempt)
 
-    async def _query_columns(self, sql: str, params: Sequence[SqlParam] | None) -> tuple[list[str], Rows]:
+    async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
         return await self._attempt.call(lambda db: db.query_columns(sql, params))
 
     def transaction(self) -> typing.AsyncContextManager[Transaction]:
@@ -439,8 +444,8 @@ class _ReaderOf(DatabaseReader):
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    async def _query_columns(self, sql: str, params: Sequence[SqlParam] | None) -> tuple[list[str], Rows]:
-        return await self._db._query_columns(sql, params)  # pylint: disable=protected-access
+    async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
+        return await self._db.query_columns(sql, params)
 
 
 def reader_of(db: Database) -> DatabaseReader:
@@ -451,6 +456,12 @@ def reader_of(db: Database) -> DatabaseReader:
 
 
 _DATABASE_NAME = re.compile(r"^[\w.-]{1,64}$")
+
+_ATTEMPT: Link[Attempt] = Link("database")
+"""The attempt of a ``ctx.db``: for ``database``."""
+
+_RESET: Link[Callable[[], Awaitable[None]]] = Link("reset")
+"""How a transaction of an exclusive handler's ``ctx.db`` empties the database: for ``reset``."""
 
 
 def database(db: Database, name: str) -> Database:
@@ -463,9 +474,10 @@ def database(db: Database, name: str) -> Database:
     """
     if not _DATABASE_NAME.match(name):
         raise TerminalError(f"database: {name!r} is not a database name")
-    if not isinstance(db, Database):
+    attempt = _ATTEMPT.of(db)
+    if attempt is None:
         raise TerminalError("database takes a handler's ctx.db")
-    return db._attempt.database(name)  # pylint: disable=protected-access
+    return attempt.database(name)
 
 
 async def reset(tx: Transaction) -> None:
@@ -476,10 +488,11 @@ async def reset(tx: Transaction) -> None:
     the outbox stays. It commits with ``tx``: what ``tx`` writes after it are
     the new database's first rows.
     """
-    if not isinstance(tx, Transaction) or tx._reset is None:  # pylint: disable=protected-access
+    empty = _RESET.of(tx)
+    if empty is None:
         raise TerminalError("reset takes a transaction of an exclusive handler's ctx.db")
     try:
-        await tx._reset()  # pylint: disable=protected-access
+        await empty()
     except SqlError as error:
         _raise_for_handler(error)
 
@@ -649,8 +662,9 @@ class Attempt:
             async with db.transaction() as handle:
                 sends = _Sends() if self._has_outbox else None
                 # A view's writes stay in its session: it has nothing to reset.
-                resetter = None if self._host.shared else (lambda: self._reset(handle))
-                tx = Transaction(handle, sends.send if sends is not None else Send(_refused_send), resetter)
+                tx = Transaction(handle, sends.send if sends is not None else Send(_refused_send))
+                if not self._host.shared:
+                    _RESET.on(tx, lambda: self._reset(handle))
                 try:
                     yield tx
                 finally:
@@ -761,10 +775,8 @@ class Attempt:
             await self._save(db)
             return
         if db is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await db.close()
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
         if not self._has_outbox or self._host.attempt_end() is not None:
             return
         again = self._open()
@@ -780,10 +792,8 @@ class Attempt:
                 await self._flush(db)
             await db.save()
         except BaseException:
-            try:
+            with contextlib.suppress(Exception):
                 await db.close()
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
             raise
 
     async def _reset(self, handle: ConnectionTransaction) -> None:

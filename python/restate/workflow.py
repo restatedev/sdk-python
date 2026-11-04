@@ -91,7 +91,7 @@ class Workflow:
 
     def __init__(
         self,
-        name,
+        name: str,
         description: typing.Optional[str] = None,
         metadata: typing.Optional[typing.Dict[str, str]] = None,
         inactivity_timeout: typing.Optional[timedelta] = None,

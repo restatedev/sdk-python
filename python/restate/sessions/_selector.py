@@ -31,7 +31,6 @@ from typing import Any, Protocol
 from restate.exceptions import SdkInternalException, SuspendedException, TerminalError
 from restate.server_context import DisconnectedException, ServerInvocationContext
 from restate.vm import (
-    AllCompletedUnresolvedFuture,
     DoProgressAnyCompleted,
     DoProgressCancelSignalReceived,
     DoProgressExecuteRun,
@@ -76,7 +75,7 @@ class SelectorDriver(Protocol):
         """Passes a chunk of the request body to the VM."""
         ...
 
-    def track(self, task: asyncio.Future) -> None:
+    def track(self, task: asyncio.Future[Any]) -> None:
         """Cancels ``task`` at the end of the attempt."""
         ...
 
@@ -91,9 +90,7 @@ def is_ready(future: UnresolvedFuture, completed: Callable[[int], bool]) -> bool
         return completed(future.handle)
     if isinstance(future, FirstCompletedUnresolvedFuture):
         return any(is_ready(child, completed) for child in future.children)
-    if isinstance(future, AllCompletedUnresolvedFuture):
-        return all(is_ready(child, completed) for child in future.children)
-    raise TypeError(f"Unknown UnresolvedFuture variant: {type(future).__name__}")
+    return all(is_ready(child, completed) for child in future.children)
 
 
 class FutureSelector:
@@ -111,8 +108,8 @@ class FutureSelector:
     def __init__(self, driver: SelectorDriver, disconnected: Callable[[], BaseException]) -> None:
         self._driver = driver
         self._disconnected = disconnected
-        self._waits: dict[asyncio.Future, UnresolvedFuture] = {}
-        self._task: asyncio.Task | None = None
+        self._waits: dict[asyncio.Future[None], UnresolvedFuture] = {}
+        self._task: asyncio.Task[None] | None = None
         # Between the VM's WaitExternalProgress and the next input.
         self._waiting = False
         # Why the attempt ended, once it has: each wait then raises a new one.
@@ -280,13 +277,13 @@ class _ContextDriver:
 
     def notify_input(self, chunk: dict[str, Any]) -> None:
         # Skip empty body frames, as the SDK does.
-        body = chunk.get("body", None)
+        body = chunk.get("body")
         if body is not None and len(body) > 0:
             self.context.vm.notify_input(body)
         if not chunk.get("more_body", False):
             self.context.vm.notify_input_closed()
 
-    def track(self, task: asyncio.Future) -> None:
+    def track(self, task: asyncio.Future[Any]) -> None:
         self.context.tasks.add(task)
 
 
@@ -298,7 +295,7 @@ def hook(context: ServerInvocationContext, on_end: Callable[[], None]) -> Future
     hook lasts as long as ``context``, one attempt.
     """
     selector = FutureSelector(_ContextDriver(context, on_end), DisconnectedException)
-    started: set[asyncio.Task] = set()
+    started: set[asyncio.Task[Any]] = set()
 
     def starting(make: Callable[..., Any]) -> Callable[..., Any]:
         def make_started(*args: Any, **kwargs: Any) -> Any:
@@ -316,10 +313,10 @@ def hook(context: ServerInvocationContext, on_end: Callable[[], None]) -> Future
 
     for name in ("create_future", "create_sleep_future", "create_call_future"):
         setattr(context, name, starting(getattr(context, name)))
-    setattr(context, "create_poll_or_cancel_coroutine", selector.wait)
+    context.create_poll_or_cancel_coroutine = selector.wait  # type: ignore[method-assign,assignment]
     return selector
 
 
-def _retrieve(task: asyncio.Future) -> None:
+def _retrieve(task: asyncio.Future[Any]) -> None:
     if not task.cancelled():
         task.exception()
