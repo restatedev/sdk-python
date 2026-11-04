@@ -328,3 +328,56 @@ async def test_options_may_be_functions_of_the_context(harness: HarnessEnvironme
         url = f"{harness.ingress_url}/pai_per_user/{k}/chat"
         assert (await ingress.post(url, content=f"system {k}", headers=TEXT)).json() == f"system: You help {k}."
         assert (await ingress.post(url, content=f"weather {k}", headers=TEXT)).json() == f"tool said: sunny in {k}"
+
+
+async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatch: pytest.MonkeyPatch):
+    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    replies: list[str] = []
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        replies.append("asked")
+        return ModelResponse(parts=[TextPart(f"answer {len(replies)}")])
+
+    save = _agent._Conversation.save  # pyright: ignore[reportPrivateUsage]
+    crashed: list[bool] = []
+
+    async def save_then_crash_once(self: Any, messages: Any) -> None:
+        await save(self, messages)
+        last = messages[-1]
+        if isinstance(last, ModelResponse) and not (last.metadata or {}) and not crashed:
+            crashed.append(True)
+            raise RuntimeError("the process crashed after storing the answer")
+
+    monkeypatch.setattr(_agent._Conversation, "save", save_then_crash_once)  # pyright: ignore[reportPrivateUsage]
+    asker = sessions.SessionObject("asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await pydantic_ai.prompt(ctx, text, model=FunctionModel(answer), system="Answer briefly.")
+
+    backend, invocation = Backend(), request()
+    with pytest.raises(RuntimeError, match="crashed after storing"):
+        await invoke(asker, "ask", Host(backend, service="asker"), invocation, "hi")
+    # The retry (the same invocation) returns the answer that was stored, without asking the model again.
+    assert await invoke(asker, "ask", Host(backend, service="asker"), invocation, "hi") == "answer 1"
+    assert replies == ["asked"]
+
+
+def test_a_tool_result_of_bytes_is_stored_as_pydantic_ai_stores_it():
+    from pydantic_ai.messages import ModelMessagesTypeAdapter  # pylint: disable=import-outside-toplevel
+
+    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
+
+    message = ModelRequest(parts=[ToolReturnPart("picture", b"\xff\x00\xfe", tool_call_id="call-1")])
+    # Storing it does not fail (a failure would fail every attempt, and run the tool again each time) ...
+    stored = _agent._MESSAGE.dump_json(message)  # pyright: ignore[reportPrivateUsage]
+    read = _agent._MESSAGE.validate_json(stored)  # pyright: ignore[reportPrivateUsage]
+    # ... and it reads back as pydantic-ai's own adapter reads it back.
+    [expected] = ModelMessagesTypeAdapter.validate_json(ModelMessagesTypeAdapter.dump_json([message]))
+    assert isinstance(read, ModelRequest) and isinstance(expected, ModelRequest)
+    assert read.parts[0].content == expected.parts[0].content  # type: ignore[union-attr]

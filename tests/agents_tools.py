@@ -151,3 +151,34 @@ async def test_subagent_hands_a_task_to_the_agent_keyed_by_this_key_and_the_task
     assert (service, handler, key, json.loads(arg)) == ("helper", "chat", "alice.lookup", "Find it")
     bad = await run_tool(host, "helper", {"name": "Not A Name", "task": "x"}, "s2")
     assert bad.startswith("Error: the arguments do not fit")
+
+
+async def test_a_stopped_turn_reports_a_call_that_returned_as_done_not_cancelled():
+    from restate.agents._calls import call_of, outcomes  # pylint: disable=import-outside-toplevel
+    from restate.agents._common import (  # pylint: disable=import-outside-toplevel
+        CANCELLED,
+        RETURNED_UNRECORDED,
+        cut_off_result,
+    )
+
+    recorded = sessions.SessionObject("stopped")
+    seen: dict[str, str] = {}
+    ids = ("call-refund", "call-status", "call-charge", "call-none")
+
+    @recorded.handler
+    async def turn(ctx: sessions.SessionContext) -> None:
+        refund = await call_of(ctx, "refund", {"order": "o1"}, "call-refund")
+        await refund.answered()
+        await call_of(ctx, "status", {"order": "o1"}, "call-status")  # made, but not returned
+        charge = await call_of(ctx, "charge", {"order": "o1"}, "call-charge")
+        await charge.answered(failed="Error: card declined")
+        returned = await outcomes(ctx, ids)
+        seen.update({call_id: cut_off_result(returned, call_id, CANCELLED) for call_id in ids})
+
+    await internal.invoke(recorded, "turn", Host(Backend(), service="stopped"), request())
+    assert seen == {
+        "call-refund": RETURNED_UNRECORDED,  # it happened: the model must not take it for undone
+        "call-status": CANCELLED,
+        "call-charge": "Error: card declined",
+        "call-none": CANCELLED,
+    }

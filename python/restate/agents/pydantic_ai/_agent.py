@@ -35,7 +35,7 @@ from collections.abc import Callable, Sequence
 from datetime import timedelta
 from typing import Any
 
-from pydantic import TypeAdapter
+from pydantic import ConfigDict, TypeAdapter
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
@@ -54,12 +54,14 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai import Tool as PydanticTool
+from restate.agents._calls import outcomes
 from restate.agents._common import (
     CANCELLED,
     UNANSWERED,
     ModelError,
     PerSession,
     configured,
+    cut_off_result,
     from_tool,
     model_of,
     next_prompt_id,
@@ -127,7 +129,10 @@ _SCHEMA = Schema(
 )
 
 # ModelMessage is an Annotated union (discriminated), which TypeAdapter takes though its type says otherwise.
-_MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(typing.cast(Any, ModelMessage))
+# Bytes (a tool's binary result, say) as base64, as pydantic-ai's own ModelMessagesTypeAdapter stores them.
+_MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(
+    typing.cast(Any, ModelMessage), config=ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
+)
 
 
 class _Conversation:
@@ -255,7 +260,7 @@ def _text(response: ModelMessage) -> str:
     return "".join(part.content for part in response.parts if isinstance(part, TextPart))
 
 
-async def _close(conversation: _Conversation, prompt_id: str, text: str) -> None:
+async def _close(ctx: SessionContext, conversation: _Conversation, prompt_id: str, text: str) -> None:
     """Close the cancelled, refused or failed run of prompt ``prompt_id`` with ``text``.
 
     Each tool call of the last response gets ``text`` as its result, and ``text``
@@ -267,7 +272,11 @@ async def _close(conversation: _Conversation, prompt_id: str, text: str) -> None
         return
     last = messages[-1]
     if isinstance(last, ModelResponse) and last.tool_calls:
-        returns = [ToolReturnPart(call.tool_name, text, call.tool_call_id) for call in last.tool_calls]
+        returned = await outcomes(ctx, [call.tool_call_id for call in last.tool_calls])
+        returns = [
+            ToolReturnPart(call.tool_name, cut_off_result(returned, call.tool_call_id, text), call.tool_call_id)
+            for call in last.tool_calls
+        ]
         messages.append(ModelRequest(parts=returns))
     messages.append(ModelResponse(parts=[TextPart(text)], metadata={_ANSWERS: prompt_id}))
     await conversation.save(messages)
@@ -297,6 +306,13 @@ async def _answer_once(
         interrupted = last is not None and _answer_of(history, last) is None
         running = _prompt_of(history[last]) if interrupted and last is not None else prompt_id
         assert running is not None
+        final = history[-1] if history else None
+        if interrupted and isinstance(final, ModelResponse) and not final.tool_calls:
+            # The run had stored its final answer, but not yet marked it as the prompt's: mark it, rather
+            # than run on, which would ask the model again.
+            final.metadata = {**(final.metadata or {}), _ANSWERS: running}
+            await conversation.save(history)
+            continue
         if not interrupted:
             history = [*history, ModelRequest(parts=[UserPromptPart(text)], metadata={_PROMPT: prompt_id})]
         stop = stop_signal_of(ctx)
@@ -311,10 +327,10 @@ async def _answer_once(
         except TerminalError as error:
             if error.status_code == _CANCELLATION:
                 # Cancelled: close the run, so that the next prompt starts afresh.
-                await _close(conversation, running, CANCELLED)
+                await _close(ctx, conversation, running, CANCELLED)
                 raise
             # Failed for good: close the run with the error, so that the next prompt does not run into it again.
-            await _close(conversation, running, f"Error: {error.message}")
+            await _close(ctx, conversation, running, f"Error: {error.message}")
             if running == prompt_id:
                 raise
             continue
@@ -324,7 +340,7 @@ async def _answer_once(
             refused = refusal_of(ctx, error)
             if refused is None:
                 raise
-            await _close(conversation, running, UNANSWERED)
+            await _close(ctx, conversation, running, UNANSWERED)
             if running == prompt_id:
                 raise refused from error
             continue

@@ -151,6 +151,28 @@ async def test_a_wait_made_while_the_loop_waits_for_input_joins_the_next_check()
     await asyncio.gather(first, second, third)
 
 
+async def test_a_wait_made_while_the_loop_flushes_is_checked_before_it_waits_for_input():
+    vm = FakeVm()
+    selector = FutureSelector(vm, Disconnected)
+    late: list[asyncio.Future] = []
+
+    async def flush_letting_a_wait_register() -> None:
+        if not late:
+            late.append(asyncio.ensure_future(selector.wait(single(2))))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+    vm.flush_output = flush_letting_a_wait_register  # type: ignore[method-assign]
+    first = asyncio.ensure_future(selector.wait(single(1)))
+    await settle()
+    await settle()
+    # Not left out of the check the loop was making while it registered, nor waiting for input or a wake.
+    assert vm.checks[-1] == FirstCompletedUnresolvedFuture([single(1), single(2)])
+    vm.complete(2)
+    vm.complete(1)
+    await asyncio.gather(first, *late)
+
+
 async def test_combinators_wait_for_their_children():
     vm = FakeVm()
     selector = FutureSelector(vm, Disconnected)

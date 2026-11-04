@@ -156,6 +156,25 @@ class MessageSerde(Serde[str]):
 CANCELLED = "Cancelled: the turn was stopped before it finished."
 """The answer of a cancelled turn, and the result of each tool call it cut off, which the model sees later in the conversation."""
 
+RETURNED_UNRECORDED = (
+    "Done, but the turn was stopped before this call's result was recorded: it did happen, so check its "
+    "effect before doing it again."
+)
+"""The result of a tool call cut off by a stopped turn after its Restate call had returned successfully."""
+
+
+def cut_off_result(outcomes: dict[str, str | None], call_id: str, text: str) -> str:
+    """Return what a stopped turn records as the result of the tool call ``call_id``, which has none.
+
+    A call whose Restate call returned is not reported as ``text`` (cancelled, say): the model would take
+    it for undone, and repeat its effect. It gets the error it returned, or ``RETURNED_UNRECORDED``.
+    """
+    if call_id not in outcomes:
+        return text
+    failed = outcomes[call_id]
+    return failed if failed is not None else RETURNED_UNRECORDED
+
+
 UNANSWERED = "Unanswered: the model's provider refused the request."
 """The stored answer of a prompt that the model's provider refused for good.
 

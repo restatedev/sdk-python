@@ -152,6 +152,30 @@ async def test_a_message_is_answered_and_the_conversation_read_and_followed(harn
     assert [m["id"] for m in newer["messages"]] == [2, 3]
 
 
+async def test_a_sync_that_waited_returns_every_change_its_revision_counts(harness: HarnessEnvironment):
+    key = str(uuid.uuid4())
+    await call(harness, "chat", key, "Hi")
+    synced = (await call(harness, "sync", key, {})).json()
+    timeout = 20
+    started = asyncio.get_running_loop().time()
+
+    async def follow() -> list[int]:
+        # As a client follows: each sync waits for a revision newer than the last one it got.
+        state, seen = synced, []
+        while 3 not in seen:
+            request = {"revision": state["revision"], "cursor": state["cursor"], "timeoutSeconds": timeout}
+            state = (await call(harness, "sync", key, request)).json()
+            seen += [message["id"] for message in state["messages"]]
+        return seen
+
+    following = asyncio.ensure_future(follow())
+    await asyncio.sleep(0.5)  # the first sync waits
+    await call(harness, "chat", key, "Again")
+    assert 2 in await following and 3 in following.result()
+    # Every message came with the revision that counted it: no sync had to time out to bring it.
+    assert asyncio.get_running_loop().time() - started < timeout
+
+
 async def test_status_says_which_message_is_answered_and_stop_cancels_it(harness: HarnessEnvironment):
     key = str(uuid.uuid4())
     gate.clear()

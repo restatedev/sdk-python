@@ -110,6 +110,9 @@ class FutureSelector:
         self._task: asyncio.Task[None] | None = None
         # True between the VM's WaitExternalProgress and the next input.
         self._waiting: bool = False
+        # True when a wait was registered after the loop took its snapshot of the pending waits: the loop
+        # then takes another pass instead of waiting for input, which might never come for that wait.
+        self._missed: bool = False
         # Why the attempt ended, once it has; each later wait raises a fresh instance.
         self._end: Callable[[], BaseException] | None = None
 
@@ -142,10 +145,12 @@ class FutureSelector:
             self._task = asyncio.create_task(self._loop())
             self._driver.track(self._task)
         elif self._waiting:
-            # Only a loop that waits for input needs waking, and only once; otherwise
-            # the loop picks up the new wait on its next pass.
+            # A loop that waits for input needs waking, once.
             self._waiting = False
             self._driver.wake()
+        else:
+            # A loop between passes (flushing output, say) may have taken its snapshot already.
+            self._missed = True
 
     def _settle(self) -> None:
         for waiter, future in self._waits.items():
@@ -172,6 +177,7 @@ class FutureSelector:
                 # waits, so that one check covers them. This is only an
                 # optimization: a later registration wakes the loop anyway.
                 await asyncio.sleep(0)
+                self._missed = False
                 pending = [future for waiter, future in self._waits.items() if not waiter.done()]
                 if not pending:
                     return
@@ -196,6 +202,8 @@ class FutureSelector:
                     driver.execute_run(response.handle)
                     continue
                 if isinstance(response, DoProgressWaitExternalProgress):
+                    if self._missed:
+                        continue
                     self._waiting = True
                     await driver.flush_output()
                     chunk = await driver.receive()

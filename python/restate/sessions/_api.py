@@ -237,8 +237,15 @@ class Transaction(DatabaseWriter, Sender, Protocol):
     """One transaction of a ``Database``: its SQL, and the sends it commits with.
 
     ``tx.send`` sends right after the transaction commits, and never if it
-    rolls back. A send without an ``idempotency_key`` gets one from the
-    transaction, so a send that a retried attempt makes again is dropped.
+    rolls back. Each committed send goes out once: if the process fails after
+    the commit but before the send, the next attempt makes it, under the same
+    idempotency key, and Restate drops any duplicate.
+
+    A retried attempt that runs the transaction's body again commits a new
+    transaction, with sends of its own. To send once across attempts, give the
+    send an ``idempotency_key`` that is the same on every attempt (one made
+    from ``ctx.request.id``, say), or skip the body when its rows show that it
+    already ran.
     """
 
 

@@ -50,6 +50,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import PrivateAttr
 
+from restate.agents._calls import outcomes
 from restate.agents._common import (
     CANCELLED,
     MODEL_ENV,
@@ -57,6 +58,7 @@ from restate.agents._common import (
     ModelError,
     PerSession,
     configured,
+    cut_off_result,
     from_tool,
     model_of,
     next_prompt_id,
@@ -244,11 +246,11 @@ async def _answer_once(
         except TerminalError as error:
             # Cancelled: close the run, so that the next prompt starts afresh.
             if error.status_code == _CANCELLATION:
-                await _close(app, config, CANCELLED)
+                await _close(ctx, app, config, CANCELLED)
                 raise
             # Failed for good (a LangChain tool's terminal error): close the run with the error, so that the next
             # prompt does not run into it again. If the run was an earlier prompt's, carry on with this one.
-            await _close(app, config, f"Error: {error.message}")
+            await _close(ctx, app, config, f"Error: {error.message}")
             if not interrupted or last == prompt_id:
                 raise
         except Exception as error:
@@ -257,12 +259,12 @@ async def _answer_once(
             refused = refusal_of(ctx, error)
             if refused is None:
                 raise
-            await _close(app, config, UNANSWERED)
+            await _close(ctx, app, config, UNANSWERED)
             if not interrupted or last == prompt_id:
                 raise refused from error
 
 
-async def _close(app: Compiled, config: RunnableConfig, text: str) -> None:
+async def _close(ctx: SessionContext, app: Compiled, config: RunnableConfig, text: str) -> None:
     """Close a cancelled, refused or failed run of ``app`` with ``text``, as its ``answer`` node would.
 
     Each tool call of the last reply that has no result gets ``text`` as its
@@ -278,8 +280,12 @@ async def _close(app: Compiled, config: RunnableConfig, text: str) -> None:
     answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
     last = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
     calls = [c for c in (last.tool_calls if last else []) if c.get("id") and c.get("id") not in answered]
+    returned = await outcomes(ctx, [str(c.get("id")) for c in calls])
     closing: list[BaseMessage] = [
-        *(ToolMessage(text, tool_call_id=str(c.get("id")), status="error") for c in calls),
+        *(
+            ToolMessage(cut_off_result(returned, str(c.get("id")), text), tool_call_id=str(c.get("id")), status="error")
+            for c in calls
+        ),
         AIMessage(text),
     ]
     await app.aupdate_state(config, {"messages": closing, "answers": {prompt: text}}, as_node="answer")

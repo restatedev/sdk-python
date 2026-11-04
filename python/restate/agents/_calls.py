@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import typing
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from restate.sessions import SessionContext
@@ -165,3 +165,14 @@ async def settle(ctx: SessionContext, stored: Callable[[str, str | None], bool])
         return
     state.calls = kept
     await _store(ctx, state)
+
+
+async def outcomes(ctx: SessionContext, call_ids: Iterable[str]) -> dict[str, str | None]:
+    """Return which of ``call_ids`` made a Restate call that returned in this invocation.
+
+    Each such id maps to the terminal error the call returned (``Error: <message>``), or to ``None`` if
+    it succeeded. A tool call whose Restate call has not returned, or that made none, is left out.
+    """
+    _, state = await _calls_of(ctx)
+    wanted = set(call_ids)
+    return {i: call.get("failed") for call in state.calls if call.get("done") for i in call["ids"] if i in wanted}

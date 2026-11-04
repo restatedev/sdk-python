@@ -398,10 +398,13 @@ def _followed(agent: AgentObject) -> None:
         if revision is not None:
             watch: Watch = {"revision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)}
             await _companion(ctx, _signals.watch, "watch")(watch)
-        # Read the revision first, so that any change after it shows up in the next sync.
+        # Read the revision first, then the page in an invocation of its own, which starts after it: a view
+        # reads the database as committed when it started, and this one started before the revision (by
+        # the whole wait, when it waited). So the page has every change the revision counts.
         now = await _companion(ctx, _signals.notifications)()
         status = await _companion(ctx, _signals.status)()
-        page = await _log.page(ctx.db, {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)})
+        wanted: MessagesRequest = {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)}
+        page = await ctx.call(messages, wanted, key=ctx.key)
         synced: Synced = {**page, "revision": now["revision"], "status": status}
         return synced
 
