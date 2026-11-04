@@ -42,26 +42,23 @@ async def greet(ctx: restate.Context, name: str) -> str:
 app = restate.app(services=[greeter])
 ```
 
-`restate.app(...)` returns an ASGI application, so it can be served by any ASGI server.
-
-With [Hypercorn](https://github.com/pgjones/hypercorn):
-
-```shell
-pip install hypercorn
-python -m hypercorn app:app --bind "0.0.0.0:9080"
-```
-
-Or start it from code:
+Serve it with `restate.serve`, which needs the `serve` extra (`pip install "restate-sdk[serve]"`,
+Python 3.11 or later). It listens on `$PORT`, or 9080, with the HTTP/2 that Restate connects with, and
+stops on SIGINT or SIGTERM:
 
 ```python
 if __name__ == "__main__":
     import asyncio
-    import hypercorn
-    import hypercorn.asyncio
 
-    conf = hypercorn.Config()
-    conf.bind = ["0.0.0.0:9080"]
-    asyncio.run(hypercorn.asyncio.serve(app, conf))
+    asyncio.run(restate.serve(app))
+```
+
+`restate.app(...)` returns an ASGI application, so any ASGI server can serve it instead, for example
+[Hypercorn](https://github.com/pgjones/hypercorn), which also works on Python 3.10:
+
+```shell
+pip install hypercorn
+python -m hypercorn app:app --bind "0.0.0.0:9080"
 ```
 
 Once served, register the deployment with `restate deployments register http://localhost:9080`.

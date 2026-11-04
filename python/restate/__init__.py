@@ -44,6 +44,7 @@ from .asyncio import as_completed, gather, wait_completed, select
 
 from .endpoint import app
 from .connection import connect, with_connection, ConnectError
+from .serving import serve
 
 from .logging import getLogger, RestateLoggingFilter
 
@@ -114,6 +115,7 @@ __all__ = [
     "JournalValueCodecProvider",
     "app",
     "connect",
+    "serve",
     "with_connection",
     "ConnectError",
     "create_test_harness",
