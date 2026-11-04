@@ -31,7 +31,6 @@ An integration needs, beyond the public API:
 from restate.agents._common import (
     CANCELLED,
     CHECK_MODEL,
-    CLAUDE_MODEL,
     DEFAULT_MODEL,
     MODEL_ENV,
     REFUSED,
@@ -39,7 +38,6 @@ from restate.agents._common import (
     MessageSerde,
     ModelError,
     ToolError,
-    check_model_name,
     configured,
     from_tool,
     model_id_of,
@@ -68,7 +66,6 @@ from restate.agents._turn import (
 __all__ = [
     "CANCELLED",
     "CHECK_MODEL",
-    "CLAUDE_MODEL",
     "DEFAULT_MODEL",
     "MODEL_ENV",
     "REFUSED",
@@ -87,7 +84,6 @@ __all__ = [
     "ToolError",
     "Transcript",
     "answer_once",
-    "check_model_name",
     "close",
     "companion_of",
     "configured",

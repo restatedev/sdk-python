@@ -38,7 +38,6 @@ import importlib
 import os
 import typing
 from collections.abc import Callable, Sequence
-from datetime import timedelta
 from typing import Annotated, Any, TypedDict
 
 from langchain_core import messages as langchain_messages
@@ -60,11 +59,13 @@ from pydantic import PrivateAttr
 
 from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
 from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
-from restate.agents._object import RETRIES, AgentObject
+from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import tool_call_ended, tool_call_started
-from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import Migration, SessionContext
+from restate.sessions import SessionContext
+
+if typing.TYPE_CHECKING:
+    from typing_extensions import Unpack
 
 
 class State(TypedDict):
@@ -299,14 +300,7 @@ def agent(
     model: PerSession[ChatModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
-    description: str | None = None,
-    migrations: Sequence[Migration] = (),
-    background: bool = False,
-    metadata: dict[str, str] | None = None,
-    inactivity_timeout: timedelta | None = None,
-    abort_timeout: timedelta | None = None,
-    ingress_private: bool | None = None,
-    invocation_retry_policy: InvocationRetryPolicy | None = RETRIES,
+    **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a LangGraph agent: a virtual object with one conversation per key.
 
@@ -329,15 +323,8 @@ def agent(
             else ``"openai/gpt-6-sol"``.
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.
-        description: The object's description, shown in Restate's UI.
-        migrations: Tables of your own, beside the agent's.
-        background: Whether it works unwatched (a subagent, say): it then
-            publishes its progress once a turn ends, not at each step.
-        metadata: The object's metadata.
-        inactivity_timeout: Restate's inactivity timeout for its handlers.
-        abort_timeout: Restate's abort timeout for its handlers.
-        ingress_private: Whether only other services may call it.
-        invocation_retry_policy: How Restate retries a failed turn.
+        **options: The object's options, such as ``description``,
+            ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
     Returns:
         The agent, to serve with ``restate.serve(sessions.app(agent))``, or any ASGI server.
@@ -347,17 +334,7 @@ def agent(
     """
     if model is None or isinstance(model, str):
         _provider_of_model(model_of(model))
-    obj = AgentObject(
-        name,
-        description=description,
-        migrations=migrations,
-        background=background,
-        metadata=metadata,
-        inactivity_timeout=inactivity_timeout,
-        abort_timeout=abort_timeout,
-        ingress_private=ingress_private,
-        invocation_retry_policy=invocation_retry_policy,
-    )
+    obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> str:
         return await prompt(

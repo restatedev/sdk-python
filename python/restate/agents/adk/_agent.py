@@ -35,8 +35,8 @@ from __future__ import annotations
 
 import json
 import time
+import typing
 from collections.abc import Callable, Sequence
-from datetime import timedelta
 from typing import Any
 
 from google.adk.agents import BaseAgent, LlmAgent
@@ -52,14 +52,25 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
-from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
+from restate.agents._common import (
+    MODEL_ENV,
+    ModelError,
+    PerSession,
+    check_own,
+    configured,
+    from_tool,
+    model_of,
+    provider_of,
+)
 from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
-from restate.agents._object import RETRIES, AgentObject
+from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
-from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import Migration, SessionContext
+from restate.sessions import SessionContext
+
+if typing.TYPE_CHECKING:
+    from typing_extensions import Unpack
 
 AnyModel = str | BaseLlm
 """A model: ``"google/<model-id>"`` (a Gemini model), or a model of ADK (``LiteLlm(...)`` for others)."""
@@ -356,11 +367,6 @@ def _run(ctx: SessionContext, app: App) -> Run:
 # --- The API --------------------------------------------------------------------------------------
 
 
-def _check(own: BaseAgent | App | None, system: object) -> None:
-    if own is not None and system is not None:
-        raise TypeError("an agent of your own has its own instruction: pass no system")
-
-
 async def prompt(
     ctx: SessionContext,
     text: str,
@@ -398,7 +404,7 @@ async def prompt(
     Raises:
         TypeError: If both ``agent`` and ``system`` are given.
     """
-    _check(agent, system)
+    check_own(agent, system)
     app = _app(ctx, agent, model, system, tools)
     return await answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app))
 
@@ -411,14 +417,7 @@ def agent(
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
-    description: str | None = None,
-    migrations: Sequence[Migration] = (),
-    background: bool = False,
-    metadata: dict[str, str] | None = None,
-    inactivity_timeout: timedelta | None = None,
-    abort_timeout: timedelta | None = None,
-    ingress_private: bool | None = None,
-    invocation_retry_policy: InvocationRetryPolicy | None = RETRIES,
+    **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create an ADK agent: a virtual object with one conversation per key.
 
@@ -444,15 +443,8 @@ def agent(
             ``$RESTATE_AGENT_MODEL`` if it is Google's.
         system: The instruction, when there is no ``adk_agent``.
         tools: ``restate.agents`` tools, or ADK's.
-        description: The object's description, shown in Restate's UI.
-        migrations: Tables of your own, beside the agent's.
-        background: Whether it works unwatched (a subagent, say): it then
-            publishes its progress once a turn ends, not at each step.
-        metadata: The object's metadata.
-        inactivity_timeout: Restate's inactivity timeout for its handlers.
-        abort_timeout: Restate's abort timeout for its handlers.
-        ingress_private: Whether only other services may call it.
-        invocation_retry_policy: How Restate retries a failed turn.
+        **options: The object's options, such as ``description``,
+            ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
     Returns:
         The agent, to serve with ``restate.serve(sessions.app(agent))``, or any ASGI server.
@@ -461,20 +453,10 @@ def agent(
         TypeError: If both ``adk_agent`` and ``system`` are given.
         TerminalError: If there is no model, or ``model`` names a provider other than Google.
     """
-    _check(adk_agent, system)
+    check_own(adk_agent, system)
     if adk_agent is None and (model is None or isinstance(model, str)):
         _model(model)
-    obj = AgentObject(
-        name,
-        description=description,
-        migrations=migrations,
-        background=background,
-        metadata=metadata,
-        inactivity_timeout=inactivity_timeout,
-        abort_timeout=abort_timeout,
-        ingress_private=ingress_private,
-        invocation_retry_policy=invocation_retry_policy,
-    )
+    obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> str:
         return await prompt(

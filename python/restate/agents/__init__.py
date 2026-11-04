@@ -67,12 +67,13 @@ from restate.agents._api import (
     Watch,
 )
 from restate.agents._common import PerSession
-from restate.agents._object import AgentObject, Synced, SyncRequest
+from restate.agents._object import AgentObject, AgentOptions, Synced, SyncRequest
 from restate.agents._tools import Tool, ToolCall, call, send, subagent, tool, wait_for_signal, workflow
 from restate.agents._webhook import Event, webhook, webhook_message
 
 __all__ = [
     "AgentObject",
+    "AgentOptions",
     "ChatMessage",
     "Event",
     "Messages",

@@ -58,6 +58,38 @@ weeks. The first retry comes soon after a crash, and each wait doubles, up to
 second.
 """
 
+
+class AgentOptions(TypedDict, total=False):
+    """The options of an agent's object, which every framework's ``agent()`` takes as keyword arguments.
+
+    Attributes:
+        description: The object's description, shown in Restate's UI.
+        migrations: Tables of your own, beside the agent's.
+        background: Whether the agent works unwatched (a subagent, say): it
+            then publishes its progress once a turn ends, not at each step.
+        metadata: The object's metadata.
+        inactivity_timeout: Restate's inactivity timeout for its handlers.
+        abort_timeout: Restate's abort timeout for its handlers.
+        journal_retention: How long Restate keeps an invocation's journal.
+        idempotency_retention: How long Restate keeps the result of an
+            invocation that has an idempotency key.
+        ingress_private: Whether only other services may call it.
+        invocation_retry_policy: How Restate retries a failed turn. Defaults
+            to ``RETRIES``.
+    """
+
+    description: str | None
+    migrations: Sequence[Migration]
+    background: bool
+    metadata: dict[str, str] | None
+    inactivity_timeout: timedelta | None
+    abort_timeout: timedelta | None
+    journal_retention: timedelta | None
+    idempotency_retention: timedelta | None
+    ingress_private: bool | None
+    invocation_retry_policy: InvocationRetryPolicy | None
+
+
 WAITS = timedelta(minutes=5)
 """The inactivity timeout of the views that wait (``watch``, ``sync`` and ``clear``).
 

@@ -43,7 +43,6 @@ import dataclasses
 import json
 import typing
 from collections.abc import Awaitable, Sequence
-from datetime import timedelta
 from typing import Any
 
 from agents import (
@@ -66,14 +65,16 @@ from agents.run import CallModelData, ModelInputData
 from agents.tool_context import ToolContext
 from pydantic_core import to_json
 
-from restate.agents._common import PerSession, configured, from_tool, model_id_of, model_of
+from restate.agents._common import PerSession, check_own, configured, from_tool, model_id_of, model_of
 from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
-from restate.agents._object import RETRIES, AgentObject
+from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
-from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import Migration, SessionContext
+from restate.sessions import SessionContext
+
+if typing.TYPE_CHECKING:
+    from typing_extensions import Unpack
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"openai/<model-id>"`` (or the model id alone), or a model of the SDK."""
@@ -356,11 +357,6 @@ def _model(model: AnyModel | None) -> str | Model:
 # --- The API --------------------------------------------------------------------------------------
 
 
-def _check(own: Agent[Any] | None, system: object) -> None:
-    if own is not None and system is not None:
-        raise TypeError("an Agent of your own has its own instructions: pass no system")
-
-
 async def prompt(
     ctx: SessionContext,
     text: str,
@@ -399,7 +395,7 @@ async def prompt(
     Raises:
         TypeError: If both ``agent`` and ``system`` are given.
     """
-    _check(agent, system)
+    check_own(agent, system)
 
     return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
 
@@ -412,14 +408,7 @@ def agent(
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
-    description: str | None = None,
-    migrations: Sequence[Migration] = (),
-    background: bool = False,
-    metadata: dict[str, str] | None = None,
-    inactivity_timeout: timedelta | None = None,
-    abort_timeout: timedelta | None = None,
-    ingress_private: bool | None = None,
-    invocation_retry_policy: InvocationRetryPolicy | None = RETRIES,
+    **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create an OpenAI Agents SDK agent: a virtual object with one conversation per key.
 
@@ -448,15 +437,8 @@ def agent(
             ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
         system: The instructions, when there is no ``openai_agent``.
         tools: ``restate.agents`` tools, or tools of the SDK.
-        description: The object's description, shown in Restate's UI.
-        migrations: Tables of your own, beside the agent's.
-        background: Whether it works unwatched (a subagent, say): it then
-            publishes its progress once a turn ends, not at each step.
-        metadata: The object's metadata.
-        inactivity_timeout: Restate's inactivity timeout for its handlers.
-        abort_timeout: Restate's abort timeout for its handlers.
-        ingress_private: Whether only other services may call it.
-        invocation_retry_policy: How Restate retries a failed turn.
+        **options: The object's options, such as ``description``,
+            ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
     Returns:
         The agent, to serve with ``restate.serve(sessions.app(agent))``, or any ASGI server.
@@ -465,20 +447,10 @@ def agent(
         TypeError: If both ``openai_agent`` and ``system`` are given.
         TerminalError: If ``model`` names a provider other than OpenAI.
     """
-    _check(openai_agent, system)
+    check_own(openai_agent, system)
     if isinstance(model, str) or (model is None and openai_agent is None):
         _model(model)
-    obj = AgentObject(
-        name,
-        description=description,
-        migrations=migrations,
-        background=background,
-        metadata=metadata,
-        inactivity_timeout=inactivity_timeout,
-        abort_timeout=abort_timeout,
-        ingress_private=ingress_private,
-        invocation_retry_policy=invocation_retry_policy,
-    )
+    obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> str:
         return await prompt(
