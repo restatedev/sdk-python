@@ -81,6 +81,8 @@ class Workflow:
             otherwise the service discovery will fail.
         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
         invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this workflow.
+        explicit_recovery (bool, optional): (Preview) Explicit recovery for all handlers of this workflow:
+            see the handler option of the same name. NOTE: in preview, it might change without notice.
         explicit_cancellation (bool, optional): (Preview) Explicit cancellation for all handlers of this workflow:
             see the handler option of the same name. NOTE: in preview, it might change without notice.
     """
@@ -103,6 +105,7 @@ class Workflow:
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
     ):
         self.service_tag = ServiceTag("workflow", name, description, metadata)
@@ -117,7 +120,7 @@ class Workflow:
         self.ingress_private = ingress_private
         self.invocation_retry_policy = invocation_retry_policy
         self.context_managers = invocation_context_managers
-        self.explicit_recovery = False
+        self.explicit_recovery = explicit_recovery
         self.explicit_cancellation = explicit_cancellation
 
     @property
@@ -146,6 +149,7 @@ class Workflow:
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
     ) -> typing.Callable[[T], T]:
         """
@@ -191,6 +195,12 @@ class Workflow:
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
+            explicit_recovery: (Preview) If true, a retried or resumed invocation does not replay its journal:
+                the handler runs again from the start, executing every context operation anew. So each
+                attempt's calls and sends are new requests (give them an idempotency key that is the same on
+                every attempt, such as one made from ``ctx.request().id``), ``ctx.run`` runs its action again
+                on every attempt, and awakeables are not supported.
+                NOTE: in preview, it might change without notice.
             explicit_cancellation: (Preview) If true, Restate cancelling an invocation neither fails the handler's
                 awaits nor cancels its calls: the handler awaits `restate._preview.cancellation(ctx)` and decides
                 what to stop. NOTE: in preview, it might change without notice.
@@ -213,6 +223,7 @@ class Workflow:
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
             invocation_context_managers=invocation_context_managers,
+            explicit_recovery=explicit_recovery,
             explicit_cancellation=explicit_cancellation,
         )
 
@@ -235,6 +246,7 @@ class Workflow:
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
     ) -> typing.Callable[[T], T]:
         """
@@ -281,6 +293,12 @@ class Workflow:
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
             invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this handler.
+            explicit_recovery: (Preview) If true, a retried or resumed invocation does not replay its journal:
+                the handler runs again from the start, executing every context operation anew. So each
+                attempt's calls and sends are new requests (give them an idempotency key that is the same on
+                every attempt, such as one made from ``ctx.request().id``), ``ctx.run`` runs its action again
+                on every attempt, and awakeables are not supported.
+                NOTE: in preview, it might change without notice.
             explicit_cancellation: (Preview) If true, Restate cancelling an invocation neither fails the handler's
                 awaits nor cancels its calls: the handler awaits `restate._preview.cancellation(ctx)` and decides
                 what to stop. NOTE: in preview, it might change without notice.
@@ -303,6 +321,7 @@ class Workflow:
             ingress_private,
             invocation_retry_policy,
             invocation_context_managers,
+            explicit_recovery=explicit_recovery,
             explicit_cancellation=explicit_cancellation,
         )
 
@@ -328,6 +347,7 @@ class Workflow:
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
     ) -> typing.Callable[[T], T]:
         """
@@ -423,6 +443,7 @@ class Workflow:
                 ingress_private=ingress_private,
                 invocation_retry_policy=invocation_retry_policy,
                 context_managers=combined_context_managers,
+                explicit_recovery=explicit_recovery,
                 explicit_cancellation=explicit_cancellation,
             )
             if handler.name in self.handlers:
