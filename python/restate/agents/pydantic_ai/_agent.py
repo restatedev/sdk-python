@@ -31,7 +31,6 @@ stored:
 from __future__ import annotations
 
 import typing
-import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from typing import Any
@@ -205,7 +204,7 @@ class _Restate(AbstractCapability[Any]):
         self, ctx: RunContext[Any], *, request_context: ModelRequestContext, response: ModelResponse
     ) -> ModelResponse:
         await self.store(ctx.messages)
-        await self.conversation.append(_item(response), reply=uuid.uuid4().hex)
+        await self.conversation.append_reply(_item(response))
         return response
 
     async def before_tool_execute(

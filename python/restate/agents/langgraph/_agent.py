@@ -37,7 +37,6 @@ from __future__ import annotations
 import importlib
 import os
 import typing
-import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from typing import Annotated, Any, TypedDict
@@ -216,7 +215,7 @@ def _graph(
     async def call_model(state: State) -> dict[str, Any]:
         messages = state["messages"]
         reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
-        await conversation.append(_item(reply), reply=uuid.uuid4().hex)
+        await conversation.append_reply(_item(reply))
         return {"messages": [reply]}
 
     async def run_tools(state: State, config: RunnableConfig) -> Any:

@@ -43,7 +43,6 @@ import contextvars
 import dataclasses
 import json
 import typing
-import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from typing import Any
@@ -148,7 +147,7 @@ def _outputs(conversation: Conversation, items: Sequence[Any]) -> list[Item]:
     ]
 
 
-def _final(conversation: Conversation, reply: str) -> str | None:
+def _final(conversation: Conversation, reply: int) -> str | None:
     """Return the text of the model's reply ``reply`` if it ends its run: a message, and no tool calls."""
     items = conversation.reply_items(reply)
     if any(ITEMS.calls(item) for item in items):
@@ -220,7 +219,7 @@ class _Hooks(RunHooks[Any]):
 
     async def on_llm_end(self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse) -> None:
         reply = typing.cast(list[Item], response.to_input_items())
-        await self.conversation.append(*reply, reply=uuid.uuid4().hex, agent=agent.name)
+        await self.conversation.append_reply(*reply, agent=agent.name)
 
     async def on_tool_start(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool) -> None:
         await tool_call_started(self.ctx)

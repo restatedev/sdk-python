@@ -12,8 +12,8 @@
 
 The conversation is one table of the framework's own items (its messages, as
 JSON), one row each, in order. A prompt's item carries the prompt's id, and
-its answer once there is one; a model reply's items carry the reply's id and
-the agent that gave it. Rows are only ever appended, but for a reply that is
+its answer once there is one; a model reply's items carry the reply's id (the
+position of its first item) and the agent that gave it. Rows are only ever appended, but for a reply that is
 dropped (to ask the model again), and a prompt's answer is one update of its
 row.
 
@@ -55,7 +55,7 @@ SCHEMA = Schema(
             item TEXT NOT NULL,
             prompt TEXT UNIQUE,
             answer TEXT,
-            reply TEXT,
+            reply INTEGER,
             agent TEXT
         )""",
         "CREATE INDEX restate_agent_conversation_reply ON restate_agent_conversation (reply)",
@@ -74,8 +74,8 @@ class Entry:
     """The id of the prompt it is, if it is one."""
     answer: str | None = None
     """The prompt's answer, once it has one."""
-    reply: str | None = None
-    """The id of the model's reply it is part of, if it is."""
+    reply: int | None = None
+    """The id of the model's reply it is part of, if it is: the position of the reply's first item."""
     agent: str | None = None
     """The agent that gave the reply."""
 
@@ -155,15 +155,15 @@ class Conversation:
         prompt = next((e for e in reversed(self.entries) if e.prompt is not None), None)
         return prompt if prompt is not None and prompt.answer is None else None
 
-    def last_reply(self) -> str | None:
+    def last_reply(self) -> int | None:
         """Return the id of the model's reply that the conversation ends with, if it ends with one."""
         return self.entries[-1].reply if self.entries else None
 
-    def reply_items(self, reply: str) -> list[Item]:
+    def reply_items(self, reply: int) -> list[Item]:
         """Return the items of the model's reply ``reply``."""
         return [e.item for e in self.entries if e.reply == reply]
 
-    def agent_of(self, reply: str) -> str | None:
+    def agent_of(self, reply: int) -> str | None:
         """Return the agent that gave the model's reply ``reply``."""
         return next((e.agent for e in self.entries if e.reply == reply), None)
 
@@ -193,16 +193,22 @@ class Conversation:
 
     # --- Writing ---
 
-    async def append(self, *items: Item, reply: str | None = None, agent: str | None = None) -> None:
-        """Append ``items``, as part of the model's reply ``reply`` (given by ``agent``) if they are one, in one transaction."""
-        start = self.entries[-1].n + 1 if self.entries else 0
-        added = [Entry(n, item, reply=reply, agent=agent) for n, item in enumerate(items, start=start)]
-        await self._insert(added)
+    async def append(self, *items: Item) -> None:
+        """Append ``items`` (a tool's results, say), in one transaction."""
+        await self._insert([Entry(n, item) for n, item in enumerate(items, start=self._next())])
+
+    async def append_reply(self, *items: Item, agent: str | None = None) -> int:
+        """Append the model's reply, of ``items`` (given by ``agent``), in one transaction, and return its id."""
+        reply = self._next()
+        await self._insert([Entry(n, item, reply=reply, agent=agent) for n, item in enumerate(items, start=reply)])
+        return reply
+
+    def _next(self) -> int:
+        return self.entries[-1].n + 1 if self.entries else 0
 
     async def ask(self, prompt_id: str, text: str) -> None:
         """Append prompt ``prompt_id``, with ``text``."""
-        n = self.entries[-1].n + 1 if self.entries else 0
-        await self._insert([Entry(n, self.items.prompt(text), prompt=prompt_id)])
+        await self._insert([Entry(self._next(), self.items.prompt(text), prompt=prompt_id)])
 
     async def answered(self, prompt_id: str, answer: str) -> None:
         """Store ``answer`` as the answer of prompt ``prompt_id``."""
@@ -211,7 +217,7 @@ class Conversation:
             if entry.prompt == prompt_id:
                 entry.answer = answer
 
-    async def drop(self, reply: str) -> None:
+    async def drop(self, reply: int) -> None:
         """Drop the items of the model's reply ``reply``, to ask the model again."""
         await self.db.execute("DELETE FROM restate_agent_conversation WHERE reply = ?", [reply])
         self.entries = [e for e in self.entries if e.reply != reply]
@@ -235,9 +241,17 @@ class Conversation:
 async def _entries(db: DatabaseReader) -> list[Entry]:
     rows = await db.values("SELECT n, item, prompt, answer, reply, agent FROM restate_agent_conversation ORDER BY n")
     return [
-        Entry(int(typing.cast(int, n)), json.loads(str(item)), *(None if v is None else str(v) for v in rest))
-        for n, item, *rest in rows
+        Entry(int(typing.cast(int, n)), json.loads(str(item)), _str(prompt), _str(answer), _int(reply), _str(agent))
+        for n, item, prompt, answer, reply, agent in rows
     ]
+
+
+def _str(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _int(value: object) -> int | None:
+    return None if value is None else int(typing.cast(int, value))
 
 
 # --- Answering a prompt ---------------------------------------------------------------------------

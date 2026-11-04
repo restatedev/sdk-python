@@ -86,7 +86,7 @@ async def test_a_prompt_is_answered_once_and_a_retry_returns_the_stored_answer()
 
     async def run(conversation: Conversation) -> str:
         runs.append("ran")
-        await conversation.append({"role": "assistant", "text": "hello"}, reply="r1")
+        await conversation.append_reply({"role": "assistant", "text": "hello"})
         return "hello"
 
     ask, invocation = asking(run), request()
@@ -102,7 +102,7 @@ async def test_a_failed_run_is_closed_with_its_error_and_the_next_prompt_starts_
         seen.append([entry.item for entry in conversation.entries])
         if len(seen) == 1:
             call = {"id": "c1", "name": "lookup", "input": {}}
-            await conversation.append({"role": "assistant", "text": "", "calls": [call]}, reply="r1")
+            await conversation.append_reply({"role": "assistant", "text": "", "calls": [call]})
             raise restate.TerminalError("boom")
         return "fine"
 
@@ -139,7 +139,7 @@ async def test_the_transcript_follows_appends_and_drops():
     async def run(conversation: Conversation) -> str:
         transcript = conversation.transcript()  # built now, then kept up to date
         call = {"id": "c1", "name": "lookup", "input": {"q": 1}}
-        await conversation.append({"role": "assistant", "text": "looking", "calls": [call]}, reply="r1")
+        await conversation.append_reply({"role": "assistant", "text": "looking", "calls": [call]})
         await conversation.append({"result": "c1", "output": "found"})
         assert transcript.messages()[-1]["parts"][-1] == {
             "type": "tool",
@@ -148,8 +148,9 @@ async def test_the_transcript_follows_appends_and_drops():
             "input": {"q": 1},
             "output": "found",
         }
-        await conversation.append({"role": "assistant", "text": "blocked"}, reply="r2")
-        await conversation.drop("r2")
+        blocked = await conversation.append_reply({"role": "assistant", "text": "blocked"})
+        assert blocked == conversation.entries[-1].n  # a reply's id: the position of its first item
+        await conversation.drop(blocked)
         texts = [part.get("text") for message in conversation.transcript().messages() for part in message["parts"]]
         assert "blocked" not in texts
         return "done"
