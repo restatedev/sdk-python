@@ -12,19 +12,16 @@
 ``app``: the ASGI app of a program's services, with what they need beside them
 (a library's objects, such as an agent's ``signals``). As sdk-sessions'
 ``serve.ts``; serving it is the program's (hypercorn, uvicorn...), as for
-``restate.app``.
+``restate.app``, or ``serve``'s.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import importlib
 import os
-import signal
+import re
 import typing
-from collections.abc import Callable, Coroutine, Iterable, Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Sequence
 
 import restate
 from restate.entry_codec import JournalValueCodec, JournalValueCodecProvider
@@ -112,49 +109,36 @@ def serve(
         if __name__ == "__main__":
             sessions.serve(wallet, handle)
 
-    It runs them on hypercorn, imported here: install it, or serve ``app``'s
-    ASGI app with a server of your own.
+    It runs them on uvicorn's HTTP/2 (cleartext, as Restate calls them),
+    imported here: install the ``serve`` extra (uvicorn 0.53 or later, and
+    zttp; Python 3.11 or later), or serve ``app``'s ASGI app with a server of
+    your own. It stops on SIGINT or SIGTERM, within a few seconds.
     """
     try:
-        hypercorn_asyncio = importlib.import_module("hypercorn.asyncio")
-        hypercorn_config = importlib.import_module("hypercorn.config")
+        uvicorn = importlib.import_module("uvicorn")
+        importlib.import_module("zttp")
     except ImportError as error:
-        raise ImportError(
-            "sessions.serve runs on hypercorn: install it, or serve sessions.app(...) with an ASGI server of your own"
-        ) from error
-    config: Any = hypercorn_config.Config()
-    config.bind = [f"0.0.0.0:{port or int(os.environ.get('PORT', '9080'))}"]
-    # Restate keeps its connections open and streams many invocations over each.
-    config.h2_max_concurrent_streams = 2147483647
-    config.keep_alive_max_requests = 2147483647
-    config.keep_alive_timeout = 2147483647
-    served_app = app(*services, identity_keys=identity_keys, journal_value_codec=journal_value_codec)
-    run = typing.cast(Callable[..., Coroutine[Any, Any, None]], hypercorn_asyncio.serve)
-    asyncio.run(_until_stopped(run, served_app, config))
+        raise ImportError(_NO_SERVER) from error
+    version = re.match(r"(\d+)\.(\d+)", str(getattr(uvicorn, "__version__", "")))
+    if version is None or (int(version[1]), int(version[2])) < (0, 53):
+        raise ImportError(_NO_SERVER)
+    config = uvicorn.Config(
+        app(*services, identity_keys=identity_keys, journal_value_codec=journal_value_codec),
+        host="0.0.0.0",
+        port=port or int(os.environ.get("PORT", "9080")),
+        http="zttp",
+        http2=True,
+        # The endpoint has no lifespan; and a graceful shutdown would wait for Restate's open connections.
+        lifespan="off",
+        timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN,
+    )
+    uvicorn.Server(config).run()
 
 
-async def _until_stopped(run: Callable[..., Coroutine[Any, Any, None]], served_app: Any, config: Any) -> None:
-    """
-    Serve until SIGINT or SIGTERM, then shut down: gracefully, but not for
-    longer than hypercorn's graceful timeout and a little more. A graceful
-    shutdown waits for every open connection to close, and Restate keeps its
-    own open.
-    """
-    loop = asyncio.get_running_loop()
-    stop = asyncio.Event()
-    for name in ("SIGINT", "SIGTERM"):
-        with contextlib.suppress(NotImplementedError, AttributeError):
-            loop.add_signal_handler(getattr(signal, name), stop.set)
-    serving = asyncio.ensure_future(run(served_app, config, shutdown_trigger=stop.wait))
-    stopping = asyncio.ensure_future(stop.wait())
-    await asyncio.wait({serving, stopping}, return_when=asyncio.FIRST_COMPLETED)
-    stopping.cancel()
-    if serving.done():
-        serving.result()
-        return
-    try:
-        await asyncio.wait_for(asyncio.shield(serving), timeout=float(config.graceful_timeout) + 2)
-    except asyncio.TimeoutError:
-        serving.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await serving
+_NO_SERVER = (
+    "sessions.serve runs on uvicorn's HTTP/2: install restate_sdk[serve] (uvicorn 0.53 or later, and zttp; "
+    "Python 3.11 or later), or serve sessions.app(...) with an ASGI server of your own"
+)
+
+_GRACEFUL_SHUTDOWN = 3
+"""Seconds a stopping ``serve`` waits for the requests in flight, which Restate retries elsewhere."""

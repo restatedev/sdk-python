@@ -10,7 +10,8 @@ examples. Each is a file that runs on its own.
 ## Run an example
 
 From the repository's root, once (it builds the SDK, with its native
-extension):
+extension, and installs the `serve` extra the examples run on: uvicorn's
+HTTP/2, on Python 3.11 or later):
 
 ```sh
 uv sync --all-extras --all-packages

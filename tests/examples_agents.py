@@ -14,7 +14,11 @@
 
 import asyncio
 import importlib.util
+import os
 import pathlib
+import signal
+import subprocess
+import sys
 import typing
 import uuid
 from collections.abc import AsyncGenerator
@@ -26,6 +30,7 @@ import pytest
 
 import restate
 from restate import sessions
+from restate.harness import RestateContainer, find_free_port
 
 
 @pytest.fixture(scope="session")
@@ -140,3 +145,44 @@ async def test_basic_notes():
     async with serving("basic/notes.py") as ingress:
         await ingress.post("notes/alice/add", "Buy milk")
         assert (await ingress.post("notes/alice/list")).json() == ["Buy milk"]
+
+
+def serves_http2() -> bool:
+    """Whether ``sessions.serve`` can run here: uvicorn 0.53+ with zttp."""
+    return importlib.util.find_spec("uvicorn") is not None and importlib.util.find_spec("zttp") is not None
+
+
+@pytest.mark.skipif(not serves_http2(), reason="sessions.serve needs the serve extra (Python 3.11+)")
+async def test_an_example_as_a_program():
+    """``uv run`` an example: it serves on PORT, Restate calls it over HTTP/2, and it stops on SIGTERM."""
+    port = find_free_port()
+    program = subprocess.Popen(
+        [sys.executable, str(EXAMPLES / "basic/notes.py")],
+        env={**os.environ, "PORT": str(port)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    container = RestateContainer("ghcr.io/restatedev/restate:latest", always_replay=False, disable_retries=False)
+    try:
+        container.start()
+        async with httpx.AsyncClient(base_url=container.admin_url(), timeout=30) as admin:
+            uri = f"http://host.docker.internal:{port}"
+            registered = await admin.post("/deployments", json={"uri": uri, "force": True})
+            for _ in range(100):  # until the program serves
+                if registered.status_code < 300:
+                    break
+                await asyncio.sleep(0.1)
+                registered = await admin.post("/deployments", json={"uri": uri, "force": True})
+            assert registered.status_code < 300, registered.text
+            deployment = (await admin.get(f"/deployments/{registered.json()['id']}")).json()
+            assert deployment.get("http_version") == "HTTP/2.0", deployment
+        ingress = Ingress(container.ingress_url())
+        await ingress.post("notes/alice/add", "Buy milk")
+        assert (await ingress.post("notes/alice/list")).json() == ["Buy milk"]
+    finally:
+        container.stop()
+        program.send_signal(signal.SIGTERM)
+        try:
+            program.wait(timeout=10)
+        finally:
+            program.kill()
