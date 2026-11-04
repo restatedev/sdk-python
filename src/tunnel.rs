@@ -6,7 +6,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use restate_sdk_shared_core::cloud_keys::{IngressKey, KeyError, INGRESS_KEY_ENV, INGRESS_KEY_URL};
+use restate_sdk_shared_core::cloud_keys::{IngressKey, KeyError, INGRESS_KEY_URL};
 use restate_sdk_shared_core::tunnel::{
     self, ConfigSource, ConnectOptions, ReconnectPolicy, Servers, Tuning, TunnelEngine,
     TunnelEngineOptions,
@@ -279,7 +279,7 @@ impl PyIngressKey {
     fn from_env() -> PyResult<Option<Self>> {
         IngressKey::from_env()
             .map(|key| key.map(Self::from))
-            .map_err(|error| ConnectError::new_err(key_error(INGRESS_KEY_ENV, &error)))
+            .map_err(|error| ConnectError::new_err(error.to_string()))
     }
 
     /// `https://<id>.env.<region>:8080`

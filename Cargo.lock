@@ -1552,7 +1552,7 @@ dependencies = [
 [[package]]
 name = "restate-sdk-shared-core"
 version = "8.3.0"
-source = "git+https://github.com/restatedev/sdk-shared-core?branch=cloud-exp-revamp#1fd7910b3542b5ed566c10ef79d041b360b9c86d"
+source = "git+https://github.com/restatedev/sdk-shared-core?branch=cloud-exp-revamp#7fbd30d6b219a3540de7f9cfa68f9c643904dca0"
 dependencies = [
  "base64",
  "bs58",
