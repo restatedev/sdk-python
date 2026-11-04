@@ -96,7 +96,7 @@ async with restate.with_connection(app, name="greeter-v1") as connection:
 
 ### Clients
 
-`restate.create_client()` without a URL connects to Restate Cloud using the ingress key in
+`restate.create_client()` without a URL connects to Restate Cloud using the ingress key in `RESTATE_INGRESS_KEY`, copied from the
 [Cloud UI -> Development → Configure SDK](https://cloud.restate.dev/to/developers/integration#configure-sdk).
 
 ## Versions
