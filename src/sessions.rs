@@ -73,22 +73,27 @@ struct SqlReply {
 
 #[pymethods]
 impl SqlReply {
+    /// A value that is none of those fails the request, with why.
     #[pyo3(signature = (value, error=None))]
-    fn __call__(&self, value: Option<Bound<'_, PyAny>>, error: Option<String>) -> PyResult<()> {
+    fn __call__(&self, value: Option<Bound<'_, PyAny>>, error: Option<String>) {
         let answer = match (error, value) {
             (Some(error), _) => Err(error),
             (None, None) => Ok(Answer::Nothing),
-            (None, Some(value)) => Ok(if value.is_instance_of::<PyList>() {
-                Answer::Keys(value.extract()?)
-            } else {
-                Answer::Value(Bytes::from(bytes_of(&value)?))
-            }),
+            (None, Some(value)) => answer_of(&value).map_err(|e| e.to_string()),
         };
         let sender = self.sender.lock().ok().and_then(|mut sender| sender.take());
         if let Some(sender) = sender {
             let _ = sender.send(answer);
         }
-        Ok(())
+    }
+}
+
+/// A request's answer from the value the store gave: its keys (a list), or a value read.
+fn answer_of(value: &Bound<'_, PyAny>) -> PyResult<Answer> {
+    if value.is_instance_of::<PyList>() {
+        Ok(Answer::Keys(value.extract()?))
+    } else {
+        Ok(Answer::Value(Bytes::from(bytes_of(value)?)))
     }
 }
 

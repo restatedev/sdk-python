@@ -181,16 +181,21 @@ class _ObjectStore:
     def clear(self, key: str) -> None:
         self._host.clear(self._key(key))
 
-    async def keys(self) -> list[str]:
-        """The database's keys, for a garbage collection."""
-        keys = await _until_attempt_end(self._host, self._host.state_keys())
-        if self._name is None:
-            return keys
+    def keys(self) -> Awaitable[list[str]]:
+        """The database's keys, for a garbage collection: listed now."""
+        listing = _until_attempt_end(self._host, self._host.state_keys())
         name = self._name
-        return [own for own in (_unbeside(name, key) for key in keys) if own is not None]
+        if name is None:
+            return listing
 
-    async def sync(self) -> None:
-        await _until_attempt_end(self._host, self._host.sync())
+        async def own() -> list[str]:
+            return [own for own in (_unbeside(name, key) for key in await listing) if own is not None]
+
+        return own()
+
+    def sync(self) -> Awaitable[None]:
+        """Done once every write before it is stored: the run is made now, in order with them."""
+        return _until_attempt_end(self._host, self._host.sync())
 
 
 class _ReaderStore:
@@ -504,6 +509,11 @@ class _Session:
         """Its connection, or none if the open failed; the attempt's end no longer closes it."""
         try:
             db: Connection | None = await asyncio.shield(self.ready)
+        except asyncio.CancelledError:
+            # Ours, as the task awaiting is cancelled, unless the open itself was.
+            if not self.ready.cancelled():
+                raise
+            db = None
         except BaseException:  # pylint: disable=broad-exception-caught
             db = None
         self._release()

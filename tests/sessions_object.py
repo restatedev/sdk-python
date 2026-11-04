@@ -416,3 +416,24 @@ def test_a_handler_or_view_is_named_after_its_function_or_as_its_option_says():
 
     assert sorted(named.handlers) == ["peek", "put"]
     assert named.handlers["peek"].kind == "shared"
+
+
+async def test_the_object_store_issues_its_sync_and_listing_when_called():
+    from restate.sessions._session import _ObjectStore  # pylint: disable=import-outside-toplevel
+
+    issued: list[str] = []
+
+    class Counting(Host):
+        def state_keys(self):  # type: ignore[override]
+            issued.append("keys")
+            return super().state_keys()
+
+        def sync(self):  # type: ignore[override]
+            issued.append("sync")
+            return super().sync()
+
+    store = _ObjectStore(Counting(Backend()), "other")
+    sync, keys = store.sync(), store.keys()
+    assert issued == ["sync", "keys"]
+    await sync
+    assert await keys == []
