@@ -315,7 +315,19 @@ def test_an_agent_of_your_own_takes_no_system():
 # --- In process -----------------------------------------------------------------------------------
 
 
-async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatch: pytest.MonkeyPatch):
+def final_response(event: Any) -> bool:
+    return event.author != "user" and event.is_final_response() and event.content is not None
+
+
+def end_of_agent(event: Any) -> bool:
+    """The event a resumable app stores once an agent is done, after its final response: it has no content."""
+    return bool(event.actions and event.actions.end_of_agent)
+
+
+@pytest.mark.parametrize("crash_after", [final_response, end_of_agent])
+async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(
+    monkeypatch: pytest.MonkeyPatch, crash_after: Callable[[Any], bool]
+):
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
     from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
 
@@ -338,7 +350,7 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
 
     async def store_then_crash_once(self: Any, session: Any, event: Any) -> Any:
         stored = await append_event(self, session, event)
-        if event.author != "user" and event.is_final_response() and event.content and not crashed:
+        if crash_after(event) and not crashed:
             crashed.append(True)
             raise RuntimeError("the process crashed after storing the answer")
         return stored
@@ -358,3 +370,39 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
     host = Host(backend, service="asker", answers={"publish": b"null"})
     assert await invoke(asker, "ask", host, invocation, "hi") == "answer 1"
     assert replies == ["asked"]
+
+
+async def test_an_app_of_your_own_keeps_its_plugins_and_gets_this_packages_tools():
+    from google.adk.apps import App  # pylint: disable=import-outside-toplevel
+    from google.adk.plugins import BasePlugin  # pylint: disable=import-outside-toplevel
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    requests: list[str] = []
+
+    class Counting(BasePlugin):
+        async def before_model_callback(self, *, callback_context: Any, llm_request: Any) -> None:
+            requests.append(callback_context.agent_name)
+
+    mine = App(
+        name="mine",
+        root_agent=LlmAgent(name="mine", model=Scripted(), instruction="Mine."),
+        plugins=[Counting("counting")],
+    )
+    asker = sessions.SessionObject("asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await adk.prompt(ctx, text, agent=mine, tools=[get_weather])
+
+    backend = Backend()
+
+    async def asked(text: str) -> Any:
+        return await invoke(asker, "ask", Host(backend, service="asker", answers={"publish": b"null"}), request(), text)
+
+    assert await asked("system x") == "system: Mine."
+    assert await asked("weather Rome") == "tool said: sunny in Rome"
+    # The app's own plugin saw each model request: one, then two (the tool call, then the answer).
+    assert requests == ["mine", "mine", "mine"]

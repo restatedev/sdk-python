@@ -295,8 +295,13 @@ def _app(
 
 
 def _final(conversation: Conversation) -> str | None:
-    """Return the text of the agent's final response, if the run that the conversation ends with has one."""
-    last = _event(conversation.entries[-1].item) if conversation.entries else None
+    """Return the text of the agent's final response, if the run that the conversation ends with has one.
+
+    The events without content after it (a resumable app's agent states, which mark the agent done) are
+    passed over: with them stored, ADK would end the invocation at once, without the response.
+    """
+    events = (_event(entry.item) for entry in reversed(conversation.entries))
+    last = next((event for event in events if event.content is not None), None)
     if last is None or last.author == "user" or last.get_function_calls() or not last.is_final_response():
         return None
     return _text(last) or None
