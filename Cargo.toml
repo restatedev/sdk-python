@@ -16,7 +16,15 @@ pyo3 = { version = "0.30.1", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.30", features = ["tokio-runtime"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-restate-sdk-shared-core = { version = "8.3.0", features = ["request_identity", "sha2_random_seed", "rust_crypto", "tunnel"] }
+# The feature `sql` is the sessions' storage: the SQLite-compatible database kept in an
+# object's state, with its page cache (foyer); `tunnel` is Restate Cloud's.
+restate-sdk-shared-core = { version = "8.3.0", features = [
+    "request_identity",
+    "sha2_random_seed",
+    "rust_crypto",
+    "tunnel",
+    "sql",
+] }
 
 # ASGI bridge for the tunnel
 bytes = "1.10"
