@@ -8,7 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""LangGraph agents as session objects, with checkpoints stored in the object's database.
+"""LangGraph agents as session objects, with each conversation stored in its key's database.
 
 For example::
 

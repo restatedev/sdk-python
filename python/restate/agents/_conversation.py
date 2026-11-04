@@ -32,19 +32,24 @@ from __future__ import annotations
 import json
 import typing
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from restate.agents._calls import outcomes
-from restate.agents._common import CANCELLED, UNANSWERED, cut_off_result, next_prompt_id, refusal_of, stored_answer
+from restate.agents._common import (
+    CANCELLATION,
+    CANCELLED,
+    UNANSWERED,
+    cut_off_result,
+    next_prompt_id,
+    refusal_of,
+    stored_answer,
+)
 from restate.agents._transcript import Transcript
 from restate.agents._turn import AttemptEnded, stop_signal_of, transcribing
 from restate.exceptions import TerminalError
 from restate.sessions import Database, DatabaseReader, SessionContext
 from restate.sessions.internal import Schema
-
-_CANCELLATION = 409
-"""The status code of Restate's cancellation error, which a stopped turn fails with."""
 
 Item: typing.TypeAlias = Any
 """An item of the conversation: a framework's message, as JSON (a dict, mostly)."""
@@ -68,6 +73,22 @@ SCHEMA = Schema(
 )
 
 
+class Call(typing.NamedTuple):
+    """A tool call that an item makes."""
+
+    id: str
+    name: str
+    input: Any
+
+
+class Result(typing.NamedTuple):
+    """A tool call's result that an item holds."""
+
+    id: str
+    output: str
+    error: bool = False
+
+
 @dataclass
 class Entry:
     """An item of the conversation, with what it is part of."""
@@ -83,22 +104,10 @@ class Entry:
     """The id of the model's reply it is part of, if it is: the position of the reply's first item."""
     agent: str | None = None
     """The agent that gave the reply."""
-
-
-class Call(typing.NamedTuple):
-    """A tool call that an item makes."""
-
-    id: str
-    name: str
-    input: Any
-
-
-class Result(typing.NamedTuple):
-    """A tool call's result that an item holds."""
-
-    id: str
-    output: str
-    error: bool = False
+    calls: list[Call] = field(default_factory=list[Call])
+    """The tool calls it makes, read from ``item`` once, as the conversation loads or appends it."""
+    results: list[Result] = field(default_factory=list[Result])
+    """The tool calls' results it holds, read from ``item`` once."""
 
 
 class Items(Protocol):
@@ -133,16 +142,29 @@ class Conversation:
     """The conversation in the key's database, loaded once and kept in step with it.
 
     It is read from memory; ``append``, ``answered`` and ``drop`` write to the
-    database and to memory alike.
+    database and to memory alike. Each item is read (its calls and results)
+    once, as it is loaded or appended.
     """
 
     def __init__(self, db: Database, items: Items, entries: list[Entry]) -> None:
         self.db = db
         self.items = items
-        self.entries = entries
+        self.entries: list[Entry] = []
+        self._results: set[str] = set()
+        """The ids of the tool calls that have a result."""
         self._transcript: Transcript | None = None
         self.closed = False
         """Whether a stop closed the run: the run, unwinding, then stores nothing more."""
+        self._add(entries)
+
+    def _add(self, entries: list[Entry]) -> None:
+        for entry in entries:
+            entry.calls = self.items.calls(entry.item)
+            entry.results = self.items.results_of(entry.item)
+            self._results.update(result.id for result in entry.results)
+            if self._transcript is not None:
+                self._transcribe(entry)
+        self.entries.extend(entries)
 
     @classmethod
     async def load(cls, db: Database, items: Items) -> Conversation:
@@ -165,36 +187,54 @@ class Conversation:
         """Return the id of the model's reply that the conversation ends with, if it ends with one."""
         return self.entries[-1].reply if self.entries else None
 
-    def reply_items(self, reply: int) -> list[Item]:
-        """Return the items of the model's reply ``reply``."""
-        return [e.item for e in self.entries if e.reply == reply]
-
     def agent_of(self, reply: int) -> str | None:
         """Return the agent that gave the model's reply ``reply``."""
         return next((e.agent for e in self.entries if e.reply == reply), None)
 
+    def has_result(self, call_id: str) -> bool:
+        """Return whether tool call ``call_id`` has a result."""
+        return call_id in self._results
+
     def unanswered(self) -> list[Call]:
         """Return the tool calls of the conversation that have no result."""
-        answered = {result.id for e in self.entries for result in self.items.results_of(e.item)}
-        return [call for e in self.entries for call in self.items.calls(e.item) if call.id not in answered]
+        return [call for e in self.entries for call in e.calls if call.id not in self._results]
+
+    def new_results(self, items: Sequence[Item]) -> list[Item]:
+        """Return the items of ``items`` (a framework's run) that hold a tool call's result the conversation lacks.
+
+        Results are found by their calls' ids, not by their place: what a
+        framework hands back may be trimmed, or be the whole conversation again.
+        """
+        return [item for item in items if any(r.id not in self._results for r in self.items.results_of(item))]
+
+    def final_reply(self) -> str | None:
+        """Return the text of the model's reply the conversation ends with, if it ends the run: text, and no tool calls."""
+        reply = self.last_reply()
+        if reply is None:
+            return None
+        entries = [e for e in self.entries if e.reply == reply]
+        if any(e.calls for e in entries):
+            return None
+        said = [said for e in entries if (said := self.items.said(e.item)) is not None]
+        return said[-1][1] if said else None
 
     def transcript(self) -> Transcript:
         """Return the conversation in the form the ``messages`` view returns, kept up to date as items are appended."""
         if self._transcript is None:
             self._transcript = Transcript()
             for entry in self.entries:
-                self._transcribe(entry.item)
+                self._transcribe(entry)
         return self._transcript
 
-    def _transcribe(self, item: Item) -> None:
+    def _transcribe(self, entry: Entry) -> None:
         transcript = self.transcript()
-        said = self.items.said(item)
+        said = self.items.said(entry.item)
         if said is not None:
             role, text = said
             transcript.say("user" if role == "user" else "assistant", text)
-        for call in self.items.calls(item):
+        for call in entry.calls:
             transcript.call(call.id, call.name, call.input)
-        for result in self.items.results_of(item):
+        for result in entry.results:
             transcript.result(result.id, result.output, result.error)
 
     # --- Writing ---
@@ -227,6 +267,7 @@ class Conversation:
         """Drop the items of the model's reply ``reply``, to ask the model again."""
         await self.db.execute(f"DELETE FROM {TABLE} WHERE reply = ?", [reply])
         self.entries = [e for e in self.entries if e.reply != reply]
+        self._results = {result.id for e in self.entries for result in e.results}
         self._transcript = None
 
     async def _insert(self, added: list[Entry]) -> None:
@@ -238,10 +279,7 @@ class Conversation:
                     f"INSERT INTO {TABLE} (n, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?)",
                     [e.n, json.dumps(e.item), e.prompt, e.reply, e.agent],
                 )
-        self.entries.extend(added)
-        if self._transcript is not None:
-            for e in added:
-                self._transcribe(e.item)
+        self._add(added)
 
 
 async def _entries(db: DatabaseReader) -> list[Entry]:
@@ -324,7 +362,7 @@ async def _answer(ctx: SessionContext, conversation: Conversation, text: str, ru
             # The attempt ended: stop here, and let the next attempt continue the run.
             raise
         except TerminalError as error:
-            if error.status_code == _CANCELLATION:
+            if error.status_code == CANCELLATION:
                 # Cancelled: close the run, so that the next prompt starts afresh.
                 await close(ctx, conversation, CANCELLED)
                 conversation.closed = True

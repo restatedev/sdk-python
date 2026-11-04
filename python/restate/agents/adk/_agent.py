@@ -33,10 +33,9 @@ its stored events:
 
 from __future__ import annotations
 
-import contextvars
 import json
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -54,9 +53,9 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
 from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
-from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
 from restate.agents._object import RETRIES, AgentObject
-from restate.agents._tools import Tool, ToolCall
+from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.retry_policy import InvocationRetryPolicy
@@ -67,9 +66,6 @@ AnyModel = str | BaseLlm
 
 AnyTool = Tool | BaseTool | Callable[..., Any]
 """A tool: one made with ``restate.agents`` (``tool``, ``call``, ``wait_for_signal``, ...), or ADK's (functions too)."""
-
-_SESSION: contextvars.ContextVar[SessionContext] = contextvars.ContextVar("restate_agents_adk_session")
-"""The context of the run in progress, for the ``restate.agents`` tools that it calls."""
 
 _USER = "restate"
 """The user of every session: the conversation is the object's key."""
@@ -227,7 +223,7 @@ class _AdkTool(BaseTool):
         )
 
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
-        return await self.tool.run(args, ToolCall(_SESSION.get(), tool_context.function_call_id or ""))
+        return await self.tool.run(args, current_call(tool_context.function_call_id or ""))
 
 
 def tools(given: Sequence[AnyTool]) -> list[Any]:
@@ -252,11 +248,11 @@ def _model(model: AnyModel | None) -> str | BaseLlm:
     """
     if isinstance(model, BaseLlm):
         return model
-    if model is None and not provider_of(model_of(None))[0] == "google":
+    named = model_of(model, fallback="")
+    if not named:
         raise ModelError(
             f"an ADK agent needs a model: model='google/<model-id>', an ADK model (LiteLlm(...)), or {MODEL_ENV}"
         )
-    named = model_of(model)
     provider, model_id = provider_of(named)
     if provider not in ("google", "") or not model_id:
         raise ModelError(f'the model "{named}" is not google/<model-id>: pass an ADK model (LiteLlm(...)) for another')
@@ -334,7 +330,7 @@ def _answers(root: BaseAgent, name: str) -> bool:
     return True
 
 
-def _run(ctx: SessionContext, app: App) -> Callable[[Conversation], Awaitable[str]]:
+def _run(ctx: SessionContext, app: App) -> Run:
     """Return the run of a prompt: ADK's runner, resuming the prompt's invocation."""
 
     async def run(conversation: Conversation) -> str:
@@ -345,17 +341,13 @@ def _run(ctx: SessionContext, app: App) -> Callable[[Conversation], Awaitable[st
         invocation = _event(running.item).invocation_id if running is not None else None
         runner = Runner(app=app, session_service=_Sessions(conversation))
         answer = ""
-        session = _SESSION.set(ctx)
-        try:
-            events = runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation)
-            async for event in events:
+        with tools_in(ctx):
+            async for event in runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation):
                 if event.error_code:
                     # The model would not answer (a safety block, say), as it would not again: the prompt fails.
                     raise TerminalError(f"the model returned {event.error_code}: {event.error_message or ''}")
-                if event.author != "user" and event.is_final_response() and (text := _text(event)):
+                if _is_final(event) and (text := _text(event)):
                     answer = text
-        finally:
-            _SESSION.reset(session)
         return answer
 
     return run

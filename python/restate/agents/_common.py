@@ -153,6 +153,9 @@ class MessageSerde(Serde[str]):
         return (obj or "").encode()
 
 
+CANCELLATION = 409
+"""The status code of Restate's cancellation error, which a stopped turn fails with."""
+
 CANCELLED = "Cancelled: the turn was stopped before it finished."
 """The answer of a cancelled turn, and the result of each tool call it cut off, which the model sees later in the conversation."""
 

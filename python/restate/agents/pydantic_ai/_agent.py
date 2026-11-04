@@ -31,7 +31,7 @@ stored:
 from __future__ import annotations
 
 import typing
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -54,17 +54,14 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai import Tool as PydanticTool
-from restate.agents._common import ModelError, PerSession, configured, from_tool, model_of, provider_of
-from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
+from restate.agents._common import CANCELLATION, ModelError, PerSession, configured, from_tool, model_of, provider_of
+from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
 from restate.agents._object import RETRIES, AgentObject
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.retry_policy import InvocationRetryPolicy
 from restate.sessions import Migration, SessionContext
-
-_CANCELLATION = 409
-"""The status code of Restate's cancellation error, which a stopped turn fails with."""
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"<provider>/<model-id>"`` (or Pydantic AI's ``"<provider>:<model-id>"``), or a Pydantic AI model."""
@@ -189,8 +186,7 @@ class _Restate(AbstractCapability[Any]):
         processor (``ProcessHistory``) may have trimmed the run's messages, and
         what it makes of them is the model's to see, not the conversation's.
         """
-        stored = {result.id for entry in self.conversation.entries for result in ITEMS.results_of(entry.item)}
-        new = [message for message in messages if _result_ids(message) - stored]
+        new = [m for m in messages if any(not self.conversation.has_result(i) for i in _result_ids(m))]
         if new:
             await self.conversation.append(*(_item(message) for message in new))
 
@@ -225,7 +221,7 @@ class _Restate(AbstractCapability[Any]):
         stop = stop_signal_of(self.ctx)
         if stop is not None and stop.reason is not None:
             raise stop.reason from error
-        if isinstance(error, TerminalError) and error.status_code != _CANCELLATION:
+        if isinstance(error, TerminalError) and error.status_code != CANCELLATION:
             await tool_call_ended(self.ctx)
             return f"Error: {error.message}"
         # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
@@ -255,7 +251,7 @@ def _run(
     named: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
-) -> Callable[[Conversation], Awaitable[str]]:
+) -> Run:
     """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer."""
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
@@ -263,11 +259,10 @@ def _run(
     toolsets = [_toolset(given, ctx)] if given else []
 
     async def run(conversation: Conversation) -> str:
-        history = [_message(entry.item) for entry in conversation.entries]
-        last = history[-1]
-        if isinstance(last, ModelResponse) and not last.tool_calls:
+        if (final := conversation.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
-            return _text(last)
+            return final
+        history = [_message(entry.item) for entry in conversation.entries]
         restate = _Restate(ctx, conversation)
         result = await agent.run(message_history=history, model=model, toolsets=toolsets, capabilities=[restate])
         # The messages that no model request stored: an output tool's return, say.

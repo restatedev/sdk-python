@@ -37,7 +37,7 @@ from __future__ import annotations
 import importlib
 import os
 import typing
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import timedelta
 from typing import Annotated, Any, TypedDict
 
@@ -59,7 +59,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import PrivateAttr
 
 from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
-from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
 from restate.agents._object import RETRIES, AgentObject
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import tool_call_ended, tool_call_started
@@ -242,19 +242,16 @@ def _graph(
     return graph.compile()
 
 
-def _run(
-    ctx: SessionContext, model: ChatModel | None, system: str | None, given: Sequence[AnyTool]
-) -> Callable[[Conversation], Awaitable[str]]:
+def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given: Sequence[AnyTool]) -> Run:
     """Return the run of a prompt: the graph, from the conversation to the prompt's answer."""
     chat_model = model if isinstance(model, BaseChatModel) else _chat_model(model_of(model))
     tools = [_native(t, ctx) if isinstance(t, Tool) else t for t in given]
 
     async def run(conversation: Conversation) -> str:
-        messages = [_message(entry.item) for entry in conversation.entries]
-        last = messages[-1]
-        if isinstance(last, AIMessage) and not last.tool_calls:
+        if (final := conversation.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
-            return _text(last)
+            return final
+        messages = [_message(entry.item) for entry in conversation.entries]
         graph = _graph(ctx, conversation, chat_model, tools, system)
         state = typing.cast(State, await graph.ainvoke({"messages": messages}))
         return _text(state["messages"][-1])
@@ -314,8 +311,8 @@ def agent(
     """Create a LangGraph agent: a virtual object with one conversation per key.
 
     Its ``chat`` handler answers each message with LangGraph's tool-calling
-    loop; LangGraph's checkpoints are kept in the key's database. Add
-    handlers of your own with ``@assistant.handler``::
+    loop; the conversation is kept in the key's database, a step at a time.
+    Add handlers of your own with ``@assistant.handler``::
 
         assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
 
