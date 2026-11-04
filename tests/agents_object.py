@@ -18,12 +18,14 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 import httpx
+import pydantic
 import pytest
 
 import restate
 from restate import HarnessEnvironment, sessions
 from restate.agents._api import Messages, Status
 from restate.agents._object import AgentObject
+from restate.agents._tools import ToolCall, run_tool, signal
 from restate.agents._transcript import Transcript
 from restate.agents._turn import stop_signal_of, transcribing
 
@@ -39,6 +41,13 @@ pytestmark = [pytest.mark.anyio]
 class AuthenticationError(Exception):
     """As a model SDK names the error of a missing or wrong API key."""
 
+
+class Refund(pydantic.BaseModel):
+    order: str
+    amount: float
+
+
+approval = signal("approval", description="Wait for a manager to approve a refund.", input=Refund)
 
 # A scripted framework: it keeps each key's transcript in this process, and answers with an echo.
 transcripts: dict[str, Transcript] = {}
@@ -59,6 +68,15 @@ async def answer(ctx: sessions.SessionContext, text: str) -> str:
             await stop.guard(gate.wait())
         if text == "refuse":
             raise AuthenticationError("invalid x-api-key")
+        if text.startswith("refund "):
+            # A tool call: the model asks for an approval, and waits for it.
+            call_id = f"call-{text.split()[1]}"
+            args = {"order": text.split()[1], "amount": 5}
+            transcript.call(call_id, approval.name, args)
+            result = await run_tool(approval, args, ToolCall(ctx, call_id))
+            transcript.result(call_id, result)
+            transcript.say("assistant", f"refund: {result}")
+            return f"refund: {result}"
         transcript.say("assistant", f"echo: {text}")
         return f"echo: {text}"
 
@@ -171,3 +189,24 @@ async def test_a_refused_message_fails_with_424_and_the_next_is_answered(harness
     assert refused.status_code == 424
     assert (await call(harness, "status", key)).json()["answering"] is None
     assert (await call(harness, "chat", key, "fine")).json() == "echo: fine"
+
+
+async def test_a_tool_waits_for_a_signal_which_the_agents_signal_view_resolves(harness: HarnessEnvironment):
+    key = str(uuid.uuid4())
+    invocation = await send(harness, key, "refund o7")
+
+    async def waiting() -> bool:
+        return len((await call(harness, "pending", key)).json()) == 1
+
+    await until(waiting)
+    [wait] = (await call(harness, "pending", key)).json()
+    assert wait["name"] == "approval" and wait["input"] == {"order": "o7", "amount": 5}
+    assert wait["id"] == f"{invocation}:call-o7"
+    assert (await call(harness, "signal", key, {"name": "approval", "value": "approved"})).json() == {
+        "resolved": wait["id"]
+    }
+    assert (await attach(harness, invocation)).json() == "refund: approved"
+    page = (await call(harness, "messages", key, {})).json()
+    [tool_call] = page["messages"][1]["parts"]
+    assert tool_call["name"] == "wait_for_approval" and tool_call["output"] == "approved"
+    assert (await call(harness, "pending", key)).json() == []
