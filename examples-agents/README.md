@@ -75,9 +75,9 @@ real application keeps its data across releases.
 | [`07_calls.py`](tutorial/07_calls.py)              | Calling another object, with an idempotency key               |
 | [`08_sends.py`](tutorial/08_sends.py)              | Transfers: a send that is delivered only if the debit commits |
 
-A third part, agents in the wallet (a prompt, an assistant and its tools, a
-person in the loop, a subagent), is not written yet. Until then, the agent
-examples under [Basic](#basic) show the agents' framework integrations.
+A third part, agents in the wallet, is not written yet. Until then, the
+examples under [Basic](#basic) show each framework's agent, and those under
+[Intermediate](#intermediate) put agents to work with Restate.
 
 ## Basic
 
@@ -87,6 +87,21 @@ examples under [Basic](#basic) show the agents' framework integrations.
 | [`langgraph_agent.py`](basic/langgraph_agent.py) | A LangGraph agent: its conversation in the key's database |
 | [`pydantic_ai_agent.py`](basic/pydantic_ai_agent.py) | A Pydantic AI agent: its conversation in the key's database |
 | [`openai_agent.py`](basic/openai_agent.py) | An OpenAI Agents SDK agent: its conversation in the key's database |
+
+## Intermediate
+
+One of Restate's patterns at a time: agents whose tools are Restate itself,
+a person in the loop, agents in workflows, and teams of agents on different
+frameworks. A tool such as `call`, `send`, `workflow`, `subagent` or
+`wait_for_signal` works with every framework.
+
+| File                                            | What                                                                                                    |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| [`support.py`](intermediate/support.py)         | A support agent whose tools are Restate itself: a service call, a manager's approval (a signal) and a refund workflow |
+| [`followup.py`](intermediate/followup.py)       | An agent that schedules a check-in for a day later: `send` with a delay                                 |
+| [`team.py`](intermediate/team.py)               | A team on three frameworks: an editor (OpenAI) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI), with `subagent` |
+| [`router.py`](intermediate/router.py)           | A front desk of your own: a handler asks a model which team handles a message (`prompt`), then calls that team's agent |
+| [`triage.py`](intermediate/triage.py)           | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review         |
 
 ## Tips
 
