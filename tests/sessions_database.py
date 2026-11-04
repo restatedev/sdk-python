@@ -549,3 +549,10 @@ async def test_a_listing_that_fails_ends_the_session_after_the_commit_that_colle
     assert not db.is_usable()
     reopened = await open(ns, backend.request())
     assert await reopened.values("SELECT count(*) FROM t") == [[committed]]
+
+
+async def test_a_store_that_answers_with_the_wrong_type_fails_the_request_with_why():
+    store = Backend().request()
+    store.get = lambda key: "not bytes"  # type: ignore[method-assign,assignment,return-value]
+    with pytest.raises(RuntimeError, match="expected bytes, got str"):
+        await open(fresh(), store)
