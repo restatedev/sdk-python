@@ -25,20 +25,29 @@ O = typing.TypeVar("O")
 
 
 class Link(typing.Generic[T]):
-    """A link of one kind, on the objects that have one: compared by identity, kept as long as the object is."""
+    """
+    A link of one kind, on the objects that have one: compared by identity,
+    kept as long as the object is. A value that refers to its owner (an
+    attempt, to its database) would keep both forever, as a link holds its
+    value: ``weak`` holds it weakly, for the owner to keep it alive.
+    """
 
-    def __init__(self, what: str) -> None:
+    def __init__(self, what: str, *, weak: bool = False) -> None:
         self.what: str = what
-        self._links: weakref.WeakKeyDictionary[object, T] = weakref.WeakKeyDictionary()
+        self._weak: bool = weak
+        self._links: weakref.WeakKeyDictionary[object, T | weakref.ref[typing.Any]] = weakref.WeakKeyDictionary()
 
     def on(self, owner: O, value: T) -> O:
         """``owner``, linked to ``value``: once, as it is made."""
-        self._links[owner] = value
+        self._links[owner] = weakref.ref(value) if self._weak else value
         return owner
 
     def of(self, owner: object) -> T | None:
         """What ``owner`` is linked to, if it has this link (and None for anything that cannot have one)."""
         try:
-            return self._links.get(owner)
+            value = self._links.get(owner)
         except TypeError:
             return None
+        if self._weak and isinstance(value, weakref.ref):
+            return typing.cast("T | None", value())
+        return typing.cast("T | None", value)

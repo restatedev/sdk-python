@@ -23,6 +23,7 @@ import pytest
 
 import restate
 from restate import HarnessEnvironment, sessions
+from restate.sessions import internal
 from restate.sessions import _object, _session
 
 
@@ -146,10 +147,10 @@ async def nap(ctx: restate.Context) -> str:
 async def stoppable(ctx: sessions.SessionContext, text: str) -> list[str]:
     """Waits for a nap; cancelled, it cancels the nap, records that it stopped, and answers the calls it cancelled."""
     napping = asyncio.ensure_future(ctx.rpc(nap)())
-    stopping = asyncio.ensure_future(sessions.cancelled(ctx))
+    stopping = asyncio.ensure_future(internal.cancelled(ctx))
     await asyncio.wait({napping, stopping}, return_when=asyncio.FIRST_COMPLETED)
     assert stopping.done()
-    cancelled = await sessions.cancel_calls(ctx)
+    cancelled = await internal.cancel_calls(ctx)
     await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [f"stopped: {text}"])
     return cancelled
 
@@ -157,7 +158,7 @@ async def stoppable(ctx: sessions.SessionContext, text: str) -> list[str]:
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([inbox, pricing, sleeper, notes]), restate_image="ghcr.io/restatedev/restate:latest"
+        sessions.app(inbox, pricing, sleeper, notes), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
