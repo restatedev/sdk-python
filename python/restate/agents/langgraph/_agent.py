@@ -35,6 +35,7 @@ in the object's database instead.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import typing
 from collections.abc import Callable, Sequence
@@ -145,35 +146,31 @@ _to_dict = typing.cast(Callable[[BaseMessage], Item], langchain_messages.message
 _from_dicts = typing.cast(Callable[[list[Item]], list[BaseMessage]], langchain_messages.messages_from_dict)
 
 
-def _item(message: BaseMessage) -> Item:
-    return _to_dict(message)
-
-
-def _message(item: Item) -> BaseMessage:
-    [message] = _from_dicts([item])
-    return message
-
-
 def _text(message: BaseMessage) -> str:
     return str(message.text)
 
 
 class _Items:
-    """LangChain's messages, as the conversation keeps them."""
+    """LangChain's messages, as the conversation keeps them: stored as LangChain's dicts, in JSON."""
+
+    def dump(self, item: Item) -> str:
+        return json.dumps(_to_dict(item))
+
+    def load(self, stored: str) -> Item:
+        [message] = _from_dicts([json.loads(stored)])
+        return message
 
     def prompt(self, text: str) -> Item:
-        return _item(HumanMessage(text))
+        return HumanMessage(text)
 
     def reply(self, text: str) -> Item:
-        return _item(AIMessage(text))
+        return AIMessage(text)
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
-        return [
-            _item(ToolMessage(text, tool_call_id=call.id, name=call.name, status="error")) for call, text in results
-        ]
+        return [ToolMessage(text, tool_call_id=call.id, name=call.name, status="error") for call, text in results]
 
     def read(self, item: Item) -> Parsed:
-        message = _message(item)
+        message = typing.cast(BaseMessage, item)
         if isinstance(message, HumanMessage):
             return Parsed(("user", _text(message)))
         if isinstance(message, AIMessage):
@@ -207,7 +204,7 @@ def _graph(
     async def call_model(state: State) -> dict[str, Any]:
         messages = state["messages"]
         reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
-        await conversation.append_reply(_item(reply))
+        await conversation.append_reply(reply)
         return {"messages": [reply]}
 
     async def run_tools(state: State, config: RunnableConfig) -> Any:
@@ -218,7 +215,7 @@ def _graph(
             # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
             from_tool(ctx, error)
             raise
-        await conversation.append(*(_item(result) for result in _tool_messages(ran)))
+        await conversation.append(*_tool_messages(ran))
         await tool_call_ended(ctx)
         return ran
 
@@ -243,7 +240,7 @@ def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given
         if (final := conversation.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
-        messages = [_message(entry.item) for entry in conversation.entries]
+        messages = typing.cast(list[BaseMessage], [entry.item for entry in conversation.entries])
         graph = _graph(ctx, conversation, chat_model, tools, system)
         state = typing.cast(State, await graph.ainvoke({"messages": messages}))
         return _text(state["messages"][-1])

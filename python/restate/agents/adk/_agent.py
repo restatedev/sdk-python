@@ -88,14 +88,6 @@ _APP = "restate"
 # --- ADK's events ---------------------------------------------------------------------------------
 
 
-def _item(event: Event) -> Item:
-    return event.model_dump(mode="json", exclude_none=True)
-
-
-def _event(item: Item) -> Event:
-    return Event.model_validate(item)
-
-
 def _text(event: Event) -> str:
     """Return the text of an event's content, without its thoughts."""
     parts = event.content.parts if event.content and event.content.parts else []
@@ -103,7 +95,13 @@ def _text(event: Event) -> str:
 
 
 class _Items:
-    """ADK's events, as the conversation keeps them; a run's closing events are its root agent's."""
+    """ADK's events, as the conversation keeps them (stored as JSON); a run's closing events are its root agent's."""
+
+    def dump(self, item: Item) -> str:
+        return typing.cast(Event, item).model_dump_json(exclude_none=True)
+
+    def load(self, stored: str) -> Item:
+        return Event.model_validate_json(stored)
 
     def __init__(self, author: str) -> None:
         self.author = author
@@ -111,11 +109,11 @@ class _Items:
     def prompt(self, text: str) -> Item:
         # A prompt starts an invocation of its own, which every attempt resumes.
         content = types.Content(role="user", parts=[types.Part(text=text)])
-        return _item(Event(author="user", invocation_id=new_invocation_context_id(), content=content))
+        return Event(author="user", invocation_id=new_invocation_context_id(), content=content)
 
     def reply(self, text: str) -> Item:
         content = types.Content(role="model", parts=[types.Part(text=text)])
-        return _item(Event(author=self.author, content=content))
+        return Event(author=self.author, content=content)
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         if not results:
@@ -124,10 +122,10 @@ class _Items:
             types.Part(function_response=types.FunctionResponse(id=call.id, name=call.name, response={"result": text}))
             for call, text in results
         ]
-        return [_item(Event(author=self.author, content=types.Content(role="user", parts=parts)))]
+        return [Event(author=self.author, content=types.Content(role="user", parts=parts))]
 
     def read(self, item: Item) -> Parsed:
-        event = _event(item)
+        event = typing.cast(Event, item)
         text = _text(event)
         calls = [Call(call.id or "", call.name or "", call.args) for call in event.get_function_calls()]
         results: list[Result] = []
@@ -151,7 +149,7 @@ class _Sessions(BaseSessionService):
     def session(self) -> Session:
         session = Session(id=_USER, app_name=_APP, user_id=_USER, last_update_time=time.time())
         for entry in self.conversation.entries:
-            event = _event(entry.item)
+            event = typing.cast(Event, entry.item)
             self._update_session_state(session, event)
             session.events.append(event)
         return session
@@ -178,9 +176,9 @@ class _Sessions(BaseSessionService):
             return event
         event = await super().append_event(session, event)
         if event.author != "user" and event.content and not event.get_function_responses():
-            await self.conversation.append_reply(_item(event), agent=event.author)
+            await self.conversation.append_reply(event, agent=event.author)
         else:
-            await self.conversation.append(_item(event))
+            await self.conversation.append(event)
         return event
 
 
@@ -309,8 +307,8 @@ def _final(conversation: Conversation, root: BaseAgent) -> str | None:
     running = conversation.running()
     if running is None:
         return None
-    invocation = _event(running.item).invocation_id
-    events = [_event(e.item) for e in conversation.entries if e.n > running.n]
+    invocation = typing.cast(Event, running.item).invocation_id
+    events = [typing.cast(Event, e.item) for e in conversation.entries if e.n > running.n]
     events = [event for event in events if event.invocation_id == invocation]
     responses = [event for event in events if _is_final(event)]
     if any(event.author == root.name and event.actions.end_of_agent for event in events):
@@ -344,7 +342,7 @@ def _run(ctx: SessionContext, app: App) -> Run:
             # The run had stored its answer's events, but not its answer: that is the answer, rather than ask again.
             return final
         running = conversation.running()
-        invocation = _event(running.item).invocation_id if running is not None else None
+        invocation = typing.cast(Event, running.item).invocation_id if running is not None else None
         runner = Runner(app=app, session_service=_Sessions(conversation))
         answer = ""
         with tools_in(ctx):

@@ -104,14 +104,6 @@ _MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(
 )
 
 
-def _item(message: ModelMessage) -> Item:
-    return _MESSAGE.dump_python(message, mode="json")
-
-
-def _message(item: Item) -> ModelMessage:
-    return _MESSAGE.validate_python(item)
-
-
 def _result(part: ToolReturnPart | RetryPromptPart) -> str:
     """Return a tool call's result as the model sees it: the return value, or the retry prompt."""
     return part.model_response() if isinstance(part, RetryPromptPart) else part.model_response_str()
@@ -122,22 +114,28 @@ def _text(response: ModelMessage) -> str:
 
 
 class _Items:
-    """Pydantic AI's messages, as the conversation keeps them."""
+    """Pydantic AI's messages, as the conversation keeps them: stored as JSON, loaded straight back by pydantic."""
+
+    def dump(self, item: Item) -> str:
+        return _MESSAGE.dump_json(item).decode()
+
+    def load(self, stored: str) -> Item:
+        return _MESSAGE.validate_json(stored)
 
     def prompt(self, text: str) -> Item:
-        return _item(ModelRequest(parts=[UserPromptPart(text)]))
+        return ModelRequest(parts=[UserPromptPart(text)])
 
     def reply(self, text: str) -> Item:
-        return _item(ModelResponse(parts=[TextPart(text)]))
+        return ModelResponse(parts=[TextPart(text)])
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         if not results:
             return []
         returns = [ToolReturnPart(call.name, text, call.id) for call, text in results]
-        return [_item(ModelRequest(parts=list(returns)))]
+        return [ModelRequest(parts=list(returns))]
 
     def read(self, item: Item) -> Parsed:
-        message = _message(item)
+        message = typing.cast(ModelMessage, item)
         if isinstance(message, ModelResponse):
             said = ("assistant", _text(message)) if any(isinstance(p, TextPart) for p in message.parts) else None
             calls = [Call(call.tool_call_id, call.tool_name, call.args_as_dict()) for call in message.tool_calls]
@@ -185,7 +183,7 @@ class _Restate(AbstractCapability[Any]):
         """
         new = [m for m in messages if any(not self.conversation.has_result(i) for i in _result_ids(m))]
         if new:
-            await self.conversation.append(*(_item(message) for message in new))
+            await self.conversation.append(*new)
 
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
@@ -197,7 +195,7 @@ class _Restate(AbstractCapability[Any]):
         self, ctx: RunContext[Any], *, request_context: ModelRequestContext, response: ModelResponse
     ) -> ModelResponse:
         await self.store(ctx.messages)
-        await self.conversation.append_reply(_item(response))
+        await self.conversation.append_reply(response)
         return response
 
     async def before_tool_execute(
@@ -259,7 +257,7 @@ def _run(
         if (final := conversation.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
-        history = [_message(entry.item) for entry in conversation.entries]
+        history = typing.cast(list[ModelMessage], [entry.item for entry in conversation.entries])
         restate = _Restate(ctx, conversation)
         result = await agent.run(message_history=history, model=model, toolsets=toolsets, capabilities=[restate])
         # The messages that no model request stored: an output tool's return, say.

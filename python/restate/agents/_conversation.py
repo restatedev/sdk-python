@@ -11,7 +11,10 @@
 """The conversation of an agent's key, which every framework integration stores the same way.
 
 The conversation is one table, ``restate_agent_conversation``, of the
-framework's own items (its messages, as JSON), one row each, in order.
+framework's own items (its messages), one row each, in order. The framework
+stores and loads its items itself (``Items.dump`` and ``Items.load``), so
+that an item goes from the database to the framework's own object in one
+step, such as pydantic's ``validate_json``.
 
 A prompt's item carries the prompt's id, and its answer once there is one; a
 model reply's items carry the reply's id (the position of its first item) and
@@ -34,7 +37,6 @@ conversation to the answer, storing each step with ``append`` as it goes).
 
 from __future__ import annotations
 
-import json
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -57,7 +59,7 @@ from restate.sessions import Database, DatabaseReader, SessionContext
 from restate.sessions.internal import Schema
 
 Item: typing.TypeAlias = Any
-"""An item of the conversation: a framework's message, as JSON (a dict, mostly)."""
+"""An item of the conversation: a framework's own message (a pydantic model, a dict, ...)."""
 
 TABLE = "restate_agent_conversation"
 """The table of the conversation, in the key's database."""
@@ -129,7 +131,15 @@ class Parsed(typing.NamedTuple):
 
 
 class Items(Protocol):
-    """What a framework's items are: how the shared code reads and makes them."""
+    """What a framework's items are: how the shared code stores, reads and makes them."""
+
+    def dump(self, item: Item) -> str:
+        """Return ``item`` as it is stored: its JSON, most often."""
+        ...
+
+    def load(self, stored: str) -> Item:
+        """Return the item that ``dump`` stored as ``stored``."""
+        ...
 
     def prompt(self, text: str) -> Item:
         """Return the item of a prompt (the user's message)."""
@@ -183,7 +193,7 @@ class Conversation:
     async def load(cls, db: Database, items: Items) -> Conversation:
         """Load the conversation from ``db``, whose items are ``items``'."""
         await SCHEMA.ensure(db)
-        return cls(db, items, await _entries(db))
+        return cls(db, items, await _entries(db, items))
 
     # --- Reading ---
 
@@ -294,7 +304,7 @@ class Conversation:
         if self.closed:
             raise RuntimeError("the run was stopped: it stores nothing more")
         sql = f"INSERT INTO {TABLE} (n, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?)"
-        rows = [[e.n, json.dumps(e.item), e.prompt, e.reply, e.agent] for e in added]
+        rows = [[e.n, self.items.dump(e.item), e.prompt, e.reply, e.agent] for e in added]
         if len(rows) == 1:
             # One statement commits on its own.
             await self.db.execute(sql, rows[0])
@@ -306,10 +316,10 @@ class Conversation:
         self._add(added)
 
 
-async def _entries(db: DatabaseReader) -> list[Entry]:
+async def _entries(db: DatabaseReader, items: Items) -> list[Entry]:
     rows = await db.values(f"SELECT n, item, prompt, answer, reply, agent FROM {TABLE} ORDER BY n")
     return [
-        Entry(int(typing.cast(int, n)), json.loads(str(item)), _str(prompt), _str(answer), _int(reply), _str(agent))
+        Entry(int(typing.cast(int, n)), items.load(str(item)), _str(prompt), _str(answer), _int(reply), _str(agent))
         for n, item, prompt, answer, reply, agent in rows
     ]
 

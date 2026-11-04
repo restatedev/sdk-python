@@ -100,7 +100,13 @@ def _output(value: Any) -> str:
 
 
 class _Items:
-    """The Responses API's input items, as the SDK keeps a conversation."""
+    """The Responses API's input items, as the SDK keeps a conversation: dicts, stored as JSON."""
+
+    def dump(self, item: Item) -> str:
+        return json.dumps(item)
+
+    def load(self, stored: str) -> Item:
+        return json.loads(stored)
 
     def prompt(self, text: str) -> Item:
         return {"role": "user", "content": text}

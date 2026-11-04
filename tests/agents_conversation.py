@@ -12,6 +12,7 @@
 
 # pylint: disable=missing-function-docstring,import-error
 
+import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -39,6 +40,12 @@ PUBLISHED = {"publish": b"null"}
 
 class Items:
     """A made-up framework's items: ``{"role", "text"}`` messages, a reply's ``calls``, and ``{"result", "output"}``."""
+
+    def dump(self, item: Item) -> str:
+        return json.dumps(item)
+
+    def load(self, stored: str) -> Item:
+        return json.loads(stored)
 
     def prompt(self, text: str) -> Item:
         return {"role": "user", "text": text}
