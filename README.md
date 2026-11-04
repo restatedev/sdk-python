@@ -26,6 +26,34 @@ To use this SDK, add the dependency to your project:
 pip install restate_sdk
 ```
 
+## Connecting to Restate Cloud
+
+An application can connect outbound to Restate Cloud instead of exposing a port. Copy a connect key
+from the Cloud UI (Development → Configure SDK), pick a name for the deployment, and run:
+
+```shell
+RESTATE_CONNECT_KEY=rstcloudv1_... python -m restate connect app:app --name greeter
+```
+
+where `app:app` is the module and attribute holding the application returned by `restate.app(...)`.
+Then register the deployment as `connect://greeter`. The same from code, running until stopped:
+
+```python
+if __name__ == "__main__":
+    asyncio.run(restate.connect(app, name="greeter"))
+```
+
+To do something while connected, use the context manager:
+
+```python
+async with restate.with_connection(app, name="greeter") as connection:
+    print(connection.info.deployment_url)
+    await connection.wait()
+```
+
+Clients can read an ingress key the same way: `restate.create_client()` without an URL uses
+`RESTATE_INGRESS_KEY` (Development → Configure Client).
+
 ## Versions
 
 The compatibility with Restate is described in the following table. sdk-python versions < 0.10 are deprecated and no longer supported.

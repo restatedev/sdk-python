@@ -13,5 +13,22 @@ doc = false
 
 [dependencies]
 pyo3 = { version = "0.30.1", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.30", features = ["tokio-runtime"] }
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-restate-sdk-shared-core = { version = "8.2.0", features = ["request_identity", "sha2_random_seed", "rust_crypto"] }
+restate-sdk-shared-core = { version = "8.2.0", features = ["request_identity", "sha2_random_seed", "rust_crypto", "tunnel"] }
+
+# ASGI bridge for the tunnel
+bytes = "1.10"
+http = "1.3"
+http-body = "1.0"
+http-body-util = "0.1"
+hyper = { version = "1.8", default-features = false }
+percent-encoding = "2.3"
+tokio = { version = "1.49", default-features = false, features = ["sync", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+
+# Until restate-sdk-shared-core with the `cloud` and `tunnel` features is released.
+[patch.crates-io]
+restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core", branch = "cloud-exp-revamp" }
