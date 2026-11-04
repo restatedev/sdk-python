@@ -23,7 +23,8 @@ import pytest
 import restate
 from restate import HarnessEnvironment
 from restate.agents import _signals
-from restate.agents._api import Status, Turn
+from restate.agents._api import Signal, Status, Turn, Watch
+from restate.agents._signals import WaitRequest
 
 
 @pytest.fixture(scope="session")
@@ -81,9 +82,21 @@ def key() -> str:
     return f"assistant:{uuid.uuid4()}"
 
 
+def waiting(wait_id: str, name: str) -> WaitRequest:
+    return {"id": wait_id, "name": name}
+
+
+def watching(revision: int, timeout: float) -> Watch:
+    return {"revision": revision, "timeoutSeconds": timeout}
+
+
+def signal(**fields: typing.Any) -> Signal:
+    return typing.cast(Signal, fields)
+
+
 async def test_a_wait_returns_the_value_of_the_signal_that_resolves_it(harness: HarnessEnvironment):
     k = key()
-    waiting = await harness.client.object_send(_signals.wait, key=k, arg={"id": "inv:1", "name": "approval"})
+    sent = await harness.client.object_send(_signals.wait, key=k, arg=waiting("inv:1", "approval"))
 
     async def listed() -> bool:
         return len(await harness.client.object_call(_signals.pending, key=k, arg=None)) == 1
@@ -91,9 +104,11 @@ async def test_a_wait_returns_the_value_of_the_signal_that_resolves_it(harness: 
     await until(listed)
     [pending] = await harness.client.object_call(_signals.pending, key=k, arg=None)
     assert pending["id"] == "inv:1" and pending["name"] == "approval" and pending["since"].endswith("Z")
-    resolved = await harness.client.object_call(_signals.resolve, key=k, arg={"id": "inv:1", "value": "approved"})
+    resolved = await harness.client.object_call(
+        _signals.resolve, key=k, arg=signal(**{"id": "inv:1", "value": "approved"})
+    )
     assert resolved == {"resolved": "inv:1"}
-    answer = await attach(harness, waiting.invocation_id)
+    answer = await attach(harness, sent.invocation_id)
     assert answer.json() == "approved"
     assert await harness.client.object_call(_signals.pending, key=k, arg=None) == []
 
@@ -101,25 +116,25 @@ async def test_a_wait_returns_the_value_of_the_signal_that_resolves_it(harness: 
 async def test_a_signal_resolves_the_oldest_wait_of_its_name_or_is_dropped_or_kept(harness: HarnessEnvironment):
     k = key()
     # No one waits: dropped, unless kept for the next wait.
-    assert await harness.client.object_call(_signals.resolve, key=k, arg={"name": "go", "value": 1}) == {
+    assert await harness.client.object_call(_signals.resolve, key=k, arg=signal(**{"name": "go", "value": 1})) == {
         "resolved": None
     }
-    await harness.client.object_call(_signals.resolve, key=k, arg={"name": "go", "value": 2, "keep": True})
-    kept = await harness.client.object_send(_signals.wait, key=k, arg={"id": "inv:2", "name": "go"})
+    await harness.client.object_call(_signals.resolve, key=k, arg=signal(**{"name": "go", "value": 2, "keep": True}))
+    kept = await harness.client.object_send(_signals.wait, key=k, arg=waiting("inv:2", "go"))
     assert (await attach(harness, kept.invocation_id)).json() == 2
 
-    first = await harness.client.object_send(_signals.wait, key=k, arg={"id": "inv:3", "name": "go"})
-    second = await harness.client.object_send(_signals.wait, key=k, arg={"id": "inv:4", "name": "go"})
+    first = await harness.client.object_send(_signals.wait, key=k, arg=waiting("inv:3", "go"))
+    second = await harness.client.object_send(_signals.wait, key=k, arg=waiting("inv:4", "go"))
 
     async def both() -> bool:
         return len(await harness.client.object_call(_signals.pending, key=k, arg=None)) == 2
 
     await until(both)
-    assert await harness.client.object_call(_signals.resolve, key=k, arg={"name": "go", "value": "a"}) in (
+    assert await harness.client.object_call(_signals.resolve, key=k, arg=signal(**{"name": "go", "value": "a"})) in (
         {"resolved": "inv:3"},
         {"resolved": "inv:4"},
     )
-    await harness.client.object_call(_signals.resolve, key=k, arg={"name": "go", "value": "b"})
+    await harness.client.object_call(_signals.resolve, key=k, arg=signal(**{"name": "go", "value": "b"}))
     answers = {(await attach(harness, w.invocation_id)).json() for w in (first, second)}
     assert answers == {"a", "b"}
 
@@ -127,15 +142,13 @@ async def test_a_signal_resolves_the_oldest_wait_of_its_name_or_is_dropped_or_ke
 async def test_watch_returns_a_newer_revision_or_the_current_one_at_its_timeout(harness: HarnessEnvironment):
     k = key()
     now = (await harness.client.object_call(_signals.notifications, key=k, arg=None))["revision"]
-    timed_out = await harness.client.object_call(_signals.watch, key=k, arg={"revision": now, "timeoutSeconds": 0.2})
+    timed_out = await harness.client.object_call(_signals.watch, key=k, arg=watching(now, 0.2))
     assert timed_out == {"revision": now}
-    watching = asyncio.ensure_future(
-        harness.client.object_call(_signals.watch, key=k, arg={"revision": now, "timeoutSeconds": 30})
-    )
+    watcher = asyncio.ensure_future(harness.client.object_call(_signals.watch, key=k, arg=watching(now, 30)))
     await asyncio.sleep(0.3)
     # A wait that starts publishes a change.
-    await harness.client.object_send(_signals.wait, key=k, arg={"id": "inv:5", "name": "x"})
-    assert (await watching)["revision"] > now
+    await harness.client.object_send(_signals.wait, key=k, arg=waiting("inv:5", "x"))
+    assert (await watcher)["revision"] > now
 
 
 async def test_a_turn_is_answered_until_it_closes_and_a_failed_one_is_closed_for_it(harness: HarnessEnvironment):
