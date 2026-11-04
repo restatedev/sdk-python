@@ -13,6 +13,7 @@
 # pylint: disable=missing-function-docstring
 
 import pytest
+from agents_conversation import ITEMS  # pylint: disable=import-error
 
 from restate import sessions
 from restate.agents import AgentObject
@@ -70,7 +71,7 @@ def test_a_name_chat_will_take_is_refused_before_chat_registers_it():
 def test_chat_is_a_decorator_too_and_returns_the_function():
     agent = AgentObject("decorated")
 
-    @agent.chat
+    @agent.chat(items=ITEMS)
     async def answer(ctx: sessions.SessionContext, text: str) -> str:
         return text
 
@@ -81,7 +82,7 @@ def test_chat_is_a_decorator_too_and_returns_the_function():
 
     async def forget(ctx: sessions.SessionContext) -> None: ...
 
-    @other.chat(clear=forget)
+    @other.chat(items=ITEMS, clear=forget)
     async def reply(ctx: sessions.SessionContext, text: str) -> str:
         return text
 

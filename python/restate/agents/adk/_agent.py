@@ -33,11 +33,10 @@ its stored events:
 
 from __future__ import annotations
 
-import contextvars
 import json
 import time
-from collections.abc import Awaitable, Callable, Sequence
-from datetime import timedelta
+import typing
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from google.adk.agents import BaseAgent, LlmAgent
@@ -53,23 +52,31 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
-from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
-from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
-from restate.agents._object import RETRIES, AgentObject
-from restate.agents._tools import Tool, ToolCall
+from restate.agents._common import (
+    MODEL_ENV,
+    ModelError,
+    PerSession,
+    check_own,
+    configured,
+    from_tool,
+    model_of,
+    provider_of,
+)
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
+from restate.agents._object import AgentObject, AgentOptions
+from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
-from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import Migration, SessionContext
+from restate.sessions import SessionContext
+
+if typing.TYPE_CHECKING:
+    from typing_extensions import Unpack
 
 AnyModel = str | BaseLlm
 """A model: ``"google/<model-id>"`` (a Gemini model), or a model of ADK (``LiteLlm(...)`` for others)."""
 
 AnyTool = Tool | BaseTool | Callable[..., Any]
 """A tool: one made with ``restate.agents`` (``tool``, ``call``, ``wait_for_signal``, ...), or ADK's (functions too)."""
-
-_SESSION: contextvars.ContextVar[SessionContext] = contextvars.ContextVar("restate_agents_adk_session")
-"""The context of the run in progress, for the ``restate.agents`` tools that it calls."""
 
 _USER = "restate"
 """The user of every session: the conversation is the object's key."""
@@ -81,14 +88,6 @@ _APP = "restate"
 # --- ADK's events ---------------------------------------------------------------------------------
 
 
-def _item(event: Event) -> Item:
-    return event.model_dump(mode="json", exclude_none=True)
-
-
-def _event(item: Item) -> Event:
-    return Event.model_validate(item)
-
-
 def _text(event: Event) -> str:
     """Return the text of an event's content, without its thoughts."""
     parts = event.content.parts if event.content and event.content.parts else []
@@ -96,19 +95,25 @@ def _text(event: Event) -> str:
 
 
 class _Items:
-    """ADK's events, as the conversation keeps them; a run's closing events are its root agent's."""
+    """ADK's events, as the conversation keeps them (stored as JSON); a run's closing events are its root agent's."""
 
-    def __init__(self, author: str) -> None:
+    def dump(self, item: Item) -> str:
+        return typing.cast(Event, item).model_dump_json(exclude_none=True)
+
+    def load(self, stored: str) -> Item:
+        return Event.model_validate_json(stored)
+
+    def __init__(self, author: str = "") -> None:
         self.author = author
 
     def prompt(self, text: str) -> Item:
         # A prompt starts an invocation of its own, which every attempt resumes.
         content = types.Content(role="user", parts=[types.Part(text=text)])
-        return _item(Event(author="user", invocation_id=new_invocation_context_id(), content=content))
+        return Event(author="user", invocation_id=new_invocation_context_id(), content=content)
 
     def reply(self, text: str) -> Item:
         content = types.Content(role="model", parts=[types.Part(text=text)])
-        return _item(Event(author=self.author, content=content))
+        return Event(author=self.author, content=content)
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         if not results:
@@ -117,23 +122,18 @@ class _Items:
             types.Part(function_response=types.FunctionResponse(id=call.id, name=call.name, response={"result": text}))
             for call, text in results
         ]
-        return [_item(Event(author=self.author, content=types.Content(role="user", parts=parts)))]
+        return [Event(author=self.author, content=types.Content(role="user", parts=parts))]
 
-    def calls(self, item: Item) -> list[Call]:
-        return [Call(call.id or "", call.name or "", call.args) for call in _event(item).get_function_calls()]
-
-    def results_of(self, item: Item) -> list[Result]:
+    def read(self, item: Item) -> Parsed:
+        event = typing.cast(Event, item)
+        text = _text(event)
+        calls = [Call(call.id or "", call.name or "", call.args) for call in event.get_function_calls()]
         results: list[Result] = []
-        for response in _event(item).get_function_responses():
+        for response in event.get_function_responses():
             output = (response.response or {}).get("result", response.response)
             results.append(Result(response.id or "", output if isinstance(output, str) else json.dumps(output)))
-        return results
-
-    def said(self, item: Item) -> tuple[str, str] | None:
-        event = _event(item)
-        if not (text := _text(event)):
-            return None
-        return ("user" if event.author == "user" else "assistant"), text
+        said = (("user" if event.author == "user" else "assistant"), text) if text else None
+        return Parsed(said, calls, results)
 
 
 # --- The session ----------------------------------------------------------------------------------
@@ -149,7 +149,7 @@ class _Sessions(BaseSessionService):
     def session(self) -> Session:
         session = Session(id=_USER, app_name=_APP, user_id=_USER, last_update_time=time.time())
         for entry in self.conversation.entries:
-            event = _event(entry.item)
+            event = typing.cast(Event, entry.item)
             self._update_session_state(session, event)
             session.events.append(event)
         return session
@@ -176,9 +176,9 @@ class _Sessions(BaseSessionService):
             return event
         event = await super().append_event(session, event)
         if event.author != "user" and event.content and not event.get_function_responses():
-            await self.conversation.append_reply(_item(event), agent=event.author)
+            await self.conversation.append_reply(event, agent=event.author)
         else:
-            await self.conversation.append(_item(event))
+            await self.conversation.append(event)
         return event
 
 
@@ -227,7 +227,7 @@ class _AdkTool(BaseTool):
         )
 
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
-        return await self.tool.run(args, ToolCall(_SESSION.get(), tool_context.function_call_id or ""))
+        return await self.tool.run(args, current_call(tool_context.function_call_id or ""))
 
 
 def tools(given: Sequence[AnyTool]) -> list[Any]:
@@ -252,11 +252,11 @@ def _model(model: AnyModel | None) -> str | BaseLlm:
     """
     if isinstance(model, BaseLlm):
         return model
-    if model is None and not provider_of(model_of(None))[0] == "google":
+    named = model_of(model, fallback="")
+    if not named:
         raise ModelError(
             f"an ADK agent needs a model: model='google/<model-id>', an ADK model (LiteLlm(...)), or {MODEL_ENV}"
         )
-    named = model_of(model)
     provider, model_id = provider_of(named)
     if provider not in ("google", "") or not model_id:
         raise ModelError(f'the model "{named}" is not google/<model-id>: pass an ADK model (LiteLlm(...)) for another')
@@ -307,8 +307,8 @@ def _final(conversation: Conversation, root: BaseAgent) -> str | None:
     running = conversation.running()
     if running is None:
         return None
-    invocation = _event(running.item).invocation_id
-    events = [_event(e.item) for e in conversation.entries if e.n > running.n]
+    invocation = typing.cast(Event, running.item).invocation_id
+    events = [typing.cast(Event, e.item) for e in conversation.entries if e.n > running.n]
     events = [event for event in events if event.invocation_id == invocation]
     responses = [event for event in events if _is_final(event)]
     if any(event.author == root.name and event.actions.end_of_agent for event in events):
@@ -334,7 +334,7 @@ def _answers(root: BaseAgent, name: str) -> bool:
     return True
 
 
-def _run(ctx: SessionContext, app: App) -> Callable[[Conversation], Awaitable[str]]:
+def _run(ctx: SessionContext, app: App) -> Run:
     """Return the run of a prompt: ADK's runner, resuming the prompt's invocation."""
 
     async def run(conversation: Conversation) -> str:
@@ -342,31 +342,22 @@ def _run(ctx: SessionContext, app: App) -> Callable[[Conversation], Awaitable[st
             # The run had stored its answer's events, but not its answer: that is the answer, rather than ask again.
             return final
         running = conversation.running()
-        invocation = _event(running.item).invocation_id if running is not None else None
+        invocation = typing.cast(Event, running.item).invocation_id if running is not None else None
         runner = Runner(app=app, session_service=_Sessions(conversation))
         answer = ""
-        session = _SESSION.set(ctx)
-        try:
-            events = runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation)
-            async for event in events:
+        with tools_in(ctx):
+            async for event in runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation):
                 if event.error_code:
                     # The model would not answer (a safety block, say), as it would not again: the prompt fails.
                     raise TerminalError(f"the model returned {event.error_code}: {event.error_message or ''}")
-                if event.author != "user" and event.is_final_response() and (text := _text(event)):
+                if _is_final(event) and (text := _text(event)):
                     answer = text
-        finally:
-            _SESSION.reset(session)
         return answer
 
     return run
 
 
 # --- The API --------------------------------------------------------------------------------------
-
-
-def _check(own: BaseAgent | App | None, system: object) -> None:
-    if own is not None and system is not None:
-        raise TypeError("an agent of your own has its own instruction: pass no system")
 
 
 async def prompt(
@@ -406,7 +397,7 @@ async def prompt(
     Raises:
         TypeError: If both ``agent`` and ``system`` are given.
     """
-    _check(agent, system)
+    check_own(agent, system)
     app = _app(ctx, agent, model, system, tools)
     return await answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app))
 
@@ -419,14 +410,7 @@ def agent(
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
-    description: str | None = None,
-    migrations: Sequence[Migration] = (),
-    background: bool = False,
-    metadata: dict[str, str] | None = None,
-    inactivity_timeout: timedelta | None = None,
-    abort_timeout: timedelta | None = None,
-    ingress_private: bool | None = None,
-    invocation_retry_policy: InvocationRetryPolicy | None = RETRIES,
+    **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create an ADK agent: a virtual object with one conversation per key.
 
@@ -452,15 +436,8 @@ def agent(
             ``$RESTATE_AGENT_MODEL`` if it is Google's.
         system: The instruction, when there is no ``adk_agent``.
         tools: ``restate.agents`` tools, or ADK's.
-        description: The object's description, shown in Restate's UI.
-        migrations: Tables of your own, beside the agent's.
-        background: Whether it works unwatched (a subagent, say): it then
-            publishes its progress once a turn ends, not at each step.
-        metadata: The object's metadata.
-        inactivity_timeout: Restate's inactivity timeout for its handlers.
-        abort_timeout: Restate's abort timeout for its handlers.
-        ingress_private: Whether only other services may call it.
-        invocation_retry_policy: How Restate retries a failed turn.
+        **options: The object's options, such as ``description``,
+            ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
     Returns:
         The agent, to serve with ``restate.serve(sessions.app(agent))``, or any ASGI server.
@@ -469,20 +446,10 @@ def agent(
         TypeError: If both ``adk_agent`` and ``system`` are given.
         TerminalError: If there is no model, or ``model`` names a provider other than Google.
     """
-    _check(adk_agent, system)
+    check_own(adk_agent, system)
     if adk_agent is None and (model is None or isinstance(model, str)):
         _model(model)
-    obj = AgentObject(
-        name,
-        description=description,
-        migrations=migrations,
-        background=background,
-        metadata=metadata,
-        inactivity_timeout=inactivity_timeout,
-        abort_timeout=abort_timeout,
-        ingress_private=ingress_private,
-        invocation_retry_policy=invocation_retry_policy,
-    )
+    obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> str:
         return await prompt(
@@ -494,5 +461,5 @@ def agent(
             tools=await configured(tools, ctx),
         )
 
-    obj.chat(answer)
+    obj.chat(answer, items=_Items())
     return obj

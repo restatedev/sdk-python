@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 import pytest
+from agents_conversation import ITEMS  # pylint: disable=import-error
 
 import restate
 from restate import HarnessEnvironment, sessions
@@ -42,7 +43,7 @@ received: dict[str, list[str]] = {}
 triage = AgentObject("hook_triage")
 
 
-@triage.chat
+@triage.chat(items=ITEMS)
 async def answer(ctx: sessions.SessionContext, text: str) -> str:
     received.setdefault(ctx.key, []).append(text)
     return "noted"

@@ -72,8 +72,11 @@ MODEL_ENV = "RESTATE_AGENT_MODEL"
 DEFAULT_MODEL = "openai/gpt-6-sol"
 """The default model of the frameworks that accept any provider; it needs ``OPENAI_API_KEY``."""
 
-CLAUDE_MODEL = "anthropic/claude-sonnet-5-5"
-"""The default model of the frameworks that accept only Anthropic models; it needs ``ANTHROPIC_API_KEY``."""
+
+def check_own(own: object, system: object) -> None:
+    """Raise ``TypeError`` if an agent of the framework's own (``own``) and ``system`` are both given."""
+    if own is not None and system is not None:
+        raise TypeError("an agent of your own has its own instructions: pass no system")
 
 
 def model_of(model: str | None, fallback: str = DEFAULT_MODEL) -> str:
@@ -117,12 +120,6 @@ class ModelError(TerminalError):
         super().__init__(message, status_code=REFUSED)
 
 
-def check_model_name(framework: str, model: str | None) -> None:
-    """Raise ``ModelError`` if ``model``, passed explicitly to a ``framework`` agent, does not name a provider."""
-    if model is not None and not re.fullmatch(r"[^/:\s]+[/:]\S+", model):
-        raise ModelError(f'{framework}: the model "{model}" is not provider/model-id, such as {CLAUDE_MODEL}')
-
-
 def model_id_of(model: str, provider: str) -> str:
     """Return the model id of ``model`` for a framework that only takes ``provider``'s models.
 
@@ -152,6 +149,9 @@ class MessageSerde(Serde[str]):
     def serialize(self, obj: str | None) -> bytes:
         return (obj or "").encode()
 
+
+CANCELLATION = 409
+"""The status code of Restate's cancellation error, which a stopped turn fails with."""
 
 CANCELLED = "Cancelled: the turn was stopped before it finished."
 """The answer of a cancelled turn, and the result of each tool call it cut off, which the model sees later in the conversation."""

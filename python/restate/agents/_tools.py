@@ -27,10 +27,12 @@ imported when the tool is created. Each framework extra installs it.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import inspect
 import json
 import typing
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -79,6 +81,25 @@ class ToolCall:
         such as a Restate call or a payment API request.
         """
         return f"{self.ctx.request.id}:{self.call_id}"
+
+
+_RUNNING: contextvars.ContextVar[SessionContext] = contextvars.ContextVar("restate_agents_running")
+"""The context of the framework run in progress, for tools that the framework calls without it."""
+
+
+@contextlib.contextmanager
+def tools_in(ctx: SessionContext) -> Generator[None, None, None]:
+    """Run a framework in ``ctx``: the tools it calls find their call with ``current_call``."""
+    token = _RUNNING.set(ctx)
+    try:
+        yield
+    finally:
+        _RUNNING.reset(token)
+
+
+def current_call(call_id: str) -> ToolCall:
+    """Return tool call ``call_id`` of the framework run in progress (see ``tools_in``)."""
+    return ToolCall(_RUNNING.get(), call_id)
 
 
 @dataclass(frozen=True)

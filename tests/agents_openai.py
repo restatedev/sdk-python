@@ -574,4 +574,4 @@ def test_a_tool_output_of_any_kind_is_stored_once():
     stored = Conversation(typing.cast(Any, None), _agent.ITEMS, [Entry(0, shell), Entry(1, function)])
     # The SDK hands the stored outputs back with the next request: none of them is new.
     new = {"type": "computer_call_output", "call_id": "c1", "output": "ok"}
-    assert _agent._outputs(stored, [shell, function, new]) == [new]  # pyright: ignore[reportPrivateUsage]
+    assert stored.new_results([shell, function, new]) == [new]

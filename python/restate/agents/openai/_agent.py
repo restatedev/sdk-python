@@ -39,12 +39,10 @@ start, and the run resumes from the last step stored:
 
 from __future__ import annotations
 
-import contextvars
 import dataclasses
 import json
 import typing
-from collections.abc import Awaitable, Callable, Sequence
-from datetime import timedelta
+from collections.abc import Awaitable, Sequence
 from typing import Any
 
 from agents import (
@@ -67,23 +65,22 @@ from agents.run import CallModelData, ModelInputData
 from agents.tool_context import ToolContext
 from pydantic_core import to_json
 
-from restate.agents._common import PerSession, configured, from_tool, model_id_of, model_of
-from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
-from restate.agents._object import RETRIES, AgentObject
-from restate.agents._tools import Tool, ToolCall
+from restate.agents._common import PerSession, check_own, configured, from_tool, model_id_of, model_of
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
+from restate.agents._object import AgentObject, AgentOptions
+from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
-from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import Migration, SessionContext
+from restate.sessions import SessionContext
+
+if typing.TYPE_CHECKING:
+    from typing_extensions import Unpack
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"openai/<model-id>"`` (or the model id alone), or a model of the SDK."""
 
 AnyTool: typing.TypeAlias = Tool | SdkTool
 """A tool: one made with ``restate.agents`` (``tool``, ``call``, ``wait_for_signal``, ...), or a tool of the SDK."""
-
-_SESSION: contextvars.ContextVar[SessionContext] = contextvars.ContextVar("restate_agents_openai_session")
-"""The context of the run in progress, for the ``restate.agents`` tools that it calls."""
 
 
 # --- The SDK's items ------------------------------------------------------------------------------
@@ -103,7 +100,13 @@ def _output(value: Any) -> str:
 
 
 class _Items:
-    """The Responses API's input items, as the SDK keeps a conversation."""
+    """The Responses API's input items, as the SDK keeps a conversation: dicts, stored as JSON."""
+
+    def dump(self, item: Item) -> str:
+        return json.dumps(item)
+
+    def load(self, stored: str) -> Item:
+        return json.loads(stored)
 
     def prompt(self, text: str) -> Item:
         return {"role": "user", "content": text}
@@ -114,52 +117,27 @@ class _Items:
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         return [{"type": "function_call_output", "call_id": call.id, "output": text} for call, text in results]
 
-    def calls(self, item: Item) -> list[Call]:
-        if item.get("type") != "function_call":
-            return []
-        arguments = str(item.get("arguments") or "{}")
-        try:
-            input: Any = json.loads(arguments)
-        except ValueError:
-            input = arguments
-        return [Call(str(item["call_id"]), str(item["name"]), input)]
-
-    def results_of(self, item: Item) -> list[Result]:
-        if item.get("type") != "function_call_output":
-            return []
-        output = item.get("output")
-        return [Result(str(item["call_id"]), output if isinstance(output, str) else json.dumps(output))]
-
-    def said(self, item: Item) -> tuple[str, str] | None:
-        if item.get("type", "message") == "message" and item.get("role") in ("user", "assistant"):
-            return str(item["role"]), _text(item)
-        return None
+    def read(self, item: Item) -> Parsed:
+        kind = str(item.get("type", "message"))
+        if kind == "message" and item.get("role") in ("user", "assistant"):
+            return Parsed(said=(str(item["role"]), _text(item)))
+        if kind == "function_call":
+            arguments = str(item.get("arguments") or "{}")
+            try:
+                input: Any = json.loads(arguments)
+            except ValueError:
+                input = arguments
+            return Parsed(calls=[Call(str(item["call_id"]), str(item["name"]), input)])
+        if kind.endswith("_output") and "call_id" in item:
+            # The output of any kind of tool: function_call_output, shell_call_output...
+            output = item.get("output")
+            return Parsed(
+                results=[Result(str(item["call_id"]), output if isinstance(output, str) else json.dumps(output))]
+            )
+        return Parsed()
 
 
 ITEMS = _Items()
-
-
-def _outputs(conversation: Conversation, items: Sequence[Any]) -> list[Item]:
-    """Return the tool outputs of ``items`` (the SDK's input) that the conversation does not have yet.
-
-    An output of any kind of tool (``function_call_output``, ``shell_call_output``...) is
-    one, found by its call's id.
-    """
-    stored = {entry.item.get("call_id") for entry in conversation.entries if _is_output(entry.item)}
-    return [item for item in items if _is_output(item) and item.get("call_id") not in stored]
-
-
-def _is_output(item: Item) -> bool:
-    return str(item.get("type", "")).endswith("_output")
-
-
-def _final(conversation: Conversation, reply: int) -> str | None:
-    """Return the text of the model's reply ``reply`` if it ends its run: a message, and no tool calls."""
-    items = conversation.reply_items(reply)
-    if any(ITEMS.calls(item) for item in items):
-        return None
-    said = [said for item in items if (said := ITEMS.said(item)) is not None]
-    return said[-1][1] if said else None
 
 
 # --- The agents -----------------------------------------------------------------------------------
@@ -198,12 +176,10 @@ def _current(conversation: Conversation, root: Agent[Any], everyone: dict[str, A
     if latest is None or latest.reply is None:
         return root
     agent = everyone.get(latest.agent or "", root)
-    answered = {result.id for e in conversation.entries for result in ITEMS.results_of(e.item)}
     targets = _handoffs(agent)
-    for item in conversation.reply_items(latest.reply):
-        for call in ITEMS.calls(item):
-            if call.name in targets and call.id in answered:
-                return everyone.get(targets[call.name], agent)
+    for call in (call for e in conversation.entries if e.reply == latest.reply for call in e.calls):
+        if call.name in targets and conversation.has_result(call.id):
+            return everyone.get(targets[call.name], agent)
     return agent
 
 
@@ -219,7 +195,7 @@ class _Hooks(RunHooks[Any]):
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
         """The run's ``call_model_input_filter``: store the tools' outputs before the next request."""
-        if outputs := _outputs(self.conversation, data.model_data.input):
+        if outputs := self.conversation.new_results(data.model_data.input):
             await self.conversation.append(*outputs)
         return data.model_data
 
@@ -247,11 +223,12 @@ async def _resume(
     calls = conversation.unanswered()
     if not calls:
         return agent
-    cut = next(e for e in conversation.entries if any(c.id == calls[0].id for c in ITEMS.calls(e.item)))
+    cut = next(e for e in conversation.entries if calls[0] in e.calls)
     agent = everyone.get(cut.agent or "", agent)
     found = {tool.name: tool for tool in await agent.get_all_tools(RunContextWrapper(None))}
     known = {*found, *_handoffs(agent)}
-    if not all(isinstance(found.get(call.name), FunctionTool) or call.name not in known for call in calls):
+    if any(call.name in known and not isinstance(found.get(call.name), FunctionTool) for call in calls):
+        # A call that only the SDK can make (a handoff, a hosted tool): ask the agent again instead.
         if cut.reply is not None:
             await conversation.drop(cut.reply)
         return agent
@@ -291,7 +268,7 @@ async def _unwrapped(ctx: SessionContext, work: Awaitable[Any]) -> Any:
 
 def _run(
     ctx: SessionContext, own: Agent[Any] | None, model: AnyModel | None, system: str | None, given: Sequence[AnyTool]
-) -> Callable[[Conversation], Awaitable[str]]:
+) -> Run:
     """Return the run of a prompt: the ``Runner``, from the conversation to the prompt's answer."""
     if own is None:
         root: Agent[Any] = Agent(name="assistant", instructions=system, tools=tools(given))
@@ -304,18 +281,15 @@ def _run(
 
     async def run(conversation: Conversation) -> str:
         reply = conversation.last_reply()
-        if reply is not None and (final := _final(conversation, reply)) is not None:
+        if reply is not None and (final := conversation.final_reply()) is not None:
             replier = everyone.get(conversation.agent_of(reply) or "", root)
             if not (replier.output_guardrails or config.output_guardrails):
                 # The run had stored its final reply, but not its answer: that is the answer.
                 return final
             # Its output guardrails may not have passed it: ask again, and they run on the new reply.
             await conversation.drop(reply)
-        session = _SESSION.set(ctx)
-        try:
+        with tools_in(ctx):
             return await _go(ctx, conversation, _current(conversation, root, everyone), everyone, config)
-        finally:
-            _SESSION.reset(session)
 
     return run
 
@@ -340,7 +314,7 @@ async def _go(
             await conversation.drop(blocked)
         raise TerminalError(str(error)) from error
     # The outputs that no model request stored: those of a tool that ends the turn, say.
-    if outputs := _outputs(conversation, result.to_input_list()):
+    if outputs := conversation.new_results(result.to_input_list()):
         await conversation.append(*outputs)
     return _output(result.final_output)
 
@@ -367,7 +341,7 @@ def _function_tool(tool: Tool) -> FunctionTool:
             args = json.loads(arguments or "{}")
         except ValueError as error:
             return f"Error: the arguments are not JSON: {error}"
-        return await tool.run(args, ToolCall(_SESSION.get(), context.tool_call_id))
+        return await tool.run(args, current_call(context.tool_call_id))
 
     return FunctionTool(
         name=tool.name,
@@ -384,11 +358,6 @@ def _model(model: AnyModel | None) -> str | Model:
 
 
 # --- The API --------------------------------------------------------------------------------------
-
-
-def _check(own: Agent[Any] | None, system: object) -> None:
-    if own is not None and system is not None:
-        raise TypeError("an Agent of your own has its own instructions: pass no system")
 
 
 async def prompt(
@@ -429,7 +398,7 @@ async def prompt(
     Raises:
         TypeError: If both ``agent`` and ``system`` are given.
     """
-    _check(agent, system)
+    check_own(agent, system)
 
     return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
 
@@ -442,14 +411,7 @@ def agent(
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
-    description: str | None = None,
-    migrations: Sequence[Migration] = (),
-    background: bool = False,
-    metadata: dict[str, str] | None = None,
-    inactivity_timeout: timedelta | None = None,
-    abort_timeout: timedelta | None = None,
-    ingress_private: bool | None = None,
-    invocation_retry_policy: InvocationRetryPolicy | None = RETRIES,
+    **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create an OpenAI Agents SDK agent: a virtual object with one conversation per key.
 
@@ -478,15 +440,8 @@ def agent(
             ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
         system: The instructions, when there is no ``openai_agent``.
         tools: ``restate.agents`` tools, or tools of the SDK.
-        description: The object's description, shown in Restate's UI.
-        migrations: Tables of your own, beside the agent's.
-        background: Whether it works unwatched (a subagent, say): it then
-            publishes its progress once a turn ends, not at each step.
-        metadata: The object's metadata.
-        inactivity_timeout: Restate's inactivity timeout for its handlers.
-        abort_timeout: Restate's abort timeout for its handlers.
-        ingress_private: Whether only other services may call it.
-        invocation_retry_policy: How Restate retries a failed turn.
+        **options: The object's options, such as ``description``,
+            ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
     Returns:
         The agent, to serve with ``restate.serve(sessions.app(agent))``, or any ASGI server.
@@ -495,20 +450,10 @@ def agent(
         TypeError: If both ``openai_agent`` and ``system`` are given.
         TerminalError: If ``model`` names a provider other than OpenAI.
     """
-    _check(openai_agent, system)
+    check_own(openai_agent, system)
     if isinstance(model, str) or (model is None and openai_agent is None):
         _model(model)
-    obj = AgentObject(
-        name,
-        description=description,
-        migrations=migrations,
-        background=background,
-        metadata=metadata,
-        inactivity_timeout=inactivity_timeout,
-        abort_timeout=abort_timeout,
-        ingress_private=ingress_private,
-        invocation_retry_policy=invocation_retry_policy,
-    )
+    obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> str:
         return await prompt(
@@ -520,5 +465,5 @@ def agent(
             tools=await configured(tools, ctx),
         )
 
-    obj.chat(answer)
+    obj.chat(answer, items=ITEMS)
     return obj

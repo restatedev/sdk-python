@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 import pydantic
+from agents_conversation import ITEMS  # pylint: disable=import-error
 import pytest
 
 import restate
@@ -26,8 +27,8 @@ from restate import HarnessEnvironment, sessions
 from restate.agents._api import Messages, Status
 from restate.agents._object import AgentObject
 from restate.agents._tools import ToolCall, run_tool, wait_for_signal
-from restate.agents._transcript import Transcript
-from restate.agents._turn import stop_signal_of, transcribing
+from restate.agents._conversation import Conversation, answer_once
+from restate.agents._turn import stop_signal_of
 
 
 @pytest.fixture(scope="session")
@@ -49,19 +50,13 @@ class Refund(pydantic.BaseModel):
 
 approval = wait_for_signal("approval", description="Wait for a manager to approve a refund.", input=Refund)
 
-# A scripted framework: it keeps each key's transcript in this process, and answers with an echo.
-transcripts: dict[str, Transcript] = {}
+# A scripted framework, on the made-up items of agents_conversation: it answers with an echo.
 gate = asyncio.Event()
+forgotten: list[str] = []
 
 
 async def answer(ctx: sessions.SessionContext, text: str) -> str:
-    transcript = transcripts.setdefault(ctx.key, Transcript())
-    transcript.say("user", text)
-
-    async def read() -> Transcript:
-        return transcript
-
-    async def work() -> str:
+    async def work(conversation: Conversation) -> str:
         if text == "wait":
             stop = stop_signal_of(ctx)
             assert stop is not None
@@ -72,23 +67,24 @@ async def answer(ctx: sessions.SessionContext, text: str) -> str:
             # A tool call: the model asks for an approval, and waits for it.
             call_id = f"call-{text.split()[1]}"
             args = {"order": text.split()[1], "amount": 5}
-            transcript.call(call_id, approval.name, args)
+            call = {"id": call_id, "name": approval.name, "input": args}
+            await conversation.append_reply({"role": "assistant", "text": "", "calls": [call]})
             result = await run_tool(approval, args, ToolCall(ctx, call_id))
-            transcript.result(call_id, result)
-            transcript.say("assistant", f"refund: {result}")
+            await conversation.append({"result": call_id, "output": result})
+            await conversation.append_reply({"role": "assistant", "text": f"refund: {result}"})
             return f"refund: {result}"
-        transcript.say("assistant", f"echo: {text}")
+        await conversation.append_reply({"role": "assistant", "text": f"echo: {text}"})
         return f"echo: {text}"
 
-    return await transcribing(ctx, read, work)
+    return await answer_once(ctx, text, ITEMS, work)
 
 
 async def forget(ctx: sessions.SessionContext) -> None:
-    transcripts.pop(ctx.key, None)
+    forgotten.append(ctx.key)
 
 
 assistant = AgentObject("assistant")
-assistant.chat(answer, clear=forget)
+assistant.chat(answer, items=ITEMS, clear=forget)
 
 
 @pytest.fixture(scope="session")
@@ -200,6 +196,7 @@ async def test_clear_forgets_the_conversation_and_its_ids_go_on(harness: Harness
     assert (await call(harness, "clear", key)).json() == {"stopped": None}
     cleared = (await call(harness, "messages", key, {})).json()
     assert cleared["messages"] == [] and cleared["first"] == 2
+    assert key in forgotten  # what the agent keeps outside its database is cleared too
     await call(harness, "chat", key, "two")
     assert texts((await call(harness, "messages", key, {})).json()) == [
         (2, "user", "two"),

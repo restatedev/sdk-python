@@ -12,6 +12,7 @@
 
 # pylint: disable=missing-function-docstring,import-error
 
+import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -21,7 +22,7 @@ from sessions_object import Host, request
 
 import restate
 from restate import sessions
-from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, answer_once
 from restate.agents.internal import CANCELLED
 from restate.sessions.internal import invoke
 
@@ -40,6 +41,12 @@ PUBLISHED = {"publish": b"null"}
 class Items:
     """A made-up framework's items: ``{"role", "text"}`` messages, a reply's ``calls``, and ``{"result", "output"}``."""
 
+    def dump(self, item: Item) -> str:
+        return json.dumps(item)
+
+    def load(self, stored: str) -> Item:
+        return json.loads(stored)
+
     def prompt(self, text: str) -> Item:
         return {"role": "user", "text": text}
 
@@ -49,14 +56,12 @@ class Items:
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         return [{"result": call.id, "output": text} for call, text in results]
 
-    def calls(self, item: Item) -> list[Call]:
-        return [Call(c["id"], c["name"], c["input"]) for c in item.get("calls", [])]
-
-    def results_of(self, item: Item) -> list[Result]:
-        return [Result(item["result"], item["output"])] if "result" in item else []
-
-    def said(self, item: Item) -> tuple[str, str] | None:
-        return (item["role"], item["text"]) if "role" in item else None
+    def read(self, item: Item) -> Parsed:
+        return Parsed(
+            (item["role"], item["text"]) if "role" in item else None,
+            [Call(c["id"], c["name"], c["input"]) for c in item.get("calls", [])],
+            [Result(item["result"], item["output"])] if "result" in item else [],
+        )
 
 
 ITEMS = Items()
@@ -135,24 +140,38 @@ async def test_a_stopped_run_stores_nothing_more():
         await conversation.append({"role": "assistant", "text": "too late"})
 
 
-async def test_the_transcript_follows_appends_and_drops():
+async def test_a_dropped_reply_takes_what_followed_it_and_each_item_is_read_once():
+    reads: list[Item] = []
+
+    class Counting(Items):
+        def read(self, item: Item) -> Parsed:
+            reads.append(item)
+            return super().read(item)
+
     async def run(conversation: Conversation) -> str:
-        transcript = conversation.transcript()  # built now, then kept up to date
-        call = {"id": "c1", "name": "lookup", "input": {"q": 1}}
-        await conversation.append_reply({"role": "assistant", "text": "looking", "calls": [call]})
+        call = {"id": "c1", "name": "lookup", "input": {}}
+        reply = await conversation.append_reply({"role": "assistant", "text": "", "calls": [call]})
         await conversation.append({"result": "c1", "output": "found"})
-        assert transcript.messages()[-1]["parts"][-1] == {
-            "type": "tool",
-            "id": "c1",
-            "name": "lookup",
-            "input": {"q": 1},
-            "output": "found",
-        }
-        blocked = await conversation.append_reply({"role": "assistant", "text": "blocked"})
-        assert blocked == conversation.entries[-1].n  # a reply's id: the position of its first item
-        await conversation.drop(blocked)
-        texts = [part.get("text") for message in conversation.transcript().messages() for part in message["parts"]]
-        assert "blocked" not in texts
+        assert conversation.has_result("c1") and not conversation.unanswered()
+        await conversation.drop(reply)
+        # The reply and the result made from it are gone, from memory and from the database alike.
+        assert not conversation.has_result("c1")
+        stored = await Conversation.load(conversation.db, ITEMS)
+        assert [entry.item for entry in stored.entries] == [entry.item for entry in conversation.entries]
+        assert [entry.item for entry in stored.entries] == [{"role": "user", "text": "hi"}]
         return "done"
 
-    assert await asking(run)("hi") == "done"
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, Counting(), run)
+
+    host = Host(Backend(), service="asker", answers=PUBLISHED)
+    assert await invoke(obj, "ask", host, request(), "hi") == "done"
+    # The prompt, the reply and the result, each read once as it was appended; the transcript reads none again.
+    assert reads == [
+        {"role": "user", "text": "hi"},
+        {"role": "assistant", "text": "", "calls": [{"id": "c1", "name": "lookup", "input": {}}]},
+        {"result": "c1", "output": "found"},
+    ]

@@ -31,8 +31,7 @@ stored:
 from __future__ import annotations
 
 import typing
-from collections.abc import Awaitable, Callable, Sequence
-from datetime import timedelta
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from pydantic import ConfigDict, TypeAdapter
@@ -54,28 +53,31 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai import Tool as PydanticTool
-from restate.agents._common import ModelError, PerSession, configured, from_tool, model_of, provider_of
-from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
-from restate.agents._object import RETRIES, AgentObject
+from restate.agents._common import (
+    CANCELLATION,
+    ModelError,
+    PerSession,
+    check_own,
+    configured,
+    from_tool,
+    model_of,
+    provider_of,
+)
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
+from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
-from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import Migration, SessionContext
+from restate.sessions import SessionContext
 
-_CANCELLATION = 409
-"""The status code of Restate's cancellation error, which a stopped turn fails with."""
+if typing.TYPE_CHECKING:
+    from typing_extensions import Unpack
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"<provider>/<model-id>"`` (or Pydantic AI's ``"<provider>:<model-id>"``), or a Pydantic AI model."""
 
 AnyTool: typing.TypeAlias = Tool | PydanticTool[Any] | Callable[..., Any]
 """A tool: one made with ``restate.agents`` (``tool``, ``call``, ...), a Pydantic AI tool, or a plain function."""
-
-
-def _check(own: Agent[Any, str] | None, system: object) -> None:
-    if own is not None and system is not None:
-        raise TypeError("an Agent of your own has its own instructions: pass no system")
 
 
 def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[Any]:
@@ -102,14 +104,6 @@ _MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(
 )
 
 
-def _item(message: ModelMessage) -> Item:
-    return _MESSAGE.dump_python(message, mode="json")
-
-
-def _message(item: Item) -> ModelMessage:
-    return _MESSAGE.validate_python(item)
-
-
 def _result(part: ToolReturnPart | RetryPromptPart) -> str:
     """Return a tool call's result as the model sees it: the return value, or the retry prompt."""
     return part.model_response() if isinstance(part, RetryPromptPart) else part.model_response_str()
@@ -120,42 +114,40 @@ def _text(response: ModelMessage) -> str:
 
 
 class _Items:
-    """Pydantic AI's messages, as the conversation keeps them."""
+    """Pydantic AI's messages, as the conversation keeps them: stored as JSON, loaded straight back by pydantic."""
+
+    def dump(self, item: Item) -> str:
+        return _MESSAGE.dump_json(item).decode()
+
+    def load(self, stored: str) -> Item:
+        return _MESSAGE.validate_json(stored)
 
     def prompt(self, text: str) -> Item:
-        return _item(ModelRequest(parts=[UserPromptPart(text)]))
+        return ModelRequest(parts=[UserPromptPart(text)])
 
     def reply(self, text: str) -> Item:
-        return _item(ModelResponse(parts=[TextPart(text)]))
+        return ModelResponse(parts=[TextPart(text)])
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         if not results:
             return []
         returns = [ToolReturnPart(call.name, text, call.id) for call, text in results]
-        return [_item(ModelRequest(parts=list(returns)))]
+        return [ModelRequest(parts=list(returns))]
 
-    def calls(self, item: Item) -> list[Call]:
-        message = _message(item)
-        if not isinstance(message, ModelResponse):
-            return []
-        return [Call(call.tool_call_id, call.tool_name, call.args_as_dict()) for call in message.tool_calls]
-
-    def results_of(self, item: Item) -> list[Result]:
-        message = _message(item)
-        if not isinstance(message, ModelRequest):
-            return []
-        return [
+    def read(self, item: Item) -> Parsed:
+        message = typing.cast(ModelMessage, item)
+        if isinstance(message, ModelResponse):
+            said = ("assistant", _text(message)) if any(isinstance(p, TextPart) for p in message.parts) else None
+            calls = [Call(call.tool_call_id, call.tool_name, call.args_as_dict()) for call in message.tool_calls]
+            return Parsed(said, calls)
+        prompts = [p.content for p in message.parts if isinstance(p, UserPromptPart)]
+        results = [
             Result(part.tool_call_id, _result(part), isinstance(part, RetryPromptPart))
             for part in message.parts
             if isinstance(part, ToolReturnPart | RetryPromptPart) and part.tool_call_id
         ]
-
-    def said(self, item: Item) -> tuple[str, str] | None:
-        message = _message(item)
-        if isinstance(message, ModelResponse):
-            return ("assistant", _text(message)) if any(isinstance(p, TextPart) for p in message.parts) else None
-        prompts = [p.content for p in message.parts if isinstance(p, UserPromptPart)]
-        return ("user", "".join(p if isinstance(p, str) else "" for p in prompts)) if prompts else None
+        said = ("user", "".join(p if isinstance(p, str) else "" for p in prompts)) if prompts else None
+        return Parsed(said, results=results)
 
 
 ITEMS = _Items()
@@ -189,10 +181,9 @@ class _Restate(AbstractCapability[Any]):
         processor (``ProcessHistory``) may have trimmed the run's messages, and
         what it makes of them is the model's to see, not the conversation's.
         """
-        stored = {result.id for entry in self.conversation.entries for result in ITEMS.results_of(entry.item)}
-        new = [message for message in messages if _result_ids(message) - stored]
+        new = [m for m in messages if any(not self.conversation.has_result(i) for i in _result_ids(m))]
         if new:
-            await self.conversation.append(*(_item(message) for message in new))
+            await self.conversation.append(*new)
 
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
@@ -204,7 +195,7 @@ class _Restate(AbstractCapability[Any]):
         self, ctx: RunContext[Any], *, request_context: ModelRequestContext, response: ModelResponse
     ) -> ModelResponse:
         await self.store(ctx.messages)
-        await self.conversation.append_reply(_item(response))
+        await self.conversation.append_reply(response)
         return response
 
     async def before_tool_execute(
@@ -225,7 +216,7 @@ class _Restate(AbstractCapability[Any]):
         stop = stop_signal_of(self.ctx)
         if stop is not None and stop.reason is not None:
             raise stop.reason from error
-        if isinstance(error, TerminalError) and error.status_code != _CANCELLATION:
+        if isinstance(error, TerminalError) and error.status_code != CANCELLATION:
             await tool_call_ended(self.ctx)
             return f"Error: {error.message}"
         # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
@@ -255,7 +246,7 @@ def _run(
     named: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
-) -> Callable[[Conversation], Awaitable[str]]:
+) -> Run:
     """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer."""
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
@@ -263,11 +254,10 @@ def _run(
     toolsets = [_toolset(given, ctx)] if given else []
 
     async def run(conversation: Conversation) -> str:
-        history = [_message(entry.item) for entry in conversation.entries]
-        last = history[-1]
-        if isinstance(last, ModelResponse) and not last.tool_calls:
+        if (final := conversation.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
-            return _text(last)
+            return final
+        history = typing.cast(list[ModelMessage], [entry.item for entry in conversation.entries])
         restate = _Restate(ctx, conversation)
         result = await agent.run(message_history=history, model=model, toolsets=toolsets, capabilities=[restate])
         # The messages that no model request stored: an output tool's return, say.
@@ -314,7 +304,7 @@ async def prompt(
     Raises:
         TypeError: If both ``agent`` and ``system`` are given.
     """
-    _check(agent, system)
+    check_own(agent, system)
 
     return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
 
@@ -327,14 +317,7 @@ def agent(
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
-    description: str | None = None,
-    migrations: Sequence[Migration] = (),
-    background: bool = False,
-    metadata: dict[str, str] | None = None,
-    inactivity_timeout: timedelta | None = None,
-    abort_timeout: timedelta | None = None,
-    ingress_private: bool | None = None,
-    invocation_retry_policy: InvocationRetryPolicy | None = RETRIES,
+    **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
 
@@ -363,15 +346,8 @@ def agent(
             ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
         system: The instructions, when there is no ``pydantic_agent``.
         tools: ``restate.agents`` tools, Pydantic AI tools or tool functions.
-        description: The object's description, shown in Restate's UI.
-        migrations: Tables of your own, beside the agent's.
-        background: Whether it works unwatched (a subagent, say): it then
-            publishes its progress once a turn ends, not at each step.
-        metadata: The object's metadata.
-        inactivity_timeout: Restate's inactivity timeout for its handlers.
-        abort_timeout: Restate's abort timeout for its handlers.
-        ingress_private: Whether only other services may call it.
-        invocation_retry_policy: How Restate retries a failed turn.
+        **options: The object's options, such as ``description``,
+            ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
     Returns:
         The agent, to serve with ``restate.serve(sessions.app(agent))``, or any ASGI server.
@@ -379,18 +355,8 @@ def agent(
     Raises:
         TypeError: If both ``pydantic_agent`` and ``system`` are given.
     """
-    _check(pydantic_agent, system)
-    obj = AgentObject(
-        name,
-        description=description,
-        migrations=migrations,
-        background=background,
-        metadata=metadata,
-        inactivity_timeout=inactivity_timeout,
-        abort_timeout=abort_timeout,
-        ingress_private=ingress_private,
-        invocation_retry_policy=invocation_retry_policy,
-    )
+    check_own(pydantic_agent, system)
+    obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> str:
         return await prompt(
@@ -402,5 +368,5 @@ def agent(
             tools=await configured(tools, ctx),
         )
 
-    obj.chat(answer)
+    obj.chat(answer, items=ITEMS)
     return obj

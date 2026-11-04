@@ -11,8 +11,9 @@
 """The turn of a ``chat`` handler.
 
 A turn reports its status, handles its cancellation, and publishes each change
-to the clients that follow the conversation, copying the framework's
-transcript into the log as it goes (``transcribing``).
+to the clients that follow the conversation. The conversation itself is
+already in the key's database, where the ``messages`` view reads it; a
+publish only tells the clients to read again.
 """
 
 from __future__ import annotations
@@ -24,11 +25,10 @@ import typing
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from restate.agents import _log, _signals
+from restate.agents import _signals
 from restate.agents._api import Turn
 from restate.agents._calls import settle
 from restate.agents._common import refusal_of
-from restate.agents._transcript import Transcript
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 from restate.sessions._link import Link
@@ -36,8 +36,8 @@ from restate.sessions.internal import ScopeKey, cancel_calls, cancelled, definit
 
 T = typing.TypeVar("T")
 
-Read = Callable[[], Awaitable[Transcript]]
-"""A function that returns the framework's transcript as it stands, either new or one the framework keeps adding to."""
+Stored = Callable[[str, str | None], bool]
+"""Whether a tool call's result is stored: ``stored(call_id, failed)``, where ``failed`` is the error the call returned."""
 
 
 class AttemptEnded(Exception):
@@ -149,41 +149,37 @@ def _unfollowed(ctx: SessionContext) -> bool:
     return agent is not None and agent.background
 
 
-_READING: ScopeKey[Read] = ScopeKey("transcribing")
-"""The transcript reader of the attempt's turn, while it answers."""
+_ANSWERING: ScopeKey[Stored] = ScopeKey("answering")
+"""What the attempt's turn has stored, while it answers."""
 
-_WRITING: ScopeKey[asyncio.Future[None]] = ScopeKey("the log's writes")
-"""The attempt's latest log write; writes run one after another, as parallel tool calls publish at the same time."""
+_SETTLING: ScopeKey[asyncio.Future[None]] = ScopeKey("settling")
+"""The attempt's latest settling of calls; they run one after another, as parallel tool calls publish at once."""
 
 
-def _logged(ctx: SessionContext, read: Read) -> Awaitable[None]:
-    """Copy the transcript that ``read`` returns into the conversation's log, after any earlier write."""
-    before = _WRITING.get(ctx)
+def _settled(ctx: SessionContext, stored: Stored) -> Awaitable[None]:
+    """Forget the calls whose results the conversation has stored (see ``_calls.py``), after any earlier settling."""
+    before = _SETTLING.get(ctx)
 
-    async def write() -> None:
+    async def run() -> None:
         if before is not None:
             with contextlib.suppress(BaseException):
                 await before
-        transcript = await read()
-        await _log.sync(ctx, transcript.messages())
-        # Forget the calls whose results the framework has stored: see _calls.py.
-        await settle(ctx, transcript.answered)
+        await settle(ctx, stored)
 
-    done = asyncio.ensure_future(write())
-    _WRITING.set(ctx, done)
+    done = asyncio.ensure_future(run())
+    _SETTLING.set(ctx, done)
     return done
 
 
 async def publish(ctx: SessionContext) -> None:
-    """Publish a change to the conversation of ``ctx``.
+    """Publish a change to the conversation of ``ctx``: the revision increases, and the clients read it again.
 
-    While a framework is answering (inside ``transcribing``), the change is
-    first copied into the log. Then the revision increases, and the clients
-    that follow the conversation read it again.
+    While a framework is answering (inside ``answering``), the calls whose
+    results are stored are first forgotten.
     """
-    read = _READING.get(ctx)
-    if read is not None:
-        await _logged(ctx, read)
+    stored = _ANSWERING.get(ctx)
+    if stored is not None:
+        await _settled(ctx, stored)
     await ctx.call(_signals.publish, key=_signals.signals_of(ctx))
 
 
@@ -203,10 +199,9 @@ async def tool_call_started(ctx: SessionContext) -> None:
     if not _unfollowed(ctx):
         await publish(ctx)
         return
-    read = _READING.get(ctx)
-    if read is not None:
-        transcript = await read()
-        await settle(ctx, transcript.answered)
+    stored = _ANSWERING.get(ctx)
+    if stored is not None:
+        await _settled(ctx, stored)
 
 
 async def tool_call_ended(ctx: SessionContext) -> None:
@@ -214,25 +209,23 @@ async def tool_call_ended(ctx: SessionContext) -> None:
     await stepped(ctx)
 
 
-async def transcribing(ctx: SessionContext, read: Read, work: Callable[[], Awaitable[T]]) -> T:
-    """Run ``work`` while keeping the conversation's log in step with the framework's transcript.
+async def answering(ctx: SessionContext, stored: Stored, work: Callable[[], Awaitable[T]]) -> T:
+    """Run ``work``, a framework's turn, forgetting the calls whose results it stores as it goes.
 
-    ``work`` is a framework's turn (or a compaction, or a reset), and ``read``
-    returns the framework's transcript as it stands. Every publish while
-    ``work`` runs (such as a tool call's start and end) copies the transcript
-    into the log, and so does the end of ``work``. The ``messages`` and
-    ``sync`` views read the log.
+    Every publish while ``work`` runs (such as a tool call's start and end),
+    and the end of ``work``, forget the Restate calls of the tool calls whose
+    results ``stored`` says are stored (see ``_calls.py``).
 
     Args:
         ctx: The handler's context.
-        read: Returns the framework's current transcript.
+        stored: Whether a tool call's result is stored, such as ``Conversation.stored``.
         work: The work to run.
 
     Returns:
         What ``work`` returns.
     """
-    outer = _READING.get(ctx)
-    _READING.set(ctx, read)
+    outer = _ANSWERING.get(ctx)
+    _ANSWERING.set(ctx, stored)
     failed = False
     try:
         return await work()
@@ -243,12 +236,12 @@ async def transcribing(ctx: SessionContext, read: Read, work: Callable[[], Await
         try:
             # A failed attempt stores nothing more, as its retry runs again.
             if not failed:
-                await _logged(ctx, read)
+                await _settled(ctx, stored)
         finally:
             if outer is not None:
-                _READING.set(ctx, outer)
+                _ANSWERING.set(ctx, outer)
             else:
-                _READING.delete(ctx)
+                _ANSWERING.delete(ctx)
 
 
 def _now() -> str:
@@ -273,12 +266,12 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     await stepped(ctx)
 
     async def end() -> None:
-        # Copy the turn's last change into the log, then have the companion
-        # close the turn, which publishes both as one revision. The close is a
-        # call, awaited so that it is done before the turn ends.
-        read = _READING.get(ctx)
-        if read is not None:
-            await _logged(ctx, read)
+        # Have the companion close the turn, which publishes its last change
+        # with it, as one revision. The close is a call, awaited so that it is
+        # done before the turn ends.
+        stored = _ANSWERING.get(ctx)
+        if stored is not None:
+            await _settled(ctx, stored)
         await ctx.call(_signals.close, invocation_id, key=companion)
 
     stop = Stop()
