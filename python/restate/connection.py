@@ -79,7 +79,7 @@ class Connection:
         """
         Deprecated alias of :meth:`wait_closed`.
 
-        .. deprecated:: 1.3.1
+        .. deprecated:: 1.4.0
             Use :meth:`wait_closed` instead.
         """
         warnings.warn(
