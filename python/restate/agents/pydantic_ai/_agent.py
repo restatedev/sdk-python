@@ -122,8 +122,6 @@ def _text(response: ModelMessage) -> str:
 class _Items:
     """Pydantic AI's messages, as the conversation keeps them."""
 
-    framework = "pydantic_ai"
-
     def prompt(self, text: str) -> Item:
         return _item(ModelRequest(parts=[UserPromptPart(text)]))
 

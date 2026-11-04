@@ -10,13 +10,14 @@
 #
 """The conversations of an agent's key, which every framework integration stores the same way.
 
-A conversation is one table of the framework's own items (its messages, as
+A conversation is one table of a framework's own items (its messages, as
 JSON), one row each, in order. The key's database is its agent's, so the
-agent's own conversation is ``restate_agent_conversation``; one beside it has
-a name of its own (``restate_agent_conversation__planner``). A conversation
-holds one framework's messages, which its prompts record. A prompt's item carries the prompt's id, and
-its answer once there is one; a model reply's items carry the reply's id (the
-position of its first item) and the agent that gave it. Rows are only ever appended, but for a reply that is
+agent's own conversation is ``restate_agent_conversation``; another agent in
+the key names a conversation of its own (``restate_agent_conversation__planner``).
+
+A prompt's item carries the prompt's id, and its answer once there is one; a
+model reply's items carry the reply's id (the position of its first item) and
+the agent that gave it. Rows are only ever appended, but for a reply that is
 dropped (to ask the model again), and a prompt's answer is one update of its
 row.
 
@@ -78,8 +79,7 @@ def _schema(table: str) -> Schema:
             prompt TEXT UNIQUE,
             answer TEXT,
             reply INTEGER,
-            agent TEXT,
-            framework TEXT
+            agent TEXT
         )"""
         _SCHEMAS[table] = Schema(f"restate_agents.{table}", [create, f"CREATE INDEX {table}_reply ON {table} (reply)"])
     return _SCHEMAS[table]
@@ -120,9 +120,6 @@ class Result(typing.NamedTuple):
 
 class Items(Protocol):
     """What a framework's items are: how the shared code reads and makes them."""
-
-    framework: str
-    """The framework's name (``openai``, say), which a conversation's prompts record."""
 
     def prompt(self, text: str) -> Item:
         """Return the item of a prompt (the user's message)."""
@@ -167,21 +164,9 @@ class Conversation:
 
     @classmethod
     async def load(cls, db: Database, items: Items, name: str | None = None) -> Conversation:
-        """Load conversation ``name`` (the agent's own, if ``None``) from ``db``, for a prompt of ``items``' framework.
-
-        Raises:
-            TerminalError: If the conversation holds another framework's messages.
-        """
+        """Load conversation ``name`` (the agent's own, if ``None``) from ``db``, whose items are ``items``'."""
         table = table_of(name)
         await _schema(table).ensure(db)
-        rows = await db.values(f"SELECT DISTINCT framework FROM {table} WHERE framework IS NOT NULL")
-        other = next((str(row[0]) for row in rows if row[0] != items.framework), None)
-        if other is not None:
-            named = f"the conversation {name!r}" if name else "the agent's conversation"
-            raise TerminalError(
-                f"{named} holds {other}'s messages, not {items.framework}'s: "
-                "give this prompt a conversation of its own (conversation=...)"
-            )
         return cls(db, items, table, await _entries(db, table))
 
     # --- Reading ---
@@ -248,7 +233,7 @@ class Conversation:
 
     async def ask(self, prompt_id: str, text: str) -> None:
         """Append prompt ``prompt_id``, with ``text``."""
-        await self._insert([Entry(self._next(), self.items.prompt(text), prompt=prompt_id)], framework=True)
+        await self._insert([Entry(self._next(), self.items.prompt(text), prompt=prompt_id)])
 
     async def answered(self, prompt_id: str, answer: str) -> None:
         """Store ``answer`` as the answer of prompt ``prompt_id``."""
@@ -263,14 +248,14 @@ class Conversation:
         self.entries = [e for e in self.entries if e.reply != reply]
         self._transcript = None
 
-    async def _insert(self, added: list[Entry], *, framework: bool = False) -> None:
+    async def _insert(self, added: list[Entry]) -> None:
         if self.closed:
             raise RuntimeError("the run was stopped: it stores nothing more")
         async with self.db.transaction() as tx:
             for e in added:
                 await tx.execute(
-                    f"INSERT INTO {self.table} (n, item, prompt, reply, agent, framework) VALUES (?, ?, ?, ?, ?, ?)",
-                    [e.n, json.dumps(e.item), e.prompt, e.reply, e.agent, self.items.framework if framework else None],
+                    f"INSERT INTO {self.table} (n, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?)",
+                    [e.n, json.dumps(e.item), e.prompt, e.reply, e.agent],
                 )
         self.entries.extend(added)
         if self._transcript is not None:

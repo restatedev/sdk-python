@@ -160,8 +160,6 @@ def _text(message: BaseMessage) -> str:
 class _Items:
     """LangChain's messages, as the conversation keeps them."""
 
-    framework = "langgraph"
-
     def prompt(self, text: str) -> Item:
         return _item(HumanMessage(text))
 

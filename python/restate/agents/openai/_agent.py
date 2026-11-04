@@ -105,8 +105,6 @@ def _output(value: Any) -> str:
 class _Items:
     """The Responses API's input items, as the SDK keeps a conversation."""
 
-    framework = "openai"
-
     def prompt(self, text: str) -> Item:
         return {"role": "user", "content": text}
 

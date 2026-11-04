@@ -41,8 +41,6 @@ PUBLISHED = {"publish": b"null"}
 class Items:
     """A made-up framework's items: ``{"role", "text"}`` messages, a reply's ``calls``, and ``{"result", "output"}``."""
 
-    framework = "made_up"
-
     def prompt(self, text: str) -> Item:
         return {"role": "user", "text": text}
 
@@ -164,8 +162,6 @@ async def test_the_transcript_follows_appends_and_drops():
 class OtherItems(Items):
     """Another made-up framework, of the same items."""
 
-    framework = "other"
-
 
 def reply_with(text: str, seen: list[list[str]] | None = None) -> Run:
     """Return a run that replies ``text``, after keeping the prompts it saw (in ``seen``)."""
@@ -220,15 +216,6 @@ async def test_two_agents_of_a_key_keep_conversations_of_their_own_by_name():
 
     assert await handler(both)() == ["p", "w", "p"]
     assert seen == [["to the planner"], ["to the writer"], ["to the planner", "to the planner again"]]
-
-
-async def test_a_conversation_holds_one_frameworks_messages():
-    async def mixed(ctx: sessions.SessionContext) -> Any:
-        await answer_once(ctx, "to made_up", ITEMS, reply_with("m"))
-        return await answer_once(ctx, "to other", OtherItems(), reply_with("o"))
-
-    with pytest.raises(restate.TerminalError, match="holds made_up's messages, not other's"):
-        await handler(mixed)()
 
 
 def test_a_conversations_name_is_an_identifier():
