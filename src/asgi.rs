@@ -69,9 +69,14 @@ async fn handle_request(
 ) -> Response<TunnelBody> {
     let (parts, body) = request.into_parts();
     let closed = CancellationToken::new();
+    // Until the response head exists, this future is the only owner of the stream:
+    // hyper drops it on a reset, a lost connection or a force shutdown. Dropping it
+    // must still turn `receive()` into `http.disconnect`.
+    let closed_guard = closed.clone().drop_guard();
     let (head_tx, head_rx) = oneshot::channel::<ResponseHead>();
     let (frame_tx, frame_rx) =
         mpsc::channel::<Result<Frame<Bytes>, BoxError>>(RESPONSE_FRAME_BUFFER);
+    let abort = Arc::new(Mutex::new(None));
 
     let receive = Arc::new(ReceiveState {
         body: tokio::sync::Mutex::new(Some(body)),
@@ -85,32 +90,47 @@ async fn handle_request(
             frames: Some(frame_tx),
             pending_trailers: HeaderMap::new(),
         }),
+        abort: Arc::clone(&abort),
         closed: closed.clone(),
     });
 
-    let app_future = Python::attach(|py| -> PyResult<_> {
-        let scope = build_scope(py, &parts)?;
-        let receive = Py::new(
-            py,
-            AsgiReceive {
-                state: Arc::clone(&receive),
-                locals: locals.clone(),
-            },
-        )?;
-        let send = Py::new(
-            py,
-            AsgiSend {
-                state: Arc::clone(&send),
-                locals: locals.clone(),
-            },
-        )?;
-        let coroutine = app.bind(py).call1((scope, receive, send))?;
-        pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
-    });
+    // Building the scope and starting the coroutine takes the GIL: do it off the
+    // runtime's worker threads, which hyper needs for the connection itself.
+    let app_future = tokio::task::spawn_blocking({
+        let receive = Arc::clone(&receive);
+        let send = Arc::clone(&send);
+        let locals = locals.clone();
+        move || {
+            Python::attach(|py| -> PyResult<_> {
+                let scope = build_scope(py, &parts)?;
+                let receive = Py::new(
+                    py,
+                    AsgiReceive {
+                        state: receive,
+                        locals: locals.clone(),
+                    },
+                )?;
+                let send = Py::new(
+                    py,
+                    AsgiSend {
+                        state: send,
+                        locals: locals.clone(),
+                    },
+                )?;
+                let coroutine = app.bind(py).call1((scope, receive, send))?;
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        }
+    })
+    .await;
     let app_future = match app_future {
-        Ok(future) => future,
-        Err(error) => {
+        Ok(Ok(future)) => future,
+        Ok(Err(error)) => {
             log_app_error(&error, "The ASGI application could not be started");
+            return internal_error();
+        }
+        Err(join_error) => {
+            tracing::error!(error = %join_error, "The ASGI application could not be started");
             return internal_error();
         }
     };
@@ -126,7 +146,15 @@ async fn handle_request(
                     send.app_finished(None)
                 }
                 Err(error) => {
-                    log_app_error(&error, "Exception in the ASGI application");
+                    let cancelled = Python::attach(|py| {
+                        error.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py)
+                    });
+                    if cancelled {
+                        // The event loop is going away (asyncio.run exit): not an app failure.
+                        tracing::debug!("ASGI application task cancelled");
+                    } else {
+                        log_app_error(&error, "Exception in the ASGI application");
+                    }
                     send.app_finished(Some(error.to_string()));
                 }
             }
@@ -137,9 +165,12 @@ async fn handle_request(
         Ok(head) => head,
         Err(_) => return internal_error(),
     };
+    // From here on the response body owns the stream's fate.
+    closed_guard.disarm();
     let mut response = Response::new(
         ClosingBody {
             inner: StreamBody::new(ReceiverStream::new(frame_rx)),
+            abort,
             closed,
         }
         .boxed_unsync(),
@@ -219,8 +250,35 @@ struct ReceiveState {
     closed: CancellationToken,
 }
 
+/// What `receive()` resolves to; converted to the ASGI dict where the Python future is resolved.
+enum ReceiveEvent {
+    Request { body: Bytes, more_body: bool },
+    Disconnect,
+}
+
+impl<'py> IntoPyObject<'py> for ReceiveEvent {
+    type Target = PyDict;
+    type Output = Bound<'py, PyDict>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        let event = PyDict::new(py);
+        match self {
+            Self::Request { body, more_body } => {
+                event.set_item("type", "http.request")?;
+                event.set_item("body", PyBytes::new(py, &body))?;
+                event.set_item("more_body", more_body)?;
+            }
+            Self::Disconnect => {
+                event.set_item("type", "http.disconnect")?;
+            }
+        }
+        Ok(event)
+    }
+}
+
 impl ReceiveState {
-    async fn next_event(&self) -> PyResult<Py<PyAny>> {
+    async fn next_event(&self) -> PyResult<ReceiveEvent> {
         if !self.ended.load(Ordering::Acquire) {
             let mut guard = self.body.lock().await;
             while let Some(body) = guard.as_mut() {
@@ -260,22 +318,12 @@ impl ReceiveState {
     }
 }
 
-fn request_event(body: Bytes, more_body: bool) -> PyResult<Py<PyAny>> {
-    Python::attach(|py| {
-        let event = PyDict::new(py);
-        event.set_item("type", "http.request")?;
-        event.set_item("body", PyBytes::new(py, &body))?;
-        event.set_item("more_body", more_body)?;
-        Ok(event.into_any().unbind())
-    })
+fn request_event(body: Bytes, more_body: bool) -> PyResult<ReceiveEvent> {
+    Ok(ReceiveEvent::Request { body, more_body })
 }
 
-fn disconnect_event() -> PyResult<Py<PyAny>> {
-    Python::attach(|py| {
-        let event = PyDict::new(py);
-        event.set_item("type", "http.disconnect")?;
-        Ok(event.into_any().unbind())
-    })
+fn disconnect_event() -> PyResult<ReceiveEvent> {
+    Ok(ReceiveEvent::Disconnect)
 }
 
 /// The ASGI `receive` callable of one request.
@@ -321,6 +369,9 @@ struct SendInner {
 
 struct SendState {
     inner: Mutex<SendInner>,
+    /// Set when the app ends without completing the response: the body then fails
+    /// (a stream reset) instead of ending cleanly, even if a frame is still buffered.
+    abort: Arc<Mutex<Option<String>>>,
     closed: CancellationToken,
 }
 
@@ -426,14 +477,16 @@ fn parse_headers(headers: &Bound<'_, PyAny>) -> PyResult<HeaderMap> {
 
 impl SendState {
     async fn send(&self, message: Message) -> PyResult<()> {
-        // Allow the app to finish after a disconnection: nothing to deliver to.
-        if self.closed.is_cancelled() {
-            return Ok(());
-        }
+        // The message must fit the protocol state even after a disconnection; what
+        // is valid is then delivered or, with nobody left to deliver to, dropped so
+        // the app can finish.
         let step = {
             let mut inner = self.inner.lock().expect("send state lock poisoned");
             inner.step(message)?
         };
+        if self.closed.is_cancelled() {
+            return Ok(());
+        }
         match step {
             Step::Nothing => Ok(()),
             Step::Frame {
@@ -470,12 +523,13 @@ impl SendState {
             }
             Stage::Body { .. } | Stage::Trailers => {
                 // An incomplete response: reset the stream rather than ending it cleanly.
-                if let Some(frames) = inner.frames.take() {
-                    let reason = error.unwrap_or_else(|| {
-                        "the ASGI application finished without completing the response".to_owned()
-                    });
-                    let _ = frames.try_send(Err(reason.into()));
-                }
+                // Recorded beside the channel, so a frame still buffered in it cannot
+                // turn the failure into a clean end of stream.
+                let reason = error.unwrap_or_else(|| {
+                    "the ASGI application finished without completing the response".to_owned()
+                });
+                *self.abort.lock().expect("abort lock poisoned") = Some(reason);
+                inner.frames.take();
                 inner.stage = Stage::Done;
             }
             Stage::Done => {}
@@ -537,7 +591,11 @@ impl SendInner {
                     more_trailers,
                 },
             ) => {
-                self.pending_trailers.extend(headers);
+                for (name, value) in headers {
+                    if let Some(name) = name {
+                        self.pending_trailers.append(name, value);
+                    }
+                }
                 if more_trailers {
                     return Ok(Step::Nothing);
                 }
@@ -596,6 +654,7 @@ impl AsgiSend {
 /// `http.disconnect` and makes later `send`s no-ops.
 struct ClosingBody {
     inner: StreamBody<ReceiverStream<Result<Frame<Bytes>, BoxError>>>,
+    abort: Arc<Mutex<Option<String>>>,
     closed: CancellationToken,
 }
 
@@ -608,7 +667,12 @@ impl Body for ClosingBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
-        let result = Pin::new(&mut this.inner).poll_frame(cx);
+        let mut result = Pin::new(&mut this.inner).poll_frame(cx);
+        if matches!(result, Poll::Ready(None)) {
+            if let Some(reason) = this.abort.lock().expect("abort lock poisoned").take() {
+                result = Poll::Ready(Some(Err(reason.into())));
+            }
+        }
         if matches!(result, Poll::Ready(None) | Poll::Ready(Some(Err(_)))) {
             this.closed.cancel();
         }

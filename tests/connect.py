@@ -179,6 +179,7 @@ TEST_TIMEOUT = 5.0
 
 class Response:
     def __init__(self) -> None:
+        self.stream_id = 0
         self.headers: typing.Dict[str, str] = {}
         self.trailers: typing.Dict[str, str] = {}
         self.body = bytearray()
@@ -348,6 +349,7 @@ class FakeCloud:
         assert self._conn is not None
         stream_id = self._conn.get_next_available_stream_id()
         response = Response()
+        response.stream_id = stream_id
         self._responses[stream_id] = response
         self._conn.send_headers(
             stream_id,
@@ -360,6 +362,12 @@ class FakeCloud:
         if wait:
             await asyncio.wait_for(response.ended, TEST_TIMEOUT)
         return response
+
+    async def reset(self, stream_id: int) -> None:
+        """Cancel a forwarded stream (RST_STREAM), as a timed-out invocation does."""
+        assert self._conn is not None
+        self._conn.reset_stream(stream_id)
+        await self._flush()
 
     async def wait_closed(self) -> None:
         await asyncio.wait_for(self._closed, TEST_TIMEOUT)
@@ -568,16 +576,24 @@ async def test_app_exceptions_become_500_and_resets():
 
 
 async def test_send_validation_and_trailers():
+    errors: typing.List[str] = []
+
+    async def expect_error(coro: typing.Awaitable[None]) -> None:
+        try:
+            await coro
+            errors.append("no error")
+        except RuntimeError as error:
+            errors.append(str(error))
+
     async def app(scope: typing.Any, receive: typing.Any, send: typing.Any) -> None:
         if scope["path"] == "/bad-order":
-            with pytest.raises(RuntimeError, match="expected 'http.response.start'"):
-                await send({"type": "http.response.body", "body": b"x"})
+            await expect_error(send({"type": "http.response.body", "body": b"x"}))
             await send({"type": "http.response.start", "status": 204, "headers": []})
-            with pytest.raises(RuntimeError, match="expected 'http.response.body'"):
-                await send({"type": "http.response.start", "status": 200, "headers": []})
+            await expect_error(send({"type": "http.response.start", "status": 200, "headers": []}))
             await send({"type": "http.response.body", "body": b"", "more_body": False})
-            with pytest.raises(RuntimeError, match="no further message"):
-                await send({"type": "http.response.body", "body": b""})
+            # Even after the stream completed, the protocol is still enforced.
+            await asyncio.sleep(0.05)
+            await expect_error(send({"type": "http.response.body", "body": b""}))
             return
         if scope["path"] == "/trailers":
             await send({"type": "http.response.start", "status": 200, "headers": [(b"x-a", b"1")], "trailers": True})
@@ -595,6 +611,13 @@ async def test_send_validation_and_trailers():
         engine, _ = await established(cloud, app)
         response = await cloud.request("/http/h/9080/bad-order", identity_headers("/bad-order"))
         assert response.status == 204
+        await asyncio.sleep(0.2)
+        assert [e.split(",")[0] for e in errors] == [
+            "Unexpected ASGI message 'http.response.body'",
+            "Unexpected ASGI message 'http.response.start'",
+            "Unexpected ASGI message 'http.response.body'",
+        ], errors
+        assert "no further message" in errors[2]
 
         response = await cloud.request("/http/h/9080/trailers", identity_headers("/trailers"))
         assert response.status == 200
@@ -628,6 +651,89 @@ async def test_request_body_is_streamed_and_disconnect_follows_completion():
         assert seen[0] == {"type": "http.request", "body": b"payload", "more_body": True}
         assert seen[1] == {"type": "http.request", "body": b"", "more_body": False}
         assert seen[2] == {"type": "http.disconnect"}
+        await engine.shutdown(0.0)
+
+
+async def test_reset_before_the_response_head_delivers_disconnect():
+    # A stream cancelled while the app has consumed the request but not yet started the
+    # response (hyper drops the request future): receive() must still report the disconnect.
+    outcome: asyncio.Future[typing.Any] = asyncio.get_running_loop().create_future()
+    consumed = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def app(scope: typing.Any, receive: typing.Any, send: typing.Any) -> None:
+        assert (await receive())["more_body"] is False
+        consumed.set()
+        await proceed.wait()
+        try:
+            event = await asyncio.wait_for(receive(), TEST_TIMEOUT)
+            outcome.set_result(event)
+        except BaseException as error:  # pylint: disable=broad-except
+            outcome.set_exception(error)
+            raise
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"late", "more_body": False})
+
+    async with FakeCloud() as cloud:
+        engine, _ = await established(cloud, app)
+        response = await cloud.request("/http/h/9080/slow-start", identity_headers("/slow-start"), wait=False)
+        await asyncio.wait_for(consumed.wait(), TEST_TIMEOUT)
+        await cloud.reset(response.stream_id)
+        await asyncio.sleep(0.1)
+        proceed.set()
+        assert await asyncio.wait_for(outcome, TEST_TIMEOUT) == {"type": "http.disconnect"}
+        # The late response is dropped silently and the engine is unaffected.
+        assert (await cloud.request("/_/health")).status == 200
+        await engine.shutdown(0.0)
+
+
+class StallingCloud(FakeCloud):
+    """A peer that never opens its flow-control window: the SDK's body frames queue up."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pending: typing.List[typing.Tuple[int, int]] = []
+
+    async def __aenter__(self) -> "StallingCloud":
+        await super().__aenter__()
+        return self
+
+    def _dispatch(self, event: typing.Any) -> None:
+        if isinstance(event, DataReceived):
+            self._responses[event.stream_id].body.extend(event.data)
+            self.pending.append((event.flow_controlled_length, event.stream_id))
+            return
+        super()._dispatch(event)
+
+    async def open_window(self) -> None:
+        assert self._conn is not None
+        for length, stream_id in self.pending:
+            self._conn.acknowledge_received_data(length, stream_id)
+        self.pending.clear()
+        await self._flush()
+
+
+async def test_app_failure_with_a_buffered_frame_resets_the_stream():
+    # The peer stalls; the app has frames queued in hyper and in the bridge when it
+    # raises. The stream must end with a reset, never as a complete response.
+    raised = asyncio.Event()
+
+    async def app(scope: typing.Any, receive: typing.Any, send: typing.Any) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"a" * 70000, "more_body": True})
+        await send({"type": "http.response.body", "body": b"b" * 10, "more_body": True})
+        await send({"type": "http.response.body", "body": b"c" * 10, "more_body": True})
+        raised.set()
+        raise RuntimeError("boom with a buffered frame")
+
+    async with StallingCloud() as cloud:
+        engine, _ = await established(cloud, app)
+        response = await cloud.request("/http/h/9080/stall", identity_headers("/stall"), wait=False)
+        await asyncio.wait_for(raised.wait(), TEST_TIMEOUT)
+        await asyncio.sleep(0.2)
+        await cloud.open_window()
+        with pytest.raises(ConnectionError, match="stream reset"):
+            await asyncio.wait_for(response.ended, TEST_TIMEOUT)
         await engine.shutdown(0.0)
 
 

@@ -1038,7 +1038,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let filter = match std::env::var("RESTATE_CORE_LOG") {
         Ok(directives) => EnvFilter::new(directives),
         Err(_) => EnvFilter::new(
-            "restate_sdk_shared_core::tunnel=info,restate_sdk_shared_core::cloud=warn",
+            "restate_sdk_shared_core::tunnel=info,restate_sdk_shared_core::cloud=warn,restate_sdk_python_core=warn",
         ),
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();

@@ -262,7 +262,7 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
     identity_verifier = PyIdentityVerifier(endpoint.identity_keys)
 
     active_channels: Set[ReceiveChannel] = set()
-    sigterm_installed = False
+    hooked_loops: "weakref.WeakSet[asyncio.AbstractEventLoop]" = weakref.WeakSet()
 
     # Journal value codec resolution.
     # A codec (or an async provider building one) may be configured on the endpoint. Whether one is
@@ -291,14 +291,14 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             ch.notify_shutdown()
 
     async def app(scope: Scope, receive: Receive, send: Send):
-        nonlocal sigterm_installed
-        if not sigterm_installed:
-            loop = asyncio.get_running_loop()
-            try:
-                install_shutdown_hook(loop, _on_sigterm, signal.SIGTERM)
-            except (NotImplementedError, RuntimeError, ValueError):
-                pass  # Windows or non-main thread
-            sigterm_installed = True
+        loop = asyncio.get_running_loop()
+        if loop not in hooked_loops:
+            hooked_loops.add(loop)
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    install_shutdown_hook(loop, _on_sigterm, signum)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    pass  # Windows or non-main thread
         try:
             if scope["type"] == "lifespan":
                 raise LifeSpanNotImplemented()
