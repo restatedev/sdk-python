@@ -171,10 +171,35 @@ async def own(ctx: sessions.SessionContext, text: str) -> str:
     return await pydantic_ai.prompt(ctx, text, agent=mine, tools=[get_weather])
 
 
+def weather_then_answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """A model that sees only the trimmed history: it calls the weather tool, then answers with its result."""
+    last = messages[-1]
+    returned = [p for p in last.parts if isinstance(p, ToolReturnPart)] if isinstance(last, ModelRequest) else []
+    if returned:
+        return ModelResponse(parts=[TextPart(f"tool said: {returned[-1].model_response_str()}")])
+    city = str(_prompts(messages)[-1]).split(" ")[-1]
+    return ModelResponse(parts=[ToolCallPart("get_weather", {"city": city}, tool_call_id=f"call-{city}")])
+
+
+def keep_last_two(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """A history processor that trims what the model sees (and what the run keeps) to the last two messages."""
+    return messages[-2:]
+
+
+def trimmed_agent() -> Any:
+    from pydantic_ai import Agent  # pylint: disable=import-outside-toplevel
+    from pydantic_ai.capabilities import ProcessHistory  # pylint: disable=import-outside-toplevel
+
+    return Agent(FunctionModel(weather_then_answer), capabilities=[ProcessHistory(keep_last_two)])
+
+
+trimmed = pydantic_ai.agent("pai_trimmed", trimmed_agent(), tools=[get_weather])
+
+
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(assistant, per_user), restate_image="ghcr.io/restatedev/restate:latest"
+        sessions.app(assistant, per_user, trimmed), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -320,6 +345,21 @@ async def test_an_agent_of_your_own_runs_with_its_instructions_and_this_packages
     k = key()
     assert (await post(harness, f"{k}/own", json=f"system {k}")).json() == "system: Mine."
     assert (await post(harness, f"{k}/own", json=f"weather {k}")).json() == f"tool said: sunny in {k}"
+
+
+async def test_with_a_history_processor_that_trims_each_tool_result_is_still_stored(harness: HarnessEnvironment):
+    k = key()
+    async with httpx.AsyncClient(timeout=60) as ingress:
+        base = f"{harness.ingress_url}/pai_trimmed/{k}"
+        for city in ("Rome", "Oslo"):
+            answered = await ingress.post(f"{base}/chat", content=f"weather {city}", headers=TEXT)
+            assert answered.json() == f"tool said: sunny in {city}"
+        page = typing.cast(Messages, (await ingress.post(f"{base}/messages", json={})).json())
+    # The whole conversation is kept, each tool call with its output, though the model saw only the last messages.
+    outputs = [
+        part.get("output") for message in page["messages"] for part in message["parts"] if part["type"] == "tool"
+    ]
+    assert outputs == ["sunny in Rome", "sunny in Oslo"]
 
 
 async def test_options_may_be_functions_of_the_context(harness: HarnessEnvironment):

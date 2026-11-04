@@ -162,6 +162,13 @@ class _Items:
 ITEMS = _Items()
 
 
+def _result_ids(message: ModelMessage) -> set[str]:
+    """Return the ids of the tool calls whose results ``message`` holds."""
+    if not isinstance(message, ModelRequest):
+        return set()
+    return {p.tool_call_id for p in message.parts if isinstance(p, ToolReturnPart | RetryPromptPart) and p.tool_call_id}
+
+
 class _Restate(AbstractCapability[Any]):
     """Make a Pydantic AI run durable in a Restate handler.
 
@@ -176,9 +183,17 @@ class _Restate(AbstractCapability[Any]):
         self.conversation = conversation
 
     async def store(self, messages: Sequence[ModelMessage]) -> None:
-        """Store the messages of the run that the conversation does not have yet: those after it."""
-        if new := messages[len(self.conversation.entries) :]:
-            await self.conversation.append(*(_item(m) for m in new))
+        """Store the tools' results in ``messages`` (the run's) that the conversation does not have yet.
+
+        The rest of what a run adds, its responses, is stored as each arrives.
+        Results are found by their call ids, not by their place: a history
+        processor (``ProcessHistory``) may have trimmed the run's messages, and
+        what it makes of them is the model's to see, not the conversation's.
+        """
+        stored = {result.id for entry in self.conversation.entries for result in ITEMS.results_of(entry.item)}
+        new = [message for message in messages if _result_ids(message) - stored]
+        if new:
+            await self.conversation.append(*(_item(message) for message in new))
 
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
