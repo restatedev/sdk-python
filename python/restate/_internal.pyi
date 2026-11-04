@@ -33,6 +33,16 @@ class PyVM:
     def __init__(self, *args: Any, **kwargs: Any) -> None: ...
     def __getattr__(self, name: str) -> Any: ...
 
+# Declared, as names ``restate.connection`` re-exports must be (still untyped).
+
+class ConnectError(Exception):
+    """Connecting to Restate Cloud failed for good (``src/tunnel``)."""
+
+class TunnelInfo:
+    """A Restate Cloud connection's details."""
+
+    def __getattr__(self, name: str) -> Any: ...
+
 # --- Sessions (src/sessions.rs) -----------------------------------------------------------------
 
 SQL_GET: int
