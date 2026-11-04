@@ -6,11 +6,11 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use restate_sdk_shared_core::cloud::{
-    ConfigSource, ConnectOptions, IngressKey, ReconnectPolicy, Servers, Tuning,
-    TunnelEngineOptions, INGRESS_KEY_ENV, INGRESS_KEY_URL,
+use restate_sdk_shared_core::cloud_keys::{IngressKey, KeyError, INGRESS_KEY_ENV, INGRESS_KEY_URL};
+use restate_sdk_shared_core::tunnel::{
+    self, ConfigSource, ConnectOptions, ReconnectPolicy, Servers, Tuning, TunnelEngine,
+    TunnelEngineOptions,
 };
-use restate_sdk_shared_core::tunnel::{self, TunnelEngine};
 
 use crate::asgi::AsgiService;
 
@@ -323,6 +323,6 @@ impl From<IngressKey> for PyIngressKey {
 /// The Cloud UI page where ingress keys are created.
 pub const INGRESS_KEY_HELP_URL: &str = INGRESS_KEY_URL;
 
-fn key_error(what: &str, error: &restate_sdk_shared_core::cloud::KeyError) -> String {
+fn key_error(what: &str, error: &KeyError) -> String {
     format!("{what} {error} — copy it again from {INGRESS_KEY_URL}")
 }
