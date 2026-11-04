@@ -11,6 +11,7 @@
 """Preview apis: they might change or be removed without notice."""
 
 import typing
+import warnings
 
 from .context import Context, RestateDurableFuture
 from .exceptions import TerminalError
@@ -25,32 +26,20 @@ T = typing.TypeVar("T")
 
 def explicit_recovery(target: T) -> T:
     """
+    Deprecated: pass ``explicit_recovery=True`` to the handler decorator, or to the service, instead.
+
     Run the handlers with explicit recovery: a retried or resumed invocation doesn't replay the journal of its
     earlier attempts, but runs the handler again from the start, executing every context operation anew,
-    e.g. reading the current state.
-
-    The handler takes care of recovering from the effects of the earlier attempts, which might repeat (at least once):
-
-    * Each attempt's calls and sends are new requests. To reach the invocation an earlier attempt started,
-      give it an idempotency key that is the same on every attempt, such as one made from `ctx.request().id`.
-    * `ctx.run` executes its action again on every attempt.
-    * Awakeables are not supported.
-
-    Apply it to a service, virtual object or workflow to enable it for all its handlers,
-    or as a decorator on top of a handler to enable it for that handler only.
-
-    Example:
-        counter = explicit_recovery(VirtualObject("counter"))
-
-        greeter = Service("greeter")
-
-        @explicit_recovery
-        @greeter.handler()
-        async def greet(ctx: Context, name: str) -> str:
-            ...
+    e.g. reading the current state. See the ``explicit_recovery`` option of the handler decorators.
 
     NOTE: This API is in preview and might change without notice.
     """
+    warnings.warn(
+        "restate._preview.explicit_recovery is deprecated: pass explicit_recovery=True to the handler decorator, "
+        "or to the service, instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if isinstance(target, (Service, VirtualObject, Workflow)):
         target.explicit_recovery = True
     else:

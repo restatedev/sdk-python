@@ -36,21 +36,22 @@ def test_is_off_by_default():
     assert not greeter.handlers["greet"].explicit_recovery
 
 
-def test_applies_to_every_handler_from_the_service():
-    counter = explicit_recovery(VirtualObject("counter"))
+def test_applies_to_every_handler_of_the_service():
+    counter = VirtualObject("counter", explicit_recovery=True)
 
     @counter.handler()
     async def add(ctx: ObjectContext, n: int) -> None:
         pass
 
     assert counter.explicit_recovery
+    assert Service("greeter", explicit_recovery=True).explicit_recovery
+    assert Workflow("flow", explicit_recovery=True).explicit_recovery
 
 
 def test_applies_to_a_single_handler():
     flow = Workflow("flow")
 
-    @explicit_recovery
-    @flow.main()
+    @flow.main(explicit_recovery=True)
     async def run(ctx: WorkflowContext) -> None:
         pass
 
@@ -63,12 +64,21 @@ def test_applies_to_a_single_handler():
     assert not flow.handlers["query"].explicit_recovery
 
 
-def test_must_be_applied_on_top_of_the_handler_decorator():
-    async def greet(ctx: Context, name: str) -> str:
-        return name
+def test_the_decorator_still_works_but_is_deprecated():
+    greeter = Service("greeter")
 
-    with pytest.raises(ValueError):
-        explicit_recovery(greet)
+    with pytest.warns(DeprecationWarning, match="pass explicit_recovery=True"):
+
+        @explicit_recovery
+        @greeter.handler()
+        async def greet(ctx: Context, name: str) -> str:
+            return name
+
+    with pytest.warns(DeprecationWarning):
+        counter = explicit_recovery(VirtualObject("counter"))
+
+    assert greeter.handlers["greet"].explicit_recovery
+    assert counter.explicit_recovery
 
 
 def test_the_vm_takes_it():
@@ -80,7 +90,7 @@ def test_the_vm_takes_it():
 @pytest.mark.anyio
 async def test_a_retry_runs_the_handler_again_and_entries_are_named():
     calls = 0
-    counter = explicit_recovery(VirtualObject("counter"))
+    counter = VirtualObject("counter", explicit_recovery=True)
 
     def step() -> int:
         nonlocal calls
