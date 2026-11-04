@@ -256,7 +256,9 @@ class Handler(Generic[I, O]):
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
         invocation_retry_policy: Optional retry policy configuration applied to this handler.
         explicit_recovery: If true, the handler runs with explicit recovery (preview): a retried or resumed
-            invocation runs the handler again from the start, instead of replaying its journal.
+            invocation runs the handler again from the start, instead of replaying its journal. See the
+            ``explicit_recovery`` option of the handler decorators for what that means for calls, sends,
+            ``ctx.run`` and awakeables.
         explicit_cancellation: If true, the handler runs with explicit cancellation (preview):
             see restate._preview.cancellation.
     """

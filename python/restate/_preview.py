@@ -26,11 +26,19 @@ T = typing.TypeVar("T")
 
 def explicit_recovery(target: T) -> T:
     """
-    Deprecated: pass ``explicit_recovery=True`` to the handler decorator, or to the service, instead.
-
     Run the handlers with explicit recovery: a retried or resumed invocation doesn't replay the journal of its
     earlier attempts, but runs the handler again from the start, executing every context operation anew,
-    e.g. reading the current state. See the ``explicit_recovery`` option of the handler decorators.
+    e.g. reading the current state.
+
+    The handler takes care of recovering from the effects of the earlier attempts, which might repeat (at least once):
+
+    * Each attempt's calls and sends are new requests. To reach the invocation an earlier attempt started,
+      give it an idempotency key that is the same on every attempt, such as one made from `ctx.request().id`.
+    * `ctx.run` executes its action again on every attempt.
+    * Awakeables are not supported.
+
+    .. deprecated:: 1.4.0
+        Pass ``explicit_recovery=True`` to the handler decorator, or to the service, instead.
 
     NOTE: This API is in preview and might change without notice.
     """

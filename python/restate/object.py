@@ -193,7 +193,10 @@ class VirtualObject:
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
             explicit_recovery: (Preview) If true, a retried or resumed invocation does not replay its journal:
-                the handler runs again from the start, and recovers from what its earlier attempts did.
+                the handler runs again from the start, executing every context operation anew. So each
+                attempt's calls and sends are new requests (give them an idempotency key that is the same on
+                every attempt, such as one made from ``ctx.request().id``), ``ctx.run`` runs its action again
+                on every attempt, and awakeables are not supported.
                 NOTE: in preview, it might change without notice.
             explicit_cancellation: (Preview) If true, Restate cancelling an invocation neither fails the handler's
                 awaits nor cancels its calls: the handler awaits `restate._preview.cancellation(ctx)` and decides
