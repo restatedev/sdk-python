@@ -151,12 +151,12 @@ def run(obj: sessions.SessionObject, name: str, host: Host, *args: Any) -> typin
 notes = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
 
-@notes.handler()
+@notes.handler
 async def add(ctx: sessions.SessionContext, text: str) -> None:
     await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [text])
 
 
-@notes.view()
+@notes.view
 async def texts(ctx: sessions.ViewContext) -> list[str]:
     return [typing.cast(str, row["text"]) for row in await ctx.db.query("SELECT text FROM notes ORDER BY rowid")]
 
@@ -401,3 +401,18 @@ def test_a_session_object_runs_its_handlers_with_explicit_recovery_and_lazy_stat
     assert notes.enable_lazy_state
     assert notes.service_tag.metadata is not None
     assert notes.service_tag.metadata["dev.restate.tooling.journal.hidden.name.prefix"] == "v22/"
+
+
+def test_a_handler_or_view_is_named_after_its_function_or_as_its_option_says():
+    named = sessions.SessionObject("named")
+
+    @named.handler(name="put")
+    async def put_one(ctx: sessions.SessionContext, value: int) -> None:
+        pass
+
+    @named.view("peek")
+    async def peek_one(ctx: sessions.ViewContext) -> None:
+        pass
+
+    assert sorted(named.handlers) == ["peek", "put"]
+    assert named.handlers["peek"].kind == "shared"

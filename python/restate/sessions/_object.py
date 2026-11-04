@@ -16,11 +16,11 @@ nothing else of the SDK's context::
 
     notes = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
-    @notes.handler()
+    @notes.handler
     async def add(ctx: sessions.SessionContext, text: str) -> None:
         await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [text])
 
-    @notes.view()
+    @notes.view
     async def list(ctx: sessions.ViewContext) -> list[str]:
         return [row["text"] for row in await ctx.db.query("SELECT text FROM notes ORDER BY rowid")]
 """
@@ -271,9 +271,9 @@ class SessionObject(VirtualObject):
     - ``schema``: the steps that make each key's database, in order, applied
       once per key by the first handler that uses it. A step that ran never
       changes: a change is a step of its own.
-    - ``@obj.handler()``: handlers run one at a time per key, each with a
+    - ``@obj.handler``: handlers run one at a time per key, each with a
       ``SessionContext``.
-    - ``@obj.view()``: views run beside the handlers, each with a
+    - ``@obj.view``: views run beside the handlers, each with a
       ``ViewContext``: they read, and write nothing.
 
     A name is a handler or a view, not both. The other options are the SDK's
@@ -313,7 +313,11 @@ class SessionObject(VirtualObject):
         self.config = ObjectConfig(schema=Schema(name, schema) if schema else None)
         self._entries: dict[str, _Entry] = {}
 
-    def handler(  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+    @typing.overload  # type: ignore[override]
+    def handler(self, fn: F, /) -> F: ...  # pyright: ignore[reportIncompatibleMethodOverride]
+
+    @typing.overload
+    def handler(
         self,
         name: str | None = None,
         *,
@@ -328,18 +332,35 @@ class SessionObject(VirtualObject):
         idempotency_retention: timedelta | None = None,
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
-    ) -> Callable[[F], F]:
+    ) -> Callable[[F], F]: ...
+
+    def handler(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        name: str | F | None = None,
+        *,
+        accept: str = "application/json",
+        content_type: str = "application/json",
+        input_serde: Serde[Any] = DefaultSerde(),
+        output_serde: Serde[Any] = DefaultSerde(),
+        metadata: dict[str, str] | None = None,
+        inactivity_timeout: timedelta | None = None,
+        abort_timeout: timedelta | None = None,
+        journal_retention: timedelta | None = None,
+        idempotency_retention: timedelta | None = None,
+        ingress_private: bool | None = None,
+        invocation_retry_policy: InvocationRetryPolicy | None = None,
+    ) -> F | Callable[[F], F]:
         """
         A handler: it runs one at a time per key, and is the only one that
         writes. Its function takes a ``SessionContext``, and its input, if any::
 
-            @notes.handler()
+            @notes.handler
             async def add(ctx: sessions.SessionContext, text: str) -> None:
                 await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [text])
 
-        The options are the SDK's handler's.
+        With options, ``@notes.handler(name=..., ...)``: the SDK's handler's.
         """
-        return self._register(
+        return self._decorate(
             False,
             name,
             dict(
@@ -357,6 +378,10 @@ class SessionObject(VirtualObject):
             ),
         )
 
+    @typing.overload
+    def view(self, fn: F, /) -> F: ...
+
+    @typing.overload
     def view(
         self,
         name: str | None = None,
@@ -372,21 +397,39 @@ class SessionObject(VirtualObject):
         idempotency_retention: timedelta | None = None,
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
-    ) -> Callable[[F], F]:
+    ) -> Callable[[F], F]: ...
+
+    def view(
+        self,
+        name: str | F | None = None,
+        *,
+        accept: str = "application/json",
+        content_type: str = "application/json",
+        input_serde: Serde[Any] = DefaultSerde(),
+        output_serde: Serde[Any] = DefaultSerde(),
+        metadata: dict[str, str] | None = None,
+        inactivity_timeout: timedelta | None = None,
+        abort_timeout: timedelta | None = None,
+        journal_retention: timedelta | None = None,
+        idempotency_retention: timedelta | None = None,
+        ingress_private: bool | None = None,
+        invocation_retry_policy: InvocationRetryPolicy | None = None,
+    ) -> F | Callable[[F], F]:
         """
         A view: it runs beside the handlers, and reads the database as
         committed when its invocation started. Its function takes a
         ``ViewContext``, and its input, if any::
 
-            @notes.view()
+            @notes.view
             async def count(ctx: sessions.ViewContext) -> int:
                 row = await ctx.db.get("SELECT count(*) AS n FROM notes")
                 return row["n"] if row else 0
 
         A view that is still running after 16 commits of the handlers fails,
-        and Restate retries it. The options are the SDK's handler's.
+        and Restate retries it. With options, ``@notes.view(name=..., ...)``:
+        the SDK's handler's.
         """
-        return self._register(
+        return self._decorate(
             True,
             name,
             dict(
@@ -403,6 +446,12 @@ class SessionObject(VirtualObject):
                 invocation_retry_policy=invocation_retry_policy,
             ),
         )
+
+    def _decorate(self, view: bool, name: str | F | None, options: dict[str, Any]) -> F | Callable[[F], F]:
+        """The decorator of ``@obj.handler(...)``, or, bare (``@obj.handler``), the function it registers."""
+        if callable(name):
+            return self._register(view, None, options)(name)
+        return self._register(view, name, options)
 
     def _register(self, view: bool, name: str | None, options: dict[str, Any]) -> Callable[[F], F]:
         def register(fn: F) -> F:

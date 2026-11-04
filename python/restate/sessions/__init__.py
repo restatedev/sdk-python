@@ -18,12 +18,12 @@ object's state (``ctx.db``). The Python variant of ``@restatedev/sessions``::
     notes = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
 
-    @notes.handler()
+    @notes.handler
     async def add(ctx: sessions.SessionContext, text: str) -> None:
         await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [text])
 
 
-    @notes.view()
+    @notes.view
     async def list(ctx: sessions.ViewContext) -> list[str]:
         return [row["text"] for row in await ctx.db.query("SELECT text FROM notes ORDER BY rowid")]
 
