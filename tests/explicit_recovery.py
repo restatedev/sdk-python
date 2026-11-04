@@ -16,7 +16,6 @@ import pytest
 
 import restate
 from restate import Context, ObjectContext, Service, VirtualObject, Workflow, WorkflowContext
-from restate._preview import explicit_recovery
 from restate.vm import VMWrapper
 
 
@@ -62,23 +61,6 @@ def test_applies_to_a_single_handler():
     assert not flow.explicit_recovery
     assert flow.handlers["run"].explicit_recovery
     assert not flow.handlers["query"].explicit_recovery
-
-
-def test_the_decorator_still_works_but_is_deprecated():
-    greeter = Service("greeter")
-
-    with pytest.warns(DeprecationWarning, match="pass explicit_recovery=True"):
-
-        @explicit_recovery
-        @greeter.handler()
-        async def greet(ctx: Context, name: str) -> str:
-            return name
-
-    with pytest.warns(DeprecationWarning):
-        counter = explicit_recovery(VirtualObject("counter"))
-
-    assert greeter.handlers["greet"].explicit_recovery
-    assert counter.explicit_recovery
 
 
 def test_the_vm_takes_it():
