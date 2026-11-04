@@ -39,26 +39,16 @@ _shutdown_hooks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[int,
 
 
 def install_shutdown_hook(
-    loop: asyncio.AbstractEventLoop,
-    hook: Callable[[], None],
-    signum: int = signal.SIGTERM,
-    only_if_present: bool = False,
-) -> bool:
+    loop: asyncio.AbstractEventLoop, hook: Callable[[], None], signum: int = signal.SIGTERM
+) -> None:
     """
     Run ``hook`` when ``signum`` (default SIGTERM) is received while ``loop`` runs.
-
-    Installing the dispatcher replaces any handler the host already has for that signal,
-    so a component that must not take a signal over from its host passes
-    ``only_if_present``: the hook then joins an existing dispatcher or is not registered
-    at all. Returns whether the hook was registered.
 
     Raises what ``loop.add_signal_handler`` raises when signals cannot be handled here
     (Windows, or a non-main thread).
     """
     hooks = _shutdown_hooks.setdefault(loop, {})
     if signum not in hooks:
-        if only_if_present:
-            return False
         registered: List[Callable[[], None]] = []
 
         def dispatch() -> None:
@@ -71,7 +61,6 @@ def install_shutdown_hook(
         loop.add_signal_handler(signum, dispatch)
         hooks[signum] = registered
     hooks[signum].append(hook)
-    return True
 
 
 X_RESTATE_SERVER = header_to_binary([("x-restate-server", f"restate-sdk-python/{SDK_VERSION}")])
@@ -273,7 +262,7 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
     identity_verifier = PyIdentityVerifier(endpoint.identity_keys)
 
     active_channels: Set[ReceiveChannel] = set()
-    hooked_loops: "weakref.WeakSet[asyncio.AbstractEventLoop]" = weakref.WeakSet()
+    sigterm_installed = False
 
     # Journal value codec resolution.
     # A codec (or an async provider building one) may be configured on the endpoint. Whether one is
@@ -302,16 +291,14 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             ch.notify_shutdown()
 
     async def app(scope: Scope, receive: Receive, send: Send):
-        loop = asyncio.get_running_loop()
-        if loop not in hooked_loops:
-            hooked_loops.add(loop)
+        nonlocal sigterm_installed
+        if not sigterm_installed:
+            loop = asyncio.get_running_loop()
             try:
                 install_shutdown_hook(loop, _on_sigterm, signal.SIGTERM)
-                # Ctrl-C belongs to the host (hypercorn, uvicorn, `restate.connect()`): join
-                # its dispatcher when there is one, never take the signal over.
-                install_shutdown_hook(loop, _on_sigterm, signal.SIGINT, only_if_present=True)
             except (NotImplementedError, RuntimeError, ValueError):
                 pass  # Windows or non-main thread
+            sigterm_installed = True
         try:
             if scope["type"] == "lifespan":
                 raise LifeSpanNotImplemented()
