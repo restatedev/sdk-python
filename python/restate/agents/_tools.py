@@ -226,14 +226,14 @@ async def _once(name: str, input: object, call: ToolCall, body: Callable[[ToolCa
     return result
 
 
-def _untyped(caller: object) -> Callable[..., Awaitable[Any]]:
-    """A caller of a handler whose input is known only at run time (a tool's): it takes the input, if any."""
-    return typing.cast(Callable[..., Awaitable[Any]], caller)
+def _untyped(ctx: SessionContext) -> Any:
+    """``ctx``, to call and send to a handler whose input a tool knows only at run time."""
+    return ctx
 
 
-def _untyped_send(sender: object) -> Callable[..., None]:
-    """A sender to a handler whose input is known only at run time (a tool's): it takes the input, if any."""
-    return typing.cast(Callable[..., None], sender)
+def _inputs(handler: Handler[Any, Any], value: Any) -> tuple[Any, ...]:
+    """The positional input of a call of ``handler``: ``value``, if it takes an input."""
+    return (value,) if handler.arity >= 2 else ()
 
 
 def _handler(target: Callable[..., Any]) -> Handler[Any, Any]:
@@ -328,10 +328,10 @@ def call(
 
         async def made(c: ToolCall) -> Any:
             target_key = chosen if key is None else await configured(key, c.ctx)
-            caller = _untyped(
-                c.ctx.rpc(target, key=target_key if _keyed(handler) else None, idempotency_key=c.idempotency_key)
+            target_key = target_key if _keyed(handler) else None
+            return await _untyped(c.ctx).call(
+                target, *_inputs(handler, value), key=target_key, idempotency_key=c.idempotency_key
             )
-            return await (caller(value) if handler.arity >= 2 else caller())
 
         return await _once(f"{service}/{handler.name}", arguments["raw"], tool_call, made)
 
@@ -363,15 +363,13 @@ def send(
 
         async def made(c: ToolCall) -> str:
             target_key = chosen if key is None else await configured(key, c.ctx)
-            sender = _untyped_send(
-                c.ctx.send(
-                    target, key=target_key if _keyed(handler) else None, delay=delay, idempotency_key=c.idempotency_key
-                )
+            _untyped(c.ctx).send(
+                target,
+                *_inputs(handler, value),
+                key=target_key if _keyed(handler) else None,
+                delay=delay,
+                idempotency_key=c.idempotency_key,
             )
-            if handler.arity >= 2:
-                sender(value)
-            else:
-                sender()
             return f"sent to {service}{'' if target_key is None else f'/{target_key}'}/{handler.name}"
 
         return await _once(f"{service}/{handler.name}", arguments["raw"], tool_call, made)
@@ -407,8 +405,9 @@ def workflow(
 
         async def made(c: ToolCall) -> Any:
             workflow_id = f"{c.ctx.key}-{c.call_id}" if key is None else await configured(key, c.ctx)
-            caller = _untyped(c.ctx.rpc(target, key=workflow_id, idempotency_key=c.idempotency_key))
-            return await (caller(value) if handler.arity >= 2 else caller())
+            return await _untyped(c.ctx).call(
+                target, *_inputs(handler, value), key=workflow_id, idempotency_key=c.idempotency_key
+            )
 
         return await _once(service, arguments["raw"], tool_call, made)
 
@@ -461,7 +460,7 @@ def subagent(
         task_name, task = typing.cast(str, arguments["name"]), typing.cast(str, arguments["task"])
 
         async def made(c: ToolCall) -> Any:
-            return await c.ctx.rpc.generic(
+            return await c.ctx.generic_call(
                 agent_name, handler, task, key=f"{c.ctx.key}.{task_name}", idempotency_key=c.idempotency_key
             )
 
@@ -505,8 +504,7 @@ def signal(name: str, *, description: str, input: Any = None, tool_name: str | N
             request: _signals.WaitRequest = {"id": wait_id, "name": name}
             if input is not None:
                 request["input"] = arguments["raw"]
-            waiting = c.ctx.rpc(_signals.wait, key=_signals.signals_of(c.ctx), idempotency_key=wait_id)
-            return await waiting(request)
+            return await c.ctx.call(_signals.wait, request, key=_signals.signals_of(c.ctx), idempotency_key=wait_id)
 
         return await _once(f"signal/{name}", arguments["raw"], tool_call, made)
 

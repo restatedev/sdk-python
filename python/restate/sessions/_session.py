@@ -35,8 +35,8 @@ from urllib.parse import quote
 
 from restate._internal import PyVM  # pylint: disable=no-name-in-module
 from restate.exceptions import SuspendedException, TerminalError
-from restate.sessions._api import Database, DatabaseReader, Send, Transaction
-from restate.sessions._calls import CallHost, GenericSend, Sender
+from restate.sessions._api import Database, DatabaseReader, Transaction
+from restate.sessions._calls import CallHost, GenericSend, Sends
 from restate.sessions._database import (
     Connection,
     ConnectionTransaction,
@@ -295,9 +295,8 @@ class _Sends:
     def __init__(self) -> None:
         self._sends: list[dict[str, Any]] = []
         self._open: bool = True
-        self.send: Send = Sender(self._record)
 
-    def _record(self, send: GenericSend) -> None:
+    def record(self, send: GenericSend) -> None:
         if not self._open:
             raise TerminalError("the transaction has ended: send from inside its body")
         stored: dict[str, Any] = {
@@ -370,12 +369,12 @@ class Writes(Reads, abc.ABC):
         await self.query_columns(sql, params)
 
 
-class AttemptTransaction(Writes):
+class AttemptTransaction(Writes, Sends):
     """``Transaction`` (see ``_api.py``): the SQL of a connection's transaction, and the sends it commits with."""
 
-    def __init__(self, handle: ConnectionTransaction, send: Send) -> None:
+    def __init__(self, handle: ConnectionTransaction, sink: Callable[[GenericSend], None]) -> None:
         self._handle: ConnectionTransaction = handle
-        self.send: Send = send
+        self._send_sink = sink
 
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
         return await self._handle.query_columns(sql, params)
@@ -615,7 +614,7 @@ class Attempt:
             async with db.transaction() as handle:
                 sends = _Sends() if self._has_outbox else None
                 # A view's writes stay in its session: it has nothing to reset.
-                tx = AttemptTransaction(handle, sends.send if sends is not None else Sender(_refused_send))
+                tx = AttemptTransaction(handle, sends.record if sends is not None else _refused_send)
                 if not self._host.shared:
                     _RESET.on(tx, lambda: self._reset(handle))
                 try:

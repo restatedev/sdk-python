@@ -9,15 +9,14 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """
-Calls and sends from a session object's handler: ``ctx.rpc`` and ``ctx.send``,
-and a transaction's ``tx.send``. A target is a handler (with its key for an
-object or a workflow), typed by its signature; or, for one known only at run
-time, its names, with ``generic``. Options go with the target: what it returns
-takes only the input::
+Calls and sends from a session object's handler: ``ctx.call`` and
+``ctx.send``, and a transaction's ``tx.send``. A target is a handler (with
+its key, for an object or a workflow), typed by its signature; a target known
+only at run time is named, with ``generic_call`` and ``generic_send``::
 
-    count = await ctx.rpc(increment, key="a", idempotency_key=f"{ctx.request.id}:inc")(5)
-    ctx.send(record, key="audit", delay=timedelta(hours=1))(entry)
-    answer = await ctx.rpc.generic("Counter", "get", key="a")
+    count = await ctx.call(increment, 5, key="a", idempotency_key=f"{ctx.request.id}:inc")
+    ctx.send(record, entry, key="audit", delay=timedelta(hours=1))
+    answer = await ctx.generic_call("Counter", "get", key="a")
 """
 
 from __future__ import annotations
@@ -116,58 +115,49 @@ class CallFuture(RestateDurableCallFuture[O]):
         await self._call.cancel_invocation()
 
 
-class Caller:
-    """``Rpc`` (see ``_api.py``) over the SDK's context: each call a generic call, its result read by its serde."""
+class Calls:
+    """``call`` and ``generic_call`` (see ``Caller`` in ``_api.py``), over ``_call_host``, the SDK's context."""
 
-    def __init__(self, host: CallHost) -> None:
-        self._host: CallHost = host
+    _call_host: CallHost
 
     @typing.overload
-    def __call__(
+    def call(
         self,
         handler: Callable[[Any], Awaitable[O]],
-        key: str | None = None,
+        /,
         *,
+        key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[[], CallFuture[O]]: ...
+    ) -> CallFuture[O]: ...
 
     @typing.overload
-    def __call__(
+    def call(
         self,
         handler: Callable[[Any, I], Awaitable[O]],
-        key: str | None = None,
+        arg: I,
+        /,
         *,
+        key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[[I], CallFuture[O]]: ...
+    ) -> CallFuture[O]: ...
 
-    def __call__(
+    def call(
         self,
         handler: Callable[..., Awaitable[Any]],
-        key: str | None = None,
+        arg: Any = None,
+        /,
         *,
+        key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[..., CallFuture[Any]]:
-        """
-        A caller of ``handler``, with ``key`` for an object's or a workflow's.
-
-        ``idempotency_key`` is the same on every attempt, so that a new attempt
-        gets the first call's result; without one, every attempt makes the call
-        again, the one that resumes a suspension too. Restate scopes it to the
-        target handler.
-        """
+    ) -> CallFuture[Any]:
         service, name, input_serde, output_serde = _target(handler, key)
+        future = self._call_host.generic_call(service, name, input_serde.serialize(arg), key, idempotency_key, headers)
+        return CallFuture(future, output_serde)
 
-        def call(arg: Any = None) -> CallFuture[Any]:
-            parameter = input_serde.serialize(arg)
-            future = self._host.generic_call(service, name, parameter, key, idempotency_key, headers)
-            return CallFuture(future, output_serde)
-
-        return call
-
-    def generic(
+    def generic_call(
         self,
         service: str,
         handler: str,
@@ -179,66 +169,57 @@ class Caller:
         input_serde: Serde[Any] = JsonSerde(),
         output_serde: Serde[Any] = JsonSerde(),
     ) -> CallFuture[Any]:
-        """
-        Call a target known only at run time, by its names: untyped, and JSON
-        unless serdes are given. ``key`` is the caller's to give, for an
-        object or a workflow.
-        """
-        future = self._host.generic_call(service, handler, input_serde.serialize(arg), key, idempotency_key, headers)
+        parameter = input_serde.serialize(arg)
+        future = self._call_host.generic_call(service, handler, parameter, key, idempotency_key, headers)
         return CallFuture(future, output_serde)
 
 
-class Sender:
-    """``Send`` (see ``_api.py``) into a sink: ``send_now``'s for ``ctx.send``, a transaction's outbox for ``tx.send``."""
+class Sends:
+    """``send`` and ``generic_send`` (see ``Sender`` in ``_api.py``), into ``_send_sink``: made at once, or at a commit."""
 
-    def __init__(self, sink: Callable[[GenericSend], None]) -> None:
-        self._sink: Callable[[GenericSend], None] = sink
+    _send_sink: Callable[[GenericSend], None]
 
     @typing.overload
-    def __call__(
+    def send(
         self,
         handler: Callable[[Any], Awaitable[Any]],
-        key: str | None = None,
+        /,
         *,
+        key: str | None = None,
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[[], None]: ...
+    ) -> None: ...
 
     @typing.overload
-    def __call__(
+    def send(
         self,
         handler: Callable[[Any, I], Awaitable[Any]],
-        key: str | None = None,
+        arg: I,
+        /,
         *,
+        key: str | None = None,
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[[I], None]: ...
+    ) -> None: ...
 
-    def __call__(
+    def send(
         self,
         handler: Callable[..., Awaitable[Any]],
-        key: str | None = None,
+        arg: Any = None,
+        /,
         *,
+        key: str | None = None,
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[..., None]:
-        """
-        A sender to ``handler``, with ``key`` for an object's or a workflow's;
-        ``delay`` is how long after the send (for ``tx.send``, after the
-        commit) the target runs. See ``Caller`` for ``idempotency_key``.
-        """
+    ) -> None:
         service, name, input_serde, _ = _target(handler, key)
+        parameter = input_serde.serialize(arg)
+        self._send_sink(GenericSend(service, name, parameter, key, delay, idempotency_key, headers))
 
-        def send(arg: Any = None) -> None:
-            parameter = input_serde.serialize(arg)
-            self._sink(GenericSend(service, name, parameter, key, delay, idempotency_key, headers))
-
-        return send
-
-    def generic(
+    def generic_send(
         self,
         service: str,
         handler: str,
@@ -250,8 +231,8 @@ class Sender:
         headers: dict[str, str] | None = None,
         input_serde: Serde[Any] = JsonSerde(),
     ) -> None:
-        """Send to a target known only at run time, by its names: untyped, and JSON unless a serde is given."""
-        self._sink(GenericSend(service, handler, input_serde.serialize(arg), key, delay, idempotency_key, headers))
+        parameter = input_serde.serialize(arg)
+        self._send_sink(GenericSend(service, handler, parameter, key, delay, idempotency_key, headers))
 
 
 def send_now(host: CallHost) -> Callable[[GenericSend], None]:

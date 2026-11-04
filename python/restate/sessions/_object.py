@@ -45,8 +45,8 @@ from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_context import DisconnectedException, ServerInvocationContext
-from restate.sessions._api import Cancel, Database, DatabaseReader, Rpc, Send, SessionContext, ViewContext
-from restate.sessions._calls import Caller, Sender, send_now
+from restate.sessions._api import Database, DatabaseReader, SessionContext, ViewContext
+from restate.sessions._calls import CallHost, Calls, GenericSend, Sends, send_now
 from restate.sessions._link import Link
 from restate.sessions._schema import Schema, Step, steps_of
 from restate.sessions._scope import SCOPE, Scope
@@ -71,26 +71,32 @@ the journal view (its head, tail, manifests and packs in the object's state,
 
 
 @dataclass(frozen=True, eq=False)
-class AttemptContext:
+class AttemptContext(Calls, Sends):
     """``SessionContext`` (see ``_api.py``): one attempt's, made as it starts. Compared by identity."""
 
     key: str
     request: Request
     db: Database
-    rpc: Rpc
-    send: Send
-    cancel: Cancel
+    _call_host: CallHost
+    _send_sink: Callable[[GenericSend], None]
+    _cancel: Callable[[str], None]
+
+    def cancel(self, invocation_id: str) -> None:
+        self._cancel(invocation_id)
 
 
 @dataclass(frozen=True, eq=False)
-class AttemptViewContext:
+class AttemptViewContext(Calls):
     """``ViewContext`` (see ``_api.py``): one attempt's, made as it starts. Compared by identity."""
 
     key: str
     request: Request
     db: DatabaseReader
-    rpc: Rpc
-    cancel: Cancel
+    _call_host: CallHost
+    _cancel: Callable[[str], None]
+
+    def cancel(self, invocation_id: str) -> None:
+        self._cancel(invocation_id)
 
 
 class _ContextHost:
@@ -200,8 +206,8 @@ async def _nothing() -> None:
     """The action of an empty run."""
 
 
-def _cancel_of(host: SqlHost) -> Cancel:
-    """``Cancel`` over the SDK's context."""
+def _cancel_of(host: SqlHost) -> Callable[[str], None]:
+    """``cancel`` over the SDK's context."""
 
     def cancel(invocation_id: str) -> None:
         # Not an id: a retry would fail the same way.
@@ -230,15 +236,21 @@ ENTRIES: Link[dict[str, _Entry]] = Link("entries")
 
 def _context_of(entry: _Entry, host: SqlHost, request: Request, attempt: Attempt) -> SessionContext | ViewContext:
     """The context of an attempt of ``entry``."""
-    rpc = Caller(host)
     cancel = _cancel_of(host)
     sdk = typing.cast("ServerInvocationContext | None", getattr(host, "context", None))
     scope = Scope(sdk=sdk, explicit_cancellation=entry.explicit_cancellation, definition=entry.definition())
     if entry.view:
-        view = AttemptViewContext(key=host.key, request=request, db=reader_of(attempt.db), rpc=rpc, cancel=cancel)
+        view = AttemptViewContext(
+            key=host.key, request=request, db=reader_of(attempt.db), _call_host=host, _cancel=cancel
+        )
         return SCOPE.on(view, scope)
     context = AttemptContext(
-        key=host.key, request=request, db=attempt.db, rpc=rpc, send=Sender(send_now(host)), cancel=cancel
+        key=host.key,
+        request=request,
+        db=attempt.db,
+        _call_host=host,
+        _send_sink=send_now(host),
+        _cancel=cancel,
     )
     return SCOPE.on(context, scope)
 
@@ -539,7 +551,7 @@ class SessionObject(VirtualObject):
                 what = f"{self.name}.{fn.__name__} is a handler already, of the SDK's or of a session object's."
                 instead = (
                     "A session object's handlers are functions of its context, of their own; put journaled work "
-                    "in a restate.VirtualObject, Service or Workflow, and call it with ctx.rpc."
+                    "in a restate.VirtualObject, Service or Workflow, and call it with ctx.call."
                 )
                 raise TypeError(f"{what} {instead}")
             if not inspect.iscoroutinefunction(inspect.unwrap(fn)):
@@ -568,7 +580,7 @@ class SessionObject(VirtualObject):
             entries = ENTRIES.of(self)
             assert entries is not None
             entries[sdk.name] = entry
-            # The function itself, marked as the handler it is: `ctx.rpc(fn, ...)`
+            # The function itself, marked as the handler it is: `ctx.call(fn, ...)`
             # and the client find it, and a test calls it with a context of
             # its own (a fake of the protocols).
             vars(fn)[RESTATE_UNIQUE_HANDLER_SYMBOL] = sdk

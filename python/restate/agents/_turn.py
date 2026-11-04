@@ -181,7 +181,7 @@ async def publish(ctx: SessionContext) -> None:
     read = _READING.get(ctx)
     if read is not None:
         await _logged(ctx, read)
-    await ctx.rpc(_signals.publish, key=_signals.signals_of(ctx))()
+    await ctx.call(_signals.publish, key=_signals.signals_of(ctx))
 
 
 async def stepped(ctx: SessionContext) -> None:
@@ -255,7 +255,7 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     companion = _signals.signals_of(ctx)
     turn: Turn = {"invocationId": invocation_id, "since": _now()}
     # The companion knows the turn from here to its close: `status` and `stop` ask it.
-    await ctx.rpc(_signals.start, key=companion)(turn)
+    await ctx.call(_signals.start, turn, key=companion)
     await stepped(ctx)
 
     async def end() -> None:
@@ -265,7 +265,7 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
         read = _READING.get(ctx)
         if read is not None:
             await _logged(ctx, read)
-        await ctx.rpc(_signals.close, key=companion)(invocation_id)
+        await ctx.call(_signals.close, invocation_id, key=companion)
 
     stop = Stop()
     _STOP.set(ctx, stop)

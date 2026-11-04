@@ -118,8 +118,8 @@ async def flaky(ctx: sessions.SessionContext, text: str) -> int:
 async def priced(ctx: sessions.SessionContext, sku: str) -> list[int]:
     """A call and SQL awaited together, and two calls at once: one await point, the selector's."""
     first, second, row = await asyncio.gather(
-        ctx.rpc(price)(sku),
-        ctx.rpc(price)(sku * 2),
+        ctx.call(price, sku),
+        ctx.call(price, sku * 2),
         ctx.db.get("SELECT count(*) AS n FROM notes"),
     )
     assert row is not None
@@ -131,7 +131,7 @@ async def forward(ctx: sessions.SessionContext, text: str) -> None:
     """A note, and its delivery to the inbox of the same key, sent once the transaction commits."""
     async with ctx.db.transaction() as tx:
         await tx.execute("INSERT INTO notes (text) VALUES (?)", [text])
-        tx.send(deliver, key=ctx.key)(text)
+        tx.send(deliver, text, key=ctx.key)
 
 
 sleeper = restate.Service("sleeper")
@@ -146,7 +146,7 @@ async def nap(ctx: restate.Context) -> str:
 @notes.handler(explicit_cancellation=True)
 async def stoppable(ctx: sessions.SessionContext, text: str) -> list[str]:
     """Waits for a nap; cancelled, it cancels the nap, records that it stopped, and answers the calls it cancelled."""
-    napping = asyncio.ensure_future(ctx.rpc(nap)())
+    napping = asyncio.ensure_future(ctx.call(nap))
     stopping = asyncio.ensure_future(internal.cancelled(ctx))
     await asyncio.wait({napping, stopping}, return_when=asyncio.FIRST_COMPLETED)
     assert stopping.done()

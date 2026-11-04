@@ -275,7 +275,13 @@ def _companion(
     key: asked again, it answers again.
     """
     key = None if step is None else f"{ctx.request.id}:{step}"
-    return typing.cast(Callable[..., Awaitable[T]], ctx.rpc(handler, key=_signals.signals_of(ctx), idempotency_key=key))
+    companion = _signals.signals_of(ctx)
+    untyped = typing.cast(Any, ctx)
+
+    def call(*args: Any) -> Awaitable[T]:
+        return typing.cast(Awaitable[T], untyped.call(handler, *args, key=companion, idempotency_key=key))
+
+    return call
 
 
 async def _stopped(ctx: ViewContext, step: str) -> Stopped:
@@ -315,7 +321,7 @@ def _followed(agent: AgentObject) -> None:
             await reset(tx)
             await _log.restart(tx, start)
         await cleared(ctx)
-        await ctx.rpc(_signals.reset, key=_signals.signals_of(ctx), idempotency_key=f"{ctx.request.id}:reset")()
+        await ctx.call(_signals.reset, key=_signals.signals_of(ctx), idempotency_key=f"{ctx.request.id}:reset")
 
     async def clear(ctx: ViewContext) -> Stopped:
         """
@@ -326,7 +332,7 @@ def _followed(agent: AgentObject) -> None:
         answered first, then forgotten too.
         """
         stopped = await _stopped(ctx, "clear")
-        await ctx.rpc(erase, key=ctx.key, idempotency_key=f"{ctx.request.id}:erase")()
+        await ctx.call(erase, key=ctx.key, idempotency_key=f"{ctx.request.id}:erase")
         return stopped
 
     async def sync(ctx: ViewContext, request: SyncRequest | None = None) -> Synced:

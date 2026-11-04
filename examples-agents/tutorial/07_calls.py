@@ -6,7 +6,7 @@ picks a handle, such as @ace. Handles are a second session object: each handle
 is a key with its own database, which records the wallet that owns it. The
 first wallet to claim a handle gets it.
 
-``ctx.rpc(claim_handle, key=name)(wallet)`` calls that object through Restate,
+``ctx.call(claim_handle, wallet, key=name)`` calls that object through Restate,
 and waits for the answer. A retried handler (06) makes its calls again, so a
 call that changes something gets an idempotency key that is the same on every
 attempt. Restate then answers a repeated call with the first call's result,
@@ -73,7 +73,7 @@ async def deposit(ctx: sessions.SessionContext, money: Deposit) -> int:
 
 @wallet.handler
 async def claim(ctx: sessions.SessionContext, name: str) -> str:
-    owner = await ctx.rpc(claim_handle, key=name, idempotency_key=f"{ctx.request.id}:claim")(ctx.key)
+    owner = await ctx.call(claim_handle, ctx.key, key=name, idempotency_key=f"{ctx.request.id}:claim")
     if owner != ctx.key:
         raise restate.TerminalError(f"@{name} belongs to {owner}")
     return f"{ctx.key} is now @{name}"

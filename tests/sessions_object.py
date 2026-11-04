@@ -231,7 +231,7 @@ async def test_the_sends_of_a_transaction_are_made_once_it_commits_and_never_if_
     async def place(ctx: sessions.SessionContext, order: str) -> None:
         async with ctx.db.transaction() as tx:
             await tx.execute("INSERT INTO orders VALUES (?)", [order])
-            tx.send(record, key="orders")(order)
+            tx.send(record, order, key="orders")
             if order == "bad":
                 raise ValueError("no")
 
@@ -257,7 +257,7 @@ async def test_the_sends_a_crash_left_in_the_outbox_are_made_again_with_the_same
     async def place(ctx: sessions.SessionContext, order: str) -> None:
         async with ctx.db.transaction() as tx:
             await tx.execute("INSERT INTO orders VALUES (?)", [order])
-            tx.send(record, key="orders")(order)
+            tx.send(record, order, key="orders")
             # The commit's sync goes through; then the process crashes, before the outbox is emptied.
             first.crash_after(1)
 
@@ -339,15 +339,15 @@ async def test_calls_are_typed_by_their_handler_and_checked_for_their_key():
 
     @caller.handler()
     async def price(ctx: sessions.SessionContext, sku: str) -> int:
-        return await ctx.rpc(quote, idempotency_key="k")(sku)
+        return await ctx.call(quote, sku, idempotency_key="k")
 
     @caller.handler()
     async def unkeyed(ctx: sessions.SessionContext) -> None:
-        ctx.send(record)("x")
+        ctx.send(record, "x")
 
     @caller.handler()
     async def literal(ctx: sessions.SessionContext) -> Any:
-        return await ctx.rpc.generic("pricing", "quote", "pear")
+        return await ctx.generic_call("pricing", "quote", "pear")
 
     host = Host(Backend(), service="caller", answers={"quote": b"42"})
     assert await run(caller, "price", host, "apple") == 42
@@ -362,7 +362,7 @@ async def test_ctx_send_is_made_at_once_and_cancel_takes_an_invocation_id():
 
     @sender.handler()
     async def go(ctx: sessions.SessionContext) -> None:
-        ctx.send(record, key="k")("entry")
+        ctx.send(record, "entry", key="k")
         ctx.cancel("inv_1")
         ctx.cancel("not-an-id")
 
@@ -493,7 +493,7 @@ async def test_cancelled_takes_the_ctx_of_a_handler_with_explicit_cancellation()
 async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first(monkeypatch):
     from restate import _preview  # pylint: disable=import-outside-toplevel
     from restate.exceptions import SuspendedException  # pylint: disable=import-outside-toplevel
-    from restate.sessions import _calls, _object, _scope  # pylint: disable=import-outside-toplevel
+    from restate.sessions import _object, _scope  # pylint: disable=import-outside-toplevel
 
     async def attempt_ended(_sdk: Any) -> None:
         raise SuspendedException()
@@ -504,9 +504,9 @@ async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first(m
         key="k",
         request=request(),
         db=typing.cast(Any, None),
-        rpc=_calls.Caller(host),
-        send=_calls.Sender(lambda send: None),
-        cancel=lambda invocation_id: None,
+        _call_host=host,
+        _send_sink=lambda send: None,
+        _cancel=lambda invocation_id: None,
     )
     _scope.SCOPE.on(ctx, _scope.Scope(sdk=typing.cast(Any, object()), explicit_cancellation=True))
     watcher = asyncio.ensure_future(internal.cancelled(ctx))
@@ -548,9 +548,22 @@ class FakeContext:
     db: FakeDatabase
     key: str = "alice"
     request: Request = field(default_factory=request)
-    rpc: sessions.Rpc = field(default_factory=lambda: typing.cast(sessions.Rpc, None))
-    send: sessions.Send = field(default_factory=lambda: typing.cast(sessions.Send, None))
-    cancel: sessions.Cancel = lambda invocation_id: None
+    sent: list[tuple[Any, Any]] = field(default_factory=list)
+
+    def call(self, handler: Any, arg: Any = None, /, **options: Any) -> Any:
+        raise NotImplementedError
+
+    def generic_call(self, service: str, handler: str, arg: Any = None, **options: Any) -> Any:
+        raise NotImplementedError
+
+    def send(self, handler: Any, arg: Any = None, /, **options: Any) -> None:
+        self.sent.append((handler, arg))
+
+    def generic_send(self, service: str, handler: str, arg: Any = None, **options: Any) -> None:
+        self.sent.append((f"{service}/{handler}", arg))
+
+    def cancel(self, invocation_id: str) -> None:
+        pass
 
 
 async def test_a_handler_runs_over_a_fake_context_of_a_test():

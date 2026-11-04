@@ -8,12 +8,13 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-The API of session objects, as handlers and views code against it: the
-contexts, the database and its transactions, calls and sends. Protocols, so
-that what a handler sees is what is declared here, and a test can give a
-handler a fake of its own; the implementations are this package's private
-classes (``_object.py``, ``_session.py``, ``_calls.py``).
+"""The API that session objects' handlers and views code against.
+
+The contexts, the database and its transactions, and calls and sends are
+declared as protocols: what a handler sees is exactly what is declared here,
+and a test can pass a handler a fake of its own. The implementations are
+private classes of this package (``_object.py``, ``_session.py``,
+``_calls.py``).
 """
 
 from __future__ import annotations
@@ -31,84 +32,45 @@ from restate.sessions._database import Row, Rows, SqlParam
 I = typing.TypeVar("I")
 O = typing.TypeVar("O")
 
-Cancel = Callable[[str], None]
-"""
-Cancel invocation ``invocation_id`` (such as ``inv_1f…``), as Restate's admin
-API does: made at once, and not awaited. Cancelling an invocation that already
-ended does nothing, so a new attempt that cancels it again is harmless.
-"""
-
 
 # --- The database ---------------------------------------------------------------------------------
 
 
 class DatabaseReader(Protocol):
-    """Reads of a database, or of one transaction of it: a view's ``ctx.db``."""
+    """Read access to a database, or to one transaction of it; a view's ``ctx.db``."""
 
     async def query(self, sql: str, params: Sequence[SqlParam] | None = None) -> list[Row]:
-        """
-        The rows of one statement, each a dict by column name; parameters bind
-        to a single statement. Columns are named as SQL names them (an
-        expression needs ``AS``), and two of the same name are an error: alias
-        them, or use ``values``.
+        """Run one statement and return its rows, each a dict keyed by column name.
+
+        Columns are named as SQL names them, so an expression needs ``AS``;
+        two columns of the same name raise ``SqlError`` (alias one, or use
+        ``values``)::
+
+            rows = await ctx.db.query("SELECT text FROM notes WHERE done = ?", [False])
         """
         ...
 
     async def get(self, sql: str, params: Sequence[SqlParam] | None = None) -> Row | None:
-        """The first row of ``query``, or ``None`` when there is none."""
+        """Return the first row of ``query``, or ``None`` if there is none."""
         ...
 
     async def values(self, sql: str, params: Sequence[SqlParam] | None = None) -> Rows:
-        """The rows of one statement as lists, in column order: for adapters, and for columns that share a name."""
+        """Run one statement and return its rows as lists, in column order."""
         ...
 
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
-        """The rows of one statement as lists, with the column names of the statement: ``(columns, rows)``."""
+        """Run one statement and return its column names and its rows as lists: ``(columns, rows)``."""
         ...
 
 
 class DatabaseWriter(DatabaseReader, Protocol):
-    """SQL: a database, or one transaction of it."""
+    """Read and write access to a database, or to one transaction of it."""
 
     async def execute(self, sql: str, params: Sequence[SqlParam] | None = None) -> None:
-        """Run SQL (one or more statements), discarding rows; parameters only with a single statement."""
-        ...
+        """Run SQL and discard any rows.
 
-
-class Transaction(DatabaseWriter, Protocol):
-    """One transaction of a ``Database``: its SQL, and the sends it commits with."""
-
-    @property
-    def send(self) -> Send:
-        """
-        Sends made right after the transaction commits, and never if it rolls
-        back. Each has the idempotency key it is given, or else one of the
-        transaction (``transaction/<id>/<index>``), so a send an attempt makes
-        again is dropped.
-        """
-        ...
-
-
-class Database(DatabaseWriter, Protocol):
-    """
-    The session's database, ``ctx.db``, for the whole handler: each statement
-    outside ``transaction()`` is its own transaction. Calls run one at a time,
-    in call order. A commit is durable once its call returns.
-    """
-
-    def transaction(self) -> typing.AsyncContextManager[Transaction]:
-        """
-        One transaction, as the body of an ``async with``::
-
-            async with ctx.db.transaction() as tx:
-                await tx.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", [amount, src])
-                tx.send(deposit, key=dst)(amount)
-
-        It commits when the body ends, and rolls back when the body raises. It
-        holds the database: other calls wait until it ends, and a call to the
-        database from inside the body is refused, as it would wait for the body.
-        So the body uses the ``tx`` it gets, which is invalid once the body has
-        ended.
+        ``sql`` may hold several statements, but parameters bind only to a
+        single one.
         """
         ...
 
@@ -116,55 +78,65 @@ class Database(DatabaseWriter, Protocol):
 # --- Calls and sends ------------------------------------------------------------------------------
 
 
-class Rpc(Protocol):
-    """
-    Calls: ``ctx.rpc(handler, key=...)`` returns a function of the handler's
-    input, if it takes one, which makes the call and returns its result's
-    awaitable. A call is made when that function is called, awaited or not::
-
-        count = await ctx.rpc(increment, key="a", idempotency_key=f"{ctx.request.id}:inc")(5)
-    """
+class Caller(Protocol):
+    """Calls to other handlers, through Restate."""
 
     @typing.overload
-    def __call__(
+    def call(
         self,
         handler: Callable[[Any], Awaitable[O]],
-        key: str | None = None,
+        /,
         *,
+        key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[[], CallFuture[O]]: ...
+    ) -> CallFuture[O]: ...
 
     @typing.overload
-    def __call__(
+    def call(
         self,
         handler: Callable[[Any, I], Awaitable[O]],
-        key: str | None = None,
+        arg: I,
+        /,
         *,
+        key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[[I], CallFuture[O]]: ...
+    ) -> CallFuture[O]: ...
 
-    def __call__(
+    def call(
         self,
         handler: Callable[..., Awaitable[Any]],
-        key: str | None = None,
+        arg: Any = None,
+        /,
         *,
+        key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[..., CallFuture[Any]]:
-        """
-        A caller of ``handler``, with ``key`` for an object's or a workflow's
-        (a ``TerminalError`` otherwise, as a retry would fail the same way).
+    ) -> CallFuture[Any]:
+        """Call ``handler`` with ``arg``, and return a future of its result.
 
-        ``idempotency_key`` is the same on every attempt, so that a new attempt
-        gets the first call's result; without one, every attempt makes the call
-        again, the one that resumes a suspension too. Restate scopes it to the
-        target handler.
+        The call is typed by the handler's own signature, and is made right
+        away, whether or not it is awaited::
+
+            balance = await ctx.call(deposit, 10, key="alice", idempotency_key=f"{ctx.request.id}:deposit")
+
+        Args:
+            handler: A handler of a service, a virtual object (a session
+                object's too) or a workflow.
+            arg: Its input, if it takes one.
+            key: The object's or workflow's key; a service takes none.
+            idempotency_key: The same on every attempt, so that a retried
+                attempt gets the first call's result instead of calling again.
+            headers: Headers to send with the call.
+
+        Raises:
+            TerminalError: If ``handler`` is not a handler, or ``key`` is
+                missing for an object or a workflow, or given for a service.
         """
         ...
 
-    def generic(
+    def generic_call(
         self,
         service: str,
         handler: str,
@@ -176,62 +148,73 @@ class Rpc(Protocol):
         input_serde: Serde[Any] = JsonSerde(),
         output_serde: Serde[Any] = JsonSerde(),
     ) -> CallFuture[Any]:
-        """
-        Call a target known only at run time, by its names: untyped, and JSON
-        unless serdes are given. ``key`` is the caller's to give, for an
-        object or a workflow.
+        """Call a handler known only at run time, by its service's and its own name.
+
+        Untyped: the input and result are JSON unless serdes are given.
         """
         ...
 
 
-class Send(Protocol):
-    """
-    Sends, as ``Rpc``'s calls: ``ctx.send(handler, key=...)`` returns a function
-    of the handler's input, if it takes one, which makes the send at once
-    (``ctx.send``), or records it for its transaction's commit (``tx.send``)::
-
-        ctx.send(record, key="audit", delay=timedelta(hours=1))(entry)
-    """
+class Sender(Protocol):
+    """Sends to other handlers, through Restate: one-way calls, which do not wait for the target."""
 
     @typing.overload
-    def __call__(
+    def send(
         self,
         handler: Callable[[Any], Awaitable[Any]],
-        key: str | None = None,
+        /,
         *,
+        key: str | None = None,
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[[], None]: ...
+    ) -> None: ...
 
     @typing.overload
-    def __call__(
+    def send(
         self,
         handler: Callable[[Any, I], Awaitable[Any]],
-        key: str | None = None,
+        arg: I,
+        /,
         *,
+        key: str | None = None,
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[[I], None]: ...
+    ) -> None: ...
 
-    def __call__(
+    def send(
         self,
         handler: Callable[..., Awaitable[Any]],
-        key: str | None = None,
+        arg: Any = None,
+        /,
         *,
+        key: str | None = None,
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Callable[..., None]:
-        """
-        A sender to ``handler``, with ``key`` for an object's or a workflow's;
-        ``delay`` is how long after the send (for ``tx.send``, after the
-        commit) the target runs. See ``Rpc`` for ``idempotency_key``.
+    ) -> None:
+        """Send ``arg`` to ``handler``, without waiting for it to run::
+
+            ctx.send(remind, note, key=ctx.key, delay=timedelta(days=1))
+
+        Args:
+            handler: A handler of a service, a virtual object (a session
+                object's too) or a workflow.
+            arg: Its input, if it takes one.
+            key: The object's or workflow's key; a service takes none.
+            delay: How long to wait before the target runs.
+            idempotency_key: The same on every attempt, so that a retried
+                attempt does not send again.
+            headers: Headers to send with the request.
+
+        Raises:
+            TerminalError: If ``handler`` is not a handler, or ``key`` is
+                missing for an object or a workflow, or given for a service.
         """
         ...
 
-    def generic(
+    def generic_send(
         self,
         service: str,
         handler: str,
@@ -243,86 +226,104 @@ class Send(Protocol):
         headers: dict[str, str] | None = None,
         input_serde: Serde[Any] = JsonSerde(),
     ) -> None:
-        """Send to a target known only at run time, by its names: untyped, and JSON unless a serde is given."""
+        """Send to a handler known only at run time, by its service's and its own name (JSON unless a serde is given)."""
+        ...
+
+
+# --- Transactions ---------------------------------------------------------------------------------
+
+
+class Transaction(DatabaseWriter, Sender, Protocol):
+    """One transaction of a ``Database``: its SQL, and the sends it commits with.
+
+    ``tx.send`` sends right after the transaction commits, and never if it
+    rolls back. A send without an ``idempotency_key`` gets one from the
+    transaction, so a send that a retried attempt makes again is dropped.
+    """
+
+
+class Database(DatabaseWriter, Protocol):
+    """A session's database, ``ctx.db``.
+
+    Each statement outside ``transaction()`` is a transaction of its own,
+    durable once its call returns. Calls run one at a time, in call order.
+    """
+
+    def transaction(self) -> typing.AsyncContextManager[Transaction]:
+        """Start a transaction, for the body of an ``async with``::
+
+            async with ctx.db.transaction() as tx:
+                await tx.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", [amount, ctx.key])
+                tx.send(deposit, amount, key=to)
+
+        It commits when the body ends, and rolls back if the body raises. It
+        holds the database until then: use the ``tx`` it gives, as a call to
+        ``ctx.db`` inside the body is refused.
+        """
         ...
 
 
 # --- The contexts ---------------------------------------------------------------------------------
 
 
-class SessionContext(Protocol):
-    """
-    The context of a session object's handler. A handler runs in attempts:
-    Restate starts a new one after a crash, a retryable error or a suspension,
-    and each runs the handler from its first line, finding what the attempts
-    before it committed. Its operations can be awaited together
-    (``asyncio.gather``, ``asyncio.wait``).
+class SessionContext(Caller, Sender, Protocol):
+    """The context of a session object's handler.
+
+    A handler runs in attempts: after a crash, a retryable error or a
+    suspension, Restate starts a new attempt, which runs the handler from the
+    start and finds what earlier attempts committed. Its operations may be
+    awaited together, with ``asyncio.gather`` or ``asyncio.wait``.
     """
 
     @property
     def key(self) -> str:
-        """The session's key."""
+        """The key of this session."""
         ...
 
     @property
     def request(self) -> Request:
-        """The request: its id (the same on every attempt), headers, and the attempt's."""
+        """The request: its id (the same on every attempt), its headers, and the attempt's."""
         ...
 
     @property
     def db(self) -> Database:
+        """The key's database."""
+        ...
+
+    def cancel(self, invocation_id: str) -> None:
+        """Cancel the invocation ``invocation_id`` (such as ``"inv_1f…"``).
+
+        The cancellation is sent right away, and not awaited. Cancelling an
+        invocation that has ended does nothing, so a retried attempt may
+        cancel it again.
         """
-        The key's database. Each statement outside a transaction is its own
-        commit, and ``db.transaction()`` groups several; a commit is durable
-        when its call returns. Calls run one at a time, in call order.
-        """
-        ...
-
-    @property
-    def rpc(self) -> Rpc:
-        """Calls, typed by the handler called: ``await ctx.rpc(handler, key="a")(input)``."""
-        ...
-
-    @property
-    def send(self) -> Send:
-        """Sends, made at once; a transaction's (``tx.send``) are made once it commits."""
-        ...
-
-    @property
-    def cancel(self) -> Cancel:
-        """Cancel an invocation, by its id: see ``Cancel``."""
         ...
 
 
-class ViewContext(Protocol):
-    """
-    The context of a session object's view: it runs beside the handlers, and
-    reads the database as committed when its invocation started, whatever they
-    commit meanwhile. It writes nothing, and sends nothing, but it can cancel an
-    invocation: a handler of its own object's, say, as a Stop button does.
+class ViewContext(Caller, Protocol):
+    """The context of a session object's view.
+
+    A view runs beside the handlers, and reads the database as committed
+    when it started, whatever they commit meanwhile. It writes and sends
+    nothing, but it may call other handlers, and cancel an invocation (a
+    handler of its own object's, as a Stop button does).
     """
 
     @property
     def key(self) -> str:
-        """The session's key."""
+        """The key of this session."""
         ...
 
     @property
     def request(self) -> Request:
-        """The request: its id, headers, and the attempt's."""
+        """The request: its id, its headers, and the attempt's."""
         ...
 
     @property
     def db(self) -> DatabaseReader:
-        """The key's database as committed when the view's invocation started: reads only."""
+        """The key's database, as committed when the view started: read-only."""
         ...
 
-    @property
-    def rpc(self) -> Rpc:
-        """Calls, typed by the handler called."""
-        ...
-
-    @property
-    def cancel(self) -> Cancel:
-        """Cancel an invocation, by its id: see ``Cancel``."""
+    def cancel(self, invocation_id: str) -> None:
+        """Cancel the invocation ``invocation_id``: see ``SessionContext.cancel``."""
         ...

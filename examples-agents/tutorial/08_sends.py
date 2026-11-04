@@ -72,7 +72,7 @@ async def transfer(ctx: sessions.SessionContext, money: Transfer) -> int:
             if await balance_of(tx) < 0:
                 raise restate.TerminalError("Not enough money")
             # Delivered once this transaction commits, and never if it rolls back.
-            tx.send(deposit, key=money.to)(Deposit(id=transfer_id, amount=money.amount, note=f"from {ctx.key}"))
+            tx.send(deposit, Deposit(id=transfer_id, amount=money.amount, note=f"from {ctx.key}"), key=money.to)
         return await balance_of(tx)
 
 

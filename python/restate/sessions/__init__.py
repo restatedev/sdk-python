@@ -8,11 +8,11 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-Session objects: virtual objects with a SQL database per key, kept in the
-object's state (``ctx.db``). The Python variant of ``@restatedev/sessions``::
+"""Session objects: Restate virtual objects with a SQL database per key.
 
-    import restate
+Each key's database (``ctx.db``) is kept in the object's state in Restate,
+so there is no database to run::
+
     from restate import sessions
 
     notes = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
@@ -23,33 +23,31 @@ object's state (``ctx.db``). The Python variant of ``@restatedev/sessions``::
         await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [text])
 
 
-    @notes.view
-    async def list(ctx: sessions.ViewContext) -> list[str]:
+    @notes.view(name="list")
+    async def list_notes(ctx: sessions.ViewContext) -> list[str]:
         return [row["text"] for row in await ctx.db.query("SELECT text FROM notes ORDER BY rowid")]
 
 
-    app = sessions.app(notes)  # with what it needs beside it; hypercorn module:app
+    if __name__ == "__main__":
+        sessions.serve(notes)
 
-Session handlers don't replay a journal: a retried attempt runs again from its
-first line, against what the attempts before it committed.
+Handlers run one at a time per key; views run beside them and read what was
+committed. A handler is not replayed from a journal: a retried attempt runs
+again from the start, against what earlier attempts committed.
 
 The types a handler gets (``SessionContext``, ``Database``, ``Transaction``,
-``Rpc``, ``Send``, ...) are protocols: a decorated handler is still the plain
-function, so a test can call it with a fake context of its own. What libraries
-built on session objects, and tests, need beside this is in
-``restate.sessions.internal``. A session object
-serves beside the SDK's services, objects and workflows, which it calls with
-``ctx.rpc`` for journaled work.
+...) are protocols, and a decorated handler is still the plain function, so a
+test can call it with a fake context. Session objects are served beside the
+SDK's services, objects and workflows, and call them with ``ctx.call``.
+``restate.sessions.internal`` has what libraries built on session objects need.
 """
 
-# The API: protocols (_api.py), which handlers and views code against.
 from restate.sessions._api import (
-    Cancel,
+    Caller,
     Database,
     DatabaseReader,
     DatabaseWriter,
-    Rpc,
-    Send,
+    Sender,
     SessionContext,
     Transaction,
     ViewContext,
@@ -62,14 +60,13 @@ from restate.sessions._serve import app, serve
 
 __all__ = [
     "CallFuture",
-    "Cancel",
+    "Caller",
     "Database",
     "DatabaseReader",
     "DatabaseWriter",
     "Row",
     "Rows",
-    "Rpc",
-    "Send",
+    "Sender",
     "SessionContext",
     "SessionObject",
     "SqlError",

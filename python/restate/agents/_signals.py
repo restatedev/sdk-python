@@ -386,7 +386,7 @@ def deliver(ctx: SessionContext, agent: object, key: str, text: str, *, idempote
         deliver(ctx, triage, "ENG-1", "The issue was closed", idempotency_key=delivery)
     """
     companion = companion_of(agent, key)  # an agent of restate.agents, with a `chat` handler
-    ctx.send.generic(companion.agent, "chat", text, key=key, idempotency_key=idempotency_key)
+    ctx.generic_send(companion.agent, "chat", text, key=key, idempotency_key=idempotency_key)
 
 
 __all__: Sequence[str] = ["Companion", "companion_of", "deliver", "signals"]
