@@ -41,6 +41,7 @@ def anyio_backend():
 pytestmark = [pytest.mark.anyio]
 
 EXAMPLES = pathlib.Path(__file__).parent.parent / "examples-agents"
+SERVABLE = (restate.Service, restate.VirtualObject, restate.Workflow)
 
 
 def load(path: str) -> ModuleType:
@@ -65,9 +66,9 @@ class Ingress:
 
 @asynccontextmanager
 async def serving(path: str) -> AsyncGenerator[Ingress, None]:
-    """The session objects of the example at ``path``, served to a Restate server of their own."""
+    """The services, objects and workflows of the example at ``path``, served to a Restate server of their own."""
     module = load(path)
-    objects = [value for value in vars(module).values() if isinstance(value, sessions.SessionObject)]
+    objects = [value for value in vars(module).values() if isinstance(value, SERVABLE)]
     async with restate.create_test_harness(
         sessions.app(*objects), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
@@ -178,6 +179,52 @@ async def test_basic_openai_agent():
     async with serving("basic/openai_agent.py") as ingress:
         assert (await ingress.post("assistant/alice/messages", {})).json()["messages"] == []
         assert (await ingress.post("assistant/alice/status")).json() == {"answering": None, "waiting": []}
+
+
+async def test_intermediate_support():
+    """The agent's tools are Restate's: the order service and the refund workflow answer, and a signal no one waits for is dropped."""
+    pytest.importorskip("agents")
+    async with serving("intermediate/support.py") as ingress:
+        assert (await ingress.post("orders/status", {"order": "103"})).json() == "Order 103 was delivered yesterday."
+        refunded = await ingress.post("refund/r1/run", {"order": "103", "amount": 30})
+        assert refunded.json() == "Refunded $30 for order 103."
+        assert (await ingress.post("support/alice/signal", {"name": "approval", "value": "approved"})).json() == {
+            "resolved": None
+        }
+        assert (await ingress.post("support/alice/pending")).json() == []
+
+
+async def test_intermediate_followup():
+    pytest.importorskip("pydantic_ai")
+    async with serving("intermediate/followup.py") as ingress:
+        assert (await ingress.post("checkins/remind", {"customer": "alice", "note": "order 103"})).status_code == 200
+        assert (await ingress.post("concierge/alice/messages", {})).json()["messages"] == []
+
+
+async def test_intermediate_team():
+    for module in ("agents", "langgraph", "pydantic_ai"):
+        pytest.importorskip(module)
+    async with serving("intermediate/team.py") as ingress:
+        for agent in ("editor/alice", "researcher/alice.lisbon", "writer/alice.guide"):
+            assert (await ingress.post(f"{agent}/messages", {})).json()["messages"] == []
+
+
+async def test_intermediate_router():
+    for module in ("agents", "langgraph", "pydantic_ai"):
+        pytest.importorskip(module)
+    async with serving("intermediate/router.py") as ingress:
+        for agent in ("billing/alice", "tech/alice"):
+            assert (await ingress.post(f"{agent}/messages", {})).json()["messages"] == []
+
+
+async def test_intermediate_triage():
+    for module in ("langgraph", "pydantic_ai"):
+        pytest.importorskip(module)
+    async with serving("intermediate/triage.py") as ingress:
+        no_draft = await ingress.post("triage/t1/draft")
+        assert no_draft.status_code == 200 and not no_draft.content  # None, before the workflow runs
+        for agent in ("classifier/t1", "drafter/t1"):
+            assert (await ingress.post(f"{agent}/messages", {})).json()["messages"] == []
 
 
 def serves_http2() -> bool:
