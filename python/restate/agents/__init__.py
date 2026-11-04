@@ -42,8 +42,9 @@ This package holds what all frameworks share:
 
 Each framework has a subpackage and an extra of its own:
 ``restate.agents.langgraph`` (``pip install "restate-sdk[langgraph]"``),
-``restate.agents.pydantic_ai`` (``pip install "restate-sdk[pydantic_ai]"``) and
-``restate.agents.openai``, on the OpenAI Agents SDK (``pip install "restate-sdk[openai]"``).
+``restate.agents.pydantic_ai`` (``pip install "restate-sdk[pydantic_ai]"``),
+``restate.agents.openai``, on the OpenAI Agents SDK (``pip install "restate-sdk[openai]"``) and
+``restate.agents.adk``, on Google ADK (``pip install "restate-sdk[adk]"``).
 ``restate.agents.internal`` has the building blocks for writing another
 integration.
 """

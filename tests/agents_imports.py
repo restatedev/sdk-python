@@ -87,3 +87,20 @@ def test_agents_import_without_the_openai_agents_sdk_and_its_integration_names_i
     ran = subprocess.run([sys.executable, "-c", WITHOUT_OPENAI_AGENTS], capture_output=True, text=True, check=False)
     assert ran.returncode == 0, ran.stderr
     assert "install the openai extra, pip install restate-sdk[openai]" in ran.stdout
+
+
+WITHOUT_ADK = """
+import sys
+sys.modules["google.adk"] = None
+import restate.agents, restate.agents.internal
+try:
+    import restate.agents.adk
+except ImportError as error:
+    print(error)
+"""
+
+
+def test_agents_import_without_adk_and_its_integration_names_its_extra():
+    ran = subprocess.run([sys.executable, "-c", WITHOUT_ADK], capture_output=True, text=True, check=False)
+    assert ran.returncode == 0, ran.stderr
+    assert "install the adk extra, pip install restate-sdk[adk]" in ran.stdout
