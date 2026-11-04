@@ -360,6 +360,7 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
                         request_headers,
                         disable_payload_checks=disable_payload_checks,
                         explicit_recovery=handler.explicit_recovery or service.explicit_recovery,
+                        explicit_cancellation=handler.explicit_cancellation or service.explicit_cancellation,
                     ),
                     handler,
                     dict(request_headers),

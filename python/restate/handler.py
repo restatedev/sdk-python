@@ -256,6 +256,7 @@ class Handler(Generic[I, O]):
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
         invocation_retry_policy: Optional retry policy configuration applied to this handler.
         explicit_recovery: If true, the handler runs with explicit recovery, see restate._preview.explicit_recovery.
+        explicit_cancellation: If true, the handler runs with explicit cancellation, see restate._preview.explicit_cancellation.
     """
 
     service_tag: ServiceTag
@@ -277,6 +278,7 @@ class Handler(Generic[I, O]):
     invocation_retry_policy: Optional[InvocationRetryPolicy] = None
     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None
     explicit_recovery: bool = False
+    explicit_cancellation: bool = False
 
 
 # disable too many arguments warning
