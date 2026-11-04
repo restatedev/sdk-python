@@ -172,7 +172,7 @@ class _Sessions(BaseSessionService):
 
     async def append_event(self, session: Session, event: Event) -> Event:
         if event.partial or event.error_code:
-            # A step that failed: the attempt fails with it, and Restate retries it.
+            # Not stored: a partial event is followed by its whole, and an error code fails the prompt (see ``run``).
             return event
         event = await super().append_event(session, event)
         if event.author != "user" and event.content and not event.get_function_responses():
