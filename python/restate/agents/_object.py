@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from typing import Any, TypedDict
 
-from restate.agents import _log, _signals
+from restate.agents import _messages, _signals
 from restate.agents._api import (
     Messages,
     MessagesRequest,
@@ -35,6 +35,7 @@ from restate.agents._api import (
     Watch,
 )
 from restate.agents._common import MessageSerde, refusal_of
+from restate.agents._conversation import SCHEMA, Items, next_start, restart
 from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared
 from restate.retry_policy import InvocationRetryPolicy
 from restate.sessions import Migration, SessionContext, SessionObject, ViewContext
@@ -119,12 +120,6 @@ class Synced(Messages):
 
     revision: int
     status: Status
-
-
-def _start_after(page: Messages) -> _log.Start:
-    """Return where the log restarts after the latest message of ``page``, past its ids and cursor."""
-    latest = page["messages"][0] if page["messages"] else None
-    return _log.Start(seq=page["cursor"], id=latest["id"] + 1 if latest else page.get("first", 0))
 
 
 BUILT_IN = frozenset(
@@ -287,6 +282,7 @@ class AgentObject(SessionObject):
         answer: A,
         /,
         *,
+        items: Items,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
     ) -> A: ...
 
@@ -295,6 +291,7 @@ class AgentObject(SessionObject):
         self,
         /,
         *,
+        items: Items,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
     ) -> Callable[[A], A]: ...
 
@@ -303,6 +300,7 @@ class AgentObject(SessionObject):
         answer: Callable[[SessionContext, str], Awaitable[Any]] | None = None,
         /,
         *,
+        items: Items,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
     ) -> Any:
         """Turn this object into an agent that answers each message with ``answer``.
@@ -322,8 +320,10 @@ class AgentObject(SessionObject):
         Args:
             answer: A framework's turn: it takes the handler's context and
                 the message, and returns the answer. It should keep the
-                conversation in the log with ``transcribing``, and stop when
+                conversation with ``answer_once``, and stop when
                 ``stop_signal_of(ctx)`` stops.
+            items: The framework's items, with which the ``messages`` view
+                reads the conversation.
             clear: Clears whatever the agent keeps outside its database; the
                 ``clear`` view calls it after emptying the database.
 
@@ -335,7 +335,7 @@ class AgentObject(SessionObject):
             def decorate(
                 fn: Callable[[SessionContext, str], Awaitable[Any]],
             ) -> Callable[[SessionContext, str], Awaitable[Any]]:
-                return self.chat(fn, clear=clear)
+                return self.chat(fn, items=items, clear=clear)
 
             return decorate
         AGENT.on(self, AgentInfo(background=self.background, clear=clear))
@@ -347,7 +347,7 @@ class AgentObject(SessionObject):
         self._building = True
         try:
             self.handler(name="chat", accept="*/*", input_serde=MessageSerde(), explicit_cancellation=True)(chat)
-            _followed(self)
+            _followed(self, items)
         finally:
             self._building = False
         return answer
@@ -383,7 +383,7 @@ async def _stopped(ctx: ViewContext, step: str) -> Stopped:
     return {"stopped": turn["invocationId"] if turn is not None else None}
 
 
-def _followed(agent: AgentObject) -> None:
+def _followed(agent: AgentObject, items: Items) -> None:
     """Register the views that ``chat()`` adds (``messages``, ``clear``, ``sync``), and the private ``erase``."""
 
     async def messages(ctx: ViewContext, request: MessagesRequest | None = None) -> Messages:
@@ -393,14 +393,16 @@ def _followed(agent: AgentObject) -> None:
         for the messages that are new or changed since ``c``. While a message
         is being answered, it returns what has been stored so far.
         """
-        return await _log.page(ctx.db, request)
+        return await _messages.page(ctx.db, items, request)
 
     async def erase(ctx: SessionContext) -> None:
         """Empty the key's database and its signals, once the handlers queued before it are done."""
-        start = _start_after(await _log.page(ctx.db, {"limit": 1}))
+        # Read first, which also makes the reset apply the conversation's schema again.
+        await SCHEMA.ensure(ctx.db)
+        start = await next_start(ctx.db)
         async with ctx.db.transaction() as tx:
             await reset(tx)
-            await _log.restart(tx, start)
+            await restart(tx, start)
         await cleared(ctx)
         await ctx.call(_signals.reset, key=_signals.signals_of(ctx), idempotency_key=f"{ctx.request.id}:reset")
 

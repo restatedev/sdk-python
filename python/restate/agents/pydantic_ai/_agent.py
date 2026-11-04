@@ -368,5 +368,5 @@ def agent(
             tools=await configured(tools, ctx),
         )
 
-    obj.chat(answer)
+    obj.chat(answer, items=ITEMS)
     return obj

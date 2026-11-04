@@ -14,14 +14,22 @@ The conversation is one table, ``restate_agent_conversation``, of the
 framework's own items (its messages), one row each, in order. The framework
 stores and loads its items itself (``Items.dump`` and ``Items.load``), so
 that an item goes from the database to the framework's own object in one
-step, such as pydantic's ``validate_json``.
+step, such as pydantic's ``validate_json``. It is the only copy: the agent's
+``messages`` and ``sync`` views render it for clients (``_messages.py``).
 
 A prompt's item carries the prompt's id, and its answer once there is one; a
 model reply's items carry the reply's id (the position of its first item) and
-the agent that gave it. Rows are only ever appended, in one transaction per
-step, but for a reply at the end that is dropped (to ask the model again),
-which is one range delete on the primary key; and a prompt's answer is one
-update of its row, by its unique prompt id.
+the agent that gave it. Each row has a ``seq``, which increases with every
+row written, so that a client can ask what changed since a cursor. Rows are
+only ever appended, in one transaction per step, but for a reply at the end
+that is dropped (to ask the model again), which is one range delete on the
+primary key; and a prompt's answer is one update of its row, by its unique
+prompt id.
+
+``restate_agent_conversation_start`` has one row, written only by a drop or
+a ``clear``: the first position of the conversation (``clear`` deletes the
+rows, and positions, which are the ids of the messages, carry on) and the
+last ``seq`` given (a drop deletes rows, and cursors must not go back).
 
 The conversation is loaded whole, once per prompt, since the framework's
 model gets all of it. Each item is read (its text, calls and results) once,
@@ -52,10 +60,9 @@ from restate.agents._common import (
     refusal_of,
     stored_answer,
 )
-from restate.agents._transcript import Transcript
-from restate.agents._turn import AttemptEnded, stop_signal_of, transcribing
+from restate.agents._turn import AttemptEnded, answering, stop_signal_of
 from restate.exceptions import TerminalError
-from restate.sessions import Database, DatabaseReader, SessionContext
+from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext
 from restate.sessions.internal import Schema
 
 Item: typing.TypeAlias = Any
@@ -64,16 +71,26 @@ Item: typing.TypeAlias = Any
 TABLE = "restate_agent_conversation"
 """The table of the conversation, in the key's database."""
 
+START = f"{TABLE}_start"
+"""The table of where the conversation starts: its first position, and the last ``seq`` given."""
+
 SCHEMA = Schema(
     "restate_agents.conversation",
     [
         f"""CREATE TABLE {TABLE} (
             n INTEGER PRIMARY KEY,
+            seq INTEGER NOT NULL,
             item TEXT NOT NULL,
             prompt TEXT UNIQUE,
             answer TEXT,
             reply INTEGER,
             agent TEXT
+        )""",
+        f"CREATE INDEX {TABLE}_seq ON {TABLE} (seq)",
+        f"""CREATE TABLE {START} (
+            row INTEGER PRIMARY KEY CHECK (row = 0),
+            n INTEGER NOT NULL,
+            seq INTEGER NOT NULL
         )""",
     ],
 )
@@ -93,6 +110,11 @@ class Result(typing.NamedTuple):
     id: str
     output: str
     error: bool = False
+
+    @property
+    def failed(self) -> bool:
+        """Whether the result is an error: marked as one, or ``"Error: <message>"``."""
+        return self.error or self.output.startswith("Error: ")
 
 
 @dataclass
@@ -158,6 +180,33 @@ class Items(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class Start:
+    """Where a conversation starts: its first position, and the last ``seq`` given before it."""
+
+    n: int = 0
+    seq: int = 0
+
+
+async def start_of(db: DatabaseReader) -> Start:
+    """Return where the conversation in ``db`` starts, as ``clear`` and drops left it."""
+    row = await db.get(f"SELECT n, seq FROM {START}")
+    return Start(int(typing.cast(int, row["n"])), int(typing.cast(int, row["seq"]))) if row else Start()
+
+
+async def next_start(db: DatabaseReader) -> Start:
+    """Return where the next conversation starts, past the positions and ``seq`` of the one in ``db``."""
+    start = await start_of(db)
+    [[last, seq]] = await db.values(f"SELECT MAX(n), MAX(seq) FROM {TABLE}")
+    n = start.n if last is None else int(typing.cast(int, last)) + 1
+    return Start(n, max(start.seq, 0 if seq is None else int(typing.cast(int, seq))))
+
+
+async def restart(tx: DatabaseWriter, start: Start) -> None:
+    """Start the conversation at ``start``, inside the transaction of ``clear`` that emptied the database."""
+    await tx.execute(f"INSERT OR REPLACE INTO {START} (row, n, seq) VALUES (0, ?, ?)", [start.n, start.seq])
+
+
 class Conversation:
     """The conversation in the key's database, loaded once and kept in step with it.
 
@@ -166,15 +215,17 @@ class Conversation:
     results) once, as it is loaded or appended.
     """
 
-    def __init__(self, db: Database, items: Items, entries: list[Entry]) -> None:
+    def __init__(self, db: Database, items: Items, entries: list[Entry], start: Start | None = None) -> None:
         self.db = db
         self.items = items
         self.entries: list[Entry] = []
-        self._results: set[str] = set()
-        """The ids of the tool calls that have a result."""
+        self._start = start or Start()
+        self._seq = self._start.seq
+        """The last ``seq`` given."""
+        self._results: dict[str, Result] = {}
+        """The tool calls' results, by their calls' ids."""
         self._prompts: dict[str, Entry] = {}
         """The prompts, by id."""
-        self._transcript: Transcript | None = None
         self.closed = False
         """Whether a stop closed the run: the run, unwinding, then stores nothing more."""
         self._add(entries)
@@ -182,18 +233,23 @@ class Conversation:
     def _add(self, entries: list[Entry]) -> None:
         for entry in entries:
             entry.said, entry.calls, entry.results = self.items.read(entry.item)
-            self._results.update(result.id for result in entry.results)
+            self._results.update((result.id, result) for result in entry.results)
             if entry.prompt is not None:
                 self._prompts[entry.prompt] = entry
-            if self._transcript is not None:
-                self._transcribe(entry)
         self.entries.extend(entries)
 
     @classmethod
     async def load(cls, db: Database, items: Items) -> Conversation:
         """Load the conversation from ``db``, whose items are ``items``'."""
         await SCHEMA.ensure(db)
-        return cls(db, items, await _entries(db, items))
+        rows = await db.values(f"SELECT n, seq, item, prompt, answer, reply, agent FROM {TABLE} ORDER BY n")
+        start = await start_of(db)
+        last = max((int(typing.cast(int, row[1])) for row in rows), default=0)
+        entries = [
+            Entry(int(typing.cast(int, n)), items.load(str(item)), _str(prompt), _str(answer), _int(reply), _str(agent))
+            for n, _, item, prompt, answer, reply, agent in rows
+        ]
+        return cls(db, items, entries, Start(start.n, max(start.seq, last)))
 
     # --- Reading ---
 
@@ -219,6 +275,11 @@ class Conversation:
         """Return whether tool call ``call_id`` has a result."""
         return call_id in self._results
 
+    def stored(self, call_id: str, failed: str | None = None) -> bool:
+        """Return whether tool call ``call_id`` has its result: not an error, unless it is ``failed``, its own."""
+        result = self._results.get(call_id)
+        return result is not None and (not result.failed or result.output == failed)
+
     def unanswered(self) -> list[Call]:
         """Return the tool calls of the conversation that have no result."""
         return [call for e in self.entries for call in e.calls if call.id not in self._results]
@@ -242,24 +303,6 @@ class Conversation:
         said = [e.said for e in entries if e.said is not None]
         return said[-1][1] if said else None
 
-    def transcript(self) -> Transcript:
-        """Return the conversation in the form the ``messages`` view returns, kept up to date as items are appended."""
-        if self._transcript is None:
-            self._transcript = Transcript()
-            for entry in self.entries:
-                self._transcribe(entry)
-        return self._transcript
-
-    def _transcribe(self, entry: Entry) -> None:
-        transcript = self.transcript()
-        if entry.said is not None:
-            role, text = entry.said
-            transcript.say("user" if role == "user" else "assistant", text)
-        for call in entry.calls:
-            transcript.call(call.id, call.name, call.input)
-        for result in entry.results:
-            transcript.result(result.id, result.output, result.error)
-
     # --- Writing ---
 
     async def append(self, *items: Item) -> None:
@@ -273,7 +316,7 @@ class Conversation:
         return reply
 
     def _next(self) -> int:
-        return self.entries[-1].n + 1 if self.entries else 0
+        return self.entries[-1].n + 1 if self.entries else self._start.n
 
     async def ask(self, prompt_id: str, text: str) -> None:
         """Append prompt ``prompt_id``, with ``text``."""
@@ -289,22 +332,28 @@ class Conversation:
 
         It is one range delete on the primary key: the reply's items start at
         position ``reply``, and what follows them (their tools' results, say)
-        was made from the reply.
+        was made from the reply. The positions are given again, so the new
+        reply's messages take the dropped ones' ids; the ``seq`` is kept, so
+        that a client's cursor still sees them.
         """
-        await self.db.execute(f"DELETE FROM {TABLE} WHERE n >= ?", [reply])
+        async with self.db.transaction() as tx:
+            await tx.execute(f"DELETE FROM {TABLE} WHERE n >= ?", [reply])
+            await restart(tx, Start(self._start.n, self._seq))
         kept = [e for e in self.entries if e.n < reply]
         for dropped in self.entries[len(kept) :]:
-            self._results.difference_update(result.id for result in dropped.results)
+            for result in dropped.results:
+                self._results.pop(result.id, None)
             if dropped.prompt is not None:
                 del self._prompts[dropped.prompt]
         self.entries = kept
-        self._transcript = None
 
     async def _insert(self, added: list[Entry]) -> None:
         if self.closed:
             raise RuntimeError("the run was stopped: it stores nothing more")
-        sql = f"INSERT INTO {TABLE} (n, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?)"
-        rows = [[e.n, self.items.dump(e.item), e.prompt, e.reply, e.agent] for e in added]
+        sql = f"INSERT INTO {TABLE} (n, seq, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?, ?)"
+        rows = [
+            [e.n, self._seq + i, self.items.dump(e.item), e.prompt, e.reply, e.agent] for i, e in enumerate(added, 1)
+        ]
         if len(rows) == 1:
             # One statement commits on its own.
             await self.db.execute(sql, rows[0])
@@ -313,15 +362,8 @@ class Conversation:
                 # The same SQL for each row: the database prepares it once.
                 for row in rows:
                     await tx.execute(sql, row)
+        self._seq += len(rows)
         self._add(added)
-
-
-async def _entries(db: DatabaseReader, items: Items) -> list[Entry]:
-    rows = await db.values(f"SELECT n, item, prompt, answer, reply, agent FROM {TABLE} ORDER BY n")
-    return [
-        Entry(int(typing.cast(int, n)), items.load(str(item)), _str(prompt), _str(answer), _int(reply), _str(agent))
-        for n, item, prompt, answer, reply, agent in rows
-    ]
 
 
 def _str(value: object) -> str | None:
@@ -369,14 +411,7 @@ async def answer_once(ctx: SessionContext, text: str, items: Items, run: Run) ->
     async def work() -> str:
         return await _answer(ctx, conversation, text, run)
 
-    return await transcribing(ctx, _read(conversation), work)
-
-
-def _read(conversation: Conversation) -> Callable[[], Awaitable[Transcript]]:
-    async def read() -> Transcript:
-        return conversation.transcript()
-
-    return read
+    return await answering(ctx, conversation.stored, work)
 
 
 async def _answer(ctx: SessionContext, conversation: Conversation, text: str, run: Run) -> str:

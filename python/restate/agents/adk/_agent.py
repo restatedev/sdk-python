@@ -103,7 +103,7 @@ class _Items:
     def load(self, stored: str) -> Item:
         return Event.model_validate_json(stored)
 
-    def __init__(self, author: str) -> None:
+    def __init__(self, author: str = "") -> None:
         self.author = author
 
     def prompt(self, text: str) -> Item:
@@ -461,5 +461,5 @@ def agent(
             tools=await configured(tools, ctx),
         )
 
-    obj.chat(answer)
+    obj.chat(answer, items=_Items())
     return obj

@@ -140,29 +140,6 @@ async def test_a_stopped_run_stores_nothing_more():
         await conversation.append({"role": "assistant", "text": "too late"})
 
 
-async def test_the_transcript_follows_appends_and_drops():
-    async def run(conversation: Conversation) -> str:
-        transcript = conversation.transcript()  # built now, then kept up to date
-        call = {"id": "c1", "name": "lookup", "input": {"q": 1}}
-        await conversation.append_reply({"role": "assistant", "text": "looking", "calls": [call]})
-        await conversation.append({"result": "c1", "output": "found"})
-        assert transcript.messages()[-1]["parts"][-1] == {
-            "type": "tool",
-            "id": "c1",
-            "name": "lookup",
-            "input": {"q": 1},
-            "output": "found",
-        }
-        blocked = await conversation.append_reply({"role": "assistant", "text": "blocked"})
-        assert blocked == conversation.entries[-1].n  # a reply's id: the position of its first item
-        await conversation.drop(blocked)
-        texts = [part.get("text") for message in conversation.transcript().messages() for part in message["parts"]]
-        assert "blocked" not in texts
-        return "done"
-
-    assert await asking(run)("hi") == "done"
-
-
 async def test_a_dropped_reply_takes_what_followed_it_and_each_item_is_read_once():
     reads: list[Item] = []
 
