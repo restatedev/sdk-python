@@ -70,3 +70,20 @@ def test_agents_import_without_pydantic_ai_and_its_integration_names_its_extra()
     ran = subprocess.run([sys.executable, "-c", WITHOUT_PYDANTIC_AI], capture_output=True, text=True, check=False)
     assert ran.returncode == 0, ran.stderr
     assert "install the pydantic_ai extra, pip install restate-sdk[pydantic_ai]" in ran.stdout
+
+
+WITHOUT_OPENAI_AGENTS = """
+import sys
+sys.modules["agents"] = None
+import restate.agents, restate.agents.internal
+try:
+    import restate.agents.openai
+except ImportError as error:
+    print(error)
+"""
+
+
+def test_agents_import_without_the_openai_agents_sdk_and_its_integration_names_its_extra():
+    ran = subprocess.run([sys.executable, "-c", WITHOUT_OPENAI_AGENTS], capture_output=True, text=True, check=False)
+    assert ran.returncode == 0, ran.stderr
+    assert "install the openai extra, pip install restate-sdk[openai]" in ran.stdout

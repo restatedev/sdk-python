@@ -41,8 +41,9 @@ This package holds what all frameworks share:
 - The types of the conversation that clients read and send.
 
 Each framework has a subpackage and an extra of its own:
-``restate.agents.langgraph`` (``pip install "restate-sdk[langgraph]"``) and
-``restate.agents.pydantic_ai`` (``pip install "restate-sdk[pydantic_ai]"``).
+``restate.agents.langgraph`` (``pip install "restate-sdk[langgraph]"``),
+``restate.agents.pydantic_ai`` (``pip install "restate-sdk[pydantic_ai]"``) and
+``restate.agents.openai``, on the OpenAI Agents SDK (``pip install "restate-sdk[openai]"``).
 ``restate.agents.internal`` has the building blocks for writing another
 integration.
 """
