@@ -8,25 +8,24 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-Pydantic AI agents: each conversation in the object's database, stored a step
-at a time (sqlexperiment's ``restate_agents.pydantic_ai``, on this package).
+"""Pydantic AI agents whose conversations are stored in the object's database, one step at a time.
 
-The handler is not replayed: a retried attempt (a crash, a lost connection)
-runs again from the start, and the run carries on from the last step stored:
+The handler is not replayed: a retried attempt (after a crash or a lost
+connection) runs again from the start, and the run resumes from the last step
+stored:
 
-- The conversation is stored before each model request, and with each model
-  response, in order with everything else the handler does. So the tool calls
-  a model made are stored before any tool runs, and a crash during the tools
-  runs them again with the same tool call ids, which a tool passes on to stay
-  idempotent.
-- A tool's error fails the attempt, which Restate retries; a
-  ``restate.TerminalError``, which a retry would repeat, is the tool's answer
-  to the model; and so are arguments that do not fit (Pydantic AI asks the
-  model again).
-- A message is answered once per invocation: its request is marked with the
-  prompt's id, its answer too, and a retried attempt that finds them returns
-  the answer, or finishes the run first.
+- The conversation is stored before each model request and with each model
+  response, in order with everything else the handler does. The tool calls a
+  model made are therefore stored before any tool runs, and a crash while tools
+  are running runs them again with the same tool call ids, which a tool can
+  pass on to stay idempotent.
+- A tool's error fails the attempt, and Restate retries it. A
+  ``restate.TerminalError``, which a retry would only repeat, is instead
+  returned to the model as the tool's answer, and so are arguments that do not
+  validate (Pydantic AI asks the model again).
+- Each message is answered once per invocation: its request and its answer are
+  both marked with the prompt's id, and a retried attempt that finds them
+  returns the answer, or finishes the run first.
 """
 
 from __future__ import annotations
@@ -78,19 +77,19 @@ from restate.sessions import Database, Migration, SessionContext
 from restate.sessions.internal import Schema
 
 _CANCELLATION = 409
-"""The status of Restate's cancellation, as a turn that was stopped fails with it."""
+"""The status code of Restate's cancellation error, which a stopped turn fails with."""
 
 _PROMPT = "restate_agents_prompt"
-"""The metadata of a prompt's request (which models do not read): the prompt's id."""
+"""The metadata key that marks a prompt's request with the prompt's id; models do not read it."""
 
 _ANSWERS = "restate_agents_answers"
-"""The metadata of the response that answers a prompt: the prompt's id."""
+"""The metadata key that marks the response answering a prompt with the prompt's id."""
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"<provider>/<model-id>"`` (or Pydantic AI's ``"<provider>:<model-id>"``), or a Pydantic AI model."""
 
 AnyTool: typing.TypeAlias = Tool | PydanticTool[Any] | Callable[..., Any]
-"""A tool: one of ``restate.agents`` (``tool``, ``call``, ``signal``...), a Pydantic AI tool, or a tool function."""
+"""A tool: one made with ``restate.agents`` (``tool``, ``call``, ...), a Pydantic AI tool, or a plain function."""
 
 
 def _check(own: Agent[Any, str] | None, system: object) -> None:
@@ -99,10 +98,11 @@ def _check(own: Agent[Any, str] | None, system: object) -> None:
 
 
 def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[Any]:
-    """
-    ``given`` as a Pydantic AI toolset for a run of the turn of ``ctx``:
-    ``restate.agents`` tools, each with its tool call's id (it checks the
-    model's arguments itself); Pydantic AI's tools and tool functions as they are.
+    """Return ``given`` as a Pydantic AI toolset for a run in ``ctx``.
+
+    ``restate.agents`` tools are wrapped so that they receive their tool call id
+    (they validate their own arguments); Pydantic AI tools and tool functions are
+    passed through unchanged.
     """
 
     def native(tool: Tool) -> PydanticTool[Any]:
@@ -131,10 +131,10 @@ _MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(typing.cast(Any, ModelMessage)
 
 
 class _Conversation:
-    """
-    A conversation in the object's database, a message per row. Saving it
-    writes the messages that changed since it was loaded or saved, in one
-    transaction.
+    """A conversation in the object's database, stored one message per row.
+
+    ``save`` writes the messages that changed since the last load or save, in
+    one transaction.
     """
 
     def __init__(self, db: Database, thread: str) -> None:
@@ -170,11 +170,12 @@ class _Conversation:
 
 
 class _Restate(AbstractCapability[Any]):
-    """
-    A run in a Restate handler: its conversation stored before each model
-    request and with each response; each tool call published as it starts and
-    ends, for the clients that follow the conversation; a tool's
-    ``restate.TerminalError`` its answer, and any other error the attempt's.
+    """Make a Pydantic AI run durable in a Restate handler.
+
+    It stores the conversation before each model request and with each
+    response, and publishes each tool call as it starts and ends for clients
+    that follow the conversation. A tool's ``restate.TerminalError`` becomes its
+    answer to the model; any other error fails the attempt.
     """
 
     def __init__(self, ctx: SessionContext, conversation: _Conversation) -> None:
@@ -214,16 +215,16 @@ class _Restate(AbstractCapability[Any]):
         if isinstance(error, TerminalError) and error.status_code != _CANCELLATION:
             await tool_call_ended(self.ctx)
             return f"Error: {error.message}"
-        # A tool's error, never taken for the model's provider refusing.
+        # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
         from_tool(self.ctx, error)
         raise error
 
 
 def _model(model: str | Model | None) -> Model:
-    """
-    The model, as Pydantic AI resolves it: ``provider/model-id`` (or
-    ``provider:model-id``). A provider whose package is missing, or without
-    its API key, refuses every message alike: a ``ModelError``.
+    """Resolve ``provider/model-id`` (or ``provider:model-id``) to a Pydantic AI model.
+
+    Raise ``ModelError`` if the provider's package is missing or its API key is
+    not set, since every message would then fail the same way.
     """
     if isinstance(model, Model):
         return model
@@ -236,17 +237,17 @@ def _model(model: str | Model | None) -> Model:
 
 
 def _prompt_of(message: ModelMessage) -> str | None:
-    """The id of the prompt that ``message`` is, if it is one."""
+    """Return the prompt id ``message`` is marked with, or ``None`` if it is not a prompt."""
     return (message.metadata or {}).get(_PROMPT) if isinstance(message, ModelRequest) else None
 
 
 def _answer_of(history: list[ModelMessage], asked: int) -> int | None:
-    """The index of the response that answers the prompt at ``asked``, if it was answered."""
+    """Return the index of the response that answers the prompt at index ``asked``, or ``None``."""
     return next((i for i in range(asked, len(history)) if (history[i].metadata or {}).get(_ANSWERS)), None)
 
 
 def _result(part: ToolReturnPart | RetryPromptPart) -> str:
-    """A tool call's result, as the model reads it: its return, or what to fix."""
+    """Return a tool call's result as the model sees it: the return value, or the retry prompt."""
     return part.model_response() if isinstance(part, RetryPromptPart) else part.model_response_str()
 
 
@@ -255,11 +256,11 @@ def _text(response: ModelMessage) -> str:
 
 
 async def _close(conversation: _Conversation, prompt_id: str, text: str) -> None:
-    """
-    End the run of prompt ``prompt_id``, which was cancelled, refused or
-    failed: a result of ``text`` for each tool call of its last response that
-    has none, then ``text`` as its answer. A run that stored no prompt yet has
-    nothing to end.
+    """Close the cancelled, refused or failed run of prompt ``prompt_id`` with ``text``.
+
+    Each tool call of the last response gets ``text`` as its result, and ``text``
+    becomes the prompt's answer. A run that stored no prompt yet has nothing to
+    close.
     """
     messages = await conversation.load()
     if not any(_prompt_of(m) == prompt_id for m in messages):
@@ -280,7 +281,7 @@ async def _answer_once(
     system: str | None,
     given: Sequence[AnyTool],
 ) -> str:
-    # An Agent of your own's model too, resolved here: refused as any other (a missing key or package).
+    # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
     agent: Agent[Any, str] = own or Agent(instructions=system)
     toolsets = [_toolset(given, ctx)] if given else []
@@ -291,7 +292,7 @@ async def _answer_once(
         asked = next((i for i, m in enumerate(history) if _prompt_of(m) == prompt_id), None)
         if asked is not None and (answer := _answer_of(history, asked)) is not None:
             return stored_answer(_text(history[answer]))
-        # Finish an interrupted run first (this prompt's, after a crash), then start this prompt's.
+        # Finish an interrupted run first (this prompt's own, after a crash), then start this prompt's run.
         last = next((i for i in reversed(range(len(history))) if _prompt_of(history[i]) is not None), None)
         interrupted = last is not None and _answer_of(history, last) is None
         running = _prompt_of(history[last]) if interrupted and last is not None else prompt_id
@@ -305,21 +306,21 @@ async def _answer_once(
         try:
             result = await (stop.guard(run) if stop is not None else run)
         except AttemptEnded:
-            # The attempt ended: it stops, and the next attempt goes on with the run.
+            # The attempt ended: stop here, and let the next attempt continue the run.
             raise
         except TerminalError as error:
             if error.status_code == _CANCELLATION:
-                # Cancelled: the run ends, and the next prompt starts afresh.
+                # Cancelled: close the run, so that the next prompt starts afresh.
                 await _close(conversation, running, CANCELLED)
                 raise
-            # Failed for good: the run ends with it, rather than the next prompt meeting it again.
+            # Failed for good: close the run with the error, so that the next prompt does not run into it again.
             await _close(conversation, running, f"Error: {error.message}")
             if running == prompt_id:
                 raise
             continue
         except Exception as error:
-            # Refused for good (a wrong API key): the run ends unanswered, and fails as terminal.
-            # An earlier prompt's, this one goes on.
+            # Refused for good (a wrong API key, say): close the run unanswered and fail with a terminal error.
+            # If the run was an earlier prompt's, carry on with this one.
             refused = refusal_of(ctx, error)
             if refused is None:
                 raise
@@ -334,7 +335,7 @@ async def _answer_once(
 
 
 async def _transcript(ctx: SessionContext) -> Transcript:
-    """The conversation (the object's key), as ``messages`` gives it."""
+    """Return the conversation (the object's key) in the form ``messages`` returns."""
     transcript = Transcript()
     for message in await _Conversation(ctx.db, ctx.key).load():
         for part in message.parts:

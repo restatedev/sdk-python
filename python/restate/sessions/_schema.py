@@ -8,28 +8,32 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-The schema of a session object's databases: each key's database is made by
-the same steps, in order, applied once per key, as its first exclusive attempt
-opens it. A database keeps how far each schema got in its record ``schema``
-(beside its tables, in none of them), committed with the steps, so a step
-added later (a column, an index) runs on each key's database once, as that key
-is next opened::
+"""Migrations for the databases of session objects.
 
-    notes = sessions.SessionObject("notes", migrations=[
-        "CREATE TABLE notes (text TEXT NOT NULL)",
-        "ALTER TABLE notes ADD COLUMN at TEXT",
-    ])
+Every key of an object has its own database, built by the same list of
+migrations, applied in order. Each key's database is migrated the first time
+a handler opens it, and records how many migrations it has applied (in a
+record named ``schema``, stored outside its tables, and committed together
+with the migrations). A migration added later, such as a new column or index,
+therefore runs once on each key's database, the next time that key is used::
 
-A step is a statement, or an async function of the transaction (to move data,
-say). Steps are never changed or removed once they ran: a change is a step of
-its own.
+    notes = sessions.SessionObject(
+        "notes",
+        migrations=[
+            "CREATE TABLE notes (text TEXT NOT NULL)",
+            "ALTER TABLE notes ADD COLUMN at TEXT",
+        ],
+    )
 
-A view applies the steps its key's database lacks in its own session, which
-stores nothing, then reads: a key never written reads as empty tables.
-Libraries (``restate.agents``) keep their tables in a schema of their own
-name, which ``schema.ensure(ctx.db)`` applies where they use them, in any
-object.
+A migration is a SQL statement, or an async function that takes the
+transaction (to move data, for example). Never change or remove a migration
+once it has run; add a new one instead.
+
+A view applies any missing migrations in a session of its own, which stores
+nothing, before it reads, so a key that was never written reads as empty
+tables. Libraries such as ``restate.agents`` keep their tables in a named
+``Schema`` of their own and apply it with ``await schema.ensure(ctx.db)``
+wherever they use them, in any object.
 """
 
 from __future__ import annotations
@@ -42,21 +46,21 @@ from typing import Any
 from restate.sessions._database import Connection, ConnectionTransaction
 
 RECORD = "schema"
-"""
-The database's record of its schemas: how many steps of each it has, by name.
-One record, so that ``reset`` clears all of them, a library's this process
-never loaded too.
+"""The name of the record that stores how many migrations of each schema were applied.
+
+It is a single record for all schemas, so that ``reset`` clears all of them,
+including those of libraries that this process never loaded.
 """
 
 Migration = str | Callable[[Any], Awaitable[None]]
-"""One step of a database's migrations: a SQL statement, or an async function of the transaction."""
+"""One migration: a SQL statement, or an async function that takes the transaction."""
 
 _ENSURE = "_restate_sessions_ensure"
-"""The attribute of a database of this package's: how it applies schemas (see ``Schema.ensure``)."""
+"""The attribute through which this package's databases apply schemas (see ``Schema.ensure``)."""
 
 
 def steps_of(steps: Sequence[Migration]) -> tuple[Migration, ...]:
-    """Return ``steps`` as a tuple; raise ``TypeError`` for a lone string, which is a sequence of characters."""
+    """Return ``steps`` as a tuple, rejecting a lone string (which is a sequence of characters)."""
     if isinstance(steps, str):
         shown = f"{steps[:40]!r}{'...' if len(steps) > 40 else ''}"
         raise TypeError(f"migrations takes a list of steps, not a string: migrations=[{shown}]")
@@ -64,59 +68,76 @@ def steps_of(steps: Sequence[Migration]) -> tuple[Migration, ...]:
 
 
 class Schema:
-    """A part of a database's schema: its ``name``, and the ``steps`` that make it, in order."""
+    """A named part of a database's schema, built by its own list of migrations.
+
+    Libraries use this for the tables they own, so that their migrations are
+    tracked separately from the object's own ``migrations``::
+
+        AUDIT = Schema("mylib.audit", ["CREATE TABLE mylib_audit (at TEXT NOT NULL, what TEXT NOT NULL)"])
+
+    Args:
+        name: The schema's name, unique within a database.
+        steps: Its migrations, in order.
+
+    Raises:
+        TypeError: If ``steps`` is a string rather than a list of migrations.
+    """
 
     def __init__(self, name: str, steps: Sequence[Migration]) -> None:
         self.name: str = name
         self.steps: tuple[Migration, ...] = steps_of(steps)
 
     async def ensure(self, db: Any) -> None:
-        """
-        Apply the steps ``db`` lacks: a library's tables, where it uses them, in
-        any object. On a handler's ``ctx.db``, once per attempt; a view's are
-        its own, vanishing with its session.
+        """Apply the migrations of this schema that ``db`` has not applied yet.
+
+        On a handler's ``ctx.db``, the migrations are committed and checked at
+        most once per attempt. On a view's ``ctx.db``, they are applied to the
+        view's own session and discarded with it.
+
+        Args:
+            db: A session object's ``ctx.db``, or a database from ``database``.
         """
         ensure = ensure_of(db)
         await (ensure([self]) if ensure is not None else apply(db, [self]))
 
 
 Ensure = Callable[[Sequence[Schema]], Awaitable[None]]
-"""How a database applies schemas: a handler's ``ctx.db``, its reader, or one of ``as_database``."""
+"""A function that applies schemas to a database (a handler's ``ctx.db``, a view's, or one from ``as_database``)."""
 
 
 def ensuring(db: Any, ensure: Ensure) -> Any:
-    """``db``, which applies schemas with ``ensure`` (see ``Schema.ensure``)."""
+    """Make ``db`` apply schemas with ``ensure``, and return it."""
     object.__setattr__(db, _ENSURE, ensure)
     return db
 
 
 def ensure_of(db: Any) -> Ensure | None:
-    """How ``db`` applies schemas, if it is a database of this package's."""
+    """Return the function ``db`` applies schemas with, or ``None`` if it is not one of this package's databases."""
     return getattr(db, _ENSURE, None)
 
 
 async def _applied_in(db: Connection | ConnectionTransaction) -> dict[str, int]:
-    """How many steps of each schema the database has, by name."""
+    """Return how many migrations of each schema the database has applied, by schema name."""
     record = await db.record(RECORD)
     return json.loads(record.decode()) if record else {}
 
 
 def _behind(applied: dict[str, int], schemas: Sequence[Schema]) -> list[Schema]:
-    """The schemas of ``schemas`` that ``applied`` lacks steps of."""
+    """Return the schemas that have migrations missing from ``applied``."""
     return [schema for schema in schemas if applied.get(schema.name, 0) < len(schema.steps)]
 
 
 async def apply(db: Connection, schemas: Sequence[Schema], *, reader: bool = False) -> None:
-    """Apply the steps of ``schemas`` that ``db`` lacks, in one transaction, with how far each got."""
+    """Apply the missing migrations of ``schemas`` to ``db`` in one transaction, and record them."""
     if not _behind(await _applied_in(db), schemas):
         return
-    # Again in the transaction, which holds the session: a call before it may
-    # have applied them.
+    # Check again inside the transaction, which holds the session: another call
+    # may have applied them in the meantime.
     async with db.transaction() as tx:
         if not reader:
             await apply_in(tx, schemas)
             return
-        # A reader's session is query-only, but for its schemas.
+        # A reader's session is query-only, except while it applies schemas.
         await tx.execute("PRAGMA query_only = 0")
         try:
             await apply_in(tx, schemas)
@@ -125,7 +146,7 @@ async def apply(db: Connection, schemas: Sequence[Schema], *, reader: bool = Fal
 
 
 async def apply_in(tx: ConnectionTransaction, schemas: Sequence[Schema]) -> None:
-    """Apply the steps of ``schemas`` that the transaction ``tx`` lacks, and record how far each got."""
+    """Apply the missing migrations of ``schemas`` inside the transaction ``tx``, and record them."""
     applied = await _applied_in(tx)
     lacking = _behind(applied, schemas)
     if not lacking:
@@ -138,14 +159,14 @@ async def apply_in(tx: ConnectionTransaction, schemas: Sequence[Schema]) -> None
 
 
 async def drop_all(tx: ConnectionTransaction, schemas: Sequence[Schema]) -> None:
-    """
-    Empty the database in the transaction ``tx``: drop every table, view, index
-    and trigger, and forget every schema, then apply ``schemas`` again. Its
-    other records (the outbox) stay. It commits with ``tx``: what ``tx`` writes
-    after it are the new database's first rows.
+    """Empty the database inside the transaction ``tx``, then apply ``schemas`` again.
+
+    Drops every table, view, index and trigger and forgets every schema; other
+    records, such as the outbox, are kept. The change commits with ``tx``, so
+    whatever ``tx`` writes afterwards becomes the new database's first rows.
     """
     made = await tx.values("SELECT type, name FROM sqlite_schema WHERE substr(name, 1, 7) != 'sqlite_'")
-    # A trigger or view may name a table; an index goes with its table.
+    # Triggers and views may refer to tables, so drop them first; indexes go with their tables.
     for kind in ("trigger", "view"):
         for made_kind, name in made:
             if made_kind == kind:
@@ -163,10 +184,10 @@ async def _drop(tx: ConnectionTransaction, kind: str, name: str) -> None:
 
 
 async def _children_first(tx: ConnectionTransaction, tables: list[str]) -> list[str]:
-    """
-    ``tables``, each after every table whose foreign keys name it: with foreign
-    keys on, dropping a table deletes its rows, which a child's rows may not
-    outlive. Tables in a cycle stay in their order.
+    """Order ``tables`` so that each comes after every table whose foreign keys refer to it.
+
+    With foreign keys enforced, dropping a parent table deletes its rows, which
+    its children's rows may not outlive. Tables in a cycle keep their order.
     """
     parents: dict[str, set[str]] = {}
     for name in tables:

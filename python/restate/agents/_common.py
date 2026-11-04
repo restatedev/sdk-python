@@ -8,10 +8,11 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-What the frameworks share: their options (``PerSession``, the model), the ids of
-an invocation's prompts, a model provider's refusal, and the ``chat`` message.
-As sdk-sessions' ``common.ts``.
+"""Helpers shared by the framework integrations.
+
+This covers per-invocation options (``PerSession``) and model names, the ids
+of an invocation's prompts, recognising a model provider's refusal, and how
+the ``chat`` handler reads its message.
 """
 
 from __future__ import annotations
@@ -32,9 +33,10 @@ from restate.sessions.internal import ScopeKey
 T = typing.TypeVar("T")
 
 PerSession: typing.TypeAlias = T | Callable[[SessionContext], T | Awaitable[T]]
-"""A value, or a function of the invocation's context (sync or async) that returns it.
+"""A value, or a function (sync or async) that takes the invocation's context and returns it.
 
-For options that are the same for every message, or that differ per user::
+Use a plain value for options that are the same for every message, and a
+function for options that differ per user::
 
     langgraph.agent("assistant", model="anthropic/claude-sonnet-5-5")
     langgraph.agent("assistant", system=lambda ctx: f"You help {ctx.key}.")
@@ -42,7 +44,7 @@ For options that are the same for every message, or that differ per user::
 
 
 async def configured(value: PerSession[T], ctx: SessionContext) -> T:
-    """``value`` for the invocation of ``ctx``."""
+    """Return ``value`` for the invocation of ``ctx``, calling and awaiting it if it is a function."""
     if not callable(value):
         return value
     made = typing.cast(Callable[[SessionContext], T | Awaitable[T]], value)(ctx)
@@ -53,10 +55,11 @@ _PROMPTS: ScopeKey[int] = ScopeKey("next_prompt_id")
 
 
 def next_prompt_id(ctx: SessionContext) -> str:
-    """
-    The id of the next prompt of the invocation of ``ctx``: the invocation's
-    id, then ``<id>:2``, ``<id>:3``... A retried attempt makes its prompts in
-    the same order, so each gets the same id again, and its answer.
+    """Return the id of the invocation's next prompt.
+
+    The first prompt's id is the invocation id, the next ones are ``<id>:2``,
+    ``<id>:3``, and so on. A retried attempt makes its prompts in the same
+    order, so each prompt gets the same id again, and finds its stored answer.
     """
     n = (_PROMPTS.get(ctx) or 0) + 1
     _PROMPTS.set(ctx, n)
@@ -64,13 +67,13 @@ def next_prompt_id(ctx: SessionContext) -> str:
 
 
 MODEL_ENV = "RESTATE_AGENT_MODEL"
-"""The environment variable of the model that agents use when given none."""
+"""The environment variable that names the model agents use when none is given."""
 
 DEFAULT_MODEL = "openai/gpt-6-sol"
-"""The default model of the frameworks that take any provider's, with OPENAI_API_KEY."""
+"""The default model of the frameworks that accept any provider; it needs ``OPENAI_API_KEY``."""
 
 CLAUDE_MODEL = "anthropic/claude-sonnet-5-5"
-"""An Anthropic model, as a framework that takes only Anthropic's defaults to (with ANTHROPIC_API_KEY)."""
+"""The default model of the frameworks that accept only Anthropic models; it needs ``ANTHROPIC_API_KEY``."""
 
 
 def model_of(model: str | None, fallback: str = DEFAULT_MODEL) -> str:
@@ -79,11 +82,11 @@ def model_of(model: str | None, fallback: str = DEFAULT_MODEL) -> str:
 
 
 def provider_of(model: str) -> tuple[str, str]:
-    """Split ``"provider/model-id"`` (or the frameworks' ``"provider:model-id"``) into its provider and model id.
+    """Split ``"provider/model-id"`` (or ``"provider:model-id"``) into its provider and model id.
 
-    It splits at the first ``/``, else at the first ``:``, so model ids that
-    contain a colon (``"openai/ft:gpt-4o:acme"``) keep it. A name with neither
-    has no provider: ``("", model)``.
+    It splits at the first ``/``, else at the first ``:``, so a model id that
+    contains a colon (``"openai/ft:gpt-4o:acme"``) keeps it. A name with
+    neither has no provider, and returns ``("", model)``.
     """
     for separator in ("/", ":"):
         provider, found, model_id = model.partition(separator)
@@ -93,20 +96,21 @@ def provider_of(model: str) -> tuple[str, str]:
 
 
 REFUSED = 424
-"""
-The error code of a message the model's provider refused (a missing or wrong
-API key, an unknown model): Failed Dependency, as its HTTP status.
+"""The error code of a message that the model's provider refused, such as for a wrong API key or an unknown model.
+
+It is the HTTP status 424 Failed Dependency.
 """
 
 CHECK_MODEL = f"check the agent's model (its `model` option, or {MODEL_ENV}) and its provider's API key"
-"""What to check when a model's provider refuses a request."""
+"""The advice in the error message when a model's provider refuses a request."""
 
 
 class ModelError(TerminalError):
-    """
-    An agent's model that it cannot take: not ``provider/model-id``, another
-    provider's, or one its framework does not know. Terminal (``REFUSED``),
-    wherever it is raised: a retry takes the same model.
+    """An error for a model name that an agent cannot use.
+
+    The name is not ``provider/model-id``, belongs to another provider, or is
+    unknown to the framework. It is a terminal error with status
+    ``REFUSED``, since a retry would use the same model.
     """
 
     def __init__(self, message: str) -> None:
@@ -114,13 +118,19 @@ class ModelError(TerminalError):
 
 
 def check_model_name(framework: str, model: str | None) -> None:
-    """Raise ``ModelError`` if ``model``, given explicitly to ``framework``'s agent, names no provider."""
+    """Raise ``ModelError`` if ``model``, passed explicitly to a ``framework`` agent, does not name a provider."""
     if model is not None and not re.fullmatch(r"[^/:\s]+[/:]\S+", model):
         raise ModelError(f'{framework}: the model "{model}" is not provider/model-id, such as {CLAUDE_MODEL}')
 
 
 def model_id_of(model: str, provider: str) -> str:
-    """The model id of ``model``, for a framework with only ``provider``'s models: ``provider/model-id``, or the id alone."""
+    """Return the model id of ``model`` for a framework that only takes ``provider``'s models.
+
+    ``model`` is either ``provider/model-id`` or the bare model id.
+
+    Raises:
+        ModelError: If ``model`` names another provider, or no model id.
+    """
     named, model_id = provider_of(model) if "/" in model or ":" in model else (provider, model)
     if named != provider or not model_id:
         from_env = f" (from {MODEL_ENV})" if os.environ.get(MODEL_ENV) == model else ""
@@ -129,7 +139,7 @@ def model_id_of(model: str, provider: str) -> str:
 
 
 class MessageSerde(Serde[str]):
-    """A chat message: the request's body as text, or the string it is as JSON (``"Hi"``)."""
+    """The serde of a chat message: the request body as plain text, or a JSON string (``"Hi"``)."""
 
     def deserialize(self, buf: bytes) -> str | None:
         text = buf.decode()
@@ -144,18 +154,18 @@ class MessageSerde(Serde[str]):
 
 
 CANCELLED = "Cancelled: the turn was stopped before it finished."
-"""What a cancelled turn answers, and each tool call it cut off: the model sees it in the conversation that goes on."""
+"""The answer of a cancelled turn, and the result of each tool call it cut off, which the model sees later in the conversation."""
 
 UNANSWERED = "Unanswered: the model's provider refused the request."
-"""
-What a prompt answers that the model's provider refused for good: the prompt is
-over, and the model sees it in the conversation that goes on, rather than
-answer it with the next message.
+"""The stored answer of a prompt that the model's provider refused for good.
+
+It ends the prompt, so that the model sees it in the rest of the conversation
+instead of answering the refused prompt along with the next message.
 """
 
 
 class ToolError(Exception):
-    """A tool's error, which fails the attempt (Restate retries it): the error of tool ``tool``."""
+    """An error raised by tool ``tool``, which fails the attempt so that Restate retries it."""
 
     def __init__(self, tool: str, cause: BaseException) -> None:
         super().__init__(f"the tool {tool} failed: {cause}")
@@ -164,20 +174,21 @@ class ToolError(Exception):
 
 
 _TOOL_ERRORS: ScopeKey[weakref.WeakSet[BaseException]] = ScopeKey("from_tool")
-"""The errors the attempt's framework tools (not ``tool()``'s) failed with: see ``from_tool``."""
+"""The errors that framework tools (not those made by ``tool()``) raised in the attempt; see ``from_tool``."""
 
 
 def from_tool(ctx: SessionContext, error: BaseException) -> None:
-    """
-    ``error`` is a tool's, in the attempt of ``ctx``: a framework's own tool
-    that failed, whose error is never taken for the model's provider refusing
-    (a tool that calls a model API may fail as one does).
+    """Record that a framework's own tool raised ``error`` in the attempt of ``ctx``.
+
+    Such an error is never mistaken for a refusal by the model's provider,
+    even if it looks like one (a tool that calls a model API can fail the same
+    way).
     """
     _TOOL_ERRORS.of(ctx, weakref.WeakSet[BaseException]).add(error)
 
 
 _FOR_GOOD = frozenset({"AuthenticationError", "PermissionDeniedError", "NotFoundError", "BadRequestError"})
-"""The model SDKs' errors (Anthropic's, OpenAI's) of a request that fails again however often it is made."""
+"""The names of the model SDKs' errors (Anthropic's, OpenAI's) for requests that would fail again on retry."""
 
 _REFUSED_TEXT = re.compile(
     r"API key not found|no API key|Could not resolve authentication method|Provider is not configured"
@@ -187,11 +198,11 @@ _REFUSED_TEXT = re.compile(
 
 
 _FOR_GOOD_STATUS = frozenset({400, 401, 403, 404})
-"""The HTTP statuses of a model request that fails again however often it is made (Pydantic AI's ``ModelHTTPError``'s)."""
+"""The HTTP statuses of Pydantic AI's ``ModelHTTPError`` for requests that would fail again on retry."""
 
 
 def _refused(error: BaseException) -> bool:
-    """Whether ``error`` is a model provider's refusal that a retry does not change: a missing key, an unknown model..."""
+    """Return whether ``error`` is a model provider's refusal that a retry would not change, such as a missing key."""
     if isinstance(error, ToolError):
         return False
     if type(error).__name__ in _FOR_GOOD:
@@ -202,7 +213,11 @@ def _refused(error: BaseException) -> bool:
 
 
 def refusal(error: BaseException) -> TerminalError | None:
-    """``error`` as a terminal error (``REFUSED``), if a retry does not change it: a model the agent cannot take, or its provider's refusal."""
+    """Return ``error`` as a terminal error with status ``REFUSED`` if retrying would not help, else ``None``.
+
+    That is the case for a model the agent cannot use, and for a refusal by
+    the model's provider.
+    """
     if isinstance(error, ModelError):
         return error
     if isinstance(error, TerminalError) or not _refused(error):
@@ -213,7 +228,7 @@ def refusal(error: BaseException) -> TerminalError | None:
 
 
 def refusal_of(ctx: SessionContext, error: BaseException) -> TerminalError | None:
-    """``refusal``, but not of an error a framework's tool failed with in the attempt of ``ctx`` (``from_tool``)."""
+    """Return ``refusal(error)``, except for errors that a framework's tool raised in the attempt (see ``from_tool``)."""
     failed_tool = _TOOL_ERRORS.get(ctx)
     if failed_tool is not None and error in failed_tool:
         return None
@@ -221,7 +236,7 @@ def refusal_of(ctx: SessionContext, error: BaseException) -> TerminalError | Non
 
 
 def stored_answer(answer: str) -> str:
-    """A prompt's stored answer, as the prompt returns it: ``UNANSWERED`` fails as the prompt did then (``REFUSED``)."""
+    """Return a prompt's stored answer, or raise the refusal again if it is ``UNANSWERED``."""
     if answer != UNANSWERED:
         return answer
     raise TerminalError(f"the model's provider refused the request: {CHECK_MODEL}", status_code=REFUSED)

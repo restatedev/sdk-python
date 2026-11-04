@@ -8,11 +8,12 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-Calls and sends from a session object's handler: ``ctx.call`` and
-``ctx.send``, and a transaction's ``tx.send``. A target is a handler (with
-its key, for an object or a workflow), typed by its signature; a target known
-only at run time is named, with ``generic_call`` and ``generic_send``::
+"""Calls and sends from session objects: ``ctx.call``, ``ctx.send`` and ``tx.send``.
+
+The target of a call or send is a handler function, passed together with its
+key for a virtual object or a workflow, and the call is typed by the
+handler's signature. A target known only at run time is addressed by name,
+with ``generic_call`` and ``generic_send``::
 
     count = await ctx.call(increment, 5, key="a", idempotency_key=f"{ctx.request.id}:inc")
     ctx.send(record, entry, key="audit", delay=timedelta(hours=1))
@@ -38,7 +39,7 @@ O = typing.TypeVar("O")
 
 @dataclass(frozen=True)
 class GenericSend:
-    """A send, its input serialized: as ``ctx.send`` makes it, or a transaction's outbox keeps it."""
+    """A send with its input already serialized, as ``ctx.send`` makes it or a transaction's outbox stores it."""
 
     service: str
     handler: str
@@ -50,7 +51,7 @@ class GenericSend:
 
 
 class CallHost(Protocol):
-    """What calls and sends need of the SDK's context."""
+    """The part of the SDK's context that calls and sends use."""
 
     def generic_call(
         self,
@@ -75,10 +76,11 @@ class CallHost(Protocol):
 
 
 def _target(handler: Callable[..., Any], key: str | None) -> tuple[str, str, Serde[Any], Serde[Any]]:
-    """
-    The service, handler name and serdes of ``handler``, called with ``key``. An
-    object's or a workflow's handler needs its key, and a service's has none:
-    a ``TerminalError`` otherwise, since a retry would fail the same way.
+    """Return the service name, handler name and serdes of ``handler``, checking ``key``.
+
+    Raises ``TerminalError`` (since a retry would fail the same way) if
+    ``handler`` is not a handler, if an object's or workflow's handler has no
+    key, or if a service's handler has one.
     """
     try:
         target: Handler[Any, Any] = handler_from_callable(handler)
@@ -95,7 +97,11 @@ def _target(handler: Callable[..., Any], key: str | None) -> tuple[str, str, Ser
 
 
 class CallFuture(RestateDurableCallFuture[O]):
-    """The result of a call, as its output serde reads it: awaitable, with the call's invocation id."""
+    """A future for the result of a call, decoded with the handler's output serde.
+
+    Await it for the result. ``invocation_id()`` returns the id of the call's
+    invocation, and ``cancel_invocation()`` cancels it.
+    """
 
     def __init__(self, call: RestateDurableCallFuture[bytes], serde: Serde[O]) -> None:
         super().__init__()
@@ -116,7 +122,7 @@ class CallFuture(RestateDurableCallFuture[O]):
 
 
 class Calls:
-    """``call`` and ``generic_call`` (see ``Caller`` in ``_api.py``), over ``_call_host``, the SDK's context."""
+    """A mixin that implements ``call`` and ``generic_call`` (see ``Caller`` in ``_api.py``) on top of ``_call_host``."""
 
     _call_host: CallHost
 
@@ -175,7 +181,11 @@ class Calls:
 
 
 class Sends:
-    """``send`` and ``generic_send`` (see ``Sender`` in ``_api.py``), into ``_send_sink``: made at once, or at a commit."""
+    """A mixin that implements ``send`` and ``generic_send`` (see ``Sender`` in ``_api.py``) by passing each send to ``_send_sink``.
+
+    The sink either sends right away (``ctx.send``) or when a transaction
+    commits (``tx.send``).
+    """
 
     _send_sink: Callable[[GenericSend], None]
 
@@ -236,7 +246,7 @@ class Sends:
 
 
 def send_now(host: CallHost) -> Callable[[GenericSend], None]:
-    """The sink of ``ctx.send``: each send is made at once."""
+    """Return the sink of ``ctx.send``, which sends each send right away."""
 
     def sink(send: GenericSend) -> None:
         host.generic_send(

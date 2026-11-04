@@ -8,22 +8,24 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-The Restate calls of an invocation's tools (``call``, ``signal``,
-``subagent``...), kept in the object's database (``restate_agent_calls``) so
-that a call is made once, however often its tool call runs. As sdk-sessions'
-``calls.ts``.
+"""Track the Restate calls that an invocation's tools make, so each is made only once.
 
-A crash or a suspension restarts the handler. A framework then runs a tool call
-that was cut off again, with its id; or tells the model it was interrupted, and
-the model makes it again with a new id: made with the same tool and input, it
-is the call an earlier attempt made, so it takes that call's id, and so the
-same idempotency key: the same Restate call, which it waits for again, or
-whose answer it gets.
+The tools built on Restate (``call``, ``send``, ``workflow``, ``subagent``,
+``wait_for_signal``) record their calls in the object's database, in
+``restate_agent_calls``, so that a call is made once however often its tool
+call runs.
 
-A call is kept until the framework's transcript has its result under the last
-id it was made with (``settle``, at each publish, and before each tool call).
-An error there is not its result, unless the call answered with that error.
+A crash or a suspension restarts the handler. The framework then either runs
+the interrupted tool call again with the same id, or tells the model it was
+interrupted, and the model makes it again under a new id. Either way, a call
+with the same tool and input as one an earlier attempt made reuses that
+call's id, and so its idempotency key: it is the same Restate call, which it
+waits for again or whose result it gets.
+
+A call is kept until the framework's transcript has its result under the
+latest id it was made with (``settle`` checks this at each publish and before
+each tool call). An error in the transcript does not count as the result,
+unless the call itself returned that error.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ SCHEMA = Schema(
 
 
 class _Made(typing.TypedDict):
-    """A tool's call: the tool, its input as JSON, the ids it was made with (the first is its own), and its attempt."""
+    """A tool's call: the tool, its input as JSON, the tool call ids it was made under (the first is its own), and its attempt."""
 
     tool: str
     input: str
@@ -59,24 +61,24 @@ class _Made(typing.TypedDict):
 
 
 class _Call(_Made, total=False):
-    """A tool's call, and whether it answered."""
+    """A tool's call, and whether it has returned."""
 
     done: bool
-    """Answered, until the transcript has its result."""
+    """Whether the call has returned; kept until the transcript has its result."""
     failed: str
-    """It answered with this error (``Error: <message>``), a terminal one: its result, as the transcript has it."""
+    """The terminal error the call returned (``Error: <message>``), which is its result in the transcript."""
 
 
 @dataclass
 class _Calls:
-    """The calls an invocation's tools made that the transcript has no result of yet."""
+    """The calls an invocation's tools made whose results are not yet in the transcript."""
 
     invocation: str
     calls: list[_Call] = field(default_factory=list[_Call])
 
 
 async def _store(ctx: SessionContext, state: _Calls) -> None:
-    """Store ``state``, committed before the call it records is made."""
+    """Store ``state``; it is committed before the call it records is made."""
     await ctx.db.execute(
         "INSERT OR REPLACE INTO restate_agent_calls (row, invocation, calls) VALUES (0, ?, ?)",
         [state.invocation, json.dumps(state.calls)],
@@ -84,7 +86,7 @@ async def _store(ctx: SessionContext, state: _Calls) -> None:
 
 
 async def _load(ctx: SessionContext, invocation: str) -> _Calls:
-    """The calls of ``invocation``, as stored: none if the row is another invocation's."""
+    """Load the stored calls of ``invocation``; none if the row belongs to another invocation."""
     await SCHEMA.ensure(ctx.db)
     row = await ctx.db.get("SELECT invocation, calls FROM restate_agent_calls")
     if row is None or row["invocation"] != invocation:
@@ -102,7 +104,7 @@ _ATTEMPT: ScopeKey[_Attempt] = ScopeKey("the calls of an attempt")
 
 
 async def _calls_of(ctx: SessionContext) -> tuple[_Attempt, _Calls]:
-    """The attempt of ``ctx``, and the calls of its invocation."""
+    """Return the current attempt and the calls of its invocation."""
     attempt = _ATTEMPT.of(ctx, lambda: _Attempt(id=str(uuid.uuid4())))
     if attempt.calls is None:
         attempt.calls = await _load(ctx, ctx.request.id)
@@ -111,7 +113,7 @@ async def _calls_of(ctx: SessionContext) -> tuple[_Attempt, _Calls]:
 
 @dataclass
 class Call:
-    """The call a tool call makes: its id (an earlier attempt's, maybe), and how to say it answered."""
+    """The call a tool call makes: its id (possibly from an earlier attempt), and a way to record that it returned."""
 
     id: str
     _ctx: SessionContext
@@ -119,7 +121,7 @@ class Call:
     _call: _Call
 
     async def answered(self, failed: str | None = None) -> None:
-        """It answered, with ``failed`` if a terminal error answered it: kept until the transcript has its result."""
+        """Record that the call returned, with ``failed`` if it returned a terminal error."""
         self._call["done"] = True
         if failed is not None:
             self._call["failed"] = failed
@@ -127,10 +129,11 @@ class Call:
 
 
 async def call_of(ctx: SessionContext, tool: str, input: object, call_id: str) -> Call:
-    """
-    The call of tool ``tool`` with ``input`` that tool call ``call_id`` makes:
-    the one it made before (a run again), or the one an earlier attempt made
-    with the same tool and input (made again under a new id), or else a new one.
+    """Return the call that tool call ``call_id`` makes to ``tool`` with ``input``.
+
+    That is the call it made before (if it runs again), or else the call an
+    earlier attempt made with the same tool and input (if the model made it
+    again under a new id), or else a new call.
     """
     attempt, state = await _calls_of(ctx)
     encoded = json.dumps(input, sort_keys=True)
@@ -150,10 +153,11 @@ async def call_of(ctx: SessionContext, tool: str, input: object, call_id: str) -
 
 
 async def settle(ctx: SessionContext, stored: Callable[[str, str | None], bool]) -> None:
-    """
-    Forget the calls that answered whose result the framework stored: those of
-    which ``stored(id, failed)`` is true for the last id they were made with,
-    ``failed`` the error that answered the call, if one did.
+    """Forget the calls that returned and whose results the framework has stored.
+
+    A call's result is stored if ``stored(id, failed)`` is true, where ``id``
+    is the latest id the call was made under and ``failed`` is the error it
+    returned, if any.
     """
     _, state = await _calls_of(ctx)
     kept = [c for c in state.calls if not c.get("done") or not stored(c["ids"][-1], c.get("failed"))]

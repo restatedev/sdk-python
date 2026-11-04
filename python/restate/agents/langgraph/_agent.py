@@ -10,24 +10,25 @@
 #
 # LangGraph's graph API (langgraph.graph, its StateGraph and compiled graphs) is untyped: no py.typed.
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
-"""
-LangGraph agents: a tool-calling graph whose checkpoints are in the object's
-database (``_checkpointer.py``). As sdk-sessions' ``langgraph/index.ts``.
+"""LangGraph agents whose checkpoints are stored in the object's database.
 
-The graph is the usual tool-calling loop: a model node, a tools node, and back
-to the model until it answers. The handler is not replayed: a retried attempt
-(a crash, a lost connection) runs again from the start, and LangGraph carries
-on from the last step it stored:
+The graph is the usual tool-calling loop: a model node and a tools node, going
+back to the model until it answers. Checkpoints are stored by
+``SqlCheckpointSaver`` (``_checkpointer.py``). The handler is not replayed: a
+retried attempt (after a crash or a lost connection) runs again from the
+start, and LangGraph resumes from the last step it stored:
 
-- Each step is stored before the next starts (``durability="sync"``), in order
-  with everything else the handler does. So the tool calls a model made are
-  stored before any tool runs, and a crash during the tools resumes them with
-  the same tool call ids, which a tool passes on to stay idempotent.
-- A tool's error fails the attempt, which Restate retries (LangGraph's
-  ToolNode would hand it to the model as the tool's result); a call of a tool
-  the agent lacks, or with arguments that do not fit, is the model's to fix.
-- A message is answered once per invocation: the graph records each answer in
-  its state, by prompt id, and a retried attempt returns it.
+- Each step is stored before the next one starts (``durability="sync"``), in
+  order with everything else the handler does. The tool calls a model made are
+  therefore stored before any tool runs, and a crash while tools are running
+  resumes them with the same tool call ids, which a tool can pass on to stay
+  idempotent.
+- A tool's error fails the attempt, and Restate retries it. (LangGraph's
+  ``ToolNode`` would otherwise hand the error to the model as the tool's
+  result.) A call to a tool the agent does not have, or with arguments that do
+  not validate, is reported back to the model to fix.
+- Each message is answered once per invocation: the graph records each answer
+  in its state under the prompt's id, and a retried attempt returns it.
 """
 
 from __future__ import annotations
@@ -73,7 +74,7 @@ from restate.retry_policy import InvocationRetryPolicy
 from restate.sessions import Migration, SessionContext
 
 _CANCELLATION = 409
-"""The status of Restate's cancellation, as a turn that was stopped fails with it."""
+"""The status code of Restate's cancellation error, which a stopped turn fails with."""
 
 
 def _merged(old: dict[str, str], new: dict[str, str]) -> dict[str, str]:
@@ -81,7 +82,7 @@ def _merged(old: dict[str, str], new: dict[str, str]) -> dict[str, str]:
 
 
 class State(TypedDict, total=False):
-    """The agent's graph's state: its conversation, the prompt it answers, and each prompt's answer."""
+    """The state of the agent's graph: the conversation, the prompt being answered, and each prompt's answer."""
 
     messages: Annotated[list[AnyMessage], add_messages]
     prompt: str
@@ -94,18 +95,18 @@ ChatModel: typing.TypeAlias = str | BaseChatModel
 """A model: ``"openai/<model-id>"`` or ``"anthropic/<model-id>"``, or a LangChain chat model that calls tools."""
 
 AnyTool: typing.TypeAlias = Tool | BaseTool
-"""A tool: one of ``restate.agents`` (``tool``, ``call``, ``signal``...), or a LangChain tool."""
+"""A tool: one made with ``restate.agents`` (``tool``, ``call``, ``wait_for_signal``, ...) or a LangChain tool."""
 
 
 _PROVIDERS = {
     "openai": ("langchain_openai", "ChatOpenAI", "langchain-openai"),
     "anthropic": ("langchain_anthropic", "ChatAnthropic", "langchain-anthropic"),
 }
-"""The providers the usual graph takes by name: LangChain's integration of each, its class, and its package."""
+"""The providers that can be named in a model string, each with its LangChain module, class and package."""
 
 
 def _provider_of_model(named: str) -> tuple[str, str]:
-    """``provider/model-id`` as its provider and model id, for a provider the usual graph takes."""
+    """Split ``provider/model-id`` into provider and model id, or raise ``ModelError`` for an unsupported provider."""
     provider, model_id = provider_of(named)
     if provider not in _PROVIDERS or not model_id:
         from_env = f" (from {MODEL_ENV})" if os.environ.get(MODEL_ENV) == named else ""
@@ -114,10 +115,11 @@ def _provider_of_model(named: str) -> tuple[str, str]:
 
 
 def _chat_model(named: str) -> BaseChatModel:
-    """
-    The chat model ``provider/model-id`` names, through LangChain's
-    integration of the provider, imported when a model of it is used: only
-    that one need be installed, beside the ``langgraph`` extra.
+    """Create the LangChain chat model that ``provider/model-id`` names.
+
+    The provider's LangChain package is imported only when one of its models is
+    used, so only that package needs to be installed next to the ``langgraph``
+    extra.
     """
     provider, model_id = _provider_of_model(named)
     module, class_name, package = _PROVIDERS[provider]
@@ -131,7 +133,7 @@ def _chat_model(named: str) -> BaseChatModel:
 
 
 class _RestateTool(BaseTool):
-    """A ``restate.agents`` tool as a LangChain tool: it gets its tool call's id, and checks the model's arguments itself."""
+    """A ``restate.agents`` tool as a LangChain tool; it receives its tool call id and validates its own arguments."""
 
     _tool: Tool = PrivateAttr()
     _ctx: SessionContext = PrivateAttr()
@@ -156,12 +158,12 @@ def _native(tool: Tool, ctx: SessionContext) -> BaseTool:
 
 
 def _tools_node(ctx: SessionContext, tools: list[BaseTool]) -> Callable[[State, RunnableConfig], Awaitable[Any]]:
-    """
-    The tools node: each tool call of the model's last message, run by a
-    ToolNode, which answers the model with what is wrong when a call names a
-    tool the agent lacks or arguments that do not fit; any other error of a
-    tool fails the attempt. The round is published as it starts and ends, for
-    the clients that follow the conversation.
+    """Return the graph's tools node, which runs the tool calls of the model's last message.
+
+    A ``ToolNode`` runs them, and tells the model what went wrong when a call
+    names an unknown tool or has invalid arguments; any other tool error fails
+    the attempt. The start and end of each round are published for clients that
+    follow the conversation.
     """
     node = ToolNode(tools)
 
@@ -170,7 +172,7 @@ def _tools_node(ctx: SessionContext, tools: list[BaseTool]) -> Callable[[State, 
         try:
             ran = await node.ainvoke(state, config)
         except Exception as error:
-            # A tool's error, never taken for the model's provider refusing.
+            # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
             from_tool(ctx, error)
             raise
         await tool_call_ended(ctx)
@@ -184,7 +186,7 @@ def _text(message: BaseMessage) -> str:
 
 
 def _graph(ctx: SessionContext, model: BaseChatModel, tools: list[BaseTool], system: str | None) -> Any:
-    """The agent's graph: ``model``, calling ``tools``, until it answers the prompt."""
+    """Build the agent's graph: ``model`` calls ``tools`` until it answers the prompt."""
     bound = model.bind_tools(tools) if tools else model
 
     async def call_model(state: State) -> dict[str, Any]:
@@ -215,7 +217,8 @@ async def _answer_once(
 ) -> str:
     chat_model = model if isinstance(model, BaseChatModel) else _chat_model(model_of(model))
     tools = [_native(t, ctx) if isinstance(t, Tool) else t for t in given]
-    # The latest checkpoint is all an agent resumes from: earlier ones would store the conversation again at each step.
+    # An agent resumes only from the latest checkpoint; keeping earlier ones would store the conversation again
+    # at each step.
     app: Compiled = _graph(ctx, chat_model, tools, system).compile(
         checkpointer=SqlCheckpointSaver(ctx.db, history="latest")
     )
@@ -226,7 +229,7 @@ async def _answer_once(
         answers = values.get("answers", {})
         if prompt_id in answers:
             return stored_answer(answers[prompt_id])
-        # Finish an interrupted run first (this prompt's, after a crash), then start this prompt's.
+        # Finish an interrupted run first (this prompt's own, after a crash), then start this prompt's run.
         # A run is unfinished while its prompt has no answer.
         last = values.get("prompt")
         interrupted = last is not None and last not in answers
@@ -236,21 +239,21 @@ async def _answer_once(
         try:
             await (stop.guard(run) if stop is not None else run)
         except AttemptEnded:
-            # The attempt ended: it stops, and the next attempt goes on with the run.
+            # The attempt ended: stop here, and let the next attempt continue the run.
             raise
         except TerminalError as error:
-            # Cancelled: the run ends, and the next prompt starts afresh.
+            # Cancelled: close the run, so that the next prompt starts afresh.
             if error.status_code == _CANCELLATION:
                 await _close(app, config, CANCELLED)
                 raise
-            # Failed for good (a LangChain tool's terminal error): the run ends with it, rather than the next
-            # prompt meeting it again. An earlier prompt's, this one goes on.
+            # Failed for good (a LangChain tool's terminal error): close the run with the error, so that the next
+            # prompt does not run into it again. If the run was an earlier prompt's, carry on with this one.
             await _close(app, config, f"Error: {error.message}")
             if not interrupted or last == prompt_id:
                 raise
         except Exception as error:
-            # Refused for good (a wrong API key): the run ends unanswered, and fails as terminal.
-            # An earlier prompt's, this one goes on.
+            # Refused for good (a wrong API key, say): close the run unanswered and fail with a terminal error.
+            # If the run was an earlier prompt's, carry on with this one.
             refused = refusal_of(ctx, error)
             if refused is None:
                 raise
@@ -260,12 +263,12 @@ async def _answer_once(
 
 
 async def _close(app: Compiled, config: RunnableConfig, text: str) -> None:
-    """
-    End the run of ``app`` that was cancelled, refused or failed, as its ``answer``
-    node: a result of ``text`` for each tool call of the last reply that has
-    none, then ``text`` as the reply and the prompt's answer. A run that
-    stored no input yet (cancelled at once) has nothing to end: the prompt the
-    state has is an earlier one, which has its answer.
+    """Close a cancelled, refused or failed run of ``app`` with ``text``, as its ``answer`` node would.
+
+    Each tool call of the last reply that has no result gets ``text`` as its
+    result, and ``text`` becomes the reply and the prompt's answer. A run that
+    stored no input yet (cancelled right away) has nothing to close: the state's
+    prompt is an earlier one, which already has its answer.
     """
     values = typing.cast(State, (await app.aget_state(config)).values)
     prompt = values.get("prompt")
@@ -283,7 +286,7 @@ async def _close(app: Compiled, config: RunnableConfig, text: str) -> None:
 
 
 async def _transcript(ctx: SessionContext) -> Transcript:
-    """The thread (the object's key) from its last checkpoint, as ``messages`` gives it."""
+    """Return the thread (the object's key) from its last checkpoint, in the form ``messages`` returns."""
     transcript = Transcript()
     saved = await SqlCheckpointSaver(ctx.db).aget_tuple({"configurable": {"thread_id": ctx.key}})
     messages: list[BaseMessage] = saved.checkpoint["channel_values"].get("messages", []) if saved else []

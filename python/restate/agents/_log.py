@@ -8,23 +8,24 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-An agent's conversation as clients read it: a log in the object's database,
-kept in step with the framework's transcript each time the agent publishes a
-change, and read by ``messages`` and ``sync``. As sdk-sessions' ``log.ts``,
-whose tables it shares.
+"""The conversation log that an agent's clients read.
+
+The log lives in the object's database. It is brought in step with the
+framework's transcript each time the agent publishes a change, and the
+``messages`` and ``sync`` views read it.
 
 Each message has an ``id`` that never changes, and a ``seq``: the sequence
-number of its last change, which is the cursor. A message that grows in place
-(a tool call's output comes) keeps its id and takes a new ``seq``; a
-transcript replaced (compacted, reset) leaves its messages in the log, and the
-messages after them are new ones. So a client reads from a cursor, and gets
-each message that is new or changed since, once.
+number of its latest change, which serves as the cursor. A message that grows
+in place (when a tool call's output arrives, for example) keeps its id and
+gets a new ``seq``. When a transcript is replaced (compacted or reset), its
+old messages stay in the log, and the replacement's messages are new ones. So
+a client that reads from a cursor gets each new or changed message exactly
+once.
 
-``clear`` forgets the log with the rest of the conversation, but not where it
-got to: the next conversation's ids and cursors go on from there (its start, a
-row of ``restate_agent_log_start``), so a client following it reads on, and
-drops the messages before ``first``.
+``clear`` deletes the log with the rest of the conversation, but remembers
+where it got to, in a row of ``restate_agent_log_start``. The next
+conversation's ids and cursors carry on from there, so a client that follows
+the conversation keeps reading, and drops the messages before ``first``.
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ SCHEMA = Schema(
             position INTEGER UNIQUE,
             message TEXT NOT NULL
         )""",
-        # Where the log starts, which `clear` sets: no row before.
+        # Where the log starts; there is no row until the first `clear`.
         f"""CREATE TABLE {TABLE}_start (
             row INTEGER PRIMARY KEY CHECK (row = 0),
             seq INTEGER NOT NULL,
@@ -60,32 +61,31 @@ SCHEMA = Schema(
 
 @dataclass(frozen=True)
 class Start:
-    """Where the log starts: past the ids and cursors of the conversations ``clear`` forgot."""
+    """Where the log starts: past the ids and cursors of the conversations that ``clear`` deleted."""
 
     seq: int
-    """The cursor it starts at."""
+    """The cursor the log starts at."""
     id: int
-    """Its first message's id."""
+    """The id of the log's first message."""
 
 
 async def _start_of(db: DatabaseReader) -> Start | None:
-    """Where the log of ``db`` starts, if ``clear`` set it."""
+    """Return where the log of ``db`` starts, or ``None`` if ``clear`` never set it."""
     row = await db.get(f"SELECT seq, id FROM {TABLE}_start")
     return Start(seq=int(typing.cast(int, row["seq"])), id=int(typing.cast(int, row["id"]))) if row else None
 
 
 async def restart(tx: DatabaseWriter, start: Start) -> None:
-    """
-    Start the log at ``start``, in the transaction ``tx`` of ``clear`` that
-    emptied the database: the next conversation's ids and cursors go on from
-    there.
+    """Restart the log at ``start``, inside the transaction of ``clear`` that emptied the database.
+
+    The next conversation's ids and cursors carry on from ``start``.
     """
     await tx.execute(f"INSERT OR REPLACE INTO {TABLE}_start (row, seq, id) VALUES (0, ?, ?)", [start.seq, start.id])
 
 
 @dataclass
 class _Row:
-    """A message of the log's head, the transcript as last stored: its id, and the message, also as JSON."""
+    """A message of the log's head (the transcript as last stored): its id, the message, and its JSON."""
 
     id: int
     message: Said
@@ -94,7 +94,7 @@ class _Row:
 
 @dataclass
 class _Head:
-    """The log's head as a session stored it last, with the last cursor and the next id."""
+    """The log's head as last stored, with the latest cursor and the next id."""
 
     rows: list[_Row]
     seq: int
@@ -102,7 +102,7 @@ class _Head:
 
 
 _HEAD: ScopeKey[_Head] = ScopeKey("the log")
-"""The log's head, as the attempt's last ``sync`` stored it: the next compares the transcript with it."""
+"""The log's head as the attempt's latest ``sync`` stored it; the next ``sync`` compares the transcript with it."""
 
 
 def _json(message: Said) -> str:
@@ -110,7 +110,7 @@ def _json(message: Said) -> str:
 
 
 async def _head_of(ctx: SessionContext) -> _Head:
-    """The log's head in the attempt of ``ctx``: as it stored it last, or else as the log has it."""
+    """Return the log's head: as the attempt last stored it, or else as read from the database."""
     cached = _HEAD.get(ctx)
     if cached is not None:
         return cached
@@ -131,11 +131,11 @@ async def _head_of(ctx: SessionContext) -> _Head:
 
 
 async def sync(ctx: SessionContext, messages: list[Said]) -> None:
-    """Store the transcript's ``messages``, in order, in the log: those that changed since the last time, in one transaction."""
+    """Store the transcript's ``messages`` in the log, writing only those that changed, in one transaction."""
     db = ctx.db
     await SCHEMA.ensure(db)
     head = await _head_of(ctx)
-    # A message the transcript did not change is the one stored (see Transcript): only the others are compared, as JSON.
+    # A message the transcript did not change is the very object stored (see Transcript): compare only the others, as JSON.
     jsons: dict[int, str] = {}
 
     def json_of(position: int) -> str:
@@ -165,7 +165,7 @@ async def sync(ctx: SessionContext, messages: list[Said]) -> None:
                 seq += 1
                 await tx.execute(f"UPDATE {TABLE} SET seq = ?, message = ? WHERE id = ?", [seq, row.json, row.id])
                 rows.append(row)
-            # The rest of the transcript as it was is replaced: its messages stay in the log, out of it.
+            # The rest of the old transcript is replaced: its messages stay in the log, but leave the transcript.
             await tx.execute(f"UPDATE {TABLE} SET position = NULL WHERE position >= ?", [grown])
             for position in range(grown, len(messages)):
                 row = _Row(id=next_id, message=messages[position], json=json_of(position))
@@ -174,18 +174,20 @@ async def sync(ctx: SessionContext, messages: list[Said]) -> None:
                 await tx.execute(f"INSERT INTO {TABLE} VALUES (?, ?, ?, ?)", [row.id, seq, position, row.json])
                 rows.append(row)
     except BaseException:
-        # Rolled back: the log is as it was, which the next sync reads again.
+        # Rolled back: the log is unchanged, and the next sync reads it again.
         _HEAD.delete(ctx)
         raise
     _HEAD.set(ctx, _Head(rows=rows, seq=seq, next=next_id))
 
 
 async def page(db: DatabaseReader, request: MessagesRequest | None = None) -> Messages:
-    """
-    A page of the log. With ``cursor``: the messages new or changed since it,
-    by when they changed, and the cursor to read on from. Without: the latest
-    ``limit`` messages (or those before ``before``, an id), oldest first, and
-    the cursor to follow the conversation from.
+    """Return a page of the log.
+
+    With a ``cursor``, the page holds the messages that are new or changed
+    since it, in the order they changed, and the cursor to read on from.
+    Without one, it holds the latest ``limit`` messages (or the latest before
+    message id ``before``), oldest first, and the cursor to follow the
+    conversation from.
     """
     request = request or {}
     limit = request.get("limit", 50)
@@ -220,13 +222,13 @@ async def page(db: DatabaseReader, request: MessagesRequest | None = None) -> Me
 
 
 def _message(row: list[typing.Any]) -> ChatMessage:
-    """A row of the log, as ``messages`` gives it."""
+    """Convert a row of the log to a message, as ``messages`` returns it."""
     said: Said = json.loads(typing.cast(str, row[1]))
     return {"id": int(row[0]), "role": said["role"], "parts": said["parts"]}
 
 
 def _grown_from(now: Said, was: Said) -> bool:
-    """Whether ``now`` is ``was`` grown in place: the same role and parts, with more (a tool call's output, say)."""
+    """Return whether ``now`` is ``was`` grown in place: the same role and parts, with more added (such as a tool output)."""
     if was["role"] != now["role"] or len(now["parts"]) < len(was["parts"]):
         return False
     for part, other in zip(was["parts"], now["parts"], strict=False):

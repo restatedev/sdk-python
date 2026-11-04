@@ -1,17 +1,26 @@
 # Session objects and agents: examples
 
 Examples of [`restate.sessions`](../python/restate/sessions/__init__.py),
-virtual objects with a SQL database per key, and
-[`restate.agents`](../python/restate/agents/__init__.py), AI agents in them.
-They are the Python counterparts of
-[sdk-sessions](https://github.com/restatedev/sdk-sessions)' tutorial and
-examples. Each is a file that runs on its own.
+which gives each key of a virtual object its own SQL database, and of
+[`restate.agents`](../python/restate/agents/__init__.py), AI agents built on
+top of it. Each example is a single file that runs on its own.
 
 ## Run an example
 
-From the repository's root, once (it builds the SDK, with its native
-extension, and installs the `serve` extra the examples run on: uvicorn's
-HTTP/2, on Python 3.11 or later):
+The examples serve themselves with `sessions.serve`, which needs Python 3.11
+or later. (The SDK itself supports Python 3.10; there, serve
+`sessions.app(...)` with any ASGI server, such as hypercorn.)
+
+Install the SDK with the `serve` extra, which adds the HTTP/2 server that
+`sessions.serve` runs on:
+
+```sh
+pip install "restate-sdk[serve]"
+```
+
+Or, to run the examples against the SDK from this repository, sync it from
+the repository's root once. This builds the SDK's native extension, so it
+needs a Rust toolchain:
 
 ```sh
 uv sync --all-extras --all-packages
@@ -20,17 +29,25 @@ uv sync --all-extras --all-packages
 Then run an example, start Restate, and tell Restate where the example is:
 
 ```sh
-uv run examples-agents/tutorial/01_object.py                                    # the example, on port 9080
+python examples-agents/tutorial/01_object.py                                    # the example, on port 9080 (or: uv run ...)
 npx @restatedev/restate-server                                                  # Restate, in another terminal
 npx @restatedev/restate -y deployments register --force http://localhost:9080   # tell Restate where it is
 curl localhost:8080/wallet/alice/hello
 ```
 
-Session objects need Restate 1.8 or later. An agent's framework comes with its extra, and its model's provider with
-its package: the comment at the top of each agent's file says which (`uv run
---extra langgraph --with langchain-openai ...`, say). Every example serves on port 9080 (or `PORT`): stop one before you start the
-next, and register again. The comment at the top of each file lists the
-commands to try it.
+Session objects need Restate 1.8 or later. Every example serves on port 9080
+(or `PORT`), so stop one before you start the next, and register again. The
+comment at the top of each file lists the commands to try it.
+
+The agent examples also need their framework's extra and the package of their
+model's provider; the comment at the top of each agent's file says which. For
+example: `pip install "restate-sdk[serve,langgraph]" langchain-openai`, or
+`uv run --extra langgraph --with langchain-openai ...` from source.
+
+Most handlers take and return JSON, so their requests use `curl --json`. An
+agent's `chat` handler is the exception: it takes the message as plain text
+(`curl -d 'Hi'`; a JSON string such as `"Hi"` works too), so that chatting
+from a terminal needs no quoting. It answers with a JSON string.
 
 ## Tutorial: a wallet, from a database to agents
 
@@ -58,8 +75,9 @@ real application keeps its data across releases.
 | [`07_calls.py`](tutorial/07_calls.py)              | Calling another object, with an idempotency key               |
 | [`08_sends.py`](tutorial/08_sends.py)              | Transfers: a send that is delivered only if the debit commits |
 
-Part 3, agents in the wallet (a prompt, an assistant, its tools, a person in
-the loop, a subagent), comes with the agents' framework integrations.
+A third part, agents in the wallet (a prompt, an assistant and its tools, a
+person in the loop, a subagent), is not written yet. Until then, the agent
+examples under [Basic](#basic) show the agents' framework integrations.
 
 ## Basic
 

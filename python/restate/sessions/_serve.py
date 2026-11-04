@@ -8,11 +8,12 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-``app``: the ASGI app of a program's services, with what they need beside them
-(a library's objects, such as an agent's ``signals``). As sdk-sessions'
-``serve.ts``; serving it is the program's (hypercorn, uvicorn...), as for
-``restate.app``, or ``serve``'s.
+"""Serving session objects.
+
+``app`` builds the ASGI app of a program's services, together with any
+services they depend on (such as the ``signals`` object that agents use). Run
+it with an ASGI server of your choice (hypercorn, uvicorn, ...), as you would
+``restate.app``, or call ``serve`` to run it in one line.
 """
 
 from __future__ import annotations
@@ -34,23 +35,44 @@ Service = restate.Service | restate.VirtualObject | restate.Workflow
 D = typing.TypeVar("D")
 
 _NEEDS: Link[Callable[[], Sequence[Service]]] = Link("needs")
-"""The services a definition needs served beside it: see ``needing``."""
+"""The services a definition needs served next to it (see ``needing``)."""
 
 
 def needing(definition: D, services: Callable[[], Sequence[Service]]) -> D:
-    """
-    ``definition``, which needs ``services`` served beside it: ``app`` serves
-    them too. For a library whose objects call one of their own (an agent's
-    ``signals``, say). ``services`` is called once ``app`` asks.
+    """Declare that ``definition`` needs ``services`` served next to it, and return it.
+
+    ``app`` then serves those services too. This is for libraries whose
+    objects call a service of their own, such as the ``signals`` object of
+    agents.
+
+    Args:
+        definition: The service, virtual object or workflow that depends on
+            ``services``.
+        services: A function returning the services needed. It is called
+            lazily, when ``app`` collects the services to serve.
+
+    Returns:
+        ``definition`` itself.
     """
     return _NEEDS.on(definition, services)
 
 
 def served(services: Iterable[Service], names: str | None = None) -> list[Service]:
-    """
-    What ``app`` serves of ``services``: each with what it needs beside it,
-    once, of those ``names`` names (comma separated; all of them without). A
-    name of none is an error.
+    """Return the services that ``app`` would serve for ``services``.
+
+    Each service is followed by the services it needs (see ``needing``),
+    transitively, and each appears once.
+
+    Args:
+        services: The services to serve.
+        names: A comma-separated list of service names to keep; if empty or
+            ``None``, all of them are kept.
+
+    Returns:
+        The services to serve, in order.
+
+    Raises:
+        ValueError: If ``names`` contains a name that matches no service.
     """
     every: dict[str, Service] = {}
 
@@ -79,13 +101,30 @@ def app(
     identity_keys: list[str] | None = None,
     journal_value_codec: JournalValueCodec | JournalValueCodecProvider | None = None,
 ) -> RestateAppT:
-    """
-    The ASGI app of ``services``, with the services they need beside them,
-    each once: ``restate.app``'s, whose options it takes. ``RESTATE_SERVE_ONLY``
-    (names separated by commas, such as ``triage,planner,signals``) serves only
-    those of them: one program (or image), deployed in parts::
+    """Return the ASGI app that serves ``services`` and the services they need.
 
-        app = sessions.app(notes, orders)   # hypercorn module:app
+    This is ``restate.app`` with the dependencies declared by ``needing``
+    added, and it takes the same options. Run it with any ASGI server::
+
+        app = sessions.app(notes, orders)  # then: hypercorn module:app
+
+    If the ``RESTATE_SERVE_ONLY`` environment variable is set to a
+    comma-separated list of names (such as ``triage,planner,signals``), only
+    those services are served. This lets one program, or one container image,
+    be deployed in parts.
+
+    Args:
+        *services: The services, virtual objects (session objects included)
+            and workflows to serve.
+        protocol: Passed to ``restate.app``.
+        identity_keys: Passed to ``restate.app``.
+        journal_value_codec: Passed to ``restate.app``.
+
+    Returns:
+        The ASGI app.
+
+    Raises:
+        ValueError: If ``RESTATE_SERVE_ONLY`` names a service that is not served.
     """
     return restate.app(
         served(services, os.environ.get("RESTATE_SERVE_ONLY")),
@@ -101,18 +140,28 @@ def serve(
     identity_keys: list[str] | None = None,
     journal_value_codec: JournalValueCodec | JournalValueCodecProvider | None = None,
 ) -> None:
-    """
-    Serve ``services`` (``app``'s: with what they need beside them, of those
-    ``RESTATE_SERVE_ONLY`` names) on ``port``, or PORT, or 9080, until the
-    process stops: a program of session objects and agents in one line::
+    """Serve ``services`` over HTTP until the process is stopped.
+
+    This runs ``app(*services)`` on uvicorn with cleartext HTTP/2, which is
+    how Restate connects to services::
 
         if __name__ == "__main__":
             sessions.serve(wallet, handle)
 
-    It runs them on uvicorn's HTTP/2 (cleartext, as Restate calls them),
-    imported here: install the ``serve`` extra (uvicorn 0.53 or later, and
-    zttp; Python 3.11 or later), or serve ``app``'s ASGI app with a server of
-    your own. It stops on SIGINT or SIGTERM, within a few seconds.
+    It needs the ``serve`` extra (``pip install "restate-sdk[serve]"``, which
+    installs uvicorn 0.53 or later and zttp) and Python 3.11 or later. On
+    other setups, serve ``app(...)`` with an ASGI server of your own. It stops
+    within a few seconds of SIGINT or SIGTERM.
+
+    Args:
+        *services: The services, virtual objects (session objects included)
+            and workflows to serve, as for ``app``.
+        port: The port to listen on. Defaults to ``$PORT``, else 9080.
+        identity_keys: Passed to ``restate.app``.
+        journal_value_codec: Passed to ``restate.app``.
+
+    Raises:
+        ImportError: If uvicorn 0.53 or later, or zttp, is not installed.
     """
     try:
         uvicorn = importlib.import_module("uvicorn")
@@ -141,4 +190,4 @@ _NO_SERVER = (
 )
 
 _GRACEFUL_SHUTDOWN = 3
-"""Seconds a stopping ``serve`` waits for the requests in flight, which Restate retries elsewhere."""
+"""How many seconds a stopping ``serve`` waits for requests in flight; Restate retries the rest."""

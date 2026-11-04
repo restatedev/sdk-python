@@ -8,22 +8,23 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-What libraries built on session objects (``restate.agents``) and tests need,
-beside the API handlers code against: as sdk-sessions'
-``@restatedev/sessions/internal``.
+"""Building blocks for libraries built on session objects, and for tests.
 
-- ``Schema``: tables a library owns, applied where it uses them
-  (``schema.ensure(ctx.db)``); ``database``, another database of the same
-  key; ``reset``, the key's database emptied in a transaction.
-- ``cancelled`` and ``cancel_calls``: explicit cancellation, for a handler
-  with ``explicit_cancellation=True``.
-- ``ScopeKey`` and ``definition_of``: what a library keeps for an attempt, or
-  for an object.
-- ``needing`` and ``served``: the services a definition needs served beside
-  it, which ``restate.sessions.app`` serves.
-- ``invoke``: a handler's attempt over a host of a test's own, without
-  Restate (see ``SqlHost``).
+Application code should not need this module; ``restate.agents`` is built on
+it. It provides:
+
+- ``Schema``: tables that a library owns and creates where it uses them
+  (``await schema.ensure(ctx.db)``).
+- ``database``: another named database under the same key.
+- ``reset``: empty the key's database inside a transaction.
+- ``cancelled`` and ``cancel_calls``: explicit cancellation, for handlers
+  declared with ``explicit_cancellation=True``.
+- ``ScopeKey`` and ``definition_of``: state a library keeps per attempt, and
+  the object an attempt belongs to.
+- ``needing`` and ``served``: declare the services an object needs served
+  next to it, which ``restate.sessions.app`` then serves too.
+- ``invoke``, ``SqlHost`` and ``ObjectConfig``: run one attempt of a handler
+  against a host of your own, without Restate, for tests.
 """
 
 from restate.sessions._object import cancel_calls, cancelled, definition_of, invoke

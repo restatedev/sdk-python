@@ -8,33 +8,36 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-A LangGraph checkpointer on a session object's database: ``SqlCheckpointSaver``,
-over a database session ``db`` (in a handler, ``ctx.db``). As sdk-sessions'
-``langgraph/checkpointer.ts``.
+"""A LangGraph checkpointer that stores checkpoints in a session object's database.
 
-Three tables, with values as LangGraph's serializer writes them:
+``SqlCheckpointSaver`` works on any database session; in a handler, that is
+``ctx.db``. It uses three tables, and stores values as LangGraph's serializer
+writes them:
 
-- ``restate_langgraph_checkpoints``: each checkpoint, without its channel values.
-- ``restate_langgraph_channel_values``: each channel's value at each version,
-  stored when a step changes it. A checkpoint's values are those at its
-  channel versions, so a step stores only what it changed, not the whole
-  state again (an agent's message list, say). Versions are unique (a count
-  and a random part): a thread forked from an earlier checkpoint takes the
-  same counts again, and its values must not replace those of the branch it
-  forked from.
-- ``restate_langgraph_writes``: the pending writes of each checkpoint's tasks.
+- ``restate_langgraph_checkpoints`` holds each checkpoint, without its
+  channel values.
+- ``restate_langgraph_channel_values`` holds each channel's value at each
+  version, written when a step changes it. A checkpoint's values are the ones
+  at its channel versions, so a step stores only what it changed rather than
+  the whole state (an agent's message list, for example). Versions are unique,
+  made of a counter and a random part: a thread forked from an earlier
+  checkpoint reuses the same counter values, and its values must not
+  overwrite those of the branch it forked from.
+- ``restate_langgraph_writes`` holds the pending writes of each checkpoint's
+  tasks.
 
-Each ``aput`` and ``aput_writes`` is one SQL transaction, so a step is stored
-whole, in order with everything else the handler does. Operations run one at
-a time, in call order: LangGraph writes the results of parallel tasks at once.
-It is asynchronous only, as ``ctx.db`` is.
+Each ``aput`` and ``aput_writes`` runs in one SQL transaction, so a step is
+stored whole, in order with everything else the handler does. Operations run
+one at a time, in the order they are called, even when LangGraph writes the
+results of parallel tasks at once. The saver is async-only, because ``ctx.db``
+is.
 
-By default a thread keeps every checkpoint (LangGraph's history: ``alist``,
-time travel, forks). With ``history="latest"``, each ``aput`` drops the
-thread's earlier checkpoints, their writes and the values only they had: a
-thread then takes the space of its state once, not once per step (a message
-list stored again at each step grows with the square of its length).
+By default a thread keeps every checkpoint, which LangGraph needs for
+``alist``, time travel and forks. With ``history="latest"``, each ``aput``
+deletes the thread's earlier checkpoints, their writes, and the channel values
+that only they referenced. A thread then stores its state once instead of once
+per step; otherwise a message list stored again at each step grows with the
+square of its length.
 """
 
 from __future__ import annotations
@@ -97,7 +100,7 @@ SCHEMA = Schema(
         )""",
     ],
 )
-"""The checkpointer's tables, a schema of their own, applied where it is used."""
+"""The checkpointer's tables, a schema of their own that is applied on first use."""
 
 _TABLES = ("restate_langgraph_checkpoints", "restate_langgraph_channel_values", "restate_langgraph_writes")
 
@@ -108,10 +111,21 @@ _EMPTY = "empty"
 
 
 class SqlCheckpointSaver(BaseCheckpointSaver[str]):
-    """
-    LangGraph's checkpoints in a database session, such as ``ctx.db``: see
-    the module. ``history``: the checkpoints a thread keeps, ``"all"`` (the
-    default) or the ``"latest"`` only.
+    """A LangGraph checkpoint saver that stores checkpoints in a database session.
+
+    Pass it to ``compile`` to keep a graph of your own in ``ctx.db``::
+
+        app = graph.compile(checkpointer=SqlCheckpointSaver(ctx.db))
+        await app.ainvoke(inputs, {"configurable": {"thread_id": ctx.key}})
+
+    See the module docstring for how checkpoints are stored.
+
+    Args:
+        db: The database to store checkpoints in, usually ``ctx.db``.
+        history: Which checkpoints a thread keeps: ``"all"`` (the default),
+            or only the ``"latest"``.
+        serde: LangGraph's serializer for checkpoints and values; LangGraph's
+            default if omitted.
     """
 
     def __init__(
@@ -128,10 +142,11 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         self._ready = False
 
     def get_next_version(self, current: str | None, channel: None = None) -> str:
-        """
-        The version after ``current``: its count plus one, zero-padded so that
-        versions compare as their counts do, and a random part, so that
-        branches of a thread never share one.
+        """Return the channel version that follows ``current``.
+
+        A version is the counter of ``current`` plus one, zero-padded so that
+        versions sort in counter order, followed by a random part so that two
+        branches of a thread never share a version.
         """
         if current is None:
             count = 0
@@ -150,7 +165,7 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         return self.serde.loads_typed((str(type_), _bytes(value)))
 
     async def _channel_values(self, thread_id: str, ns: str, checkpoint: Checkpoint) -> dict[str, Any]:
-        """The values of ``checkpoint``'s channels, at its versions."""
+        """Return the values of ``checkpoint``'s channels at its channel versions."""
         versions = list(checkpoint.get("channel_versions", {}).items())
         if not versions:
             return {}
@@ -336,7 +351,7 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
 
 
 def _thread(config: RunnableConfig) -> tuple[str, str]:
-    """The thread of ``config``, and its namespace."""
+    """Return the thread id and checkpoint namespace of ``config``."""
     configurable = _configurable(config)
     return str(configurable["thread_id"]), str(configurable.get("checkpoint_ns", ""))
 
@@ -350,7 +365,7 @@ def _bytes(value: SqlValue) -> bytes:
 
 
 def _matches(actual: object, expected: object) -> bool:
-    """Whether ``actual`` has every field of ``expected``, recursively (a metadata filter)."""
+    """Return whether ``actual`` has every field of ``expected``, recursively, for metadata filters."""
     if isinstance(expected, dict):
         if not isinstance(actual, dict):
             return False
@@ -360,11 +375,7 @@ def _matches(actual: object, expected: object) -> bool:
 
 
 async def _drop_earlier(tx: DatabaseWriter, thread_id: str, ns: str, checkpoint: Checkpoint) -> None:
-    """
-    Drop what the thread keeps from before ``checkpoint``: its other
-    checkpoints, their pending writes, and the channel values at versions
-    other than ``checkpoint``'s.
-    """
+    """Delete the thread's checkpoints, writes and channel values that ``checkpoint`` does not use."""
     for table in ("restate_langgraph_checkpoints", "restate_langgraph_writes"):
         await tx.execute(
             f"DELETE FROM {table} WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id <> ?",

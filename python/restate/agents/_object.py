@@ -8,10 +8,10 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-Session objects set up for agents: ``AgentObject``, whose ``chat`` makes it an
-agent. As sdk-sessions' ``sessionObject`` of ``@restatedev/agents``
-(``object.ts``).
+"""Session objects set up for agents.
+
+``AgentObject`` adds the views every agent has; its ``chat()`` method turns it
+into an agent that answers messages.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from restate.sessions.internal import reset
 
 T = typing.TypeVar("T")
 A = typing.TypeVar("A", bound=Callable[[SessionContext, str], Awaitable[Any]])
-"""A chat turn's answer function: a message in, the answer out."""
+"""The function that answers a chat message: it takes the message and returns the answer."""
 
 RETRIES = InvocationRetryPolicy(
     initial_interval=timedelta(milliseconds=50),
@@ -50,25 +50,29 @@ RETRIES = InvocationRetryPolicy(
     max_interval=timedelta(seconds=10),
     max_attempts=100_000,
 )
-"""
-An agent's retries, for weeks, since each attempt resumes from the database:
-soon after a crash, then twice as long each time, up to 10 seconds apart (a
-provider's rate limit, say, is not asked again twice a second).
+"""The default retry policy of an agent's handlers.
+
+Each attempt resumes from the database, so an agent can keep retrying for
+weeks. The first retry comes soon after a crash, and each wait doubles, up to
+10 seconds, so that a provider that rate-limits is not asked again twice a
+second.
 """
 
 WAITS = timedelta(minutes=5)
-"""
-The inactivity timeout of the views that wait (``watch``, ``sync``, ``clear``):
-Restate suspends one that waits past it, which restarts it, so it is longer
-than the wait.
+"""The inactivity timeout of the views that wait (``watch``, ``sync`` and ``clear``).
+
+Restate suspends a view that waits longer than this, which restarts it, so the
+timeout is longer than any of their waits.
 """
 
 
 class SyncRequest(TypedDict, total=False):
-    """
-    What ``sync`` reads: what is new or changed since ``cursor`` (default 0,
-    all of it), at most ``limit`` messages (default 100); once the revision is
-    past ``revision``, if given, or at ``timeoutSeconds`` (default 50, at most
+    """The request of the ``sync`` view.
+
+    ``sync`` returns the messages that are new or changed since ``cursor``
+    (default 0, which means the whole conversation), at most ``limit`` of them
+    (default 100). If ``revision`` is given, it first waits until the revision
+    is newer than that, or until ``timeoutSeconds`` pass (default 50, at most
     60).
     """
 
@@ -79,14 +83,14 @@ class SyncRequest(TypedDict, total=False):
 
 
 class Synced(Messages):
-    """What ``sync`` answers: the messages since the cursor, as ``messages`` gives them, the status and the revision."""
+    """The response of the ``sync`` view: a page of messages, as ``messages`` returns it, plus the status and the revision."""
 
     revision: int
     status: Status
 
 
 def _start_after(page: Messages) -> _log.Start:
-    """Where the log starts after the latest message of ``page``: past its ids and cursor."""
+    """Return where the log restarts after the latest message of ``page``, past its ids and cursor."""
     latest = page["messages"][0] if page["messages"] else None
     return _log.Start(seq=page["cursor"], id=latest["id"] + 1 if latest else page.get("first", 0))
 
@@ -94,26 +98,57 @@ def _start_after(page: Messages) -> _log.Start:
 BUILT_IN = frozenset(
     {"signal", "pending", "status", "stop", "notifications", "watch", "chat", "messages", "clear", "sync", "erase"}
 )
-"""The names of the handlers and views every agent has (``chat`` and the rest once it chats)."""
+"""The names of the built-in handlers and views of every agent, which are reserved."""
 
 
 class AgentObject(SessionObject):
-    """
-    A Restate virtual object with a SQL database per key, ``ctx.db``, set up
-    for agents. Besides its own handlers and views, it has the views
-    ``status``, what it is doing (the message it answers, and what its tools
-    wait for), ``stop``, which stops that message, ``pending``, the waits of
-    its tools, ``signal({id, value})``, which resolves one, and
-    ``notifications`` and ``watch({revision})``, to follow its conversation.
+    """A session object set up for agents.
 
-    ``chat(answer)`` makes it an agent: a ``chat`` handler, a message in and
-    the answer out, the ``messages`` view (its conversation), ``clear``, which
-    forgets it (its database too), and ``sync``, which a client following it
-    reads. A framework's ``agent()`` makes one.
+    Like any session object, it is a Restate virtual object with a SQL
+    database per key (``ctx.db``), and it can have handlers and views of your
+    own. Every agent also has these built-in views:
 
-    ``migrations``: tables of your own, beside the agent's (named ``restate_...``).
-    ``background``: it works unwatched (a subagent, say): its turn publishes at
-    its end only, not at each step.
+    - ``status``: what the agent is doing: the message it is answering, if
+      any, and the signals its tools are waiting for.
+    - ``stop``: cancel the message being answered.
+    - ``pending``: list the signals its tools are waiting for, oldest first.
+    - ``signal``: resolve one of those waits with a ``value``, by its ``id``
+      or by signal ``name``.
+    - ``notifications``: return the conversation's revision, which increases
+      with each change.
+    - ``watch``: wait for a revision newer than a given one.
+
+    ``chat()`` turns the object into an agent, and adds:
+
+    - ``chat``: a handler that takes a message and returns the answer.
+    - ``messages``: read the conversation, one page at a time.
+    - ``clear``: stop the message being answered and forget the
+      conversation, emptying the key's database.
+    - ``sync``: read what changed since a cursor, together with the status
+      and the revision, for clients that follow the conversation.
+
+    These names, and ``erase`` (which ``clear`` uses), are reserved:
+    registering a handler or view of your own under one of them raises
+    ``ValueError``. You rarely create an ``AgentObject`` yourself: a
+    framework's ``agent()`` creates one and calls ``chat()`` for you.
+
+    Args:
+        name: The object's name, as Restate serves it.
+        description: The object's description, shown in Restate's UI.
+        migrations: Tables of your own, beside the agent's (whose names
+            start with ``restate_``).
+        background: Whether the agent works unwatched (a subagent, for
+            example). A background agent publishes its progress only when a
+            turn ends, not after each step.
+        metadata: The object's metadata.
+        inactivity_timeout: Restate's inactivity timeout for its handlers.
+        abort_timeout: Restate's abort timeout for its handlers.
+        journal_retention: How long Restate keeps an invocation's journal.
+        idempotency_retention: How long Restate keeps the result of an
+            invocation that has an idempotency key.
+        ingress_private: Whether only other services may call it.
+        invocation_retry_policy: How Restate retries a failed handler.
+            Defaults to ``RETRIES``.
     """
 
     def __init__(
@@ -158,11 +193,11 @@ class AgentObject(SessionObject):
         return super()._taken(name)
 
     def _attempt_fn(self, fn: Callable[..., Awaitable[Any]], view: bool) -> Callable[..., Awaitable[Any]]:
-        """A handler's attempt: a model provider's refusal it fails with ends its invocation, as ``chat``'s does."""
+        """Wrap a handler so that a model provider's refusal fails its invocation for good, as in ``chat``."""
         if view:
             return fn
 
-        # With fn's signature, from which the SDK takes whether it has an input.
+        # Keep fn's signature: the SDK reads from it whether the handler takes an input.
         @functools.wraps(fn)
         async def answering(ctx: SessionContext, *args: Any) -> Any:
             try:
@@ -176,33 +211,33 @@ class AgentObject(SessionObject):
         return answering
 
     def _built_in(self) -> None:
-        """The views every agent has: each asks the companion, which knows what the object does."""
+        """Register the views every agent has; each one asks the agent's companion ``signals`` object."""
 
         async def signal(ctx: ViewContext, signal: Signal) -> Resolved:
-            """Resolve a wait of the object's tools: by its ``id``, or the oldest of a ``name``, with ``value``."""
+            """Resolve a wait of the agent's tools with ``value``: the wait with ``id``, or the oldest one for ``name``."""
             return await _companion(ctx, _signals.resolve, "signal")(signal)
 
         async def pending(ctx: ViewContext) -> list[Waiting]:
-            """The waits of the object's tools, oldest first."""
+            """List the signals the agent's tools are waiting for, oldest first."""
             return await _companion(ctx, _signals.pending)()
 
         async def status(ctx: ViewContext) -> Status:
-            """What the object is doing: the message it answers, if any, and what its tools wait for."""
+            """Return what the agent is doing: the message it is answering, if any, and what its tools wait for."""
             return await _companion(ctx, _signals.status)()
 
         async def stop(ctx: ViewContext) -> Stopped:
-            """Cancel the invocation of the message being answered (``status``'s), as Restate's admin API cancels one."""
+            """Cancel the invocation that is answering the current message, if there is one."""
             return await _stopped(ctx, "stop")
 
         async def notifications(ctx: ViewContext) -> Notifications:
-            """The revision of the conversation: each change of what ``messages`` and ``status`` give increases it."""
+            """Return the conversation's revision, which increases whenever ``messages`` or ``status`` change."""
             return await _companion(ctx, _signals.notifications)()
 
         async def watch(ctx: ViewContext, request: Watch) -> Notifications:
-            """
-            The revision, once there is one newer than ``revision``, or at the
-            timeout (50 s by default, at most 60 s): a client then reads what
-            changed. It waits in Restate, holding no process.
+            """Wait for a revision newer than ``revision``, then return the current one.
+
+            It returns anyway after ``timeoutSeconds`` (50 by default, at most
+            60). The wait happens in Restate and holds no process.
             """
             return await _companion(ctx, _signals.watch, "watch")(request)
 
@@ -234,18 +269,30 @@ class AgentObject(SessionObject):
         *,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
     ) -> Any:
-        """
-        Make this object an agent, which answers each message with ``answer``:
-        a framework's turn, which keeps the conversation in the log
-        (``transcribing``) and stops with ``stop_signal_of(ctx)``. ``clear``,
-        what the agent keeps beside its database, which ``clear`` empties too.
+        """Turn this object into an agent that answers each message with ``answer``.
 
-        A message comes as the request's body, text or a JSON string::
+        Call it directly or use it as a decorator. Besides the ``chat``
+        handler, it adds the ``messages``, ``clear`` and ``sync`` views.
+
+        The message is the request's body, as plain text or as a JSON
+        string::
 
             curl localhost:8080/assistant/alice/chat -d 'Hi'
 
-        A key answers one message at a time; one its model's provider refused
-        (a missing API key, an unknown model) answers with an error (424).
+        Each key answers one message at a time. A message that the model's
+        provider refuses (a missing API key, an unknown model) fails with
+        status 424 instead of being retried.
+
+        Args:
+            answer: A framework's turn: it takes the handler's context and
+                the message, and returns the answer. It should keep the
+                conversation in the log with ``transcribing``, and stop when
+                ``stop_signal_of(ctx)`` stops.
+            clear: Clears whatever the agent keeps outside its database; the
+                ``clear`` view calls it after emptying the database.
+
+        Returns:
+            ``answer`` itself.
         """
         if answer is None:
 
@@ -269,10 +316,10 @@ class AgentObject(SessionObject):
 def _companion(
     ctx: ViewContext, handler: Callable[..., Awaitable[T]], step: str | None = None
 ) -> Callable[..., Awaitable[T]]:
-    """
-    A call of the companion's of ``ctx``; with ``step``, a change, keyed by the
-    request and ``step``: a restarted view joins the same call. A read has no
-    key: asked again, it answers again.
+    """Return a function that calls ``handler`` on the companion of the agent of ``ctx``.
+
+    With ``step``, the call gets an idempotency key made of the request id and
+    ``step``, so a restarted view joins the same call. Reads have no key.
     """
     key = None if step is None else f"{ctx.request.id}:{step}"
     companion = _signals.signals_of(ctx)
@@ -285,11 +332,10 @@ def _companion(
 
 
 async def _stopped(ctx: ViewContext, step: str) -> Stopped:
-    """
-    Cancel the invocation of the message being answered, if any, and say
-    which. The companion's ``status`` says which, with a key of the request and
-    ``step``: a restarted view cancels the same invocation again (which does
-    nothing), not the message that started once it was cancelled.
+    """Cancel the invocation answering the current message, if any, and return its id.
+
+    The status is read with an idempotency key, so a restarted view cancels the
+    same invocation again (a no-op) rather than the next message's.
     """
     turn = (await _companion(ctx, _signals.status, step)())["answering"]
     if turn is not None:
@@ -298,24 +344,19 @@ async def _stopped(ctx: ViewContext, step: str) -> Stopped:
 
 
 def _followed(agent: AgentObject) -> None:
-    """
-    An agent's views beside those of every object: ``messages``, its
-    conversation; ``clear``, which forgets it; and ``sync``, the conversation
-    since ``cursor``, what the agent is doing, and the revision, in one
-    request. And ``erase``, ``clear``'s work, which only its views call.
-    """
+    """Register the views that ``chat()`` adds (``messages``, ``clear``, ``sync``), and the private ``erase``."""
 
     async def messages(ctx: ViewContext, request: MessagesRequest | None = None) -> Messages:
-        """
-        The conversation as clients read it, from its log: a page of it
-        (``{limit, before}``), or what is new or changed since a cursor
-        (``{cursor}``). It answers while a message is answered, with what was
-        stored so far.
+        """Read the conversation: a page of it, or what changed since a cursor.
+
+        Send ``{"limit": n, "before": id}`` for a page, or ``{"cursor": c}``
+        for the messages that are new or changed since ``c``. While a message
+        is being answered, it returns what has been stored so far.
         """
         return await _log.page(ctx.db, request)
 
     async def erase(ctx: SessionContext) -> None:
-        """``clear``'s work, once the handlers before it are done: the key's database empties, and its signals'."""
+        """Empty the key's database and its signals, once the handlers queued before it are done."""
         start = _start_after(await _log.page(ctx.db, {"limit": 1}))
         async with ctx.db.transaction() as tx:
             await reset(tx)
@@ -324,31 +365,32 @@ def _followed(agent: AgentObject) -> None:
         await ctx.call(_signals.reset, key=_signals.signals_of(ctx), idempotency_key=f"{ctx.request.id}:reset")
 
     async def clear(ctx: ViewContext) -> Stopped:
-        """
-        Forget the conversation: stop the message being answered (as
-        ``stop``), then empty the key's database, and what its ``signals``
-        hold. The log's ids and cursors go on, so a follower reads on, and
-        drops the messages before ``first``. A message sent before it is
-        answered first, then forgotten too.
+        """Forget the conversation, and empty the key's database.
+
+        It stops the message being answered, as ``stop`` does. Messages sent
+        before the ``clear`` are still answered first, then forgotten too.
+        Message ids and cursors carry on from where they were, so a client
+        that follows the conversation keeps reading, and drops the messages
+        before ``first``.
         """
         stopped = await _stopped(ctx, "clear")
         await ctx.call(erase, key=ctx.key, idempotency_key=f"{ctx.request.id}:erase")
         return stopped
 
     async def sync(ctx: ViewContext, request: SyncRequest | None = None) -> Synced:
-        """
-        The conversation since ``cursor`` (by default, all of it), what the
-        agent is doing, and the revision; with ``revision``, once there is a
-        newer one, or at the timeout. A client follows the conversation by
-        sending each answer's ``revision`` and ``cursor`` back, at once while
-        it has ``more``.
+        """Return the conversation since ``cursor``, what the agent is doing, and the revision.
+
+        With ``revision``, it first waits for a newer revision, or for the
+        timeout. A client follows the conversation by sending back the
+        ``revision`` and ``cursor`` of each response, right away while
+        ``more`` is true.
         """
         request = request or {}
         revision = request.get("revision")
         if revision is not None:
             watch: Watch = {"revision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)}
             await _companion(ctx, _signals.watch, "watch")(watch)
-        # The revision first: a change after it shows in the next sync.
+        # Read the revision first, so that any change after it shows up in the next sync.
         now = await _companion(ctx, _signals.notifications)()
         status = await _companion(ctx, _signals.status)()
         page = await _log.page(ctx.db, {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)})

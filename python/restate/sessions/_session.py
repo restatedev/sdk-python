@@ -8,11 +8,12 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-An attempt's database: the session's database, kept in the object's state
-(``_database.py``), opened as an exclusive attempt starts (a view's on its
-first read) and saved when the handler ends; and its transactions, with the
-sends each commits with (``tx.send``).
+"""The database of one attempt, and its transactions.
+
+The database itself is stored in the object's state (see ``_database.py``).
+An exclusive handler's attempt opens it when it starts, a view's on its
+first read, and the attempt saves it when the handler ends. Transactions
+commit together with the sends made through ``tx.send``.
 """
 
 from __future__ import annotations
@@ -56,11 +57,14 @@ T = typing.TypeVar("T")
 
 
 class SqlHost(CallHost, Protocol):
-    """What an attempt's session needs of the handler's context."""
+    """The host that an attempt's database runs on: the handler's context, or a test's fake.
+
+    Implement it to run handlers without Restate, with ``internal.invoke``.
+    """
 
     @property
     def shared(self) -> bool:
-        """A view's: it reads beside the exclusive handler, and stores nothing."""
+        """Whether this is a view's attempt, which reads alongside the exclusive handler and stores nothing."""
         ...
 
     @property
@@ -74,74 +78,75 @@ class SqlHost(CallHost, Protocol):
         ...
 
     def get(self, key: str) -> Awaitable[bytes | None]:
-        """A state read, issued now."""
+        """Read the state ``key``; the read is issued immediately."""
         ...
 
     def set(self, key: str, value: bytes) -> None:
-        """A state write."""
+        """Write the state ``key``."""
         ...
 
     def clear(self, key: str) -> None:
-        """A state clear."""
+        """Clear the state ``key``."""
         ...
 
     def state_keys(self) -> Awaitable[list[str]]:
-        """The object's state keys, issued now."""
+        """List the object's state keys; the request is issued immediately."""
         ...
 
     def sync(self) -> Awaitable[Any]:
-        """An empty run: done once every command before it is stored."""
+        """Make an empty run, which completes once every earlier command is stored."""
         ...
 
     def attempt_end(self) -> BaseException | None:
-        """Why the attempt ended (a suspension, say), or None while it goes on."""
+        """Return why the attempt ended (a suspension, say), or ``None`` while it continues."""
         ...
 
     def on_attempt_end(self, listener: Callable[[], None]) -> Callable[[], None]:
-        """Call ``listener`` when the attempt ends; the returned function cancels it."""
+        """Call ``listener`` when the attempt ends, and return a function that unregisters it."""
         ...
 
     @property
     def vm(self) -> PyVM | None:
-        """The invocation's VM, which the store writes and reads directly; none without one (a test's host)."""
+        """The invocation's VM, which the database reads and writes directly, or ``None`` (as on a test's host)."""
         ...
 
     def wait(self, handle: int) -> Awaitable[None]:
-        """Done once the VM has the read whose handle is ``handle``."""
+        """Wait until the VM has the result of the read ``handle``."""
         ...
 
     def cancel_invocation(self, invocation_id: str) -> None:
-        """Cancel the invocation ``invocation_id``, as Restate's admin API does."""
+        """Cancel the invocation ``invocation_id``."""
         ...
 
 
 @dataclass
 class ObjectConfig:
-    """What a session object gives its attempts: its schema, and a wrapper of its store (fault injection, in tests)."""
+    """Per-object settings shared by its attempts.
+
+    Attributes:
+        schema: The object's migrations, as a ``Schema``.
+        wrap_store: A function that wraps the store, for fault injection in tests.
+    """
 
     schema: Schema | None = None
     wrap_store: Callable[[Store], Store] | None = field(default=None)
-
-
-# --- Errors ---------------------------------------------------------------------------------------
 
 
 # --- The object's state as a store ----------------------------------------------------------------
 
 
 def _beside(name: str, key: str) -> str:
-    """
-    The key of the database ``name``, apart from the object's own: each of the
-    format's keys (``v22/head``, ``v22/tail/...``) as ``v22/db/<name>/head``,
-    under the format's prefix still, which tooling hides, and under none of the
-    object's database's.
+    """Return the state key of ``key`` for the separate database ``name``.
+
+    ``v22/head`` becomes ``v22/db/<name>/head``: still under the format's
+    prefix, which tooling hides, and clear of the object's own database's keys.
     """
     at = key.index("/") + 1
     return f"{key[:at]}db/{name}/{key[at:]}"
 
 
 def _unbeside(name: str, key: str) -> str | None:
-    """The format's key of a key of the database ``name`` (undoes ``_beside``); None for any other key of the object."""
+    """Undo ``_beside``: return the format's key, or ``None`` if ``key`` is not in the database ``name``."""
     at = key.find("/") + 1
     prefix = f"db/{name}/"
     if at > 0 and key.startswith(prefix, at):
@@ -150,14 +155,15 @@ def _unbeside(name: str, key: str) -> str | None:
 
 
 class _ObjectStore:
-    """
-    The object's state as an ordered store: ``get`` is a state get, ``set`` and
-    ``clear`` are state writes, which return at once and which the runtime
-    stores in order; ``sync`` is an empty run, done once the commands before it
-    are stored. A ``get``, ``wait`` or ``sync`` the attempt's end leaves
-    waiting raises, so the session that made it ends instead of holding its
-    lock. With the invocation's VM (``vm``), the extension writes and reads it
-    directly, and waits for a read with ``wait``.
+    """The object's state as a ``Store``.
+
+    ``get`` reads the state; ``set`` and ``clear`` write it, returning at once,
+    and Restate stores the writes in order; ``sync`` is an empty run, which
+    completes once the commands before it are stored. A ``get``, ``wait`` or
+    ``sync`` still pending when the attempt ends raises, so that the session
+    ends instead of holding its lock. With the invocation's VM (``vm``), the
+    extension reads and writes the VM directly, and waits for reads with
+    ``wait``.
     """
 
     def __init__(self, host: SqlHost, name: str | None) -> None:
@@ -167,16 +173,16 @@ class _ObjectStore:
         self.database_name: str | None = name
 
     def wait(self, handle: int) -> Awaitable[None]:
-        """Done once the VM has the read whose handle is ``handle``."""
+        """Wait until the VM has the result of the read ``handle``."""
         return _until_attempt_end(self._host, self._host.wait(handle))
 
     def _key(self, key: str) -> str:
         return key if self._name is None else _beside(self._name, key)
 
     def get(self, key: str) -> Awaitable[bytes | None]:
-        # TODO: read with protocol v8's ephemeral get, left out of the journal,
-        # once a Restate release ships v8 and the SDK can make one. Restate 1.8
-        # negotiates v7 at most: a journaled get.
+        # TODO: use protocol v8's ephemeral get, which stays out of the journal,
+        # once a Restate release ships v8 and the SDK supports it. Restate 1.8
+        # negotiates v7 at most, so this is a journaled get.
         return _until_attempt_end(self._host, self._host.get(self._key(key)))
 
     def set(self, key: str, value: bytes) -> None:
@@ -186,7 +192,7 @@ class _ObjectStore:
         self._host.clear(self._key(key))
 
     def keys(self) -> Awaitable[list[str]]:
-        """The database's keys, for a garbage collection: listed now."""
+        """List the database's state keys, for garbage collection; the request is issued immediately."""
         listing = _until_attempt_end(self._host, self._host.state_keys())
         name = self._name
         if name is None:
@@ -198,12 +204,12 @@ class _ObjectStore:
         return own()
 
     def sync(self) -> Awaitable[None]:
-        """Done once every write before it is stored: the run is made now, in order with them."""
+        """Wait until every earlier write is stored; the run is issued now, in order with the writes."""
         return _until_attempt_end(self._host, self._host.sync())
 
 
 class _ReaderStore:
-    """The object's state as a view's store: it reads beside the exclusive handler, and writes nothing."""
+    """The object's state as a view's ``Store``, which reads alongside the exclusive handler and never writes."""
 
     def __init__(self, host: SqlHost, name: str | None) -> None:
         self._host: SqlHost = host
@@ -212,7 +218,7 @@ class _ReaderStore:
         self.database_name: str | None = name
 
     def wait(self, handle: int) -> Awaitable[None]:
-        """Done once the VM has the read whose handle is ``handle``."""
+        """Wait until the VM has the result of the read ``handle``."""
         return _until_attempt_end(self._host, self._host.wait(handle))
 
     def get(self, key: str) -> Awaitable[bytes | None]:
@@ -230,9 +236,9 @@ class _ReaderStore:
 
 
 async def _until_attempt_end(host: SqlHost, request: Awaitable[T]) -> T:
-    """
-    ``request``'s result, or why the attempt ended, once it has: an attempt that
-    is suspended or aborted never completes what it was waiting for.
+    """Return the result of ``request``, or raise why the attempt ended if it ends first.
+
+    A suspended or aborted attempt never receives what it was waiting for.
     """
     ended = host.attempt_end()
     if ended is not None:
@@ -251,33 +257,34 @@ async def _until_attempt_end(host: SqlHost, request: Awaitable[T]) -> T:
         cancel()
     if task.done():
         return task.result()
-    # Its error, if it ever has one, is dropped.
+    # Drop the request's error, if it ever has one.
     task.add_done_callback(lambda t: t.cancelled() or t.exception())
     raise host.attempt_end() or SuspendedException()
 
 
 # --- The outbox -----------------------------------------------------------------------------------
 
-# A transaction's sends commit with it, in the database's record `outbox`
-# (beside its tables, in none of them), which holds each committed
-# transaction's sends until they are stored. They are made with its commit
-# (see `Attempt.transaction`); a later open makes again those still in the
-# outbox, with the same idempotency keys (`transaction/<id>/<index>`, with a
-# random id of the transaction), so making them again is dropped. Restate
-# keeps an attempt's commands in the order they were made, so a send made
-# before a commit is stored whenever the commit is: the next commit leaves the
-# sends this attempt made out of the outbox, and so does the end of the
-# attempt. The format is sdk-sessions' (TypeScript).
+# A transaction's sends commit with it, in the database's `outbox` record
+# (stored next to its tables, not in one), which holds each committed
+# transaction's sends until they are stored by Restate. They are sent during
+# the commit (see `Attempt.transaction`). A later open sends again whatever is
+# still in the outbox, with the same idempotency keys
+# (`transaction/<id>/<index>`, where the id is random per transaction), so
+# Restate drops the duplicates. Restate keeps an attempt's commands in the
+# order they were made, so a send made before a commit is stored whenever the
+# commit is: the next commit removes the sends this attempt made from the
+# outbox, and so does the end of the attempt. The record's format is a wire
+# format shared with other SDKs: keep it compatible.
 
 OUTBOX = "outbox"
-"""The database's record of the outbox."""
+"""The name of the record that holds the outbox."""
 
 Outgoing = dict[str, Any]
-"""The sends of a committed transaction, in the outbox: ``{"id": ..., "sends": [...]}``."""
+"""The sends of one committed transaction, as stored in the outbox: ``{"id": ..., "sends": [...]}``."""
 
 
 def _encode_outbox(outbox: list[Outgoing]) -> bytes:
-    """The outbox as its record: none is empty, as a record never set reads."""
+    """Encode the outbox as its record; an empty outbox is stored as empty bytes, like a record never set."""
     return json.dumps(outbox).encode() if outbox else b""
 
 
@@ -290,7 +297,7 @@ def _now_ms() -> int:
 
 
 class _Sends:
-    """The sends of one transaction, as its body makes them (``tx.send``), until it ends."""
+    """The sends that one transaction's body makes with ``tx.send``, collected until it ends."""
 
     def __init__(self) -> None:
         self._sends: list[dict[str, Any]] = []
@@ -315,7 +322,7 @@ class _Sends:
         self._sends.append(stored)
 
     def close(self) -> Outgoing | None:
-        """The body ended: the transaction's sends, if it made any, their delays counted from now."""
+        """Close the collection and return the transaction's sends, if any, with delays counted from now."""
         self._open = False
         if not self._sends:
             return None
@@ -327,7 +334,7 @@ class _Sends:
 
 
 def _refused_send(_: GenericSend) -> None:
-    """The sends of a transaction that has no outbox: a view's, or another database's."""
+    """Refuse a send from a transaction without an outbox (a view's, or another database's)."""
     raise TerminalError("a send of a transaction is an exclusive handler's, in the object's own database")
 
 
@@ -335,42 +342,42 @@ def _refused_send(_: GenericSend) -> None:
 
 
 class Reads(abc.ABC):
-    """``DatabaseReader`` (see ``_api.py``) by way of ``query_columns``: an SQL error that escapes is terminal."""
+    """A ``DatabaseReader`` (see ``_api.py``) built on ``query_columns``."""
 
     @abc.abstractmethod
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
-        """The rows of one statement as lists, with the column names of the statement: ``(columns, rows)``."""
+        """Run one statement and return its column names and its rows as lists: ``(columns, rows)``."""
 
     async def query(self, sql: str, params: Sequence[SqlParam] | None = None) -> list[Row]:
-        """
-        The rows of one statement, each a dict by column name; parameters bind
-        to a single statement. Columns are named as SQL names them (an
-        expression needs ``AS``), and two of the same name are an error: alias
-        them, or use ``values``.
+        """Run one statement and return its rows, each a dict keyed by column name.
+
+        Columns are named as SQL names them, so an expression needs ``AS``;
+        two columns of the same name raise ``SqlError`` (alias one, or use
+        ``values``).
         """
         columns, rows = await self.query_columns(sql, params)
         return objects_of(columns, rows)
 
     async def get(self, sql: str, params: Sequence[SqlParam] | None = None) -> Row | None:
-        """The first row of ``query``, or ``None`` when there is none."""
+        """Return the first row of ``query``, or ``None`` if there is none."""
         rows = await self.query(sql, params)
         return rows[0] if rows else None
 
     async def values(self, sql: str, params: Sequence[SqlParam] | None = None) -> Rows:
-        """The rows of one statement as lists, in column order: for adapters, and for columns that share a name."""
+        """Run one statement and return its rows as lists, in column order."""
         return (await self.query_columns(sql, params))[1]
 
 
 class Writes(Reads, abc.ABC):
-    """``DatabaseWriter`` (see ``_api.py``) by way of ``query_columns``."""
+    """A ``DatabaseWriter`` (see ``_api.py``) built on ``query_columns``."""
 
     async def execute(self, sql: str, params: Sequence[SqlParam] | None = None) -> None:
-        """Run SQL (one or more statements), discarding rows; parameters only with a single statement."""
+        """Run SQL and discard any rows; ``sql`` may hold several statements, but parameters bind only to one."""
         await self.query_columns(sql, params)
 
 
 class AttemptTransaction(Writes, Sends):
-    """``Transaction`` (see ``_api.py``): the SQL of a connection's transaction, and the sends it commits with."""
+    """The ``Transaction`` (see ``_api.py``) of an attempt: SQL in one transaction, and the sends it commits."""
 
     def __init__(self, handle: ConnectionTransaction, sink: Callable[[GenericSend], None]) -> None:
         self._handle: ConnectionTransaction = handle
@@ -381,7 +388,7 @@ class AttemptTransaction(Writes, Sends):
 
 
 class AttemptDatabase(Writes):
-    """``Database`` (see ``_api.py``): an attempt's session, opened on its first use."""
+    """The ``Database`` (see ``_api.py``) of an attempt, opened on first use."""
 
     def __init__(self, attempt: Attempt) -> None:
         self._attempt: Attempt = attempt
@@ -395,7 +402,7 @@ class AttemptDatabase(Writes):
 
 
 class _ReaderOf(Reads):
-    """The reads of a database: a view's ``ctx.db``."""
+    """A read-only view of an ``AttemptDatabase``: a view's ``ctx.db``."""
 
     def __init__(self, db: AttemptDatabase) -> None:
         self._db: AttemptDatabase = db
@@ -405,7 +412,7 @@ class _ReaderOf(Reads):
 
 
 def reader_of(db: AttemptDatabase) -> DatabaseReader:
-    """The reads of ``db``, which apply a library's schema as ``db`` does (``Schema.ensure``)."""
+    """Return a read-only wrapper of ``db`` that still applies schemas (see ``Schema.ensure``)."""
     reader = _ReaderOf(db)
     ensure = ensure_of(db)
     return ensuring(reader, ensure) if ensure is not None else reader
@@ -414,19 +421,32 @@ def reader_of(db: AttemptDatabase) -> DatabaseReader:
 _DATABASE_NAME = re.compile(r"^[\w.-]{1,64}$")
 
 _ATTEMPT: Link[Attempt] = Link("database", weak=True)
-"""The attempt of a ``ctx.db``, which keeps it alive (and refers to it): for ``database``."""
+"""The attempt that owns a ``ctx.db``, held weakly as it refers back to it; used by ``database``."""
 
 _RESET: Link[Callable[[], Awaitable[None]]] = Link("reset")
-"""How a transaction of an exclusive handler's ``ctx.db`` empties the database: for ``reset``."""
+"""How a transaction of an exclusive handler's ``ctx.db`` empties the database; used by ``reset``."""
 
 
 def database(db: Database, name: str) -> Database:
-    """
-    The database ``name`` of the key, apart from the object's own (``ctx.db``,
-    of the attempt whose database ``db`` is): for a library whose tables must
-    be alone in their database. It opens on its first use, and ends with the
-    attempt, as ``ctx.db`` does. A name is 1 to 64 letters, digits, ``_``,
-    ``-`` or ``.``.
+    """Return another database of the same key, separate from the object's own ``ctx.db``.
+
+    This is for libraries whose tables must live in a database of their own.
+    Like ``ctx.db``, it opens on first use and closes when the attempt ends.
+    It has neither the object's migrations nor an outbox, so ``tx.send`` is
+    not available in its transactions::
+
+        checkpoints = internal.database(ctx.db, "checkpoints")
+
+    Args:
+        db: A handler's ``ctx.db``.
+        name: The database's name: 1 to 64 letters, digits, ``_``, ``-`` or ``.``.
+
+    Returns:
+        The database ``name`` of the key.
+
+    Raises:
+        TerminalError: If ``name`` is not a valid name, or ``db`` is not a
+            handler's ``ctx.db``.
     """
     if not _DATABASE_NAME.match(name):
         raise TerminalError(f"database: {name!r} is not a database name")
@@ -437,12 +457,22 @@ def database(db: Database, name: str) -> Database:
 
 
 async def reset(tx: Transaction) -> None:
-    """
-    Empty the key's database in ``tx``, a transaction of an exclusive handler's
-    ``ctx.db``: every table, view, index and trigger is dropped, the schemas are
-    applied again (the object's, and the libraries' the attempt applied), and
-    the outbox stays. It commits with ``tx``: what ``tx`` writes after it are
-    the new database's first rows.
+    """Empty the key's database inside the transaction ``tx``.
+
+    Every table, view, index and trigger is dropped, and then the schemas are
+    applied again: the object's migrations, and those of any library this
+    attempt used. The outbox is kept. The reset commits with ``tx``, so
+    whatever ``tx`` writes afterwards becomes the new database's first rows::
+
+        async with ctx.db.transaction() as tx:
+            await internal.reset(tx)
+
+    Args:
+        tx: A transaction of an exclusive handler's ``ctx.db``.
+
+    Raises:
+        TerminalError: If ``tx`` is not a transaction of an exclusive
+            handler's ``ctx.db``.
     """
     empty = _RESET.of(tx)
     if empty is None:
@@ -459,15 +489,15 @@ def _close_soon(db: Connection) -> None:
 
 
 class _Session:
-    """
-    One session of an attempt's database, from its open on. A failure ends it:
-    its open's, or a request's since. It closes as the attempt ends, unless the
-    attempt ends it first (``end``).
+    """One session of an attempt's database, from the moment it starts opening.
+
+    A failure, while opening or afterwards, ends it. It closes when the
+    attempt ends, unless the attempt ends it first with ``end``.
     """
 
     def __init__(self, ready: asyncio.Task[Connection], host: SqlHost) -> None:
         self.ready: asyncio.Task[Connection] = ready
-        # A call failed on it once a failure ended it: the next call opens another.
+        # Set when a call fails on a session that a failure ended; the next call opens a new one.
         self.retired: bool = False
         self._release: Callable[[], None] = lambda: None
         ready.add_done_callback(lambda task: self._track(task, host))
@@ -477,13 +507,13 @@ class _Session:
             return
         db = task.result()
         # A handler still waiting for something else when the attempt ends (a
-        # model's request, say) keeps the session no longer: it closes once no
-        # statement runs, and the handler's later calls fail.
+        # model request, say) no longer holds the session: it closes once no
+        # statement is running, and the handler's later calls fail.
         self._release = host.on_attempt_end(lambda: _close_soon(db))
 
     @property
     def ended(self) -> bool:
-        """Whether a failure ended it."""
+        """Whether a failure ended the session."""
         if not self.ready.done():
             return False
         if self.ready.cancelled() or self.ready.exception() is not None:
@@ -491,11 +521,11 @@ class _Session:
         return not self.ready.result().is_usable()
 
     async def end(self) -> Connection | None:
-        """Its connection, or none if the open failed; the attempt's end no longer closes it."""
+        """Detach the session from the attempt's end and return its connection, or ``None`` if opening failed."""
         try:
             db: Connection | None = await asyncio.shield(self.ready)
         except asyncio.CancelledError:
-            # Ours, as the task awaiting is cancelled, unless the open itself was.
+            # The awaiting task was cancelled, unless the open itself was.
             if not self.ready.cancelled():
                 raise
             db = None
@@ -505,7 +535,7 @@ class _Session:
         return db
 
     def close(self) -> None:
-        """Close it now."""
+        """Close the session now."""
 
         async def close() -> None:
             db = await self.end()
@@ -517,26 +547,26 @@ class _Session:
 
 
 class Attempt:
-    """
-    An attempt's SQL session: opened on its first use, or as an exclusive
-    attempt starts (``open_now``), shared by everything the handler does, and
-    saved when the handler ends (``end``). With ``name``, of the key's database
-    ``name`` (``database``), which has neither the object's schema nor an
-    outbox.
+    """The SQL session of one attempt.
+
+    It opens on first use, or when an exclusive attempt starts (``open_now``),
+    is shared by everything the handler does, and is saved when the handler
+    ends (``end``). With ``name``, it is the key's separate database ``name``
+    (see ``database``), which has neither the object's schema nor an outbox.
     """
 
     def __init__(self, host: SqlHost, config: ObjectConfig | None = None, name: str | None = None) -> None:
         self._host: SqlHost = host
         self._config: ObjectConfig = config or ObjectConfig()
         self._name: str | None = name
-        # The object's own database of an exclusive handler: the one with an outbox.
+        # Only the object's own database, in an exclusive handler, has an outbox.
         self._has_outbox: bool = not host.shared and name is None
         # The key's other databases this attempt opened, by name.
         self._databases: dict[str, Attempt] = {}
         self._session: _Session | None = None
-        # The ids of the outbox's transactions this attempt made the sends of.
+        # The ids of the outbox transactions whose sends this attempt has made.
         self._made: set[str] = set()
-        # The schemas this attempt's database has all the steps of, by name.
+        # The schemas fully applied to this attempt's database, by name.
         self._ensured: dict[str, Schema] = {}
         self._ended: bool = False
         self.db: AttemptDatabase = AttemptDatabase(self)
@@ -547,7 +577,7 @@ class Attempt:
         await self.call(lambda db: self._ensure_schemas(db, schemas))
 
     def database(self, name: str) -> Database:
-        """The key's database ``name``, in this attempt: see ``database``."""
+        """Return the key's separate database ``name`` for this attempt (see ``database``)."""
         if self._ended:
             raise RuntimeError("the handler has ended: its SQL session is closed")
         other = self._databases.get(name)
@@ -556,19 +586,20 @@ class Attempt:
         return other.db
 
     def open_now(self) -> None:
-        """
-        Open the session now, as the attempt starts, rather than on its first
-        call: the open makes the sends a crashed attempt committed and left
-        unmade, which must not wait for a handler that uses the database.
+        """Open the session now, as the attempt starts, rather than on first use.
+
+        Opening makes any sends that a crashed attempt committed but did not
+        make, and those should not wait until the handler uses the database.
         """
         if self._has_outbox and self._session is None:
-            # Its failure goes to the first call, as it would had that call opened it.
+            # A failure is reported to the first call, as if that call had opened the session.
             self._current().ready.add_done_callback(lambda t: t.cancelled() or t.exception())
 
     async def end(self, error: BaseException | None) -> None:
-        """
-        The handler ended, with ``error`` or not: the key's other databases end,
-        then this one. It raises what the handler failed with, or a failure to end the session.
+        """End the attempt's databases after the handler ends, the key's other databases first.
+
+        Re-raises ``error``, the handler's exception, if there is one;
+        otherwise raises any failure to end a session.
         """
         failures: list[BaseException] = []
         for other in self._databases.values():
@@ -581,10 +612,11 @@ class Attempt:
             raise failures[0]
 
     async def call(self, call: Callable[[Connection], Awaitable[T]]) -> T:
-        """
-        ``call`` on the session, opening it on the first; its failure as the
-        handler fails with it. The call that fails on a session that a failure
-        ended is its last: the next opens another, which reads what is stored.
+        """Run ``call`` on the session, opening it if needed, and return its result.
+
+        Errors propagate to the handler. If a call fails on a session that a
+        failure ended, the next call opens a new session, which reads what was
+        stored.
         """
         session = self._current()
         try:
@@ -596,16 +628,18 @@ class Attempt:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncGenerator[AttemptTransaction, None]:
-        """
-        One transaction. In the object's own database of an exclusive handler,
-        its sends commit with it, in the outbox, and are made with its commit,
-        right after its writes and before it waits for anything
-        (``with_commit``): Restate stores an attempt's commands in order, so
-        they are stored only if the commit is, and whatever fails the commit's
-        wait (a cancellation, say) comes after them. A second commit empties
-        the outbox before the transaction returns: left until the handler's
-        end, they would be made again by an attempt that resumes a long wait,
-        past the idempotency retention that drops a repeat.
+        """Run the body of an ``async with`` in one transaction.
+
+        In the object's own database of an exclusive handler, the transaction's
+        sends are committed to the outbox with it, and are made during the
+        commit, right after its writes and before it waits for anything (see
+        ``with_commit``). Since Restate stores an attempt's commands in order,
+        the sends are stored only if the commit is, and anything that fails the
+        commit's wait (a cancellation, say) comes after them. A second commit
+        empties the outbox before the transaction returns. If the sends stayed
+        until the handler's end, an attempt that resumes after a long wait could
+        make them again after the idempotency retention has expired, so that
+        the duplicates would no longer be dropped.
         """
         outgoing: Outgoing | None = None
         session = self._current()
@@ -613,7 +647,7 @@ class Attempt:
             db = await session.ready
             async with db.transaction() as handle:
                 sends = _Sends() if self._has_outbox else None
-                # A view's writes stay in its session: it has nothing to reset.
+                # A view's writes stay in its own session, so there is nothing to reset.
                 tx = AttemptTransaction(handle, sends.record if sends is not None else _refused_send)
                 if not self._host.shared:
                     _RESET.on(tx, lambda: self._reset(handle))
@@ -631,7 +665,7 @@ class Attempt:
             await self.call(self._flush)
 
     async def _commit_outbox(self, handle: ConnectionTransaction, outgoing: Outgoing | None) -> None:
-        """Commit with ``handle`` the outbox as committed, but the sends stored since, and with ``outgoing``, which the commit makes."""
+        """Write the outbox in ``handle``: the unstored committed sends, plus ``outgoing``, which the commit makes."""
         outbox = await self._unstored(handle)
         if outgoing is not None:
             outbox.append(outgoing)
@@ -640,7 +674,7 @@ class Attempt:
         handle.set_record(OUTBOX, _encode_outbox(outbox))
 
     def _current(self) -> _Session:
-        """The session, opening one if there is none, or the one there is was retired."""
+        """Return the current session, opening a new one if there is none or it was retired."""
         if self._ended:
             raise RuntimeError("the handler has ended: its SQL session is closed")
         if self._session is not None and self._session.retired:
@@ -653,13 +687,13 @@ class Attempt:
         return _Session(asyncio.ensure_future(self._start()), self._host)
 
     def _own_schema(self) -> Schema | None:
-        """The object's schema, which the key's other databases have none of."""
+        """Return the object's schema, or ``None`` for the key's separate databases, which do not have it."""
         return self._config.schema if self._name is None else None
 
     async def _start(self) -> Connection:
         host = self._host
-        # The page cache's: the key escaped, so that no key reads as another's
-        # database (a name has no `/`).
+        # The page cache's namespace. The key is escaped so that no key can be
+        # mistaken for another key's separate database (names have no `/`).
         key = f"{host.service}/{quote(host.key, safe='')}"
         namespace = key if self._name is None else f"{key}/{self._name}"
         store: Store = _ReaderStore(host, self._name) if host.shared else _ObjectStore(host, self._name)
@@ -667,20 +701,20 @@ class Attempt:
             store = self._config.wrap_store(store)
         db = await open_connection(namespace, store, reader=host.shared)
         try:
-            # A view writes nothing: a write fails, rather than vanish with the attempt.
+            # Views write nothing: make a write fail, rather than vanish with the attempt.
             if host.shared:
                 await db.execute("PRAGMA query_only = 1")
             if self._has_outbox:
-                # What a crash left unmade; an open again in this attempt finds
-                # what this attempt made, stored before it, as made.
+                # Make the sends a crash left unmade. When this attempt reopens the
+                # database, the sends it already made were stored first, so skip them.
                 left = _decode_outbox(await db.record(OUTBOX))
                 for outgoing in left:
                     if outgoing["id"] not in self._made:
                         self._make(outgoing, again=True)
-                # Emptied at once, as a transaction's own sends are.
+                # Empty the outbox right away, as for a transaction's own sends.
                 if left:
                     await self._flush(db)
-            # A view's too, whose writes are never stored: a key never written reads as empty tables.
+            # Views too, although their writes are never stored: a key never written reads as empty tables.
             own = self._own_schema()
             if own is not None:
                 await self._ensure_schemas(db, [own])
@@ -690,11 +724,12 @@ class Attempt:
         return db
 
     async def _end_session(self, error: BaseException | None) -> None:
-        """
-        End the session, then raise as the handler did. The handler's error stands: what it
-        committed is stored, and an outbox left full is made by the next open.
-        A failure to end the session fails a handler that succeeded, which a
-        retry then ends (a transaction it left open, say).
+        """End the session, then re-raise the handler's error, if any.
+
+        The handler's error takes precedence: what it committed is stored, and
+        the next open makes any sends left in the outbox. A failure to end the
+        session (a transaction left open, say) fails a handler that succeeded,
+        and a retry then ends it.
         """
         self._ended = True
         failed: BaseException | None = None
@@ -708,12 +743,14 @@ class Attempt:
             raise failed
 
     async def _close(self) -> None:
-        """
-        Close the session as the attempt ends. A view's closes: it read the
-        snapshot it opened on. Another is saved, its outbox emptied. One that a
-        failure ended closes, and the object's own database is opened again and
-        saved: it may hold sends unmade (a crash left them, and this attempt's
-        open failed) or made and not emptied (the commit's wait failed).
+        """Close the session as the attempt ends.
+
+        A view's session just closes, as it only read its snapshot. Any other
+        session is saved, after emptying its outbox. If a failure ended it, it
+        is closed, and the object's own database is reopened and saved, since
+        its outbox may hold sends not yet made (left by a crash, when this
+        attempt's open failed) or made but not removed (when the commit's wait
+        failed).
         """
         if self._session is None:
             return
@@ -737,7 +774,7 @@ class Attempt:
             await again.end()
 
     async def _save(self, db: Connection) -> None:
-        """Empty the outbox and save the session, which closes if that fails."""
+        """Empty the outbox and save the session, closing it if that fails."""
         try:
             if self._has_outbox:
                 await self._flush(db)
@@ -748,13 +785,13 @@ class Attempt:
             raise
 
     async def _reset(self, handle: ConnectionTransaction) -> None:
-        """Empty the database in the transaction ``handle`` (``reset``), and apply the schemas this attempt applied again."""
+        """Empty the database in the transaction ``handle`` and reapply the schemas this attempt applied (see ``reset``)."""
         own = self._own_schema()
         schemas = ([own] if own is not None else []) + [s for s in self._ensured.values() if s is not own]
         await drop_all(handle, schemas)
 
     async def _ensure_schemas(self, db: Connection, schemas: Sequence[Schema]) -> None:
-        """Apply the steps of ``schemas`` that the database lacks, each schema once per attempt."""
+        """Apply the missing migrations of ``schemas``, checking each schema at most once per attempt."""
         lacking = [s for s in schemas if s.name not in self._ensured]
         if not lacking:
             return
@@ -763,12 +800,12 @@ class Attempt:
             self._ensured[schema.name] = schema
 
     def _make(self, outgoing: Outgoing, again: bool = False) -> None:
-        """Make the sends of a committed transaction: each with an idempotency key of the transaction (or its own), so that making them again is dropped."""
+        """Make the sends of a committed transaction, with idempotency keys so that repeats are dropped."""
         for index, send in enumerate(outgoing["sends"]):
             delay = send.get("delay")
             due = send.get("due")
             if delay is not None and again and due is not None:
-                # Made again, a delayed send waits only what remains of its delay.
+                # When made again, a delayed send waits only for the rest of its delay.
                 delay = max(0, due - _now_ms())
             self._host.generic_send(
                 send["service"],
@@ -782,24 +819,24 @@ class Attempt:
         self._made.add(outgoing["id"])
 
     async def _unstored(self, db: Connection | ConnectionTransaction) -> list[Outgoing]:
-        """The outbox as committed, but the transactions this attempt made the sends of: a commit made after them stores them first."""
+        """Return the committed outbox without the transactions whose sends this attempt made (a later commit stores those)."""
         return [outgoing for outgoing in _decode_outbox(await db.record(OUTBOX)) if outgoing["id"] not in self._made]
 
     async def _flush(self, db: Connection) -> None:
-        """Empty the outbox, so that a later open does not make its sends again: a commit after them, which stores them first."""
+        """Remove the sends this attempt made from the outbox, so that a later open does not make them again."""
         if not await db.record(OUTBOX):
             return
-        # Read in the transaction that writes it: one that committed sends since keeps them.
+        # Read the outbox in the transaction that writes it, to keep sends committed in the meantime.
         async with db.transaction() as tx:
             tx.set_record(OUTBOX, _encode_outbox(await self._unstored(tx)))
 
 
 async def with_attempt(handler: Callable[[], Awaitable[T]], attempt: Attempt) -> T:
-    """Run ``handler``, then end ``attempt``'s SQL session, if it opened one (see ``Attempt.end``)."""
+    """Run ``handler``, then end the SQL session of ``attempt``, if it opened one (see ``Attempt.end``)."""
     try:
         value = await handler()
     except BaseException as error:
         await attempt.end(error)
-        raise  # `end` raises: this is for the type checker
+        raise  # `end` already raises; this is for the type checker
     await attempt.end(None)
     return value

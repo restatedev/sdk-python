@@ -8,28 +8,38 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-LangGraph agents in session objects: a tool-calling graph whose checkpoints
-are in the object's database. As sdk-sessions' ``@restatedev/agents/langgraph``::
+"""LangGraph agents as session objects, with checkpoints stored in the object's database.
+
+For example::
 
     from restate import sessions
     from restate.agents import langgraph, tool
 
     @tool
     async def get_weather(city: str) -> str:
-        '''The current weather in a city.'''
+        '''Return the current weather in a city.'''
         return f"Sunny in {city}"
 
     assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
     sessions.serve(assistant)
 
-``agent`` creates an agent; ``prompt`` answers a prompt in a handler of your
-own; ``SqlCheckpointSaver`` keeps a graph of your own in ``ctx.db``.
+``agent`` creates an agent, ``prompt`` answers a prompt from a handler of your
+own, and ``SqlCheckpointSaver`` stores the checkpoints of a graph of your own
+in ``ctx.db``.
+
+This differs from the older ``restate.ext.langchain`` integration, whose
+middleware makes a LangChain ``create_agent`` agent durable inside any regular
+Restate handler by journaling each model response, and leaves tool side
+effects for you to wrap in ``ctx.run_typed``. Pick ``restate.ext.langchain``
+to add durability to an agent you run in your own services; pick this module
+for a ready-made agent per key, whose conversation lives in a database and
+which comes with built-in handlers to chat, read the conversation, watch its
+progress and stop a turn.
 
 Install the ``langgraph`` extra (``pip install restate-sdk[langgraph]``). A
-model named ``openai/...`` also needs ``langchain-openai``, and
-``anthropic/...`` needs ``langchain-anthropic``; or pass any LangChain chat
-model as ``model``.
+model named ``openai/...`` also needs ``langchain-openai``, and one named
+``anthropic/...`` needs ``langchain-anthropic``. Alternatively, pass any
+LangChain chat model as ``model``.
 """
 
 try:

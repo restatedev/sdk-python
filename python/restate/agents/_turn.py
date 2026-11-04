@@ -8,11 +8,11 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-The turn of a ``chat`` handler: its status, its cancellation, and publishing
-for the clients that follow the conversation, with the framework's transcript
-kept in the log as it goes. As sdk-sessions' ``chatHandler`` and
-``transcribing`` (``common.ts``).
+"""The turn of a ``chat`` handler.
+
+A turn reports its status, handles its cancellation, and publishes each change
+to the clients that follow the conversation, copying the framework's
+transcript into the log as it goes (``transcribing``).
 """
 
 from __future__ import annotations
@@ -37,15 +37,16 @@ from restate.sessions.internal import ScopeKey, cancel_calls, cancelled, definit
 T = typing.TypeVar("T")
 
 Read = Callable[[], Awaitable[Transcript]]
-"""A framework's transcript as it stands, while it answers: a new one, or the one it keeps and adds to."""
+"""A function that returns the framework's transcript as it stands, either new or one the framework keeps adding to."""
 
 
 class AttemptEnded(Exception):
-    """
-    Why a turn stopped when its attempt ended before it did: Restate suspended
-    the attempt, gave up on it, or lost its connection. Nothing the attempt does
-    after is stored, and the next attempt goes on with the turn, so it stops
-    without answering: unlike a cancellation, nothing is cancelled.
+    """Raised to stop a turn whose attempt ended before the turn did.
+
+    The attempt ends when Restate suspends it, gives up on it, or loses its
+    connection. Nothing the attempt does afterwards is stored, and the next
+    attempt carries on with the turn, so the turn stops without answering.
+    Unlike a cancellation, nothing is cancelled.
     """
 
     def __init__(self) -> None:
@@ -53,46 +54,47 @@ class AttemptEnded(Exception):
 
 
 def cancellation() -> TerminalError:
-    """What a cancelled turn fails with: Restate's cancellation, 409."""
+    """Return the error a cancelled turn fails with: Restate's cancellation, status 409."""
     return TerminalError("cancelled", status_code=409)
 
 
 class Stop:
-    """
-    What stops a turn: a framework stops its work with it (a model's request,
-    say). It stops with Restate's cancellation (``409``) once Restate cancels
-    the invocation, the turn then ending as cancelled; or with an
-    ``AttemptEnded`` once the attempt ends first, the work stopping and
-    answering nothing.
+    """The stop signal of a turn, which a framework uses to cut its work short (a model request, for example).
+
+    It stops with Restate's cancellation (status 409) when Restate cancels the
+    invocation, and the turn then ends as cancelled. It stops with
+    ``AttemptEnded`` when the attempt ends first, and the work then stops
+    without answering.
     """
 
     def __init__(self) -> None:
         self._event = asyncio.Event()
         self.reason: BaseException | None = None
-        """Why it stopped, once it has."""
+        """Why it stopped, or ``None`` while it has not."""
 
     @property
     def stopped(self) -> bool:
-        """Whether it stopped."""
+        """Whether it has stopped."""
         return self.reason is not None
 
     def stop(self, reason: BaseException) -> None:
-        """Stop, with ``reason``; once."""
+        """Stop with ``reason``, unless already stopped."""
         if self.reason is None:
             self.reason = reason
             self._event.set()
 
     async def wait(self) -> BaseException:
-        """Return once it stopped: why."""
+        """Wait until it stops, and return the reason."""
         await self._event.wait()
         assert self.reason is not None
         return self.reason
 
     async def guard(self, work: Awaitable[T]) -> T:
-        """
-        ``work``, unless it stops first: then ``work`` is cancelled, and this
-        raises why it stopped. For a framework's request that the turn's stop
-        must cut short.
+        """Await ``work`` and return its result, unless the turn stops first.
+
+        If it stops first, ``work`` is cancelled and the stop reason is
+        raised. Use it for a framework request that stopping the turn must cut
+        short.
         """
         task = asyncio.ensure_future(work)
         stopping = asyncio.ensure_future(self._event.wait())
@@ -113,20 +115,20 @@ _STOP: ScopeKey[Stop] = ScopeKey("stop_signal_of")
 
 
 def stop_signal_of(ctx: SessionContext) -> Stop | None:
-    """The ``Stop`` of the turn of ``ctx``, a ``chat`` handler's: see ``Stop``."""
+    """Return the ``Stop`` of the ``chat`` turn running on ``ctx``, or ``None`` outside one."""
     return _STOP.get(ctx)
 
 
 @dataclass(frozen=True)
 class AgentInfo:
-    """An agent's own: whether it works unwatched (``background``), and what its ``clear`` also empties."""
+    """An agent's settings: whether it works unwatched (``background``), and what its ``clear`` also empties."""
 
     background: bool = False
     clear: Callable[[SessionContext], Awaitable[None]] | None = None
 
 
 AGENT: Link[AgentInfo] = Link("an agent")
-"""An agent's own, on its definition."""
+"""The agent's settings, attached to its definition."""
 
 
 def _agent_of(ctx: SessionContext) -> AgentInfo | None:
@@ -135,27 +137,27 @@ def _agent_of(ctx: SessionContext) -> AgentInfo | None:
 
 
 async def cleared(ctx: SessionContext) -> None:
-    """Clear what the agent of ``ctx`` keeps beside its database."""
+    """Clear whatever the agent of ``ctx`` keeps outside its database."""
     agent = _agent_of(ctx)
     if agent is not None and agent.clear is not None:
         await agent.clear(ctx)
 
 
 def _unfollowed(ctx: SessionContext) -> bool:
-    """Whether the agent of ``ctx`` runs in the background: it publishes the turn's end only."""
+    """Return whether the agent of ``ctx`` runs in the background, publishing only when a turn ends."""
     agent = _agent_of(ctx)
     return agent is not None and agent.background
 
 
 _READING: ScopeKey[Read] = ScopeKey("transcribing")
-"""The transcript of the attempt's turn, while it answers."""
+"""The transcript reader of the attempt's turn, while it answers."""
 
 _WRITING: ScopeKey[asyncio.Future[None]] = ScopeKey("the log's writes")
-"""The attempt's last log write: they run one after another (tool calls in parallel publish at once)."""
+"""The attempt's latest log write; writes run one after another, as parallel tool calls publish at the same time."""
 
 
 def _logged(ctx: SessionContext, read: Read) -> Awaitable[None]:
-    """The log of the conversation of ``ctx`` takes its transcript as ``read`` gives it."""
+    """Copy the transcript that ``read`` returns into the conversation's log, after any earlier write."""
     before = _WRITING.get(ctx)
 
     async def write() -> None:
@@ -164,7 +166,7 @@ def _logged(ctx: SessionContext, read: Read) -> Awaitable[None]:
                 await before
         transcript = await read()
         await _log.sync(ctx, transcript.messages())
-        # The calls whose results the framework stored are made: see _calls.py.
+        # Forget the calls whose results the framework has stored: see _calls.py.
         await settle(ctx, transcript.answered)
 
     done = asyncio.ensure_future(write())
@@ -173,10 +175,11 @@ def _logged(ctx: SessionContext, read: Read) -> Awaitable[None]:
 
 
 async def publish(ctx: SessionContext) -> None:
-    """
-    The conversation of ``ctx`` changed: its log takes the change (while a
-    framework answers: ``transcribing``), its revision increases, and the
-    clients that follow it read it again.
+    """Publish a change to the conversation of ``ctx``.
+
+    While a framework is answering (inside ``transcribing``), the change is
+    first copied into the log. Then the revision increases, and the clients
+    that follow the conversation read it again.
     """
     read = _READING.get(ctx)
     if read is not None:
@@ -185,16 +188,17 @@ async def publish(ctx: SessionContext) -> None:
 
 
 async def stepped(ctx: SessionContext) -> None:
-    """A step of a turn of ``ctx``: ``publish`` it, unless the agent runs in the background."""
+    """Publish a step of the turn, unless the agent runs in the background."""
     if not _unfollowed(ctx):
         await publish(ctx)
 
 
 async def tool_call_started(ctx: SessionContext) -> None:
-    """
-    A tool call of the turn of ``ctx`` starts: ``publish`` it, which forgets
-    the calls whose results are stored before the tool makes its own. In the
-    background, it forgets them alone.
+    """Publish that a tool call of the turn is starting.
+
+    Publishing also forgets the earlier calls whose results are stored, before
+    the tool makes calls of its own. A background agent only forgets them,
+    without publishing.
     """
     if not _unfollowed(ctx):
         await publish(ctx)
@@ -206,16 +210,26 @@ async def tool_call_started(ctx: SessionContext) -> None:
 
 
 async def tool_call_ended(ctx: SessionContext) -> None:
-    """A tool call of the turn of ``ctx`` ended: ``publish`` it, unless the agent runs in the background."""
+    """Publish that a tool call of the turn has ended, unless the agent runs in the background."""
     await stepped(ctx)
 
 
 async def transcribing(ctx: SessionContext, read: Read, work: Callable[[], Awaitable[T]]) -> T:
-    """
-    Run ``work``, a framework's turn (or a compaction, a reset), with ``read``
-    giving the framework's transcript as it stands: each publish meanwhile (a
-    tool call's start and end) takes it into the conversation's log, and so
-    does ``work``'s end. ``messages`` and ``sync`` read the log.
+    """Run ``work`` while keeping the conversation's log in step with the framework's transcript.
+
+    ``work`` is a framework's turn (or a compaction, or a reset), and ``read``
+    returns the framework's transcript as it stands. Every publish while
+    ``work`` runs (such as a tool call's start and end) copies the transcript
+    into the log, and so does the end of ``work``. The ``messages`` and
+    ``sync`` views read the log.
+
+    Args:
+        ctx: The handler's context.
+        read: Returns the framework's current transcript.
+        work: The work to run.
+
+    Returns:
+        What ``work`` returns.
     """
     outer = _READING.get(ctx)
     _READING.set(ctx, read)
@@ -227,7 +241,7 @@ async def transcribing(ctx: SessionContext, read: Read, work: Callable[[], Await
         raise
     finally:
         try:
-            # A failed attempt stores nothing more: its retry runs again.
+            # A failed attempt stores nothing more, as its retry runs again.
             if not failed:
                 await _logged(ctx, read)
         finally:
@@ -242,26 +256,26 @@ def _now() -> str:
 
 
 async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionContext, str], Awaitable[T]]) -> T:
-    """
-    ``answer`` as a chat handler's turn. While it answers, the object's
-    ``status`` says so (its ``Turn``). Its invocation's cancellation (Restate's,
-    explicit) stops the turn (``stop_signal_of``) whenever it comes, and cancels
-    the calls its tools made: the turn ends, and the handler fails with the
-    cancellation. An attempt that ends first stops it too, with an
-    ``AttemptEnded``: the work stops, and the next attempt goes on with it. It
-    publishes when it starts and ends, for the clients that follow it.
+    """Run ``answer`` as the turn of a ``chat`` handler.
+
+    While it answers, the object's ``status`` reports the turn. Cancelling the
+    invocation stops the turn (through ``stop_signal_of``) whenever it comes,
+    and cancels the calls its tools made; the handler then fails with the
+    cancellation. If the attempt ends first, the turn stops with
+    ``AttemptEnded`` and the next attempt carries on. The turn publishes when
+    it starts and when it ends.
     """
     invocation_id = ctx.request.id
     companion = _signals.signals_of(ctx)
     turn: Turn = {"invocationId": invocation_id, "since": _now()}
-    # The companion knows the turn from here to its close: `status` and `stop` ask it.
+    # From here until the turn closes, the companion knows about it: `status` and `stop` ask it.
     await ctx.call(_signals.start, turn, key=companion)
     await stepped(ctx)
 
     async def end() -> None:
-        # The log takes the turn's last change, then the companion closes the
-        # turn, which publishes it: one revision. The close is a call the turn
-        # waits for, so that it is done before the turn ends.
+        # Copy the turn's last change into the log, then have the companion
+        # close the turn, which publishes both as one revision. The close is a
+        # call, awaited so that it is done before the turn ends.
         read = _READING.get(ctx)
         if read is not None:
             await _logged(ctx, read)
@@ -283,12 +297,12 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     try:
         try:
             answered = await answer(ctx, text)
-            # Cancelled once answered: the answer stands.
+            # A cancellation after the answer does not change it.
         except TerminalError:
             await end()
             raise
         except Exception as error:
-            # Any other error fails the attempt, and Restate retries the turn, but a refusal.
+            # Any other error fails the attempt and Restate retries the turn, unless it is a refusal.
             terminal = refusal_of(ctx, error)
             if terminal is None:
                 raise

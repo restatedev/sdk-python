@@ -8,11 +8,19 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-What a framework's integration needs beside ``restate.agents``: its turn's
-transcript kept in the log (``transcribing``, ``Transcript``), its stop
-(``stop_signal_of``), its tool calls (``run_tool``), its model (``model_of``
-and the rest), and a model provider's refusal (``refusal_of``, ``from_tool``).
+"""Building blocks for writing a framework integration of ``restate.agents``.
+
+An integration needs, beyond the public API:
+
+- ``transcribing`` and ``Transcript``, to keep the conversation's log in step
+  with the framework's transcript.
+- ``stop_signal_of``, to stop a turn when it is cancelled or its attempt ends.
+- ``run_tool``, to run a ``restate.agents`` tool for a tool call.
+- ``model_of``, ``provider_of`` and the related helpers, to resolve the model.
+- ``refusal_of`` and ``from_tool``, to tell a model provider's refusal from a
+  tool's error.
+- ``companion_of`` and ``deliver``, to see what an agent is doing and to send
+  it a message from another session object's handler.
 """
 
 from restate.agents._common import (

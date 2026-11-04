@@ -8,16 +8,15 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-One loop that drives every pending wait of an invocation without journal replay.
+"""A single loop that drives every pending wait of an invocation without journal replay.
 
-Without journal replay, the handler's futures are plain awaitables that user
-code awaits and combines as it likes: ``asyncio.gather``, ``asyncio.wait``,
-its own tasks, or a library's. The protocol has one await point per
-invocation, though: a suspension, the awaiting-on hint and a cancellation each
-take one unresolved future. So every wait is registered with the selector,
-which asks the VM for progress on the first of all of them to complete, and is
-the only one reading the invocation's input.
+Without journal replay, a handler's futures are plain awaitables that user
+code awaits and combines however it likes: with ``asyncio.gather``,
+``asyncio.wait``, its own tasks, or a library's. The protocol, however, has
+one await point per invocation: a suspension, the awaiting-on hint and a
+cancellation each take a single unresolved future. So every wait registers
+with the selector, which asks the VM for progress on whichever of them
+completes first, and which is the only reader of the invocation's input.
 """
 
 from __future__ import annotations
@@ -44,47 +43,47 @@ logger = logging.getLogger(__name__)
 
 
 class SelectorDriver(Protocol):
-    """What the selector needs of the invocation."""
+    """The operations of the invocation that the selector uses."""
 
     def do_progress(self, future: UnresolvedFuture) -> Any:
-        """The VM's progress on ``future``: a DoProgress* response, Suspended, or an exception."""
+        """Return the VM's progress on ``future``: a DoProgress* response, ``Suspended``, or an exception."""
         ...
 
     def is_completed(self, handle: int) -> bool:
-        """Whether the VM has the result of ``handle``."""
+        """Return whether the VM has the result of ``handle``."""
         ...
 
     async def flush_output(self) -> None:
-        """Writes out what the VM has buffered."""
+        """Write out whatever the VM has buffered."""
         ...
 
     async def receive(self) -> Mapping[str, Any]:
-        """The next input event: a chunk of the request body, a disconnect, or a restate.* event."""
+        """Return the next input event: a chunk of the request body, a disconnect, or a ``restate.*`` event."""
         ...
 
     def wake(self) -> None:
-        """Makes ``receive`` return a restate.* event."""
+        """Make ``receive`` return a ``restate.*`` event."""
         ...
 
     def execute_run(self, handle: int) -> None:
-        """Starts the run of ``handle``, which signals its completion through ``receive``."""
+        """Start the run of ``handle``, which signals its completion through ``receive``."""
         ...
 
     def notify_input(self, chunk: Mapping[str, Any]) -> None:
-        """Passes a chunk of the request body to the VM."""
+        """Pass a chunk of the request body to the VM."""
         ...
 
     def track(self, task: asyncio.Future[Any]) -> None:
-        """Cancels ``task`` at the end of the attempt."""
+        """Cancel ``task`` when the attempt ends."""
         ...
 
     def on_end(self) -> None:
-        """The attempt cannot go on: the selector has failed every wait."""
+        """Handle the end of the attempt, after the selector has failed every wait."""
         ...
 
 
 def is_ready(future: UnresolvedFuture, completed: Callable[[int], bool]) -> bool:
-    """Whether ``future`` needs no more progress."""
+    """Return whether ``future`` needs no more progress."""
     if isinstance(future, SingleUnresolvedFuture):
         return completed(future.handle)
     if isinstance(future, FirstCompletedUnresolvedFuture):
@@ -93,15 +92,15 @@ def is_ready(future: UnresolvedFuture, completed: Callable[[int], bool]) -> bool
 
 
 class FutureSelector:
-    """
-    The one loop of an invocation without journal replay.
+    """The single loop that drives the waits of an invocation without journal replay.
 
-    A wait stays registered until it is ready. The loop settles whatever is
-    ready, then asks the VM for progress on the first of all the pending waits
-    to complete: so a suspension waits for any of them, a pending run starts
-    whichever wait reaches it first, and a cancellation reaches all of them. A
-    wait registered while the loop reads the input wakes it, so it is part of
-    the next check. The loop runs while something is pending.
+    A wait stays registered until it is ready. Each pass, the loop resolves
+    the waits that are ready, then asks the VM for progress on whichever
+    pending wait completes first. So a suspension waits for any of them, a
+    pending run starts whichever wait reaches it first, and a cancellation
+    reaches all of them. Registering a wait while the loop reads input wakes
+    the loop, so the new wait is included in the next check. The loop runs as
+    long as something is pending.
     """
 
     def __init__(self, driver: SelectorDriver, disconnected: Callable[[], BaseException]) -> None:
@@ -109,23 +108,23 @@ class FutureSelector:
         self._disconnected: Callable[[], BaseException] = disconnected
         self._waits: dict[asyncio.Future[None], UnresolvedFuture] = {}
         self._task: asyncio.Task[None] | None = None
-        # Between the VM's WaitExternalProgress and the next input.
+        # True between the VM's WaitExternalProgress and the next input.
         self._waiting: bool = False
-        # Why the attempt ended, once it has: each wait then raises a new one.
+        # Why the attempt ended, once it has; each later wait raises a fresh instance.
         self._end: Callable[[], BaseException] | None = None
 
     @property
     def ended(self) -> BaseException | None:
-        """Why the attempt ended (a suspension, an error, a disconnect), or None while it goes on."""
+        """Why the attempt ended (a suspension, an error, a disconnect), or ``None`` while it continues."""
         return None if self._end is None else self._end()
 
     @property
     def size(self) -> int:
-        """The waits still pending, for tests."""
+        """The number of waits still pending, for tests."""
         return len(self._waits)
 
     async def wait(self, future: UnresolvedFuture) -> None:
-        """Returns once ``future`` is ready; raises if the attempt ends first, or is cancelled."""
+        """Wait until ``future`` is ready; raise if the attempt ends first or is cancelled."""
         if self._end is not None:
             raise self._end()
         if is_ready(future, self._driver.is_completed):
@@ -143,8 +142,8 @@ class FutureSelector:
             self._task = asyncio.create_task(self._loop())
             self._driver.track(self._task)
         elif self._waiting:
-            # Only a loop waiting for input needs waking, once: any other picks
-            # up the new wait on its next pass.
+            # Only a loop that waits for input needs waking, and only once; otherwise
+            # the loop picks up the new wait on its next pass.
             self._waiting = False
             self._driver.wake()
 
@@ -159,7 +158,7 @@ class FutureSelector:
                 waiter.set_exception(error())
 
     def _finish(self, end: Callable[[], BaseException]) -> None:
-        """The attempt cannot go on: every wait, now and later, raises ``end()``."""
+        """End the attempt: every wait, current or future, raises ``end()``."""
         self._end = end
         self._fail_all(end)
         self._driver.on_end()
@@ -169,9 +168,9 @@ class FutureSelector:
         try:
             while True:
                 self._settle()
-                # Let what that settled run, and register what it waits for
-                # next, so that one check covers them. An optimization: what
-                # registers later wakes the loop anyway.
+                # Let the code that was just resolved run and register its next
+                # waits, so that one check covers them. This is only an
+                # optimization: a later registration wakes the loop anyway.
                 await asyncio.sleep(0)
                 pending = [future for waiter, future in self._waits.items() if not waiter.done()]
                 if not pending:
@@ -190,7 +189,7 @@ class FutureSelector:
                 if isinstance(response, DoProgressAnyCompleted):
                     continue
                 if isinstance(response, DoProgressCancelSignalReceived):
-                    # Reaches every pending wait; what waits after it is not cancelled.
+                    # Cancel every pending wait; waits registered afterwards are not cancelled.
                     self._fail_all(lambda: TerminalError("cancelled", 409))
                     continue
                 if isinstance(response, DoProgressExecuteRun):
@@ -220,7 +219,7 @@ class FutureSelector:
 
 
 def _internal(cause: BaseException) -> Callable[[], BaseException]:
-    """New SdkInternalExceptions, caused by ``cause``."""
+    """Return a factory of ``SdkInternalException`` instances caused by ``cause``."""
 
     def internal() -> BaseException:
         error = SdkInternalException()
@@ -230,16 +229,17 @@ def _internal(cause: BaseException) -> Callable[[], BaseException]:
     return internal
 
 
-# The selector takes over an invocation of the SDK's (``hook``): the waits of
-# its futures, which the SDK makes through ``create_poll_or_cancel_coroutine``,
-# go to the selector, and each future starts when it is made. It reaches into
-# ``ServerInvocationContext``, of this same package, whose tests cover it.
+# ``hook`` makes the selector take over an SDK invocation: the waits of its
+# futures, which the SDK makes through ``create_poll_or_cancel_coroutine``, go
+# to the selector, and each future starts as soon as it is created. This
+# reaches into ``ServerInvocationContext``, from the same package, whose tests
+# cover it.
 # TODO: once sessions run on it, the context could drive its waits through
-# the selector itself, rather than be hooked.
+# the selector itself, instead of being hooked.
 
 
 class _ContextDriver:
-    """What the selector needs of the SDK's context."""
+    """A ``SelectorDriver`` over the SDK's invocation context."""
 
     def __init__(self, context: ServerInvocationContext, on_end: Callable[[], None]) -> None:
         self.context: ServerInvocationContext = context
@@ -258,7 +258,7 @@ class _ContextDriver:
         return await self.context.receive()
 
     def wake(self) -> None:
-        # Any restate.* event: the loop takes it as a wake-up.
+        # Any restate.* event will do: the loop treats it as a wake-up.
         event = self.context.receive.enqueue_restate_event({"type": "restate.run_completed", "data": None})
         self.track(asyncio.ensure_future(event))
 
@@ -287,11 +287,11 @@ class _ContextDriver:
 
 
 def hook(context: ServerInvocationContext, on_end: Callable[[], None]) -> FutureSelector:
-    """
-    Make the waits of ``context``, an invocation without journal replay, go
-    through one selector, which calls ``on_end`` if it fails them all; each
-    future starts when it is made, whether or not anything awaits it. The
-    hook lasts as long as ``context``, one attempt.
+    """Route the waits of ``context``, an invocation without journal replay, through one selector.
+
+    Each future starts as soon as it is created, whether or not anything
+    awaits it. The selector calls ``on_end`` if it has to fail every wait.
+    The hook lasts as long as ``context``, which is one attempt.
     """
     selector = FutureSelector(_ContextDriver(context, on_end), DisconnectedException)
     started: set[asyncio.Task[Any]] = set()
@@ -302,7 +302,7 @@ def hook(context: ServerInvocationContext, on_end: Callable[[], None]) -> Future
             lazy = future.future
             if lazy.task is None:
                 lazy.task = asyncio.create_task(lazy.async_def())
-                # Its error, if nothing awaits it, is dropped.
+                # If nothing awaits it, its error is dropped.
                 lazy.task.add_done_callback(_retrieve)
                 started.add(lazy.task)
                 lazy.task.add_done_callback(started.discard)

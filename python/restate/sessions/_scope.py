@@ -8,11 +8,12 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-An attempt's scope: what its code keeps for the attempt (an agent's turn, the
-calls of its tools...), which its context holds and which ends with it. A
-retry gets a context, and so a scope, of its own. A module holds only the key
-of what it keeps (``ScopeKey``), never the state. As sdk-sessions' ``scope.ts``.
+"""Per-attempt state, kept on the attempt's context.
+
+Code running in an attempt can keep state for the duration of that attempt
+(an agent's turn, the calls its tools made, ...). The state lives on the
+context and ends with it; a retry gets a new context and starts empty.
+Modules hold only a ``ScopeKey``, never the state itself.
 """
 
 from __future__ import annotations
@@ -31,50 +32,58 @@ T = typing.TypeVar("T")
 
 @dataclass
 class Scope:
-    """An attempt's own, as this package made it, on its context (``SCOPE``), and what its code keeps for it."""
+    """The per-attempt data this package attaches to a context (see ``SCOPE``)."""
 
     sdk: ServerInvocationContext | None
-    """The SDK's context of the attempt: none over a test's own host."""
+    """The SDK's context of the attempt, or ``None`` when running on a test's host."""
     explicit_cancellation: bool = False
     """Whether its handler has ``explicit_cancellation=True``."""
     definition: object | None = None
-    """The session object whose handler or view it runs (``definition_of``)."""
+    """The session object whose handler or view the attempt runs (see ``definition_of``)."""
     values: dict[ScopeKey[Any], Any] = field(default_factory=dict[Any, Any])
-    """What its code keeps for it, by key: only ``ScopeKey`` reaches it."""
+    """The state kept for the attempt, by key; only ``ScopeKey`` accesses it."""
 
 
 SCOPE: Link[Scope] = Link("scope")
-"""The attempt's scope, on its context."""
+"""The attempt's scope, attached to its context."""
 
 
 class ScopeKey(typing.Generic[T]):
-    """
-    A kind of state an attempt's code keeps, by its context: its key in the
-    attempt's scope. Kept per attempt, so a retry starts without it::
+    """A key for one kind of state kept per attempt, on the attempt's context.
+
+    The state is not carried over to a retry, which starts without it::
 
         TURN: ScopeKey[Turn] = ScopeKey("an agent's turn")
 
         turn = TURN.of(ctx, lambda: Turn(...))
+
+    Args:
+        what: A description of the state, used in error messages.
     """
 
     def __init__(self, what: str) -> None:
         self.what: str = what
-        """What it is, for an error."""
+        """A description of the state, used in error messages."""
 
     def get(self, ctx: SessionContext | ViewContext) -> T | None:
-        """What the attempt of ``ctx`` keeps under this key, if anything."""
+        """Return the value kept under this key for the attempt of ``ctx``, or ``None``."""
         return typing.cast("T | None", self._values(ctx).get(self))
 
     def set(self, ctx: SessionContext | ViewContext, value: T) -> None:
-        """Keep ``value`` under this key, for the attempt of ``ctx``."""
+        """Keep ``value`` under this key for the attempt of ``ctx``."""
         self._values(ctx)[self] = value
 
     def delete(self, ctx: SessionContext | ViewContext) -> None:
-        """Keep nothing under this key, for the attempt of ``ctx``."""
+        """Remove the value kept under this key for the attempt of ``ctx``, if any."""
         self._values(ctx).pop(self, None)
 
     def of(self, ctx: SessionContext | ViewContext, make: Callable[[], T]) -> T:
-        """What the attempt of ``ctx`` keeps under this key, made by ``make`` the first time."""
+        """Return the value kept under this key for the attempt of ``ctx``, creating it with ``make`` if absent.
+
+        Raises:
+            TypeError: If ``ctx`` is not the context of a session object's
+                handler or view.
+        """
         values = self._values(ctx)
         if self not in values:
             values[self] = make()

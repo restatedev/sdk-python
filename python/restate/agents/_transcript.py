@@ -8,10 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-A conversation as ``messages`` gives it, built from a framework's transcript.
-As sdk-sessions' ``Transcript`` (``common.ts``).
-"""
+"""Build the conversation that clients read from a framework's transcript."""
 
 from __future__ import annotations
 
@@ -22,29 +19,29 @@ from restate.agents._api import Part, Role, Said, ToolPart, is_tool_part, text_p
 
 
 class Transcript:
-    """
-    A conversation as ``messages`` gives it, built from a framework's
-    transcript: each message is started by ``say``, a tool call goes to the
-    assistant's message, and its result to its call. Messages without parts
+    """A conversation in the form the ``messages`` view returns, built from a framework's transcript.
+
+    ``say`` starts each message, ``call`` adds a tool call to the assistant's
+    message, and ``result`` adds the call's output. Messages without parts
     are left out.
 
-    A message, once given out by ``messages()``, is never changed: a change
-    makes a new one in its place. So a framework can keep its transcript and
-    add to it as its conversation grows, and the log stores only the messages
-    that are not the ones it stored last (see ``_log.py``).
+    A message returned by ``messages()`` is never mutated: a change replaces
+    it with a new one. So a framework can keep its ``Transcript`` and add to
+    it as the conversation grows, and the log stores only the messages that
+    are not the same objects it stored last time (see ``_log.py``).
     """
 
     def __init__(self) -> None:
         self._messages: list[Said] = []
-        # The message of each tool call, by the call's id: its index.
+        # The index of each tool call's message, by the call's id.
         self._calls: dict[str, int] = {}
 
     def say(self, role: Role, text: str = "") -> None:
-        """A new message of ``role``, with ``text`` if there is any."""
+        """Start a new message of ``role``, with ``text`` if it is not blank."""
         self._messages.append({"role": role, "parts": [text_part(text)] if text.strip() else []})
 
     def call(self, call_id: str, name: str, input: Any) -> None:
-        """Tool call ``call_id`` of the assistant's message."""
+        """Add tool call ``call_id`` to the assistant's message, starting one if needed."""
         if not self._messages or self._messages[-1]["role"] != "assistant":
             self.say("assistant")
         at = len(self._messages) - 1
@@ -53,7 +50,11 @@ class Transcript:
         self._calls[call_id] = at
 
     def result(self, call_id: str, output: str, error: bool = False) -> None:
-        """The output of tool call ``call_id``; an error's if the framework says so, or it is a tool's ``Error: <message>``."""
+        """Set the output of tool call ``call_id``.
+
+        The output counts as an error if ``error`` is true or it starts with
+        ``"Error: "``.
+        """
         at = self._calls.get(call_id)
         if at is None:
             return
@@ -74,7 +75,11 @@ class Transcript:
         self._change(at, with_output)
 
     def answered(self, call_id: str, failed: str | None = None) -> bool:
-        """Whether tool call ``call_id`` has its output: not an error's, unless it is ``failed``, the error the call answered with."""
+        """Return whether tool call ``call_id`` has its output.
+
+        An error output does not count, unless it is ``failed``: the error
+        the call itself returned.
+        """
         at = self._calls.get(call_id)
         if at is None:
             return False
@@ -87,10 +92,10 @@ class Transcript:
         )
 
     def messages(self) -> list[Said]:
-        """Its messages, in order: those with parts."""
+        """Return the messages in order, leaving out those without parts."""
         return [message for message in self._messages if message["parts"]]
 
     def _change(self, at: int, change: Callable[[list[Part]], list[Part]]) -> None:
-        """Message ``at`` with its parts as ``change`` makes them: a new message, in its place."""
+        """Replace message ``at`` with a new message whose parts ``change`` computes."""
         message = self._messages[at]
         self._messages[at] = {"role": message["role"], "parts": change(message["parts"])}

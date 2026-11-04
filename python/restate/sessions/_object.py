@@ -8,20 +8,22 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""
-Session objects: Restate virtual objects whose state is a SQL database per
-key. Its handlers run one at a time per key, its views beside them; each gets a
-context of its own, made of the key, the request, the database and calls, and
-nothing else of the SDK's context::
+"""Session objects: Restate virtual objects whose state is a SQL database per key.
+
+Handlers run one at a time per key, and views run alongside them. Each gets a
+context of its own that holds the key, the request, the database, and calls
+and sends, and nothing else from the SDK's context::
 
     notes = sessions.SessionObject("notes", migrations=["CREATE TABLE notes (text TEXT NOT NULL)"])
+
 
     @notes.handler
     async def add(ctx: sessions.SessionContext, text: str) -> None:
         await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [text])
 
-    @notes.view
-    async def list(ctx: sessions.ViewContext) -> list[str]:
+
+    @notes.view(name="list")
+    async def list_notes(ctx: sessions.ViewContext) -> list[str]:
         return [row["text"] for row in await ctx.db.query("SELECT text FROM notes ORDER BY rowid")]
 """
 
@@ -57,22 +59,23 @@ from restate.vm import SingleUnresolvedFuture
 F = typing.TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
 HEAD_KEY = "v22/head"
-"""The key of the object database's head, its first read as it opens (shared-core's state format)."""
+"""The state key of the database's head, the first thing read when it opens."""
 
 SQL_METADATA = {
     "dev.restate.tooling.journal.hidden.names": "sync",
     "dev.restate.tooling.journal.hidden.name.prefix": "v22/",
 }
-"""
-The metadata every session object has: Restate's UI hides the database from
-the journal view (its head, tail, manifests and packs in the object's state,
-``v22/...``; and the ``sync`` run after its writes).
+"""Metadata added to every session object.
+
+It tells Restate's UI to hide the database from the journal view: its head,
+tail, manifests and packs (state keys under ``v22/``), and the ``sync`` run
+after its writes.
 """
 
 
 @dataclass(frozen=True, eq=False)
 class AttemptContext(Calls, Sends):
-    """``SessionContext`` (see ``_api.py``): one attempt's, made as it starts. Compared by identity."""
+    """The ``SessionContext`` of one attempt, created when the attempt starts; compared by identity."""
 
     key: str
     request: Request
@@ -87,7 +90,7 @@ class AttemptContext(Calls, Sends):
 
 @dataclass(frozen=True, eq=False)
 class AttemptViewContext(Calls):
-    """``ViewContext`` (see ``_api.py``): one attempt's, made as it starts. Compared by identity."""
+    """The ``ViewContext`` of one attempt, created when the attempt starts; compared by identity."""
 
     key: str
     request: Request
@@ -100,10 +103,10 @@ class AttemptViewContext(Calls):
 
 
 class _ContextHost:
-    """
-    An attempt's session's host (``SqlHost``) over the SDK's context: its waits
-    go through the selector, and its state commands are named after their keys,
-    so that tooling can hide the database by name.
+    """A ``SqlHost`` over the SDK's context, for one attempt.
+
+    Its waits go through the selector, and its state commands are named after
+    their keys, so that tooling can hide the database by name.
     """
 
     def __init__(self, context: ServerInvocationContext, shared: bool) -> None:
@@ -123,15 +126,15 @@ class _ContextHost:
 
     @property
     def vm(self) -> Any:
-        """
-        The invocation's VM, which the database's store writes and reads
-        directly (see ``_database.Store``); none with a journal codec, whose
-        values only the context's state commands encode.
+        """The invocation's VM, which the database reads and writes directly (see ``_database.Store``).
+
+        It is ``None`` when a journal codec is configured, since only the
+        context's state commands apply the codec.
         """
         return None if self.context.journal_codec is not None else self.context.vm.vm
 
     def wait(self, handle: int) -> Awaitable[None]:
-        """Done once the VM has the read whose handle is ``handle``: through the selector, as every wait."""
+        """Wait, through the selector, until the VM has the result of the read ``handle``."""
         return self.selector.wait(SingleUnresolvedFuture(handle))
 
     def cancel_invocation(self, invocation_id: str) -> None:
@@ -147,7 +150,7 @@ class _ContextHost:
         self.context.clear(key, entry_name=key)
 
     def state_keys(self) -> Awaitable[list[str]]:
-        # Named under the format's prefix, which tooling hides.
+        # Named under the state format's prefix, which tooling hides.
         return self.context.state_keys(entry_name="v22/keys")
 
     def sync(self) -> Awaitable[Any]:
@@ -203,14 +206,14 @@ class _ContextHost:
 
 
 async def _nothing() -> None:
-    """The action of an empty run."""
+    """Do nothing; the action of an empty run."""
 
 
 def _cancel_of(host: SqlHost) -> Callable[[str], None]:
-    """``cancel`` over the SDK's context."""
+    """Return the context's ``cancel``, implemented on ``host``."""
 
     def cancel(invocation_id: str) -> None:
-        # Not an id: a retry would fail the same way.
+        # Terminal: a retry would fail the same way.
         if not invocation_id.startswith("inv"):
             raise TerminalError(f"not an invocation id: {invocation_id}")
         host.cancel_invocation(invocation_id)
@@ -220,22 +223,22 @@ def _cancel_of(host: SqlHost) -> Callable[[str], None]:
 
 @dataclass(frozen=True)
 class _Entry:
-    """A handler or view of a session object: its function, kind, and object's config."""
+    """A registered handler or view of a session object."""
 
     fn: Callable[..., Awaitable[Any]]
     view: bool
     config: ObjectConfig
     definition: weakref.ref[SessionObject]
-    """Its session object, weakly: the object's entries, which it holds, hold this."""
+    """The session object, held weakly because the object holds its entries."""
     explicit_cancellation: bool = False
 
 
 ENTRIES: Link[dict[str, _Entry]] = Link("entries")
-"""A session object's handlers and views, by name: for ``invoke``."""
+"""A session object's handlers and views, by name, for ``invoke``."""
 
 
 def _context_of(entry: _Entry, host: SqlHost, request: Request, attempt: Attempt) -> SessionContext | ViewContext:
-    """The context of an attempt of ``entry``."""
+    """Create the context for an attempt of ``entry``."""
     cancel = _cancel_of(host)
     sdk = typing.cast("ServerInvocationContext | None", getattr(host, "context", None))
     scope = Scope(sdk=sdk, explicit_cancellation=entry.explicit_cancellation, definition=entry.definition())
@@ -256,7 +259,7 @@ def _context_of(entry: _Entry, host: SqlHost, request: Request, attempt: Attempt
 
 
 async def _attempt(entry: _Entry, host: SqlHost, request: Request, args: Sequence[Any]) -> Any:
-    """One attempt of ``entry`` over ``host``: its own context and session, which ends with it."""
+    """Run one attempt of ``entry`` over ``host``, with a context and database session of its own."""
     attempt = Attempt(host, entry.config)
     attempt.open_now()
     context = _context_of(entry, host, request, attempt)
@@ -264,7 +267,7 @@ async def _attempt(entry: _Entry, host: SqlHost, request: Request, args: Sequenc
 
 
 def _sdk_handler(entry: _Entry) -> Callable[..., Awaitable[Any]]:
-    """``entry`` as the SDK's handler: one loop drives each attempt's awaits (the selector), until it ends."""
+    """Wrap ``entry`` as an SDK handler whose attempts drive their awaits through a selector."""
 
     @functools.wraps(entry.fn)
     async def handler(ctx: ServerInvocationContext, *args: Any) -> Any:
@@ -275,7 +278,7 @@ def _sdk_handler(entry: _Entry) -> Callable[..., Awaitable[Any]]:
 
 
 def _explicit_of(ctx: SessionContext, operation: str) -> ServerInvocationContext:
-    """The SDK's context behind ``ctx``, a handler's with ``explicit_cancellation=True``."""
+    """Return the SDK's context behind ``ctx``, which must be a handler's with ``explicit_cancellation=True``."""
     scope = SCOPE.of(ctx)
     if scope is None or scope.sdk is None:
         raise TerminalError(f"{operation} takes a session object's ctx")
@@ -285,20 +288,28 @@ def _explicit_of(ctx: SessionContext, operation: str) -> ServerInvocationContext
 
 
 async def cancelled(ctx: SessionContext) -> None:
-    """
-    Returns when Restate cancels the invocation of ``ctx``, a handler's with
-    ``explicit_cancellation=True``, whose awaits are left as they are: for
-    code that stops its own work then (a model's request, say)::
+    """Wait until Restate cancels the invocation of ``ctx``.
+
+    For handlers declared with ``explicit_cancellation=True``, whose awaits
+    are not interrupted by a cancellation, so that they can stop their own
+    work (a model request, for example)::
 
         async def stop_when_cancelled():
             await internal.cancelled(ctx)
             await internal.cancel_calls(ctx)
 
+
         asyncio.ensure_future(stop_when_cancelled())
 
-    If the attempt ends first (the handler returned, or Restate suspended
-    it), it raises ``asyncio.CancelledError``: a task that waits for it ends
-    cancelled, quietly, as a task whose work is over does.
+    Args:
+        ctx: The context of a handler with ``explicit_cancellation=True``.
+
+    Raises:
+        asyncio.CancelledError: If the attempt ends first (the handler
+            returned, or Restate suspended it), so that a task waiting on this
+            ends quietly, as cancelled.
+        TerminalError: If ``ctx`` is not the context of a handler with
+            ``explicit_cancellation=True``.
     """
     try:
         await _preview.cancellation(_explicit_of(ctx, "cancelled"))
@@ -307,18 +318,29 @@ async def cancelled(ctx: SessionContext) -> None:
 
 
 async def cancel_calls(ctx: SessionContext) -> list[str]:
-    """
-    Cancel the calls the attempt of ``ctx`` made and that have not completed,
-    as a cancelled invocation's would be without explicit cancellation: a
-    handler's with ``explicit_cancellation=True``. Returns their invocation ids.
+    """Cancel the calls made by the attempt of ``ctx`` that have not completed yet.
+
+    This is what a cancellation does automatically for handlers without
+    explicit cancellation.
+
+    Args:
+        ctx: The context of a handler with ``explicit_cancellation=True``.
+
+    Returns:
+        The invocation ids of the cancelled calls.
+
+    Raises:
+        TerminalError: If ``ctx`` is not the context of a handler with
+            ``explicit_cancellation=True``.
     """
     return await _preview.cancel_previous_calls(_explicit_of(ctx, "cancel_calls"))
 
 
 def definition_of(ctx: SessionContext | ViewContext) -> SessionObject | None:
-    """
-    The session object whose handler or view ``ctx`` is the context of: what
-    a library keeps per object (an agent's options, say) lives on it.
+    """Return the session object whose handler or view ``ctx`` belongs to, or ``None``.
+
+    Libraries use it to find what they keep per object, such as an agent's
+    options.
     """
     scope = SCOPE.of(ctx)
     definition = scope.definition if scope is not None else None
@@ -326,7 +348,23 @@ def definition_of(ctx: SessionContext | ViewContext) -> SessionObject | None:
 
 
 async def invoke(obj: SessionObject, name: str, host: SqlHost, request: Request, *args: Any) -> Any:
-    """Run handler or view ``name`` of ``obj`` for one attempt over ``host``, a context of a test's own, without Restate."""
+    """Run one attempt of the handler or view ``name`` of ``obj`` on ``host``, without Restate.
+
+    This is for tests, which provide a ``SqlHost`` of their own.
+
+    Args:
+        obj: The session object.
+        name: The name of the handler or view.
+        host: The host that stores state and makes calls.
+        request: The request the context reports.
+        *args: The handler's input, if it takes one.
+
+    Returns:
+        The handler's result.
+
+    Raises:
+        ValueError: If ``obj`` has no handler or view named ``name``.
+    """
     entry = (ENTRIES.of(obj) or {}).get(name)
     if entry is None:
         raise ValueError(f"{obj.name}.{name} is no handler or view of a session object")
@@ -334,20 +372,42 @@ async def invoke(obj: SessionObject, name: str, host: SqlHost, request: Request,
 
 
 class SessionObject(VirtualObject):
-    """
-    A virtual object whose state is a SQL database per key.
+    """A virtual object whose state is a SQL database per key.
 
-    - ``migrations``: the steps that make each key's database, in order, applied
-      once per key by the first handler that uses it. A step that ran never
-      changes: a change is a step of its own.
-    - ``@obj.handler``: handlers run one at a time per key, each with a
-      ``SessionContext``.
-    - ``@obj.view``: views run beside the handlers, each with a
-      ``ViewContext``: they read, and write nothing.
+    A session object offers:
 
-    A name is a handler or a view, not both. The other options are the SDK's
-    virtual object's, but for its state options: a session object's state is
-    its database's.
+    - A SQL database per key, ``ctx.db``, built by ``migrations``.
+    - Handlers (``@obj.handler``), which run one at a time per key and may
+      write to the database.
+    - Views (``@obj.view``), which run alongside the handlers and only read.
+    - Calls and sends to other handlers (``ctx.call``, ``ctx.send``), and
+      sends that commit with a transaction (``tx.send``).
+
+    ::
+
+        notes = sessions.SessionObject("notes", migrations=["CREATE TABLE notes (text TEXT NOT NULL)"])
+
+    Each name is either a handler or a view, not both. The remaining options
+    are those of ``restate.VirtualObject``, minus its state options, since a
+    session object's state is its database.
+
+    Args:
+        name: The object's name, as Restate serves it.
+        migrations: The migrations that build each key's database, in order.
+            They are applied once per key, by the first handler that uses the
+            database. Never change a migration that has run; add a new one.
+        description: The object's description, shown in Restate's UI.
+        metadata: The object's metadata.
+        inactivity_timeout: Restate's inactivity timeout for its handlers.
+        abort_timeout: Restate's abort timeout for its handlers.
+        journal_retention: How long Restate keeps an invocation's journal.
+        idempotency_retention: How long Restate keeps the result of an
+            invocation with an idempotency key.
+        ingress_private: Whether only other services may call it.
+        invocation_retry_policy: How Restate retries a failed invocation.
+
+    Raises:
+        TypeError: If ``migrations`` is a string rather than a list.
     """
 
     def __init__(
@@ -372,9 +432,9 @@ class SessionObject(VirtualObject):
             abort_timeout=abort_timeout,
             journal_retention=journal_retention,
             idempotency_retention=idempotency_retention,
-            # An invocation starts with the database's head only, its first read as it opens: the rest it
-            # reads as it needs it (its tail entries and packs change keys with each flush: only the head
-            # can be named). As sdk-sessions' sqlOptions; restate-server 1.8 or later.
+            # Preload only the database's head, the first thing read when it opens; the rest is read on
+            # demand (the tail entries and packs change keys with each flush, so only the head has a fixed
+            # name). Needs restate-server 1.8 or later.
             state_preload=[HEAD_KEY],
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
@@ -386,7 +446,7 @@ class SessionObject(VirtualObject):
         return f"{type(self).__name__}({self.name!r})"
 
     def _taken(self, name: str) -> str:
-        """Why ``name`` is taken already, for the error of a second handler of that name."""
+        """Return the error message for registering ``name`` a second time."""
         return f"{self.name} has a handler or view named {name!r} already: give this one another name"
 
     @typing.overload  # type: ignore[override]
@@ -428,19 +488,36 @@ class SessionObject(VirtualObject):
         invocation_retry_policy: InvocationRetryPolicy | None = None,
         explicit_cancellation: bool = False,
     ) -> F | Callable[[F], F]:
-        """
-        A handler: it runs one at a time per key, and is the only one that
-        writes. Its function takes a ``SessionContext``, and its input, if any::
+        """Register a handler, used bare (``@obj.handler``) or with options (``@obj.handler(...)``).
+
+        Handlers run one at a time per key, and only handlers can write to the
+        database. The function takes a ``SessionContext`` and its input, if
+        any, and stays a plain function, so a test can call it directly::
 
             @notes.handler
             async def add(ctx: sessions.SessionContext, text: str) -> None:
                 await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [text])
 
-        With options, ``@notes.handler(name=..., ...)``: the SDK's handler's.
-        With ``explicit_cancellation=True``, Restate's cancellation of its
-        invocation fails no await, nor cancels its calls: the handler learns of
-        it with ``internal.cancelled(ctx)``, and decides what to stop (its calls,
-        with ``internal.cancel_calls(ctx)``), of ``restate.sessions.internal``.
+        The options are those of ``restate.VirtualObject.handler``, plus
+        ``explicit_cancellation``.
+
+        Args:
+            name: The handler's name. Defaults to the function's name.
+            explicit_cancellation: If true, cancelling the invocation neither
+                fails its awaits nor cancels its calls. The handler learns of
+                the cancellation with ``internal.cancelled(ctx)`` and decides
+                what to stop, for example its calls with
+                ``internal.cancel_calls(ctx)`` (from
+                ``restate.sessions.internal``).
+
+        Returns:
+            The function itself, or a decorator if called with options.
+
+        Raises:
+            TypeError: If the function is not an ``async def``, or is already
+                a handler.
+            ValueError: If the object already has a handler or view of that
+                name.
         """
         return self._decorate(
             False,
@@ -498,19 +575,32 @@ class SessionObject(VirtualObject):
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
     ) -> F | Callable[[F], F]:
-        """
-        A view: it runs beside the handlers, and reads the database as
-        committed when its invocation started. Its function takes a
-        ``ViewContext``, and its input, if any::
+        """Register a view, used bare (``@obj.view``) or with options (``@obj.view(...)``).
+
+        Views run alongside the handlers and read the database as it was
+        committed when the view started. The function takes a
+        ``ViewContext`` and its input, if any::
 
             @notes.view
             async def count(ctx: sessions.ViewContext) -> int:
                 row = await ctx.db.get("SELECT count(*) AS n FROM notes")
                 return row["n"] if row else 0
 
-        A view that is still running after 16 commits of the handlers fails,
-        and Restate retries it. With options, ``@notes.view(name=..., ...)``:
-        the SDK's handler's.
+        A view still running after the handlers have committed 16 times
+        fails, and Restate retries it. The options are those of
+        ``restate.VirtualObject.handler``.
+
+        Args:
+            name: The view's name. Defaults to the function's name.
+
+        Returns:
+            The function itself, or a decorator if called with options.
+
+        Raises:
+            TypeError: If the function is not an ``async def``, or is already
+                a handler.
+            ValueError: If the object already has a handler or view of that
+                name.
         """
         return self._decorate(
             True,
@@ -531,17 +621,13 @@ class SessionObject(VirtualObject):
         )
 
     def _decorate(self, view: bool, name: str | F | None, options: dict[str, Any]) -> F | Callable[[F], F]:
-        """The decorator of ``@obj.handler(...)``, or, bare (``@obj.handler``), the function it registers."""
+        """Return the decorator for ``@obj.handler(...)``, or register the function directly for a bare ``@obj.handler``."""
         if callable(name):
             return self._register(view, None, options)(name)
         return self._register(view, name, options)
 
     def _attempt_fn(self, fn: Callable[..., Awaitable[Any]], view: bool) -> Callable[..., Awaitable[Any]]:
-        """
-        What an attempt of handler (or view, with ``view``) ``fn`` runs: ``fn``
-        itself; a subclass's may wrap it (an agent's turns a model provider's
-        refusal into a terminal error).
-        """
+        """Return the function an attempt of ``fn`` runs; subclasses may wrap it (agents do)."""
         del view
         return fn
 
@@ -573,16 +659,16 @@ class SessionObject(VirtualObject):
                 _sdk_handler(entry)
             )
             sdk: Handler[Any, Any] = handler_from_callable(registered)
-            # A later attempt makes different reads than a replayed journal
-            # would have: each runs from the start, against the state as it is.
+            # Attempts are not replayed: each runs from the start, against the
+            # current state, so it may read differently from earlier attempts.
             sdk.explicit_recovery = True
             sdk.explicit_cancellation = explicit
             entries = ENTRIES.of(self)
             assert entries is not None
             entries[sdk.name] = entry
-            # The function itself, marked as the handler it is: `ctx.call(fn, ...)`
-            # and the client find it, and a test calls it with a context of
-            # its own (a fake of the protocols).
+            # Return the function itself, marked as a handler: `ctx.call(fn, ...)`
+            # and the client can find it, and a test can call it with a fake
+            # context.
             vars(fn)[RESTATE_UNIQUE_HANDLER_SYMBOL] = sdk
             return fn
 
