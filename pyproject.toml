@@ -58,8 +58,15 @@ cache-keys = [
 ]
 
 # The packages written to be fully typed: strict in both type checkers.
+# basedpyright (an editor's, say) reads this section too, as there is no
+# [tool.basedpyright] (it refuses both): the mode is set, standard, for it to
+# check what pyright does rather than its stricter default, whose Any rules
+# do not fit an SDK (Any is what a handler's input or a serialized value is).
+# Deprecations are reported, by both.
 [tool.pyright]
+typeCheckingMode = "standard"
 strict = ["python/restate/sessions", "python/restate/agents"]
+reportDeprecated = "warning"
 
 [[tool.mypy.overrides]]
 module = ["restate.sessions.*", "restate.agents.*"]

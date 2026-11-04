@@ -28,7 +28,7 @@ class Link(typing.Generic[T]):
     """A link of one kind, on the objects that have one: compared by identity, kept as long as the object is."""
 
     def __init__(self, what: str) -> None:
-        self.what = what
+        self.what: str = what
         self._links: weakref.WeakKeyDictionary[object, T] = weakref.WeakKeyDictionary()
 
     def on(self, owner: O, value: T) -> O:

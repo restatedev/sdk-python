@@ -17,6 +17,7 @@ sends each commits with (``tx.send``).
 
 from __future__ import annotations
 
+import abc
 import asyncio
 import base64
 import contextlib
@@ -25,13 +26,14 @@ import re
 import time
 import typing
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Protocol
 from urllib.parse import quote
 
+from restate._internal import PyVM  # pylint: disable=no-name-in-module
 from restate.exceptions import SuspendedException, TerminalError
 from restate.sessions._calls import CallHost, GenericSend, Send
 from restate.sessions._database import (
@@ -99,6 +101,15 @@ class SqlHost(CallHost, Protocol):
         """Call ``listener`` when the attempt ends; the returned function cancels it."""
         ...
 
+    @property
+    def vm(self) -> PyVM | None:
+        """The invocation's VM, which the store writes and reads directly; none without one (a test's host)."""
+        ...
+
+    def wait(self, handle: int) -> Awaitable[None]:
+        """Done once the VM has the read whose handle is ``handle``."""
+        ...
+
 
 @dataclass
 class ObjectConfig:
@@ -157,11 +168,6 @@ def _unbeside(name: str, key: str) -> str | None:
     return None
 
 
-def _vm_of(host: SqlHost) -> Any:
-    """The invocation's VM, if ``host`` gives it (see ``Store``): the SDK's context does."""
-    return getattr(host, "vm", None)
-
-
 class _ObjectStore:
     """
     The object's state as an ordered store: ``get`` is a state get, ``set`` and
@@ -174,14 +180,14 @@ class _ObjectStore:
     """
 
     def __init__(self, host: SqlHost, name: str | None) -> None:
-        self._host = host
-        self._name = name
-        self.vm = _vm_of(host)
-        self.database_name = name
+        self._host: SqlHost = host
+        self._name: str | None = name
+        self.vm: PyVM | None = host.vm
+        self.database_name: str | None = name
 
     def wait(self, handle: int) -> Awaitable[None]:
         """Done once the VM has the read whose handle is ``handle``."""
-        return _until_attempt_end(self._host, self._host.wait(handle))  # type: ignore[attr-defined]
+        return _until_attempt_end(self._host, self._host.wait(handle))
 
     def _key(self, key: str) -> str:
         return key if self._name is None else _beside(self._name, key)
@@ -219,23 +225,23 @@ class _ReaderStore:
     """The object's state as a view's store: it reads beside the exclusive handler, and writes nothing."""
 
     def __init__(self, host: SqlHost, name: str | None) -> None:
-        self._host = host
-        self._name = name
-        self.vm = _vm_of(host)
-        self.database_name = name
+        self._host: SqlHost = host
+        self._name: str | None = name
+        self.vm: PyVM | None = host.vm
+        self.database_name: str | None = name
 
     def wait(self, handle: int) -> Awaitable[None]:
         """Done once the VM has the read whose handle is ``handle``."""
-        return _until_attempt_end(self._host, self._host.wait(handle))  # type: ignore[attr-defined]
+        return _until_attempt_end(self._host, self._host.wait(handle))
 
     def get(self, key: str) -> Awaitable[bytes | None]:
         key = key if self._name is None else _beside(self._name, key)
         return _until_attempt_end(self._host, self._host.get(key))
 
-    def set(self, key: str, value: bytes) -> None:
+    def set(self, _key: str, _value: bytes, /) -> None:
         raise RuntimeError("a view writes no state")
 
-    def clear(self, key: str) -> None:
+    def clear(self, _key: str, /) -> None:
         raise RuntimeError("a view writes no state")
 
     async def sync(self) -> None:
@@ -307,8 +313,8 @@ class _Sends:
 
     def __init__(self) -> None:
         self._sends: list[dict[str, Any]] = []
-        self._open = True
-        self.send = Send(self._record)
+        self._open: bool = True
+        self.send: Send = Send(self._record)
 
     def _record(self, send: GenericSend) -> None:
         if not self._open:
@@ -348,12 +354,12 @@ def _refused_send(_: GenericSend) -> None:
 # --- The database, as a handler gets it -----------------------------------------------------------
 
 
-class DatabaseReader:
+class DatabaseReader(abc.ABC):
     """Reads of a database, or of one transaction of it."""
 
+    @abc.abstractmethod
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
         """The rows of one statement as lists, with the column names of the statement: ``(columns, rows)``."""
-        raise NotImplementedError
 
     async def query(self, sql: str, params: Sequence[SqlParam] | None = None) -> list[Row]:
         """
@@ -378,7 +384,7 @@ class DatabaseReader:
         return (await self.query_columns(sql, params))[1]
 
 
-class DatabaseWriter(DatabaseReader):
+class DatabaseWriter(DatabaseReader, abc.ABC):
     """SQL: a database, or one transaction of it."""
 
     async def execute(self, sql: str, params: Sequence[SqlParam] | None = None) -> None:
@@ -397,8 +403,8 @@ class Transaction(DatabaseWriter):
     """
 
     def __init__(self, handle: ConnectionTransaction, send: Send) -> None:
-        self._handle = handle
-        self.send = send
+        self._handle: ConnectionTransaction = handle
+        self.send: Send = send
 
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
         try:
@@ -415,7 +421,7 @@ class Database(DatabaseWriter):
     """
 
     def __init__(self, attempt: Attempt) -> None:
-        self._attempt = attempt
+        self._attempt: Attempt = attempt
         _ATTEMPT.on(self, attempt)
 
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
@@ -442,7 +448,7 @@ class _ReaderOf(DatabaseReader):
     """The reads of a ``Database``: a view's ``ctx.db``."""
 
     def __init__(self, db: Database) -> None:
-        self._db = db
+        self._db: Database = db
 
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
         return await self._db.query_columns(sql, params)
@@ -513,9 +519,9 @@ class _Session:
     """
 
     def __init__(self, ready: asyncio.Task[Connection], host: SqlHost) -> None:
-        self.ready = ready
+        self.ready: asyncio.Task[Connection] = ready
         # A call failed on it once a failure ended it: the next call opens another.
-        self.retired = False
+        self.retired: bool = False
         self._release: Callable[[], None] = lambda: None
         ready.add_done_callback(lambda task: self._track(task, host))
 
@@ -573,11 +579,11 @@ class Attempt:
     """
 
     def __init__(self, host: SqlHost, config: ObjectConfig | None = None, name: str | None = None) -> None:
-        self._host = host
-        self._config = config or ObjectConfig()
-        self._name = name
+        self._host: SqlHost = host
+        self._config: ObjectConfig = config or ObjectConfig()
+        self._name: str | None = name
         # The object's own database of an exclusive handler: the one with an outbox.
-        self._has_outbox = not host.shared and name is None
+        self._has_outbox: bool = not host.shared and name is None
         # The key's other databases this attempt opened, by name.
         self._databases: dict[str, Attempt] = {}
         self._session: _Session | None = None
@@ -585,8 +591,8 @@ class Attempt:
         self._made: set[str] = set()
         # The schemas this attempt's database has all the steps of, by name.
         self._ensured: dict[str, Schema] = {}
-        self._ended = False
-        self.db = Database(self)
+        self._ended: bool = False
+        self.db: Database = Database(self)
         """``ctx.db``."""
         ensuring(self.db, self._ensure)
 
@@ -643,7 +649,7 @@ class Attempt:
             _raise_for_handler(error)
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Transaction]:
+    async def transaction(self) -> AsyncGenerator[Transaction, None]:
         """
         One transaction. In the object's own database of an exclusive handler,
         its sends commit with it, in the outbox, and are made with its commit,

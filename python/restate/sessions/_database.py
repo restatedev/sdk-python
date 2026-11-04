@@ -22,12 +22,13 @@ module orders the calls and runs transactions::
 
 from __future__ import annotations
 
+import abc
 import asyncio
 import contextlib
 import contextvars
 import inspect
 import typing
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Protocol
 
@@ -92,22 +93,10 @@ class Store(Protocol):
     key's database, apart from the object's own (see ``_session.database``).
     """
 
-    def get(self, key: str) -> bytes | None | Awaitable[bytes | None]: ...
-    def set(self, key: str, value: bytes) -> None: ...
-    def clear(self, key: str) -> None: ...
+    def get(self, key: str, /) -> bytes | None | Awaitable[bytes | None]: ...
+    def set(self, key: str, value: bytes, /) -> None: ...
+    def clear(self, key: str, /) -> None: ...
     def sync(self) -> None | Awaitable[None]: ...
-
-
-class _ListsKeys(Protocol):
-    """A store that lists its keys (see ``Store``)."""
-
-    def keys(self) -> Sequence[str] | Awaitable[Sequence[str]]: ...
-
-
-class _Waits(Protocol):
-    """A store over the invocation's VM, which waits for a read (see ``Store``)."""
-
-    def wait(self, handle: int) -> Awaitable[None]: ...
 
 
 async def open(namespace: str, store: Store, *, reader: bool = False) -> Connection:  # pylint: disable=redefined-builtin
@@ -153,9 +142,12 @@ class _Boundary:
     """
 
     def __init__(self, store: Store, loop: asyncio.AbstractEventLoop) -> None:
-        self.store = store
-        self.loop = loop
-        self.lists_keys = callable(getattr(store, "keys", None))
+        self.store: Store = store
+        self.loop: asyncio.AbstractEventLoop = loop
+        # Its optional methods (see `Store`).
+        self._keys: Callable[[], Sequence[str] | Awaitable[Sequence[str]]] | None = getattr(store, "keys", None)
+        self._wait: Callable[[int], Awaitable[None]] | None = getattr(store, "wait", None)
+        self.lists_keys: bool = callable(self._keys)
         # The first error of the store's.
         self.failed: BaseException | None = None
         # What the next sync runs first: the committing transaction's.
@@ -186,9 +178,11 @@ class _Boundary:
             if op == SQL_GET:
                 result: object = self.store.get(key)
             elif op == SQL_KEYS:
-                result = typing.cast(_ListsKeys, self.store).keys()
+                assert self._keys is not None
+                result = self._keys()
             elif op == SQL_WAIT:
-                result = typing.cast(_Waits, self.store).wait(key)
+                assert self._wait is not None
+                result = self._wait(key)
             elif self._write_failed is not None:
                 reply(None, str(self._write_failed))
                 return
@@ -238,16 +232,16 @@ def objects_of(columns: list[str], rows: Rows) -> list[Row]:
     return [dict(zip(columns, row, strict=True)) for row in rows]
 
 
-class _Sql:
+class _Sql(abc.ABC):
     """SQL on a session of the extension: ``query``, ``get``, ``values`` and ``execute`` by way of ``query_columns``."""
 
     def __init__(self, native: PySqlDatabase, boundary: _Boundary) -> None:
-        self._native = native
-        self._boundary = boundary
+        self._native: PySqlDatabase = native
+        self._boundary: _Boundary = boundary
 
+    @abc.abstractmethod
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
         """The rows of one statement, with its column names: ``(columns, rows)``."""
-        raise NotImplementedError
 
     async def query(self, sql: str, params: Sequence[SqlParam] | None = None) -> list[Row]:
         """
@@ -319,10 +313,10 @@ class Connection(_Sql):
     def __init__(self, native: PySqlDatabase, boundary: _Boundary) -> None:
         super().__init__(native, boundary)
         # FIFO: calls run in the order they were made.
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock = asyncio.Lock()
 
     @asynccontextmanager
-    async def _serial(self) -> AsyncIterator[None]:
+    async def _serial(self) -> AsyncGenerator[None, None]:
         """Run the body once the calls before it have, unless it comes from the body of a transaction it would wait for."""
         running = _running.get()
         if running is not None and running.holds(self):
@@ -335,7 +329,7 @@ class Connection(_Sql):
             return await self._request(lambda: self._native.query_columns(sql, params))
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[ConnectionTransaction]:
+    async def transaction(self) -> AsyncGenerator[ConnectionTransaction, None]:
         """
         One SQL transaction, as the body of an ``async with``::
 
@@ -417,14 +411,14 @@ class ConnectionTransaction(_Sql):
         self, native: PySqlDatabase, boundary: _Boundary, connection: Connection, outer: ConnectionTransaction | None
     ) -> None:
         super().__init__(native, boundary)
-        self._connection = connection
+        self._connection: Connection = connection
         # The transaction whose body this one's runs in, if any: of another
         # connection, since a connection's own are refused.
-        self._outer = outer
+        self._outer: ConnectionTransaction | None = outer
         self._records: dict[str, bytes] = {}
         self._with_commits: list[Callable[[], None]] = []
-        self._lock = asyncio.Lock()
-        self._ended = False
+        self._lock: asyncio.Lock = asyncio.Lock()
+        self._ended: bool = False
 
     @property
     def open(self) -> bool:
@@ -492,7 +486,7 @@ class ConnectionTransaction(_Sql):
         return run_all
 
     @asynccontextmanager
-    async def _serial(self) -> AsyncIterator[None]:
+    async def _serial(self) -> AsyncGenerator[None, None]:
         """Run the body, a call made while the transaction is open, once the calls before it have."""
         self._refuse_ended()
         async with self._lock:

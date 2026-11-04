@@ -24,8 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import typing
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 from restate.exceptions import SdkInternalException, SuspendedException, TerminalError
@@ -59,7 +58,7 @@ class SelectorDriver(Protocol):
         """Writes out what the VM has buffered."""
         ...
 
-    async def receive(self) -> dict[str, Any]:
+    async def receive(self) -> Mapping[str, Any]:
         """The next input event: a chunk of the request body, a disconnect, or a restate.* event."""
         ...
 
@@ -71,7 +70,7 @@ class SelectorDriver(Protocol):
         """Starts the run of ``handle``, which signals its completion through ``receive``."""
         ...
 
-    def notify_input(self, chunk: dict[str, Any]) -> None:
+    def notify_input(self, chunk: Mapping[str, Any]) -> None:
         """Passes a chunk of the request body to the VM."""
         ...
 
@@ -106,12 +105,12 @@ class FutureSelector:
     """
 
     def __init__(self, driver: SelectorDriver, disconnected: Callable[[], BaseException]) -> None:
-        self._driver = driver
-        self._disconnected = disconnected
+        self._driver: SelectorDriver = driver
+        self._disconnected: Callable[[], BaseException] = disconnected
         self._waits: dict[asyncio.Future[None], UnresolvedFuture] = {}
         self._task: asyncio.Task[None] | None = None
         # Between the VM's WaitExternalProgress and the next input.
-        self._waiting = False
+        self._waiting: bool = False
         # Why the attempt ended, once it has: each wait then raises a new one.
         self._end: Callable[[], BaseException] | None = None
 
@@ -243,8 +242,8 @@ class _ContextDriver:
     """What the selector needs of the SDK's context."""
 
     def __init__(self, context: ServerInvocationContext, on_end: Callable[[], None]) -> None:
-        self.context = context
-        self.on_end = on_end
+        self.context: ServerInvocationContext = context
+        self.on_end: Callable[[], None] = on_end
 
     def do_progress(self, future: UnresolvedFuture) -> Any:
         return self.context.vm.do_progress(future)
@@ -255,8 +254,8 @@ class _ContextDriver:
     async def flush_output(self) -> None:
         await self.context.take_and_send_output()
 
-    async def receive(self) -> dict[str, Any]:
-        return typing.cast(dict[str, Any], await self.context.receive())
+    async def receive(self) -> Mapping[str, Any]:
+        return await self.context.receive()
 
     def wake(self) -> None:
         # Any restate.* event: the loop takes it as a wake-up.
@@ -275,7 +274,7 @@ class _ContextDriver:
 
         self.track(asyncio.create_task(run()))
 
-    def notify_input(self, chunk: dict[str, Any]) -> None:
+    def notify_input(self, chunk: Mapping[str, Any]) -> None:
         # Skip empty body frames, as the SDK does.
         body = chunk.get("body")
         if body is not None and len(body) > 0:
@@ -313,7 +312,7 @@ def hook(context: ServerInvocationContext, on_end: Callable[[], None]) -> Future
 
     for name in ("create_future", "create_sleep_future", "create_call_future"):
         setattr(context, name, starting(getattr(context, name)))
-    context.create_poll_or_cancel_coroutine = selector.wait  # type: ignore[method-assign,assignment]
+    context.create_poll_or_cancel_coroutine = selector.wait  # type: ignore[method-assign,assignment]  # pyright: ignore[reportAttributeAccessIssue]
     return selector
 
 
