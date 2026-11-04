@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import typing
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
@@ -48,6 +49,7 @@ from restate.sessions._calls import Caller, Sender, send_now
 from restate.sessions._database import Store
 from restate.sessions._link import Link
 from restate.sessions._schema import Schema, Step
+from restate.sessions._scope import SCOPE, Scope
 from restate.sessions._selector import FutureSelector, hook
 from restate.sessions._session import Attempt, ObjectConfig, SqlHost, reader_of, with_attempt
 from restate.vm import SingleUnresolvedFuture
@@ -208,26 +210,14 @@ def _cancel_of(host: Any) -> Cancel:
 
 
 @dataclass(frozen=True)
-class Scope:
-    """An attempt's own, as this package made it, on its context (``SCOPE``)."""
-
-    sdk: ServerInvocationContext | None
-    """The SDK's context of the attempt: none over a test's own host."""
-    explicit_cancellation: bool = False
-    """Whether its handler has ``explicit_cancellation=True``."""
-
-
-SCOPE: Link[Scope] = Link("scope")
-"""The attempt's scope, on its context."""
-
-
-@dataclass(frozen=True)
 class _Entry:
     """A handler or view of a session object: its function, kind, and object's config."""
 
     fn: Callable[..., Awaitable[Any]]
     view: bool
     config: ObjectConfig
+    definition: weakref.ref[SessionObject]
+    """Its session object, weakly: the object's entries, which it holds, hold this."""
     explicit_cancellation: bool = False
 
 
@@ -239,13 +229,15 @@ def _context_of(entry: _Entry, host: SqlHost, request: Request, attempt: Attempt
     """The context of an attempt of ``entry``."""
     rpc = Caller(host)
     cancel = _cancel_of(host)
+    sdk = typing.cast("ServerInvocationContext | None", getattr(host, "context", None))
+    scope = Scope(sdk=sdk, explicit_cancellation=entry.explicit_cancellation, definition=entry.definition())
     if entry.view:
-        return AttemptViewContext(key=host.key, request=request, db=reader_of(attempt.db), rpc=rpc, cancel=cancel)
+        view = AttemptViewContext(key=host.key, request=request, db=reader_of(attempt.db), rpc=rpc, cancel=cancel)
+        return SCOPE.on(view, scope)
     context = AttemptContext(
         key=host.key, request=request, db=attempt.db, rpc=rpc, send=Sender(send_now(host)), cancel=cancel
     )
-    sdk = typing.cast("ServerInvocationContext | None", getattr(host, "context", None))
-    return SCOPE.on(context, Scope(sdk=sdk, explicit_cancellation=entry.explicit_cancellation))
+    return SCOPE.on(context, scope)
 
 
 async def _attempt(entry: _Entry, host: SqlHost, request: Request, args: Sequence[Any]) -> Any:
@@ -284,8 +276,8 @@ async def cancelled(ctx: SessionContext) -> None:
     code that stops its own work then (a model's request, say)::
 
         async def stop_when_cancelled():
-            await sessions.cancelled(ctx)
-            await sessions.cancel_calls(ctx)
+            await internal.cancelled(ctx)
+            await internal.cancel_calls(ctx)
 
         asyncio.ensure_future(stop_when_cancelled())
 
@@ -306,6 +298,16 @@ async def cancel_calls(ctx: SessionContext) -> list[str]:
     handler's with ``explicit_cancellation=True``. Returns their invocation ids.
     """
     return await _preview.cancel_previous_calls(_explicit_of(ctx, "cancel_calls"))
+
+
+def definition_of(ctx: SessionContext | ViewContext) -> SessionObject | None:
+    """
+    The session object whose handler or view ``ctx`` is the context of: what
+    a library keeps per object (an agent's options, say) lives on it.
+    """
+    scope = SCOPE.of(ctx)
+    definition = scope.definition if scope is not None else None
+    return definition if isinstance(definition, SessionObject) else None
 
 
 async def invoke(obj: SessionObject, name: str, host: SqlHost, request: Request, *args: Any) -> Any:
@@ -415,8 +417,8 @@ class SessionObject(VirtualObject):
         With options, ``@notes.handler(name=..., ...)``: the SDK's handler's.
         With ``explicit_cancellation=True``, Restate's cancellation of its
         invocation fails no await, nor cancels its calls: the handler learns of
-        it with ``sessions.cancelled(ctx)``, and decides what to stop (its calls,
-        with ``sessions.cancel_calls(ctx)``).
+        it with ``internal.cancelled(ctx)``, and decides what to stop (its calls,
+        with ``internal.cancel_calls(ctx)``), of ``restate.sessions.internal``.
         """
         return self._decorate(
             False,
@@ -523,7 +525,9 @@ class SessionObject(VirtualObject):
                 raise TypeError(f"{what} {instead}")
             explicit = bool(options.get("explicit_cancellation"))
             sdk_options = {key: value for key, value in options.items() if key != "explicit_cancellation"}
-            entry = _Entry(fn=fn, view=view, config=self.config, explicit_cancellation=explicit)
+            entry = _Entry(
+                fn=fn, view=view, config=self.config, definition=weakref.ref(self), explicit_cancellation=explicit
+            )
             registered = VirtualObject.handler(self, name, kind="shared" if view else "exclusive", **sdk_options)(
                 _sdk_handler(entry)
             )
@@ -549,4 +553,4 @@ class SessionObject(VirtualObject):
         return self
 
 
-__all__ = ["SessionObject", "cancel_calls", "cancelled"]
+__all__ = ["SessionObject", "cancel_calls", "cancelled", "definition_of"]

@@ -22,6 +22,7 @@ import pytest
 
 import restate
 from restate import sessions
+from restate.sessions import internal
 from restate.context import AttemptFinishedEvent, Request
 from restate.exceptions import TerminalError
 from restate.handler import handler_from_callable
@@ -359,7 +360,7 @@ async def test_another_database_of_the_key_is_apart_from_the_objects_own():
 
     @multi.handler()
     async def both(ctx: sessions.SessionContext) -> list[str]:
-        other = sessions.database(ctx.db, "other")
+        other = internal.database(ctx.db, "other")
         await other.execute("CREATE TABLE apart (b INTEGER)")
         rows = await other.query("SELECT name FROM sqlite_schema WHERE type = 'table'")
         return [typing.cast(str, row["name"]) for row in rows]
@@ -380,7 +381,7 @@ async def test_reset_empties_the_database_and_applies_the_schema_again():
     @resettable.handler()
     async def empty(ctx: sessions.SessionContext) -> list[Any]:
         async with ctx.db.transaction() as tx:
-            await sessions.reset(tx)
+            await internal.reset(tx)
             await tx.execute("INSERT INTO t VALUES (2)")
         return await ctx.db.values("SELECT name FROM sqlite_schema WHERE type = 'table' UNION ALL SELECT a FROM t")
 
@@ -454,11 +455,11 @@ async def test_cancelled_takes_the_ctx_of_a_handler_with_explicit_cancellation()
 
     @obj.handler
     async def implicit(ctx: sessions.SessionContext) -> None:
-        await sessions.cancelled(ctx)
+        await internal.cancelled(ctx)
 
     @obj.handler(explicit_cancellation=True)
     async def explicit(ctx: sessions.SessionContext) -> None:
-        await sessions.cancel_calls(ctx)
+        await internal.cancel_calls(ctx)
 
     assert not obj.handlers["implicit"].explicit_cancellation
     assert obj.handlers["explicit"].explicit_cancellation
@@ -470,7 +471,7 @@ async def test_cancelled_takes_the_ctx_of_a_handler_with_explicit_cancellation()
 async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first(monkeypatch):
     from restate import _preview  # pylint: disable=import-outside-toplevel
     from restate.exceptions import SuspendedException  # pylint: disable=import-outside-toplevel
-    from restate.sessions import _calls, _object  # pylint: disable=import-outside-toplevel
+    from restate.sessions import _calls, _object, _scope  # pylint: disable=import-outside-toplevel
 
     async def attempt_ended(_sdk: Any) -> None:
         raise SuspendedException()
@@ -485,8 +486,8 @@ async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first(m
         send=_calls.Sender(lambda send: None),
         cancel=lambda invocation_id: None,
     )
-    _object.SCOPE.on(ctx, _object.Scope(sdk=typing.cast(Any, object()), explicit_cancellation=True))
-    watcher = asyncio.ensure_future(sessions.cancelled(ctx))
+    _scope.SCOPE.on(ctx, _scope.Scope(sdk=typing.cast(Any, object()), explicit_cancellation=True))
+    watcher = asyncio.ensure_future(internal.cancelled(ctx))
     await asyncio.wait({watcher})
     # Cancelled, not failed: asyncio reports no exception nobody retrieved.
     assert watcher.cancelled()
@@ -538,3 +539,96 @@ async def test_a_handler_runs_over_a_fake_context_of_a_test():
     assert fake.db.statements == [("INSERT INTO notes (text) VALUES (?)", ["milk"])]
     # And the function is still the handler that calls and the client name.
     assert handler_from_callable(add).name == "add"
+
+
+TURNS: internal.ScopeKey[list[str]] = internal.ScopeKey("the turns of a test")
+
+
+async def test_a_scope_key_keeps_its_value_for_the_attempt_and_a_new_attempt_starts_without_it():
+    scoped = sessions.SessionObject("scoped")
+
+    @scoped.handler
+    async def turn(ctx: sessions.SessionContext, text: str) -> list[str]:
+        seen_before = TURNS.get(ctx)
+        turns = TURNS.of(ctx, list)
+        turns.append(text)
+        # `of` makes it once: the same list, for the attempt.
+        assert TURNS.of(ctx, list) is turns
+        return [*(seen_before or []), *turns]
+
+    @scoped.view
+    async def peek(ctx: sessions.ViewContext) -> list[str]:
+        TURNS.set(ctx, ["view"])
+        value = TURNS.get(ctx)
+        TURNS.delete(ctx)
+        assert TURNS.get(ctx) is None
+        return value or []
+
+    host = Host(Backend(), service="scoped")
+    assert await run(scoped, "turn", host, "a") == ["a"]
+    # Another attempt, another scope: it starts without what the first kept.
+    assert await run(scoped, "turn", host, "b") == ["b"]
+    assert await run(scoped, "peek", host.view()) == ["view"]
+
+
+async def test_definition_of_gives_the_session_object_of_a_handler_or_a_view():
+    defined = sessions.SessionObject("defined")
+
+    @defined.handler
+    async def handled(ctx: sessions.SessionContext) -> bool:
+        return internal.definition_of(ctx) is defined
+
+    @defined.view
+    async def viewed(ctx: sessions.ViewContext) -> bool:
+        return internal.definition_of(ctx) is defined
+
+    host = Host(Backend(), service="defined")
+    assert await run(defined, "handled", host)
+    assert await run(defined, "viewed", host.view())
+
+
+def test_a_scope_key_takes_the_context_of_a_session_object():
+    with pytest.raises(TypeError, match="takes the context of a session object's handler or view"):
+        TURNS.get(FakeContext(db=FakeDatabase()))
+    assert internal.definition_of(FakeContext(db=FakeDatabase())) is None
+
+
+def test_served_adds_what_each_service_needs_once_and_serve_only_picks():
+    companion = restate.VirtualObject("companion")
+    helper = restate.Service("helper")
+    first = internal.needing(sessions.SessionObject("first"), lambda: [companion, helper])
+    second = internal.needing(sessions.SessionObject("second"), lambda: [companion])
+    internal.needing(companion, lambda: [helper])
+
+    assert [s.name for s in internal.served([first, second])] == ["first", "companion", "helper", "second"]
+    assert [s.name for s in internal.served([first, second], "second, helper")] == ["helper", "second"]
+    with pytest.raises(ValueError, match="RESTATE_SERVE_ONLY names nowhere"):
+        internal.served([first], "nowhere")
+
+
+def test_app_serves_what_restate_serve_only_names(monkeypatch):
+    companion = restate.VirtualObject("companion2")
+    first = internal.needing(sessions.SessionObject("first2"), lambda: [companion])
+    monkeypatch.setenv("RESTATE_SERVE_ONLY", "companion2")
+    assert callable(sessions.app(first))
+    monkeypatch.setenv("RESTATE_SERVE_ONLY", "unknown")
+    with pytest.raises(ValueError, match="RESTATE_SERVE_ONLY names unknown"):
+        sessions.app(first)
+
+
+async def test_an_attempt_is_freed_once_it_ends():
+    import gc  # pylint: disable=import-outside-toplevel
+    import weakref  # pylint: disable=import-outside-toplevel
+
+    kept: list[weakref.ref[Any]] = []
+    freed = sessions.SessionObject("freed", schema=["CREATE TABLE t (a INTEGER)"])
+
+    @freed.handler
+    async def use(ctx: sessions.SessionContext) -> None:
+        await internal.database(ctx.db, "other").execute("CREATE TABLE IF NOT EXISTS u (b INTEGER)")
+        kept.append(weakref.ref(ctx.db))
+
+    await run(freed, "use", Host(Backend(), service="freed"))
+    gc.collect()
+    # Nothing of this package's holds an attempt's database (and so the attempt) past it.
+    assert kept[0]() is None

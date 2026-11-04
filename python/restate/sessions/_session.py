@@ -440,8 +440,8 @@ def reader_of(db: AttemptDatabase) -> DatabaseReader:
 
 _DATABASE_NAME = re.compile(r"^[\w.-]{1,64}$")
 
-_ATTEMPT: Link[Attempt] = Link("database")
-"""The attempt of a ``ctx.db``: for ``database``."""
+_ATTEMPT: Link[Attempt] = Link("database", weak=True)
+"""The attempt of a ``ctx.db``, which keeps it alive (and refers to it): for ``database``."""
 
 _RESET: Link[Callable[[], Awaitable[None]]] = Link("reset")
 """How a transaction of an exclusive handler's ``ctx.db`` empties the database: for ``reset``."""

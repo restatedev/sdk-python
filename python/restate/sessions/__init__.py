@@ -28,14 +28,16 @@ object's state (``ctx.db``). The Python variant of ``@restatedev/sessions``::
         return [row["text"] for row in await ctx.db.query("SELECT text FROM notes ORDER BY rowid")]
 
 
-    app = restate.app([notes])
+    app = sessions.app(notes)  # with what it needs beside it; hypercorn module:app
 
 Session handlers don't replay a journal: a retried attempt runs again from its
 first line, against what the attempts before it committed.
 
 The types a handler gets (``SessionContext``, ``Database``, ``Transaction``,
 ``Rpc``, ``Send``, ...) are protocols: a decorated handler is still the plain
-function, so a test can call it with a fake context of its own. A session object
+function, so a test can call it with a fake context of its own. What libraries
+built on session objects, and tests, need beside this is in
+``restate.sessions.internal``. A session object
 serves beside the SDK's services, objects and workflows, which it calls with
 ``ctx.rpc`` for journaled work.
 """
@@ -54,9 +56,9 @@ from restate.sessions._api import (
 )
 from restate.sessions._calls import CallFuture
 from restate.sessions._database import Row, Rows, SqlError, SqlParam, SqlValue
-from restate.sessions._object import SessionObject, cancel_calls, cancelled
-from restate.sessions._schema import Schema, Step
-from restate.sessions._session import database, reset
+from restate.sessions._object import SessionObject
+from restate.sessions._schema import Step
+from restate.sessions._serve import app
 
 __all__ = [
     "CallFuture",
@@ -67,7 +69,6 @@ __all__ = [
     "Row",
     "Rows",
     "Rpc",
-    "Schema",
     "Send",
     "SessionContext",
     "SessionObject",
@@ -77,8 +78,5 @@ __all__ = [
     "Step",
     "Transaction",
     "ViewContext",
-    "cancel_calls",
-    "cancelled",
-    "database",
-    "reset",
+    "app",
 ]
