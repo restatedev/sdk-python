@@ -31,12 +31,16 @@ the run resumes from the last step stored:
 - A tool's error fails the attempt, and Restate retries it. A
   ``restate.TerminalError``, which a retry would only repeat, is instead the
   tool's answer to the model.
+- A guardrail's tripwire fails the prompt for good, and the reply it blocked
+  is dropped from the conversation. A stored reply becomes the answer
+  without asking again only if its agent has no output guardrails.
 - Each message is answered once per invocation: its answer is stored under the
   prompt's id, and a retried attempt returns it.
 """
 
 from __future__ import annotations
 
+import collections
 import contextvars
 import dataclasses
 import json
@@ -136,6 +140,33 @@ class _Stored:
     def tagged(self, tag: str) -> list[int]:
         return [n for n, t in self.tags.items() if t == tag]
 
+    def replaced(self, items: list[Item]) -> _Stored:
+        """Return the conversation as ``items``, a new version of it, with each item keeping its tag.
+
+        An item keeps the tag of the stored item it equals, in order, wherever
+        it is now: a handoff's ``input_filter`` may have dropped items before it.
+        """
+        stored: dict[str, collections.deque[str | None]] = {}
+        for n, item in enumerate(self.items):
+            stored.setdefault(_dumped(item), collections.deque()).append(self.tags.get(n))
+        tags: dict[int, str] = {}
+        for n, item in enumerate(items):
+            same = stored.get(_dumped(item))
+            tag = same.popleft() if same else None
+            if tag is not None:
+                tags[n] = tag
+        return _Stored(items, tags)
+
+    def without(self, tag: str) -> _Stored:
+        """Return the conversation without the items tagged ``tag`` (a reply)."""
+        kept = [n for n in range(len(self.items)) if self.tags.get(n) != tag]
+        return _Stored([self.items[n] for n in kept], {i: self.tags[n] for i, n in enumerate(kept) if n in self.tags})
+
+    def last_reply(self) -> str | None:
+        """Return the tag of the model's reply that the conversation ends with, if it ends with one."""
+        tag = self.tags.get(len(self.items) - 1)
+        return tag if tag is not None and tag.startswith("response:") else None
+
     def prompts(self) -> list[str]:
         """Return the ids of the prompts in the conversation, in order."""
         return [t.removeprefix("prompt:") for _, t in sorted(self.tags.items()) if t.startswith("prompt:")]
@@ -203,6 +234,15 @@ class _Conversation:
 # --- The conversation's shape ---------------------------------------------------------------------
 
 
+def _dumped(item: Item) -> str:
+    return json.dumps(item, sort_keys=True)
+
+
+def _agent_of(reply: str) -> str:
+    """Return the name of the agent whose reply is tagged ``reply`` (``response:<id>:<agent>``)."""
+    return reply.split(":", 2)[-1]
+
+
 def _unanswered(items: list[Item]) -> list[Item]:
     """Return the function calls of ``items`` that have no output."""
     answered = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
@@ -220,10 +260,8 @@ def _text(item: Item) -> str:
 
 def _final_reply(stored: _Stored) -> str | None:
     """Return the text of the conversation's last reply if it is a final one: a message, and no function calls."""
-    if not stored.items:
-        return None
-    tag = stored.tags.get(len(stored.items) - 1, "")
-    if not tag.startswith("response:"):
+    tag = stored.last_reply()
+    if tag is None:
         return None
     reply = [stored.items[n] for n in stored.tagged(tag)]
     messages = [item for item in reply if item.get("type", "message") == "message" and item.get("role") == "assistant"]
@@ -267,7 +305,7 @@ class _Run(RunHooks[Any]):
         """The name of the agent the conversation is with."""
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
-        self.stored = _Stored(typing.cast(list[Item], list(data.model_data.input)), self.stored.tags)
+        self.stored = self.stored.replaced(typing.cast(list[Item], list(data.model_data.input)))
         await self.conversation.save(self.stored)
         return data.model_data
 
@@ -294,8 +332,26 @@ class _Run(RunHooks[Any]):
         """Run on from the stored conversation, with the agent it is with, and return the ``Runner``'s result."""
         agent = await _unwrapped(self.ctx, self.resume(everyone.get(self.agent, root), everyone))
         filtered = dataclasses.replace(config, call_model_input_filter=self.model_input)
-        items = typing.cast(Any, self.stored.items)
-        return await _unwrapped(self.ctx, Runner.run(agent, items, hooks=self, run_config=filtered))
+        result = await _unwrapped(self.ctx, self._guarded(agent, filtered))
+        # The items the run ended with, which no model request stored: those of a tool that ends the turn, say.
+        self.stored = self.stored.replaced(typing.cast(list[Item], result.to_input_list()))
+        await self.conversation.save(self.stored)
+        return result
+
+    async def _guarded(self, agent: Agent[Any], config: RunConfig) -> Any:
+        """Run the ``Runner``; a reply that a guardrail's tripwire blocked is dropped, and the prompt fails for good."""
+        try:
+            return await Runner.run(agent, typing.cast(Any, self.stored.items), hooks=self, run_config=config)
+        except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:
+            await self.drop_last_reply()
+            raise TerminalError(str(error)) from error
+
+    async def drop_last_reply(self) -> None:
+        """Drop the model's reply that the conversation ends with, if it ends with one."""
+        tag = self.stored.last_reply()
+        if tag is not None:
+            self.stored = self.stored.without(tag)
+            await self.conversation.save(self.stored)
 
     async def resume(self, agent: Agent[Any], everyone: dict[str, Agent[Any]]) -> Agent[Any]:
         """Resume from a reply whose tool calls have no outputs (cut off by a crash), and return the agent to run.
@@ -308,6 +364,9 @@ class _Run(RunHooks[Any]):
         calls = _unanswered(self.stored.items)
         if not calls:
             return agent
+        # The agent whose reply it is, which a handoff may since have passed the conversation on from.
+        cut = self.stored.tags.get(self.stored.items.index(calls[0]), "")
+        agent = everyone.get(_agent_of(cut), agent)
         found = {tool.name: tool for tool in await agent.get_all_tools(RunContextWrapper(None))}
         known = {*found, *(_handoff_name(h) for h in agent.handoffs)}
         if all(
@@ -317,13 +376,7 @@ class _Run(RunHooks[Any]):
             outputs = [await self._output_of(call, found.get(str(call.get("name")))) for call in calls]
             self.stored = _Stored([*self.stored.items, *outputs], self.stored.tags)
         else:
-            cut = self.stored.tags.get(self.stored.items.index(calls[0]), "")
-            kept = [n for n in range(len(self.stored.items)) if not cut or self.stored.tags.get(n) != cut]
-            self.stored = _Stored(
-                [self.stored.items[n] for n in kept],
-                {i: self.stored.tags[n] for i, n in enumerate(kept) if n in self.stored.tags},
-            )
-            agent = everyone.get(cut.split(":", 2)[-1], agent)
+            self.stored = self.stored.without(cut)
         await self.conversation.save(self.stored)
         return agent
 
@@ -351,8 +404,7 @@ def _output(value: Any) -> str:
 async def _unwrapped(ctx: SessionContext, work: typing.Awaitable[Any]) -> Any:
     """Await ``work``, raising a tool's error as the tool raised it rather than as the SDK wraps it.
 
-    Errors that a retry would only repeat (too many turns, a guardrail's
-    tripwire) become terminal.
+    Too many turns, which a retry would only repeat, become terminal.
     """
     try:
         return await work
@@ -363,7 +415,7 @@ async def _unwrapped(ctx: SessionContext, work: typing.Awaitable[Any]) -> Any:
             from_tool(ctx, cause)
             raise cause from None
         raise
-    except (MaxTurnsExceeded, InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:
+    except MaxTurnsExceeded as error:
         raise TerminalError(str(error)) from error
 
 
@@ -459,9 +511,15 @@ async def _answer_once(
         asked = stored.prompts()
         running = asked[-1] if asked and await conversation.answer_of(asked[-1]) is None else None
         if running is not None and (final := _final_reply(stored)) is not None:
-            # The run had stored its final reply, but not yet its answer: store it, rather than ask the model again.
-            await conversation.answer(running, final)
-            continue
+            reply = stored.last_reply() or ""
+            replier = everyone.get(_agent_of(reply), root)
+            if not (replier.output_guardrails or config.output_guardrails):
+                # The run had stored its final reply, but not its answer: store it, rather than ask the model again.
+                await conversation.answer(running, final)
+                continue
+            # Its output guardrails may not have passed it: ask again, and the guardrails run on the new reply.
+            stored = stored.without(reply)
+            await conversation.save(stored)
         if running is None:
             running = prompt_id
             stored.tags[len(stored.items)] = f"prompt:{prompt_id}"

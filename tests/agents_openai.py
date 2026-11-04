@@ -15,6 +15,7 @@
 import asyncio
 import collections
 import copy
+import json
 import typing
 import uuid
 from collections.abc import Awaitable, Callable
@@ -25,7 +26,18 @@ import pytest
 
 pytest.importorskip("agents")
 
-from agents import Agent, Model, ModelResponse, Usage, set_tracing_disabled  # noqa: E402
+from agents import (  # noqa: E402
+    Agent,
+    GuardrailFunctionOutput,
+    Model,
+    ModelResponse,
+    RunContextWrapper,
+    Usage,
+    handoff,
+    output_guardrail,
+    set_tracing_disabled,
+)
+from agents.extensions import handoff_filters  # noqa: E402
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText  # noqa: E402
 
 import restate  # noqa: E402
@@ -105,7 +117,12 @@ def reply(system: str | None, items: list[Item]) -> list[Output]:
     if word == "loop":
         return [calls(f"call-{uuid.uuid4().hex}", "get_weather", f'{{"city": "{rest}"}}')]
     names = {"weather": "get_weather", "crash": "flaky", "wait": "blocking", "wrong": "get_weather"}
-    names |= {"unknown": "nonexistent", "forbidden": "forbidden", "handoff": "transfer_to_refunds"}
+    names |= {"unknown": "nonexistent", "forbidden": "forbidden", "handoff": "transfer_to_refunds", "book": "book"}
+    if word == "secret":
+        return [said("the SECRET is 42")]
+    if word == "handoff" and system == "You handle refunds." and result is None:
+        # The refunds agent, handed the conversation without the handoff (a filter took it out).
+        return [said(f"refunds: {rest}")]
     if word in names and result is None:
         arguments = '{"town": 3}' if word == "wrong" else "{}" if word == "handoff" else f'{{"city": "{rest}"}}'
         return [calls(f"call-{rest}", names[word], arguments)]
@@ -411,3 +428,123 @@ def test_a_model_of_another_provider_is_refused():
 def test_an_agent_of_your_own_takes_no_system():
     with pytest.raises(TypeError, match="pass no system"):
         openai.agent("mine", Agent(name="mine"), system="theirs")
+
+
+# --- In process: an Agent of your own's options ---------------------------------------------------
+
+
+def invoker(obj: sessions.SessionObject) -> Callable[..., Awaitable[Any]]:
+    """Invoke ``obj``'s ``ask`` in one backend: with an invocation's request to retry it, or a new one."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    backend = Backend()
+
+    async def ask(text: str, invocation: Any = None) -> Any:
+        host = Host(backend, service="asker", answers=PUBLISHED)
+        return await invoke(obj, "ask", host, invocation or request(), text)
+
+    return ask
+
+
+def crash_once_after(monkeypatch: pytest.MonkeyPatch, hook: str, when: Callable[..., bool]) -> None:
+    """Make ``_Run.<hook>`` crash, once, after it has run for arguments that ``when`` accepts."""
+    from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
+
+    original = getattr(_agent._Run, hook)  # pyright: ignore[reportPrivateUsage]
+    crashed: list[bool] = []
+
+    async def then_crash(self: Any, *args: Any) -> None:
+        await original(self, *args)
+        if not crashed and when(*args):
+            crashed.append(True)
+            raise RuntimeError(f"the process crashed after {hook}")
+
+    monkeypatch.setattr(_agent._Run, hook, then_crash)  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_tool_that_ends_the_turn_is_stored_and_not_run_again():
+    runs: list[str] = []
+
+    @tool
+    async def book(city: str) -> str:
+        """Book a trip."""
+        runs.append(city)
+        return f"booked {city}"
+
+    scripted = Scripted(reply)
+    booker = Agent(name="booker", model=scripted, tools=openai.tools([book]), tool_use_behavior="stop_on_first_tool")
+    ask = invoker(asker(agent=booker))
+    assert await ask("book Rome") == "booked Rome"
+    assert await ask("hi there") == "echo: hi there"
+    assert runs == ["Rome"]
+    _, items = scripted.requests[-1]
+    assert [i.get("type", "message") for i in items] == ["message", "function_call", "function_call_output", "message"]
+
+
+@output_guardrail
+async def no_secrets(context: RunContextWrapper[Any], agent: Agent[Any], output: Any) -> GuardrailFunctionOutput:
+    return GuardrailFunctionOutput(output_info=None, tripwire_triggered="SECRET" in str(output))
+
+
+async def test_a_reply_an_output_guardrail_blocks_is_not_kept():
+    scripted = Scripted(reply)
+    ask = invoker(asker(agent=Agent(name="guarded", model=scripted, output_guardrails=[no_secrets])))
+    with pytest.raises(restate.TerminalError, match="[Gg]uardrail"):
+        await ask("secret now")
+    assert await ask("hi there") == "echo: hi there"
+    _, items = scripted.requests[-1]
+    assert not any("SECRET" in json.dumps(item) for item in items)
+
+
+async def test_a_stored_reply_is_not_the_answer_before_its_output_guardrails_pass(monkeypatch: pytest.MonkeyPatch):
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
+    ask = invoker(asker(agent=Agent(name="guarded", model=Scripted(reply), output_guardrails=[no_secrets])))
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("secret now", invocation)
+    with pytest.raises(restate.TerminalError, match="[Gg]uardrail"):
+        await ask("secret now", invocation)
+
+
+async def test_a_handoff_input_filter_keeps_each_prompt_marked(monkeypatch: pytest.MonkeyPatch):
+    scripted = Scripted(reply)
+    refunds = Agent(name="refunds", instructions="You handle refunds.", model=scripted)
+    filtered = handoff(refunds, input_filter=handoff_filters.remove_all_tools)
+    triage = Agent(
+        name="triage",
+        instructions="You triage.",
+        model=scripted,
+        tools=openai.tools([get_weather]),
+        handoffs=[filtered],
+    )
+    ask = invoker(asker(agent=triage))
+    assert await ask("weather Rome") == "tool said: sunny in Rome"
+    # The refunds agent's reply is stored, then the process crashes: the retry finds it as the prompt's answer.
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: agent.name == "refunds")
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("handoff x", invocation)
+    asked = len(scripted.requests)
+    assert await ask("handoff x", invocation) == "refunds: x"
+    assert len(scripted.requests) == asked
+
+
+async def test_a_reply_cut_off_after_its_handoff_started_is_resumed_with_its_own_agent(monkeypatch: pytest.MonkeyPatch):
+    scripted = Scripted(reply)
+    crash_once_after(monkeypatch, "on_agent_start", lambda context, agent: agent.name == "refunds")
+    ask = invoker(asker(agent=desk(scripted)))
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("handoff x", invocation)
+    answer = await ask("handoff x", invocation)
+    assert "no tool named" not in answer
+    assert [system for system, _ in scripted.requests][-1] == "You handle refunds."
+
+
+def request_of() -> Any:
+    from sessions_object import request  # pylint: disable=import-error,import-outside-toplevel
+
+    return request()
