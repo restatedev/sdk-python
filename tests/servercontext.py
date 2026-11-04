@@ -46,7 +46,9 @@ def ohoh():
 
 
 @asynccontextmanager
-async def simple_harness(service: Service | VirtualObject | Workflow) -> typing.AsyncIterator[restate.RestateClient]:
+async def simple_harness(
+    service: Service | VirtualObject | Workflow,
+) -> typing.AsyncGenerator[restate.RestateClient, None]:
     async with restate.create_test_harness(
         restate.app([service]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as restate_test_harness:

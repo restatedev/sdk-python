@@ -100,8 +100,8 @@ class CallFuture(RestateDurableCallFuture[O]):
 
     def __init__(self, call: RestateDurableCallFuture[bytes], serde: Serde[O]) -> None:
         super().__init__()
-        self._call = call
-        self._serde = serde
+        self._call: RestateDurableCallFuture[bytes] = call
+        self._serde: Serde[O] = serde
 
     async def _result(self) -> O:
         return typing.cast(O, self._serde.deserialize(await self._call))
@@ -124,7 +124,7 @@ class Rpc:
     """
 
     def __init__(self, host: CallHost) -> None:
-        self._host = host
+        self._host: CallHost = host
 
     @typing.overload
     def __call__(
@@ -200,7 +200,7 @@ class Send:
     """
 
     def __init__(self, sink: Callable[[GenericSend], None]) -> None:
-        self._sink = sink
+        self._sink: Callable[[GenericSend], None] = sink
 
     @typing.overload
     def __call__(

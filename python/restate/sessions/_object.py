@@ -43,11 +43,11 @@ from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_context import DisconnectedException, ServerInvocationContext
-from restate.sessions import _selector
 from restate.sessions._calls import CallFuture, Rpc, Send, send_now
 from restate.sessions._database import Store
 from restate.sessions._link import Link
 from restate.sessions._schema import Schema, Step
+from restate.sessions._selector import FutureSelector, hook
 from restate.sessions._session import Attempt, Database, DatabaseReader, ObjectConfig, SqlHost, reader_of, with_attempt
 from restate.vm import SingleUnresolvedFuture
 
@@ -126,12 +126,12 @@ class _ContextHost:
     """
 
     def __init__(self, context: ServerInvocationContext, shared: bool) -> None:
-        self.context = context
-        self.shared = shared
-        self.service = context.handler.service_tag.name
-        self.key = context.key()
+        self.context: ServerInvocationContext = context
+        self.shared: bool = shared
+        self.service: str = context.handler.service_tag.name
+        self.key: str = context.key()
         self._listeners: list[Callable[[], None]] = []
-        self.selector = _selector.hook(context, self._notify_attempt_end)
+        self.selector: FutureSelector = hook(context, self._notify_attempt_end)
         attempt_finished = context.on_attempt_finished
 
         def on_attempt_finished() -> None:
@@ -389,11 +389,11 @@ class SessionObject(VirtualObject):
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
         )
-        self.config = ObjectConfig(schema=Schema(name, schema) if schema else None)
+        self.config: ObjectConfig = ObjectConfig(schema=Schema(name, schema) if schema else None)
         ENTRIES.on(self, {})
 
     @typing.overload  # type: ignore[override]
-    def handler(self, fn: F, /) -> F: ...  # pyright: ignore[reportIncompatibleMethodOverride]
+    def handler(self, fn: F, /) -> F: ...
 
     @typing.overload
     def handler(
@@ -542,10 +542,11 @@ class SessionObject(VirtualObject):
     def _register(self, view: bool, name: str | None, options: dict[str, Any]) -> Callable[[F], F]:
         def register(fn: F) -> F:
             if RESTATE_UNIQUE_HANDLER_SYMBOL in vars(fn):
-                raise TypeError(
-                    f"{self.name}.{fn.__name__} is an SDK handler: a session object's handlers are functions of its "
-                    "context. Put journaled work in a restate.VirtualObject, Service or Workflow, and call it with ctx.rpc"
+                what = f"{self.name}.{fn.__name__} is an SDK handler: a session object's handlers are functions of its context."
+                instead = (
+                    "Put journaled work in a restate.VirtualObject, Service or Workflow, and call it with ctx.rpc."
                 )
+                raise TypeError(f"{what} {instead}")
             explicit = bool(options.get("explicit_cancellation"))
             sdk_options = {key: value for key, value in options.items() if key != "explicit_cancellation"}
             entry = _Entry(fn=fn, view=view, config=self.config, explicit_cancellation=explicit)

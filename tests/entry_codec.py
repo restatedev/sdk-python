@@ -169,7 +169,7 @@ async def test_client_send_skips_response_decode():
 @asynccontextmanager
 async def codec_harness(
     service: typing.Union[Service, restate.VirtualObject, restate.Workflow], codec: JournalValueCodec
-) -> typing.AsyncIterator[restate.RestateClient]:
+) -> typing.AsyncGenerator[restate.RestateClient, None]:
     """Spin up a harness where BOTH the endpoint and the ingress client share the same codec."""
     async with restate.create_test_harness(
         restate.app([service], journal_value_codec=codec),

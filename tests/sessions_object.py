@@ -131,6 +131,12 @@ class Host:
     def cancel_invocation(self, invocation_id: str) -> None:
         self.cancelled.append(invocation_id)
 
+    # No VM: the database's store goes through get, set and clear.
+    vm = None
+
+    def wait(self, handle: int):
+        raise AssertionError("a host without a VM waits for no read")
+
     def attempt_end(self):
         return None
 

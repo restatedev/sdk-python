@@ -13,6 +13,7 @@
 # pylint: disable=missing-function-docstring
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -86,7 +87,7 @@ class FakeVm:
         self.completed.add(handle)
         self.input.put_nowait({"type": "restate.run_completed"})
 
-    def notify_input(self, chunk: dict[str, Any]) -> None:
+    def notify_input(self, chunk: Mapping[str, Any]) -> None:
         self.completed.add(int(chunk["body"]))
 
     def track(self, task: asyncio.Future) -> None:

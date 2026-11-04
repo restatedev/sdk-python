@@ -59,7 +59,7 @@ class Schema:
     """A part of a database's schema: its ``name``, and the ``steps`` that make it, in order."""
 
     def __init__(self, name: str, steps: Sequence[Step]) -> None:
-        self.name = name
+        self.name: str = name
         self.steps: tuple[Step, ...] = tuple(steps)
 
     async def ensure(self, db: Any) -> None:
