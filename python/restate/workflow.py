@@ -115,6 +115,7 @@ class Workflow:
         self.invocation_retry_policy = invocation_retry_policy
         self.context_managers = invocation_context_managers
         self.explicit_recovery = False
+        self.explicit_cancellation = False
 
     @property
     def name(self):

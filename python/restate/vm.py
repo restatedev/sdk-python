@@ -210,8 +210,10 @@ class VMWrapper:
         headers: typing.List[typing.Tuple[str, str]],
         disable_payload_checks: bool = False,
         explicit_recovery: bool = False,
+        explicit_cancellation: bool = False,
     ):
-        self.vm = PyVM(headers, disable_payload_checks, explicit_recovery)
+        self.vm = PyVM(headers, disable_payload_checks, explicit_recovery, explicit_cancellation)
+        self.explicit_cancellation = explicit_cancellation
 
     def get_response_head(self) -> typing.Tuple[int, typing.Iterable[typing.Tuple[str, str]]]:
         """

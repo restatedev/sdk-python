@@ -6,10 +6,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyNone, PyString};
 use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
 use restate_sdk_shared_core::{
-    AwaitResponse, AwakeableHandle, CallHandle, CoreVM, Error, Header, IdentityVerifier, Input,
-    JournalReplay, NonDeterministicChecksOption, NonEmptyValue, NotificationHandle, OnMaxAttempts,
-    ResponseHead, RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture,
-    VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
+    AwaitResponse, AwakeableHandle, CallHandle, CoreVM, Error, Header, IdentityVerifier,
+    ImplicitCancellationOption, Input, JournalReplay, NonDeterministicChecksOption, NonEmptyValue,
+    NotificationHandle, OnMaxAttempts, ResponseHead, RetryPolicy, RunExitResult, RunHandle, Target,
+    TerminalFailure, UnresolvedFuture, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
 };
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -373,11 +373,12 @@ struct PyVM {
 #[pymethods]
 impl PyVM {
     #[new]
-    #[pyo3(signature = (headers, disable_payload_checks=false, explicit_recovery=false))]
+    #[pyo3(signature = (headers, disable_payload_checks=false, explicit_recovery=false, explicit_cancellation=false))]
     fn new(
         headers: Vec<(String, String)>,
         disable_payload_checks: bool,
         explicit_recovery: bool,
+        explicit_cancellation: bool,
     ) -> Result<Self, PyVMError> {
         // When a journal value codec is configured, the serialized payloads written to the journal
         // may legitimately differ between attempts (e.g. encryption with a random nonce), so we
@@ -392,6 +393,13 @@ impl PyVM {
                 JournalReplay::Disabled
             } else {
                 JournalReplay::Enabled
+            },
+            // With explicit cancellation, a cancellation neither fails the handler's awaits nor
+            // cancels its calls: the handler awaits CANCEL_NOTIFICATION_HANDLE and decides.
+            implicit_cancellation: if explicit_cancellation {
+                ImplicitCancellationOption::Disabled
+            } else {
+                VMOptions::default().implicit_cancellation
             },
             ..Default::default()
         };
