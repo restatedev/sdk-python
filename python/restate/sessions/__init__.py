@@ -38,7 +38,7 @@ serves beside the SDK's services, objects and workflows, which it calls with
 
 from restate.sessions._calls import CallFuture, Rpc, Send
 from restate.sessions._database import Row, Rows, SqlError, SqlParam, SqlValue
-from restate.sessions._object import Cancel, SessionContext, SessionObject, ViewContext
+from restate.sessions._object import Cancel, SessionContext, SessionObject, ViewContext, cancel_calls, cancelled
 from restate.sessions._schema import Schema, Step
 from restate.sessions._session import (
     Database,
@@ -68,6 +68,8 @@ __all__ = [
     "Step",
     "Transaction",
     "ViewContext",
+    "cancel_calls",
+    "cancelled",
     "database",
     "reset",
 ]
