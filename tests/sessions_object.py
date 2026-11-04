@@ -24,6 +24,7 @@ import restate
 from restate import sessions
 from restate.context import AttemptFinishedEvent, Request
 from restate.exceptions import TerminalError
+from restate.handler import handler_from_callable
 from restate.sessions._object import invoke
 from sessions_database import Backend  # pylint: disable=import-error
 
@@ -396,8 +397,11 @@ def test_an_sdk_handler_is_refused():
         pass
 
     obj = sessions.SessionObject("refusing")
-    with pytest.raises(TypeError, match="is an SDK handler"):
+    with pytest.raises(TypeError, match="is a handler already"):
         obj.handler()(journaled)
+    # A session object's handler too: it is registered once.
+    with pytest.raises(TypeError, match="is a handler already"):
+        obj.handler()(add)
 
 
 def test_a_session_object_runs_its_handlers_with_explicit_recovery_and_lazy_state():
@@ -466,19 +470,19 @@ async def test_cancelled_takes_the_ctx_of_a_handler_with_explicit_cancellation()
 async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first(monkeypatch):
     from restate import _preview  # pylint: disable=import-outside-toplevel
     from restate.exceptions import SuspendedException  # pylint: disable=import-outside-toplevel
-    from restate.sessions import _object  # pylint: disable=import-outside-toplevel
+    from restate.sessions import _calls, _object  # pylint: disable=import-outside-toplevel
 
     async def attempt_ended(_sdk: Any) -> None:
         raise SuspendedException()
 
     monkeypatch.setattr(_preview, "cancellation", attempt_ended)
     host = Host(Backend())
-    ctx = sessions.SessionContext(
+    ctx = _object.AttemptContext(
         key="k",
         request=request(),
         db=typing.cast(Any, None),
-        rpc=sessions.Rpc(host),
-        send=sessions.Send(lambda send: None),
+        rpc=_calls.Caller(host),
+        send=_calls.Sender(lambda send: None),
         cancel=lambda invocation_id: None,
     )
     _object.SCOPE.on(ctx, _object.Scope(sdk=typing.cast(Any, object()), explicit_cancellation=True))
@@ -486,3 +490,51 @@ async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first(m
     await asyncio.wait({watcher})
     # Cancelled, not failed: asyncio reports no exception nobody retrieved.
     assert watcher.cancelled()
+
+
+class FakeDatabase:
+    """A test's own database, as ``sessions.Database`` declares one: it records the SQL it is given."""
+
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, Any]] = []
+
+    async def query(self, sql: str, params: Any = None) -> list[sessions.Row]:
+        self.statements.append((sql, params))
+        return []
+
+    async def get(self, sql: str, params: Any = None) -> sessions.Row | None:
+        return None
+
+    async def values(self, sql: str, params: Any = None) -> sessions.Rows:
+        return []
+
+    async def query_columns(self, sql: str, params: Any = None) -> tuple[list[str], sessions.Rows]:
+        return [], []
+
+    async def execute(self, sql: str, params: Any = None) -> None:
+        self.statements.append((sql, params))
+
+    def transaction(self) -> typing.AsyncContextManager[sessions.Transaction]:
+        raise NotImplementedError
+
+
+@dataclass
+class FakeContext:
+    """A test's own handler context, as ``sessions.SessionContext`` declares one."""
+
+    db: FakeDatabase
+    key: str = "alice"
+    request: Request = field(default_factory=request)
+    rpc: sessions.Rpc = field(default_factory=lambda: typing.cast(sessions.Rpc, None))
+    send: sessions.Send = field(default_factory=lambda: typing.cast(sessions.Send, None))
+    cancel: sessions.Cancel = lambda invocation_id: None
+
+
+async def test_a_handler_runs_over_a_fake_context_of_a_test():
+    fake = FakeContext(db=FakeDatabase())
+    # The protocols are structural: the fake is a SessionContext to the type checkers.
+    ctx: sessions.SessionContext = fake
+    await add(ctx, "milk")
+    assert fake.db.statements == [("INSERT INTO notes (text) VALUES (?)", ["milk"])]
+    # And the function is still the handler that calls and the client name.
+    assert handler_from_callable(add).name == "add"

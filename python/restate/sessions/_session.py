@@ -35,7 +35,8 @@ from urllib.parse import quote
 
 from restate._internal import PyVM  # pylint: disable=no-name-in-module
 from restate.exceptions import SuspendedException, TerminalError
-from restate.sessions._calls import CallHost, GenericSend, Send
+from restate.sessions._api import Database, DatabaseReader, Send, Transaction
+from restate.sessions._calls import CallHost, GenericSend, Sender
 from restate.sessions._database import (
     Connection,
     ConnectionTransaction,
@@ -314,7 +315,7 @@ class _Sends:
     def __init__(self) -> None:
         self._sends: list[dict[str, Any]] = []
         self._open: bool = True
-        self.send: Send = Send(self._record)
+        self.send: Send = Sender(self._record)
 
     def _record(self, send: GenericSend) -> None:
         if not self._open:
@@ -354,8 +355,8 @@ def _refused_send(_: GenericSend) -> None:
 # --- The database, as a handler gets it -----------------------------------------------------------
 
 
-class DatabaseReader(abc.ABC):
-    """Reads of a database, or of one transaction of it."""
+class Reads(abc.ABC):
+    """``DatabaseReader`` (see ``_api.py``) by way of ``query_columns``: an SQL error that escapes is terminal."""
 
     @abc.abstractmethod
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
@@ -384,23 +385,16 @@ class DatabaseReader(abc.ABC):
         return (await self.query_columns(sql, params))[1]
 
 
-class DatabaseWriter(DatabaseReader, abc.ABC):
-    """SQL: a database, or one transaction of it."""
+class Writes(Reads, abc.ABC):
+    """``DatabaseWriter`` (see ``_api.py``) by way of ``query_columns``."""
 
     async def execute(self, sql: str, params: Sequence[SqlParam] | None = None) -> None:
         """Run SQL (one or more statements), discarding rows; parameters only with a single statement."""
         await self.query_columns(sql, params)
 
 
-class Transaction(DatabaseWriter):
-    """
-    One transaction of a ``Database``: its SQL, and the sends it commits with.
-
-    ``send`` makes its sends right after the transaction commits, and never if
-    it rolls back. Each has the idempotency key it is given, or else one of the
-    transaction (``transaction/<id>/<index>``), so a send an attempt makes
-    again is dropped.
-    """
+class AttemptTransaction(Writes):
+    """``Transaction`` (see ``_api.py``): the SQL of a connection's transaction, and the sends it commits with."""
 
     def __init__(self, handle: ConnectionTransaction, send: Send) -> None:
         self._handle: ConnectionTransaction = handle
@@ -413,12 +407,8 @@ class Transaction(DatabaseWriter):
             _raise_for_handler(error)
 
 
-class Database(DatabaseWriter):
-    """
-    The session's database, ``ctx.db``, for the whole handler: each statement
-    outside ``transaction()`` is its own transaction. Calls run one at a time,
-    in call order. A commit is durable once its call returns.
-    """
+class AttemptDatabase(Writes):
+    """``Database`` (see ``_api.py``): an attempt's session, opened on its first use."""
 
     def __init__(self, attempt: Attempt) -> None:
         self._attempt: Attempt = attempt
@@ -428,33 +418,20 @@ class Database(DatabaseWriter):
         return await self._attempt.call(lambda db: db.query_columns(sql, params))
 
     def transaction(self) -> typing.AsyncContextManager[Transaction]:
-        """
-        One transaction, as the body of an ``async with``::
-
-            async with ctx.db.transaction() as tx:
-                await tx.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", [amount, src])
-                tx.send(deposit, key=dst)(amount)
-
-        It commits when the body ends, and rolls back when the body raises. It
-        holds the database: other calls wait until it ends, and a call to the
-        database from inside the body is refused, as it would wait for the body.
-        So the body uses the ``tx`` it gets, which is invalid once the body has
-        ended.
-        """
         return self._attempt.transaction()
 
 
-class _ReaderOf(DatabaseReader):
-    """The reads of a ``Database``: a view's ``ctx.db``."""
+class _ReaderOf(Reads):
+    """The reads of a database: a view's ``ctx.db``."""
 
-    def __init__(self, db: Database) -> None:
-        self._db: Database = db
+    def __init__(self, db: AttemptDatabase) -> None:
+        self._db: AttemptDatabase = db
 
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
         return await self._db.query_columns(sql, params)
 
 
-def reader_of(db: Database) -> DatabaseReader:
+def reader_of(db: AttemptDatabase) -> DatabaseReader:
     """The reads of ``db``, which apply a library's schema as ``db`` does (``Schema.ensure``)."""
     reader = _ReaderOf(db)
     ensure = ensure_of(db)
@@ -592,7 +569,7 @@ class Attempt:
         # The schemas this attempt's database has all the steps of, by name.
         self._ensured: dict[str, Schema] = {}
         self._ended: bool = False
-        self.db: Database = Database(self)
+        self.db: AttemptDatabase = AttemptDatabase(self)
         """``ctx.db``."""
         ensuring(self.db, self._ensure)
 
@@ -649,7 +626,7 @@ class Attempt:
             _raise_for_handler(error)
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncGenerator[Transaction, None]:
+    async def transaction(self) -> AsyncGenerator[AttemptTransaction, None]:
         """
         One transaction. In the object's own database of an exclusive handler,
         its sends commit with it, in the outbox, and are made with its commit,
@@ -668,7 +645,7 @@ class Attempt:
             async with db.transaction() as handle:
                 sends = _Sends() if self._has_outbox else None
                 # A view's writes stay in its session: it has nothing to reset.
-                tx = Transaction(handle, sends.send if sends is not None else Send(_refused_send))
+                tx = AttemptTransaction(handle, sends.send if sends is not None else Sender(_refused_send))
                 if not self._host.shared:
                     _RESET.on(tx, lambda: self._reset(handle))
                 try:
