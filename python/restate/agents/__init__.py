@@ -38,6 +38,7 @@ This package holds what all frameworks share:
   ``call``, ``send``, ``workflow``, ``subagent`` and ``wait_for_signal``,
   which are built on Restate.
 - ``PerSession``, for agent options that differ per invocation.
+- ``webhook``, which turns another system's webhooks into messages to agents.
 - The types of the conversation that clients read and send.
 
 Each framework has a subpackage and an extra of its own:
@@ -67,10 +68,12 @@ from restate.agents._api import (
 from restate.agents._common import PerSession
 from restate.agents._object import AgentObject, Synced, SyncRequest
 from restate.agents._tools import Tool, ToolCall, call, send, subagent, tool, wait_for_signal, workflow
+from restate.agents._webhook import Event, webhook, webhook_message
 
 __all__ = [
     "AgentObject",
     "ChatMessage",
+    "Event",
     "Messages",
     "MessagesRequest",
     "Notifications",
@@ -94,5 +97,7 @@ __all__ = [
     "subagent",
     "tool",
     "wait_for_signal",
+    "webhook",
+    "webhook_message",
     "workflow",
 ]

@@ -24,6 +24,7 @@ this object, which waits without holding a process.
 
 from __future__ import annotations
 
+import json
 import typing
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -382,12 +383,15 @@ def has_companion(agent: object) -> bool:
     return _COMPANION.of(agent) is not None
 
 
-def deliver(ctx: SessionContext, agent: object, key: str, text: str, *, idempotency_key: str | None = None) -> None:
-    """Send ``text`` to ``agent``'s key ``key`` as a chat message, from a session object's handler.
+def deliver(
+    ctx: SessionContext | restate.Context, agent: object, key: str, text: str, *, idempotency_key: str | None = None
+) -> None:
+    """Send ``text`` to ``agent``'s key ``key`` as a chat message, from a handler.
 
-    The agent answers it after any messages queued before it. The message is
-    sent, not awaited; pass ``idempotency_key`` so that a retried attempt
-    delivers it only once::
+    The handler is a session object's, or any Restate handler's (a webhook's,
+    say). The agent answers the message after any messages queued before it.
+    The message is sent, not awaited; pass ``idempotency_key`` so that a
+    retried attempt delivers it only once::
 
         deliver(ctx, triage, "ENG-1", "The issue was closed", idempotency_key=f"{ctx.request.id}:closed")
 
@@ -395,7 +399,12 @@ def deliver(ctx: SessionContext, agent: object, key: str, text: str, *, idempote
         TypeError: If ``agent`` is not a ``restate.agents`` agent.
     """
     companion = companion_of(agent, key)  # an agent of restate.agents, with a `chat` handler
-    ctx.generic_send(companion.agent, "chat", text, key=key, idempotency_key=idempotency_key)
+    if isinstance(ctx, restate.Context):
+        # A Restate handler's context sends bytes: the message as a JSON string, which `chat` takes.
+        message = json.dumps(text).encode()
+        ctx.generic_send(companion.agent, "chat", message, key=key, idempotency_key=idempotency_key)
+    else:
+        ctx.generic_send(companion.agent, "chat", text, key=key, idempotency_key=idempotency_key)
 
 
 __all__: Sequence[str] = ["Companion", "companion_of", "deliver", "signals"]
