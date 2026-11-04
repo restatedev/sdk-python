@@ -359,7 +359,7 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
     from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
 
     answering = Scripted(lambda system, items: [said(f"answer {len(answering.requests)}")])
-    on_llm_end = _agent._Run.on_llm_end  # pyright: ignore[reportPrivateUsage]
+    on_llm_end = _agent._Hooks.on_llm_end  # pyright: ignore[reportPrivateUsage]
     crashed: list[bool] = []
 
     async def store_then_crash_once(self: Any, *args: Any) -> None:
@@ -368,7 +368,7 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
             crashed.append(True)
             raise RuntimeError("the process crashed after storing the answer")
 
-    monkeypatch.setattr(_agent._Run, "on_llm_end", store_then_crash_once)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(_agent._Hooks, "on_llm_end", store_then_crash_once)  # pyright: ignore[reportPrivateUsage]
     backend, invocation, obj = Backend(), request(), asker(model=answering)
     with pytest.raises(RuntimeError, match="crashed after storing"):
         await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), invocation, "hi")
@@ -385,7 +385,7 @@ async def test_a_handoff_cut_off_by_a_crash_is_asked_again_and_hands_off_once(mo
     from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
 
     scripted = Scripted(reply)
-    on_llm_end = _agent._Run.on_llm_end  # pyright: ignore[reportPrivateUsage]
+    on_llm_end = _agent._Hooks.on_llm_end  # pyright: ignore[reportPrivateUsage]
     crashed: list[bool] = []
 
     async def store_then_crash_once(self: Any, context: Any, agent: Any, response: Any) -> None:
@@ -394,7 +394,7 @@ async def test_a_handoff_cut_off_by_a_crash_is_asked_again_and_hands_off_once(mo
             crashed.append(True)
             raise RuntimeError("the process crashed after storing the handoff")
 
-    monkeypatch.setattr(_agent._Run, "on_llm_end", store_then_crash_once)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(_agent._Hooks, "on_llm_end", store_then_crash_once)  # pyright: ignore[reportPrivateUsage]
     backend, invocation, obj = Backend(), request(), asker(agent=desk(scripted))
     with pytest.raises(RuntimeError, match="crashed after storing"):
         await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), invocation, "handoff x")
@@ -450,19 +450,20 @@ def invoker(obj: sessions.SessionObject) -> Callable[..., Awaitable[Any]]:
 
 
 def crash_once_after(monkeypatch: pytest.MonkeyPatch, hook: str, when: Callable[..., bool]) -> None:
-    """Make ``_Run.<hook>`` crash, once, after it has run for arguments that ``when`` accepts."""
+    """Make ``_Hooks.<hook>`` crash, once, after it has run for arguments that ``when`` accepts."""
     from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
 
-    original = getattr(_agent._Run, hook)  # pyright: ignore[reportPrivateUsage]
+    original = getattr(_agent._Hooks, hook)  # pyright: ignore[reportPrivateUsage]
     crashed: list[bool] = []
 
-    async def then_crash(self: Any, *args: Any) -> None:
-        await original(self, *args)
+    async def then_crash(self: Any, *args: Any) -> Any:
+        returned = await original(self, *args)
         if not crashed and when(*args):
             crashed.append(True)
             raise RuntimeError(f"the process crashed after {hook}")
+        return returned
 
-    monkeypatch.setattr(_agent._Run, hook, then_crash)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(_agent._Hooks, hook, then_crash)  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_a_tool_that_ends_the_turn_is_stored_and_not_run_again():
@@ -542,6 +543,20 @@ async def test_a_reply_cut_off_after_its_handoff_started_is_resumed_with_its_own
     answer = await ask("handoff x", invocation)
     assert "no tool named" not in answer
     assert [system for system, _ in scripted.requests][-1] == "You handle refunds."
+
+
+async def test_after_a_handoff_the_next_request_is_the_new_agents(monkeypatch: pytest.MonkeyPatch):
+    scripted = Scripted(reply)
+    # The handoff's output is stored before the refunds agent's first request, then the process crashes.
+    crash_once_after(monkeypatch, "model_input", lambda data: data.agent.name == "refunds")
+    ask = invoker(asker(agent=desk(scripted)))
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("handoff x", invocation)
+    asked = len(scripted.requests)
+    assert (await ask("handoff x", invocation)).startswith("tool said: ")
+    # The retry went on with the refunds agent, without asking triage again.
+    assert [system for system, _ in scripted.requests[asked:]] == ["You handle refunds."]
 
 
 def request_of() -> Any:

@@ -343,17 +343,17 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
         replies.append("asked")
         return ModelResponse(parts=[TextPart(f"answer {len(replies)}")])
 
-    save = _agent._Conversation.save  # pyright: ignore[reportPrivateUsage]
+    stored = _agent._Restate.after_model_request  # pyright: ignore[reportPrivateUsage]
     crashed: list[bool] = []
 
-    async def save_then_crash_once(self: Any, messages: Any) -> None:
-        await save(self, messages)
-        last = messages[-1]
-        if isinstance(last, ModelResponse) and not (last.metadata or {}) and not crashed:
+    async def store_then_crash_once(self: Any, ctx: Any, **kwargs: Any) -> Any:
+        response = await stored(self, ctx, **kwargs)
+        if not response.tool_calls and not crashed:
             crashed.append(True)
             raise RuntimeError("the process crashed after storing the answer")
+        return response
 
-    monkeypatch.setattr(_agent._Conversation, "save", save_then_crash_once)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(_agent._Restate, "after_model_request", store_then_crash_once)  # pyright: ignore[reportPrivateUsage]
     asker = sessions.SessionObject("asker")
 
     @asker.handler

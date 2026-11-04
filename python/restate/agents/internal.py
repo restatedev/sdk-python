@@ -12,8 +12,13 @@
 
 An integration needs, beyond the public API:
 
+- ``Conversation`` and ``answer_once``: the conversation every integration
+  stores the same way, and the run of a prompt on it (answered once, an
+  unfinished run finished first, a stopped, refused or failed run closed). An
+  integration gives its ``Items`` (what its messages are: ``Call`` and
+  ``Result``) and its own run, which appends each step as it goes.
 - ``transcribing`` and ``Transcript``, to keep the conversation's log in step
-  with the framework's transcript.
+  with a transcript of the integration's own (``answer_once`` does this).
 - ``stop_signal_of``, to stop a turn when it is cancelled or its attempt ends.
 - ``run_tool``, to run a ``restate.agents`` tool for a tool call.
 - ``model_of``, ``provider_of`` and the related helpers, to resolve the model.
@@ -45,6 +50,7 @@ from restate.agents._common import (
     refusal_of,
     stored_answer,
 )
+from restate.agents._conversation import Call, Conversation, Entry, Items, Result, answer_once, close
 from restate.agents._signals import Companion, companion_of, deliver, signals
 from restate.agents._tools import run_tool
 from restate.agents._transcript import Transcript
@@ -68,14 +74,21 @@ __all__ = [
     "REFUSED",
     "UNANSWERED",
     "AttemptEnded",
+    "Call",
     "Companion",
+    "Conversation",
+    "Entry",
+    "Items",
     "MessageSerde",
     "ModelError",
     "Read",
+    "Result",
     "Stop",
     "ToolError",
     "Transcript",
+    "answer_once",
     "check_model_name",
+    "close",
     "companion_of",
     "configured",
     "deliver",

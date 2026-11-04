@@ -23,15 +23,16 @@ stored:
   ``restate.TerminalError``, which a retry would only repeat, is instead
   returned to the model as the tool's answer, and so are arguments that do not
   validate (Pydantic AI asks the model again).
-- Each message is answered once per invocation: its request and its answer are
-  both marked with the prompt's id, and a retried attempt that finds them
-  returns the answer, or finishes the run first.
+- Each message is answered once per invocation, by the shared conversation of
+  ``restate.agents`` (``_conversation.py``), which also closes a stopped,
+  refused or failed run.
 """
 
 from __future__ import annotations
 
 import typing
-from collections.abc import Callable, Sequence
+import uuid
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -54,38 +55,17 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai import Tool as PydanticTool
-from restate.agents._calls import outcomes
-from restate.agents._common import (
-    CANCELLED,
-    UNANSWERED,
-    ModelError,
-    PerSession,
-    configured,
-    cut_off_result,
-    from_tool,
-    model_of,
-    next_prompt_id,
-    provider_of,
-    refusal_of,
-    stored_answer,
-)
+from restate.agents._common import ModelError, PerSession, configured, from_tool, model_of, provider_of
+from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
 from restate.agents._object import RETRIES, AgentObject
 from restate.agents._tools import Tool, ToolCall
-from restate.agents._transcript import Transcript
-from restate.agents._turn import AttemptEnded, stop_signal_of, tool_call_ended, tool_call_started, transcribing
+from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import Database, Migration, SessionContext
-from restate.sessions.internal import Schema
+from restate.sessions import Migration, SessionContext
 
 _CANCELLATION = 409
 """The status code of Restate's cancellation error, which a stopped turn fails with."""
-
-_PROMPT = "restate_agents_prompt"
-"""The metadata key that marks a prompt's request with the prompt's id; models do not read it."""
-
-_ANSWERS = "restate_agents_answers"
-"""The metadata key that marks the response answering a prompt with the prompt's id."""
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"<provider>/<model-id>"`` (or Pydantic AI's ``"<provider>:<model-id>"``), or a Pydantic AI model."""
@@ -116,18 +96,6 @@ def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[A
     return FunctionToolset([native(t) if isinstance(t, Tool) else t for t in given])
 
 
-_SCHEMA = Schema(
-    "restate_agents.pydantic_ai",
-    [
-        """CREATE TABLE restate_pydantic_ai_messages (
-            thread TEXT NOT NULL,
-            n INTEGER NOT NULL,
-            message TEXT NOT NULL,
-            PRIMARY KEY (thread, n)
-        )"""
-    ],
-)
-
 # ModelMessage is an Annotated union (discriminated), which TypeAdapter takes though its type says otherwise.
 # Bytes (a tool's binary result, say) as base64, as pydantic-ai's own ModelMessagesTypeAdapter stores them.
 _MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(
@@ -135,68 +103,94 @@ _MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(
 )
 
 
-class _Conversation:
-    """A conversation in the object's database, stored one message per row.
+def _item(message: ModelMessage) -> Item:
+    return _MESSAGE.dump_python(message, mode="json")
 
-    ``save`` writes the messages that changed since the last load or save, in
-    one transaction.
-    """
 
-    def __init__(self, db: Database, thread: str) -> None:
-        self.db = db
-        self.thread = thread
-        self._saved: list[str] = []
+def _message(item: Item) -> ModelMessage:
+    return _MESSAGE.validate_python(item)
 
-    async def load(self) -> list[ModelMessage]:
-        await _SCHEMA.ensure(self.db)
-        rows = await self.db.values(
-            "SELECT message FROM restate_pydantic_ai_messages WHERE thread = ? ORDER BY n", [self.thread]
-        )
-        self._saved = [str(row[0]) for row in rows]
-        return [_MESSAGE.validate_json(m) for m in self._saved]
 
-    async def save(self, messages: Sequence[ModelMessage]) -> None:
-        dumped = [_MESSAGE.dump_json(m).decode() for m in messages]
-        first = next(
-            (i for i, (a, b) in enumerate(zip(dumped, self._saved, strict=False)) if a != b),
-            min(len(dumped), len(self._saved)),
-        )
-        if first == len(dumped) == len(self._saved):
-            return
-        async with self.db.transaction() as tx:
-            await tx.execute(
-                "DELETE FROM restate_pydantic_ai_messages WHERE thread = ? AND n >= ?", [self.thread, first]
-            )
-            for n in range(first, len(dumped)):
-                await tx.execute(
-                    "INSERT INTO restate_pydantic_ai_messages VALUES (?, ?, ?)", [self.thread, n, dumped[n]]
-                )
-        self._saved = dumped
+def _result(part: ToolReturnPart | RetryPromptPart) -> str:
+    """Return a tool call's result as the model sees it: the return value, or the retry prompt."""
+    return part.model_response() if isinstance(part, RetryPromptPart) else part.model_response_str()
+
+
+def _text(response: ModelMessage) -> str:
+    return "".join(part.content for part in response.parts if isinstance(part, TextPart))
+
+
+class _Items:
+    """Pydantic AI's messages, as the conversation keeps them."""
+
+    def prompt(self, text: str) -> Item:
+        return _item(ModelRequest(parts=[UserPromptPart(text)]))
+
+    def reply(self, text: str) -> Item:
+        return _item(ModelResponse(parts=[TextPart(text)]))
+
+    def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
+        if not results:
+            return []
+        returns = [ToolReturnPart(call.name, text, call.id) for call, text in results]
+        return [_item(ModelRequest(parts=list(returns)))]
+
+    def calls(self, item: Item) -> list[Call]:
+        message = _message(item)
+        if not isinstance(message, ModelResponse):
+            return []
+        return [Call(call.tool_call_id, call.tool_name, call.args_as_dict()) for call in message.tool_calls]
+
+    def results_of(self, item: Item) -> list[Result]:
+        message = _message(item)
+        if not isinstance(message, ModelRequest):
+            return []
+        return [
+            Result(part.tool_call_id, _result(part), isinstance(part, RetryPromptPart))
+            for part in message.parts
+            if isinstance(part, ToolReturnPart | RetryPromptPart) and part.tool_call_id
+        ]
+
+    def said(self, item: Item) -> tuple[str, str] | None:
+        message = _message(item)
+        if isinstance(message, ModelResponse):
+            return ("assistant", _text(message)) if any(isinstance(p, TextPart) for p in message.parts) else None
+        prompts = [p.content for p in message.parts if isinstance(p, UserPromptPart)]
+        return ("user", "".join(p if isinstance(p, str) else "" for p in prompts)) if prompts else None
+
+
+ITEMS = _Items()
 
 
 class _Restate(AbstractCapability[Any]):
     """Make a Pydantic AI run durable in a Restate handler.
 
-    It stores the conversation before each model request and with each
-    response, and publishes each tool call as it starts and ends for clients
+    It stores the requests before each model request and each response as it
+    arrives, and publishes each tool call as it starts and ends for clients
     that follow the conversation. A tool's ``restate.TerminalError`` becomes its
     answer to the model; any other error fails the attempt.
     """
 
-    def __init__(self, ctx: SessionContext, conversation: _Conversation) -> None:
+    def __init__(self, ctx: SessionContext, conversation: Conversation) -> None:
         self.ctx = ctx
         self.conversation = conversation
+
+    async def store(self, messages: Sequence[ModelMessage]) -> None:
+        """Store the messages of the run that the conversation does not have yet: those after it."""
+        if new := messages[len(self.conversation.entries) :]:
+            await self.conversation.append(*(_item(m) for m in new))
 
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
     ) -> ModelRequestContext:
-        await self.conversation.save(ctx.messages)
+        await self.store(ctx.messages)
         return request_context
 
     async def after_model_request(
         self, ctx: RunContext[Any], *, request_context: ModelRequestContext, response: ModelResponse
     ) -> ModelResponse:
-        await self.conversation.save([*ctx.messages, response])
+        await self.store(ctx.messages)
+        await self.conversation.append(_item(response), reply=uuid.uuid4().hex)
         return response
 
     async def before_tool_execute(
@@ -241,129 +235,32 @@ def _model(model: str | Model | None) -> Model:
         raise ModelError(f'the model "{named}": {error}') from error
 
 
-def _prompt_of(message: ModelMessage) -> str | None:
-    """Return the prompt id ``message`` is marked with, or ``None`` if it is not a prompt."""
-    return (message.metadata or {}).get(_PROMPT) if isinstance(message, ModelRequest) else None
-
-
-def _answer_of(history: list[ModelMessage], asked: int) -> int | None:
-    """Return the index of the response that answers the prompt at index ``asked``, or ``None``."""
-    return next((i for i in range(asked, len(history)) if (history[i].metadata or {}).get(_ANSWERS)), None)
-
-
-def _result(part: ToolReturnPart | RetryPromptPart) -> str:
-    """Return a tool call's result as the model sees it: the return value, or the retry prompt."""
-    return part.model_response() if isinstance(part, RetryPromptPart) else part.model_response_str()
-
-
-def _text(response: ModelMessage) -> str:
-    return "".join(part.content for part in response.parts if isinstance(part, TextPart))
-
-
-async def _close(ctx: SessionContext, conversation: _Conversation, prompt_id: str, text: str) -> None:
-    """Close the cancelled, refused or failed run of prompt ``prompt_id`` with ``text``.
-
-    Each tool call of the last response gets ``text`` as its result, and ``text``
-    becomes the prompt's answer. A run that stored no prompt yet has nothing to
-    close.
-    """
-    messages = await conversation.load()
-    if not any(_prompt_of(m) == prompt_id for m in messages):
-        return
-    last = messages[-1]
-    if isinstance(last, ModelResponse) and last.tool_calls:
-        returned = await outcomes(ctx, [call.tool_call_id for call in last.tool_calls])
-        returns = [
-            ToolReturnPart(call.tool_name, cut_off_result(returned, call.tool_call_id, text), call.tool_call_id)
-            for call in last.tool_calls
-        ]
-        messages.append(ModelRequest(parts=returns))
-    messages.append(ModelResponse(parts=[TextPart(text)], metadata={_ANSWERS: prompt_id}))
-    await conversation.save(messages)
-
-
-async def _answer_once(
+def _run(
     ctx: SessionContext,
-    text: str,
     own: Agent[Any, str] | None,
     named: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
-) -> str:
+) -> Callable[[Conversation], Awaitable[str]]:
+    """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer."""
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
     agent: Agent[Any, str] = own or Agent(instructions=system)
     toolsets = [_toolset(given, ctx)] if given else []
-    conversation = _Conversation(ctx.db, ctx.key)
-    prompt_id = next_prompt_id(ctx)
-    while True:
-        history = await conversation.load()
-        asked = next((i for i, m in enumerate(history) if _prompt_of(m) == prompt_id), None)
-        if asked is not None and (answer := _answer_of(history, asked)) is not None:
-            return stored_answer(_text(history[answer]))
-        # Finish an interrupted run first (this prompt's own, after a crash), then start this prompt's run.
-        last = next((i for i in reversed(range(len(history))) if _prompt_of(history[i]) is not None), None)
-        interrupted = last is not None and _answer_of(history, last) is None
-        running = _prompt_of(history[last]) if interrupted and last is not None else prompt_id
-        assert running is not None
-        final = history[-1] if history else None
-        if interrupted and isinstance(final, ModelResponse) and not final.tool_calls:
-            # The run had stored its final answer, but not yet marked it as the prompt's: mark it, rather
-            # than run on, which would ask the model again.
-            final.metadata = {**(final.metadata or {}), _ANSWERS: running}
-            await conversation.save(history)
-            continue
-        if not interrupted:
-            history = [*history, ModelRequest(parts=[UserPromptPart(text)], metadata={_PROMPT: prompt_id})]
-        stop = stop_signal_of(ctx)
-        run = agent.run(
-            message_history=history, model=model, toolsets=toolsets, capabilities=[_Restate(ctx, conversation)]
-        )
-        try:
-            result = await (stop.guard(run) if stop is not None else run)
-        except AttemptEnded:
-            # The attempt ended: stop here, and let the next attempt continue the run.
-            raise
-        except TerminalError as error:
-            if error.status_code == _CANCELLATION:
-                # Cancelled: close the run, so that the next prompt starts afresh.
-                await _close(ctx, conversation, running, CANCELLED)
-                raise
-            # Failed for good: close the run with the error, so that the next prompt does not run into it again.
-            await _close(ctx, conversation, running, f"Error: {error.message}")
-            if running == prompt_id:
-                raise
-            continue
-        except Exception as error:
-            # Refused for good (a wrong API key, say): close the run unanswered and fail with a terminal error.
-            # If the run was an earlier prompt's, carry on with this one.
-            refused = refusal_of(ctx, error)
-            if refused is None:
-                raise
-            await _close(ctx, conversation, running, UNANSWERED)
-            if running == prompt_id:
-                raise refused from error
-            continue
-        messages = result.all_messages()
-        response = next(m for m in reversed(messages) if isinstance(m, ModelResponse))
-        response.metadata = {**(response.metadata or {}), _ANSWERS: running}
-        await conversation.save(messages)
 
+    async def run(conversation: Conversation) -> str:
+        history = [_message(entry.item) for entry in conversation.entries]
+        last = history[-1]
+        if isinstance(last, ModelResponse) and not last.tool_calls:
+            # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
+            return _text(last)
+        restate = _Restate(ctx, conversation)
+        result = await agent.run(message_history=history, model=model, toolsets=toolsets, capabilities=[restate])
+        # The messages that no model request stored: an output tool's return, say.
+        await restate.store(result.all_messages())
+        return result.output
 
-async def _transcript(ctx: SessionContext) -> Transcript:
-    """Return the conversation (the object's key) in the form ``messages`` returns."""
-    transcript = Transcript()
-    for message in await _Conversation(ctx.db, ctx.key).load():
-        for part in message.parts:
-            if isinstance(part, UserPromptPart):
-                transcript.say("user", part.content if isinstance(part.content, str) else "")
-            elif isinstance(part, TextPart):
-                transcript.say("assistant", part.content)
-            elif isinstance(part, ToolCallPart):
-                transcript.call(part.tool_call_id, part.tool_name, part.args_as_dict())
-            elif isinstance(part, ToolReturnPart | RetryPromptPart) and part.tool_call_id:
-                transcript.result(part.tool_call_id, _result(part), isinstance(part, RetryPromptPart))
-    return transcript
+    return run
 
 
 async def prompt(
@@ -405,13 +302,7 @@ async def prompt(
     """
     _check(agent, system)
 
-    async def read() -> Transcript:
-        return await _transcript(ctx)
-
-    async def work() -> str:
-        return await _answer_once(ctx, text, agent, model, system, tools)
-
-    return await transcribing(ctx, read, work)
+    return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
 
 
 def agent(
