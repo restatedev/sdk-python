@@ -84,7 +84,7 @@ examples under [Basic](#basic) show the agents' framework integrations.
 | File                          | What                                            |
 | ----------------------------- | ----------------------------------------------- |
 | [`notes.py`](basic/notes.py)  | SQL in a virtual object, with `ctx.db`, and no agent |
-| [`langgraph_agent.py`](basic/langgraph_agent.py) | A LangGraph agent: its checkpoints in the key's database |
+| [`langgraph_agent.py`](basic/langgraph_agent.py) | A LangGraph agent: its conversation in the key's database |
 | [`pydantic_ai_agent.py`](basic/pydantic_ai_agent.py) | A Pydantic AI agent: its conversation in the key's database |
 | [`openai_agent.py`](basic/openai_agent.py) | An OpenAI Agents SDK agent: its conversation in the key's database |
 

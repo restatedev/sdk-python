@@ -10,25 +10,26 @@
 #
 # LangGraph's graph API (langgraph.graph, its StateGraph and compiled graphs) is untyped: no py.typed.
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
-"""LangGraph agents whose checkpoints are stored in the object's database.
+"""LangGraph agents whose conversations are stored in the object's database, one step at a time.
 
 The graph is the usual tool-calling loop: a model node and a tools node, going
-back to the model until it answers. Checkpoints are stored by
-``SqlCheckpointSaver`` (``_checkpointer.py``). The handler is not replayed: a
+back to the model until it answers. It runs on the shared conversation of
+``restate.agents`` (``_conversation.py``), which answers each prompt once and
+closes a stopped, refused or failed run. The handler is not replayed: a
 retried attempt (after a crash or a lost connection) runs again from the
-start, and LangGraph resumes from the last step it stored:
+start, and the run resumes from the last step stored:
 
-- Each step is stored before the next one starts (``durability="sync"``), in
-  order with everything else the handler does. The tool calls a model made are
-  therefore stored before any tool runs, and a crash while tools are running
-  resumes them with the same tool call ids, which a tool can pass on to stay
-  idempotent.
+- The model node stores each reply before the tools run, and the tools node
+  stores their results before the next request. A crash while tools are
+  running runs them again with the same tool call ids, which a tool can pass
+  on to stay idempotent.
 - A tool's error fails the attempt, and Restate retries it. (LangGraph's
   ``ToolNode`` would otherwise hand the error to the model as the tool's
   result.) A call to a tool the agent does not have, or with arguments that do
   not validate, is reported back to the model to fix.
-- Each message is answered once per invocation: the graph records each answer
-  in its state under the prompt's id, and a retried attempt returns it.
+
+For a graph of your own, ``SqlCheckpointSaver`` stores LangGraph's checkpoints
+in the object's database instead.
 """
 
 from __future__ import annotations
@@ -40,57 +41,36 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from typing import Annotated, Any, TypedDict
 
+from langchain_core import messages as langchain_messages
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import PrivateAttr
 
-from restate.agents._calls import outcomes
-from restate.agents._common import (
-    CANCELLED,
-    MODEL_ENV,
-    UNANSWERED,
-    ModelError,
-    PerSession,
-    configured,
-    cut_off_result,
-    from_tool,
-    model_of,
-    next_prompt_id,
-    provider_of,
-    refusal_of,
-    stored_answer,
-)
+from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
+from restate.agents._conversation import Call, Conversation, Item, Result, answer_once
 from restate.agents._object import RETRIES, AgentObject
 from restate.agents._tools import Tool, ToolCall
-from restate.agents._transcript import Transcript
-from restate.agents._turn import AttemptEnded, stop_signal_of, tool_call_ended, tool_call_started, transcribing
-from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
-from restate.exceptions import TerminalError
+from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.retry_policy import InvocationRetryPolicy
 from restate.sessions import Migration, SessionContext
 
-_CANCELLATION = 409
-"""The status code of Restate's cancellation error, which a stopped turn fails with."""
 
-
-def _merged(old: dict[str, str], new: dict[str, str]) -> dict[str, str]:
-    return {**old, **new}
-
-
-class State(TypedDict, total=False):
-    """The state of the agent's graph: the conversation, the prompt being answered, and each prompt's answer."""
+class State(TypedDict):
+    """The state of the agent's graph: the conversation."""
 
     messages: Annotated[list[AnyMessage], add_messages]
-    prompt: str
-    """The id of the prompt being answered."""
-    answers: Annotated[dict[str, str], _merged]
-    """The answer to each prompt, by id."""
 
 
 ChatModel: typing.TypeAlias = str | BaseChatModel
@@ -159,15 +139,84 @@ def _native(tool: Tool, ctx: SessionContext) -> BaseTool:
     return native
 
 
-def _tools_node(ctx: SessionContext, tools: list[BaseTool]) -> Callable[[State, RunnableConfig], Awaitable[Any]]:
-    """Return the graph's tools node, which runs the tool calls of the model's last message.
+# LangChain's own (de)serialization of messages, whose dicts it leaves untyped.
+_to_dict = typing.cast(Callable[[BaseMessage], Item], langchain_messages.message_to_dict)
+_from_dicts = typing.cast(Callable[[list[Item]], list[BaseMessage]], langchain_messages.messages_from_dict)
 
-    A ``ToolNode`` runs them, and tells the model what went wrong when a call
-    names an unknown tool or has invalid arguments; any other tool error fails
-    the attempt. The start and end of each round are published for clients that
-    follow the conversation.
+
+def _item(message: BaseMessage) -> Item:
+    return _to_dict(message)
+
+
+def _message(item: Item) -> BaseMessage:
+    [message] = _from_dicts([item])
+    return message
+
+
+def _text(message: BaseMessage) -> str:
+    return str(message.text)
+
+
+class _Items:
+    """LangChain's messages, as the conversation keeps them."""
+
+    def prompt(self, text: str) -> Item:
+        return _item(HumanMessage(text))
+
+    def reply(self, text: str) -> Item:
+        return _item(AIMessage(text))
+
+    def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
+        return [
+            _item(ToolMessage(text, tool_call_id=call.id, name=call.name, status="error")) for call, text in results
+        ]
+
+    def calls(self, item: Item) -> list[Call]:
+        message = _message(item)
+        if not isinstance(message, AIMessage):
+            return []
+        return [Call(call.get("id") or "", call["name"], call["args"]) for call in message.tool_calls]
+
+    def results_of(self, item: Item) -> list[Result]:
+        message = _message(item)
+        if not isinstance(message, ToolMessage):
+            return []
+        return [Result(message.tool_call_id, _text(message), message.status == "error")]
+
+    def said(self, item: Item) -> tuple[str, str] | None:
+        message = _message(item)
+        if isinstance(message, HumanMessage):
+            return "user", _text(message)
+        if isinstance(message, AIMessage):
+            return "assistant", _text(message)
+        return None
+
+
+ITEMS = _Items()
+
+
+def _tool_messages(ran: Any) -> list[BaseMessage]:
+    """Return the tool messages a ``ToolNode`` returned: as its state update, or as a list."""
+    messages = typing.cast(dict[str, Any], ran)["messages"] if isinstance(ran, dict) else ran
+    return typing.cast(list[BaseMessage], messages)
+
+
+def _graph(
+    ctx: SessionContext, conversation: Conversation, model: BaseChatModel, tools: list[BaseTool], system: str | None
+) -> Any:
+    """Build the agent's graph: ``model`` calls ``tools`` until it answers, each step stored in ``conversation``.
+
+    It starts with the tools if the conversation ends with a reply whose tool
+    calls have no results (cut off by a crash), and else with the model.
     """
+    bound = model.bind_tools(tools) if tools else model
     node = ToolNode(tools)
+
+    async def call_model(state: State) -> dict[str, Any]:
+        messages = state["messages"]
+        reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
+        await conversation.append_reply(_item(reply))
+        return {"messages": [reply]}
 
     async def run_tools(state: State, config: RunnableConfig) -> Any:
         await tool_call_started(ctx)
@@ -177,135 +226,40 @@ def _tools_node(ctx: SessionContext, tools: list[BaseTool]) -> Callable[[State, 
             # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
             from_tool(ctx, error)
             raise
+        await conversation.append(*(_item(result) for result in _tool_messages(ran)))
         await tool_call_ended(ctx)
         return ran
 
-    return run_tools
-
-
-def _text(message: BaseMessage) -> str:
-    return str(message.text)
-
-
-def _graph(ctx: SessionContext, model: BaseChatModel, tools: list[BaseTool], system: str | None) -> Any:
-    """Build the agent's graph: ``model`` calls ``tools`` until it answers the prompt."""
-    bound = model.bind_tools(tools) if tools else model
-
-    async def call_model(state: State) -> dict[str, Any]:
-        messages = state.get("messages", [])
-        reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
-        return {"messages": [reply]}
-
-    def answer(state: State) -> dict[str, Any]:
-        messages = state.get("messages", [])
-        return {"answers": {state.get("prompt", ""): _text(messages[-1]) if messages else ""}}
+    def start(state: State) -> str:
+        return "tools" if conversation.unanswered() else "model"
 
     graph = StateGraph(State)
     graph.add_node("model", call_model)
-    graph.add_node("tools", typing.cast(Any, _tools_node(ctx, tools)))
-    graph.add_node("answer", answer)
-    graph.add_edge(START, "model")
-    graph.add_conditional_edges("model", tools_condition, {"tools": "tools", END: "answer"})
+    graph.add_node("tools", typing.cast(Any, run_tools))
+    graph.add_conditional_edges(START, start, {"tools": "tools", "model": "model"})
+    graph.add_conditional_edges("model", tools_condition, {"tools": "tools", END: END})
     graph.add_edge("tools", "model")
-    graph.add_edge("answer", END)
-    return graph
+    return graph.compile()
 
 
-Compiled = CompiledStateGraph[Any, Any, Any, Any]
-
-
-async def _answer_once(
-    ctx: SessionContext, text: str, model: ChatModel | None, system: str | None, given: Sequence[AnyTool]
-) -> str:
+def _run(
+    ctx: SessionContext, model: ChatModel | None, system: str | None, given: Sequence[AnyTool]
+) -> Callable[[Conversation], Awaitable[str]]:
+    """Return the run of a prompt: the graph, from the conversation to the prompt's answer."""
     chat_model = model if isinstance(model, BaseChatModel) else _chat_model(model_of(model))
     tools = [_native(t, ctx) if isinstance(t, Tool) else t for t in given]
-    # An agent resumes only from the latest checkpoint; keeping earlier ones would store the conversation again
-    # at each step.
-    app: Compiled = _graph(ctx, chat_model, tools, system).compile(
-        checkpointer=SqlCheckpointSaver(ctx.db, history="latest")
-    )
-    config: RunnableConfig = {"configurable": {"thread_id": ctx.key}}
-    prompt_id = next_prompt_id(ctx)
-    while True:
-        values = typing.cast(State, (await app.aget_state(config)).values)
-        answers = values.get("answers", {})
-        if prompt_id in answers:
-            return stored_answer(answers[prompt_id])
-        # Finish an interrupted run first (this prompt's own, after a crash), then start this prompt's run.
-        # A run is unfinished while its prompt has no answer.
-        last = values.get("prompt")
-        interrupted = last is not None and last not in answers
-        start: State | None = None if interrupted else {"messages": [HumanMessage(text)], "prompt": prompt_id}
-        stop = stop_signal_of(ctx)
-        run = app.ainvoke(start, config, durability="sync")
-        try:
-            await (stop.guard(run) if stop is not None else run)
-        except AttemptEnded:
-            # The attempt ended: stop here, and let the next attempt continue the run.
-            raise
-        except TerminalError as error:
-            # Cancelled: close the run, so that the next prompt starts afresh.
-            if error.status_code == _CANCELLATION:
-                await _close(ctx, app, config, CANCELLED)
-                raise
-            # Failed for good (a LangChain tool's terminal error): close the run with the error, so that the next
-            # prompt does not run into it again. If the run was an earlier prompt's, carry on with this one.
-            await _close(ctx, app, config, f"Error: {error.message}")
-            if not interrupted or last == prompt_id:
-                raise
-        except Exception as error:
-            # Refused for good (a wrong API key, say): close the run unanswered and fail with a terminal error.
-            # If the run was an earlier prompt's, carry on with this one.
-            refused = refusal_of(ctx, error)
-            if refused is None:
-                raise
-            await _close(ctx, app, config, UNANSWERED)
-            if not interrupted or last == prompt_id:
-                raise refused from error
 
+    async def run(conversation: Conversation) -> str:
+        messages = [_message(entry.item) for entry in conversation.entries]
+        last = messages[-1]
+        if isinstance(last, AIMessage) and not last.tool_calls:
+            # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
+            return _text(last)
+        graph = _graph(ctx, conversation, chat_model, tools, system)
+        state = typing.cast(State, await graph.ainvoke({"messages": messages}))
+        return _text(state["messages"][-1])
 
-async def _close(ctx: SessionContext, app: Compiled, config: RunnableConfig, text: str) -> None:
-    """Close a cancelled, refused or failed run of ``app`` with ``text``, as its ``answer`` node would.
-
-    Each tool call of the last reply that has no result gets ``text`` as its
-    result, and ``text`` becomes the reply and the prompt's answer. A run that
-    stored no input yet (cancelled right away) has nothing to close: the state's
-    prompt is an earlier one, which already has its answer.
-    """
-    values = typing.cast(State, (await app.aget_state(config)).values)
-    prompt = values.get("prompt")
-    if prompt is None or prompt in values.get("answers", {}):
-        return
-    messages = values.get("messages", [])
-    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
-    last = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
-    calls = [c for c in (last.tool_calls if last else []) if c.get("id") and c.get("id") not in answered]
-    returned = await outcomes(ctx, [str(c.get("id")) for c in calls])
-    closing: list[BaseMessage] = [
-        *(
-            ToolMessage(cut_off_result(returned, str(c.get("id")), text), tool_call_id=str(c.get("id")), status="error")
-            for c in calls
-        ),
-        AIMessage(text),
-    ]
-    await app.aupdate_state(config, {"messages": closing, "answers": {prompt: text}}, as_node="answer")
-
-
-async def _transcript(ctx: SessionContext) -> Transcript:
-    """Return the thread (the object's key) from its last checkpoint, in the form ``messages`` returns."""
-    transcript = Transcript()
-    saved = await SqlCheckpointSaver(ctx.db).aget_tuple({"configurable": {"thread_id": ctx.key}})
-    messages: list[BaseMessage] = saved.checkpoint["channel_values"].get("messages", []) if saved else []
-    for m in messages:
-        if isinstance(m, HumanMessage):
-            transcript.say("user", _text(m))
-        elif isinstance(m, AIMessage):
-            transcript.say("assistant", _text(m))
-            for call in m.tool_calls:
-                transcript.call(call.get("id") or "", call["name"], call["args"])
-        elif isinstance(m, ToolMessage):
-            transcript.result(m.tool_call_id, _text(m), m.status == "error")
-    return transcript
+    return run
 
 
 async def prompt(
@@ -339,13 +293,7 @@ async def prompt(
         The agent's answer.
     """
 
-    async def read() -> Transcript:
-        return await _transcript(ctx)
-
-    async def work() -> str:
-        return await _answer_once(ctx, text, model, system, tools)
-
-    return await transcribing(ctx, read, work)
+    return await answer_once(ctx, text, ITEMS, _run(ctx, model, system, tools))
 
 
 def agent(

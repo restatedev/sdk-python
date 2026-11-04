@@ -1,7 +1,7 @@
 """
-A LangGraph agent: a weather assistant, its conversation (and LangGraph's
-checkpoints) in each key's database. A crash mid-turn resumes from LangGraph's
-last stored step: a tool call already made is not made again::
+A LangGraph agent: a weather assistant, each conversation in its key's
+database, stored a step at a time. A crash mid-turn resumes from the last
+stored step: a tool call already made is not made again::
 
     OPENAI_API_KEY=... uv run --extra langgraph --extra serve --with langchain-openai examples-agents/basic/langgraph_agent.py
     npx @restatedev/restate-server                                                  # Restate, in another terminal
