@@ -1552,7 +1552,8 @@ dependencies = [
 [[package]]
 name = "restate-sdk-shared-core"
 version = "8.3.0"
-source = "git+https://github.com/restatedev/sdk-shared-core?branch=cloud-exp-revamp#7fbd30d6b219a3540de7f9cfa68f9c643904dca0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7aab6c6bb01010b5dca515fc6547b636954647427ea8ecec3790feffbce7291"
 dependencies = [
  "base64",
  "bs58",
