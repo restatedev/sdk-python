@@ -30,10 +30,11 @@ from __future__ import annotations
 import functools
 import typing
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
+from restate import _preview
 from restate.context import Request
 from restate.exceptions import SuspendedException, TerminalError
 from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL, Handler, handler_from_callable
@@ -97,6 +98,10 @@ class SessionContext:
     """Sends, made at once; a transaction's (``tx.send``) are made once it commits."""
     cancel: Cancel
     """Cancel an invocation, by its id: see ``Cancel``."""
+    _sdk: Any = field(default=None, repr=False, compare=False)
+    """The SDK's context of the attempt, for ``cancelled`` and ``cancel_calls``."""
+    _explicit_cancellation: bool = field(default=False, repr=False, compare=False)
+    """Whether its handler has ``explicit_cancellation=True``."""
 
 
 @dataclass(frozen=True)
@@ -238,6 +243,7 @@ class _Entry:
     fn: Callable[..., Awaitable[Any]]
     view: bool
     config: ObjectConfig
+    explicit_cancellation: bool = False
 
 
 def _context_of(entry: _Entry, host: SqlHost, request: Request, attempt: Attempt) -> SessionContext | ViewContext:
@@ -247,7 +253,14 @@ def _context_of(entry: _Entry, host: SqlHost, request: Request, attempt: Attempt
     if entry.view:
         return ViewContext(key=host.key, request=request, db=reader_of(attempt.db), rpc=rpc, cancel=cancel)
     return SessionContext(
-        key=host.key, request=request, db=attempt.db, rpc=rpc, send=Send(send_now(host)), cancel=cancel
+        key=host.key,
+        request=request,
+        db=attempt.db,
+        rpc=rpc,
+        send=Send(send_now(host)),
+        cancel=cancel,
+        _sdk=getattr(host, "context", None),
+        _explicit_cancellation=entry.explicit_cancellation,
     )
 
 
@@ -268,6 +281,37 @@ def _sdk_handler(entry: _Entry) -> Callable[..., Awaitable[Any]]:
         return await _attempt(entry, host, ctx.request(), args)
 
     return handler
+
+
+def _explicit_of(ctx: SessionContext, operation: str) -> Any:
+    """The SDK's context behind ``ctx``, a handler's with ``explicit_cancellation=True``."""
+    if not isinstance(ctx, SessionContext) or ctx._sdk is None:  # pylint: disable=protected-access
+        raise TerminalError(f"{operation} takes a session object's ctx")
+    if not ctx._explicit_cancellation:  # pylint: disable=protected-access
+        raise TerminalError(f"{operation} takes the ctx of a handler with explicit_cancellation=True")
+    return ctx._sdk  # pylint: disable=protected-access
+
+
+async def cancelled(ctx: SessionContext) -> None:
+    """
+    Returns when Restate cancels the invocation of ``ctx``, a handler's with
+    ``explicit_cancellation=True``, whose awaits are left as they are: for
+    code that stops its own work then (a model's request, say)::
+
+        async def stop_when_cancelled():
+            await sessions.cancelled(ctx)
+            await sessions.cancel_calls(ctx)
+    """
+    await _preview.cancellation(_explicit_of(ctx, "cancelled"))
+
+
+async def cancel_calls(ctx: SessionContext) -> list[str]:
+    """
+    Cancel the calls the attempt of ``ctx`` made and that have not completed,
+    as a cancelled invocation's would be without explicit cancellation: a
+    handler's with ``explicit_cancellation=True``. Returns their invocation ids.
+    """
+    return await _preview.cancel_previous_calls(_explicit_of(ctx, "cancel_calls"))
 
 
 async def invoke(obj: SessionObject, name: str, host: SqlHost, request: Request, *args: Any) -> Any:
@@ -346,6 +390,7 @@ class SessionObject(VirtualObject):
         idempotency_retention: timedelta | None = None,
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
+        explicit_cancellation: bool = False,
     ) -> Callable[[F], F]: ...
 
     def handler(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -363,6 +408,7 @@ class SessionObject(VirtualObject):
         idempotency_retention: timedelta | None = None,
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
+        explicit_cancellation: bool = False,
     ) -> F | Callable[[F], F]:
         """
         A handler: it runs one at a time per key, and is the only one that
@@ -373,11 +419,16 @@ class SessionObject(VirtualObject):
                 await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [text])
 
         With options, ``@notes.handler(name=..., ...)``: the SDK's handler's.
+        With ``explicit_cancellation=True``, Restate's cancellation of its
+        invocation fails no await, nor cancels its calls: the handler learns of
+        it with ``sessions.cancelled(ctx)``, and decides what to stop (its calls,
+        with ``sessions.cancel_calls(ctx)``).
         """
         return self._decorate(
             False,
             name,
             dict(
+                explicit_cancellation=explicit_cancellation,
                 accept=accept,
                 content_type=content_type,
                 input_serde=input_serde,
@@ -474,14 +525,17 @@ class SessionObject(VirtualObject):
                     f"{self.name}.{fn.__name__} is an SDK handler: a session object's handlers are functions of its "
                     "context. Put journaled work in a restate.VirtualObject, Service or Workflow, and call it with ctx.rpc"
                 )
-            entry = _Entry(fn=fn, view=view, config=self.config)
-            registered = VirtualObject.handler(self, name, kind="shared" if view else "exclusive", **options)(
+            explicit = bool(options.get("explicit_cancellation"))
+            sdk_options = {key: value for key, value in options.items() if key != "explicit_cancellation"}
+            entry = _Entry(fn=fn, view=view, config=self.config, explicit_cancellation=explicit)
+            registered = VirtualObject.handler(self, name, kind="shared" if view else "exclusive", **sdk_options)(
                 _sdk_handler(entry)
             )
             sdk: Handler[Any, Any] = handler_from_callable(registered)
             # A later attempt makes different reads than a replayed journal
             # would have: each runs from the start, against the state as it is.
             sdk.explicit_recovery = True
+            sdk.explicit_cancellation = explicit
             self._entries[sdk.name] = entry
             return typing.cast(F, registered)
 
@@ -493,4 +547,4 @@ class SessionObject(VirtualObject):
         return self
 
 
-__all__ = ["CallFuture", "Cancel", "SessionContext", "SessionObject", "ViewContext"]
+__all__ = ["CallFuture", "Cancel", "SessionContext", "SessionObject", "ViewContext", "cancel_calls", "cancelled"]

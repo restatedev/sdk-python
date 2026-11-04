@@ -437,3 +437,21 @@ async def test_the_object_store_issues_its_sync_and_listing_when_called():
     assert issued == ["sync", "keys"]
     await sync
     assert await keys == []
+
+
+async def test_cancelled_takes_the_ctx_of_a_handler_with_explicit_cancellation():
+    obj = sessions.SessionObject("cancelling")
+
+    @obj.handler
+    async def implicit(ctx: sessions.SessionContext) -> None:
+        await sessions.cancelled(ctx)
+
+    @obj.handler(explicit_cancellation=True)
+    async def explicit(ctx: sessions.SessionContext) -> None:
+        await sessions.cancel_calls(ctx)
+
+    assert not obj.handlers["implicit"].explicit_cancellation
+    assert obj.handlers["explicit"].explicit_cancellation
+    # Over a test's own host there is no SDK context to cancel.
+    with pytest.raises(TerminalError, match="takes a session object's ctx"):
+        await run(obj, "explicit", Host(Backend(), service="cancelling"))

@@ -15,6 +15,9 @@
 import asyncio
 import typing
 import uuid
+from datetime import timedelta
+
+import httpx
 
 import pytest
 
@@ -130,10 +133,31 @@ async def forward(ctx: sessions.SessionContext, text: str) -> None:
         tx.send(deliver, key=ctx.key)(text)
 
 
+sleeper = restate.Service("sleeper")
+
+
+@sleeper.handler()
+async def nap(ctx: restate.Context) -> str:
+    await ctx.sleep(timedelta(minutes=5))
+    return "rested"
+
+
+@notes.handler(explicit_cancellation=True)
+async def stoppable(ctx: sessions.SessionContext, text: str) -> list[str]:
+    """Waits for a nap; cancelled, it cancels the nap, records that it stopped, and answers the calls it cancelled."""
+    napping = asyncio.ensure_future(ctx.rpc(nap)())
+    stopping = asyncio.ensure_future(sessions.cancelled(ctx))
+    await asyncio.wait({napping, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    assert stopping.done()
+    cancelled = await sessions.cancel_calls(ctx)
+    await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [f"stopped: {text}"])
+    return cancelled
+
+
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([inbox, pricing, notes]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([inbox, pricing, sleeper, notes]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -177,3 +201,36 @@ async def test_the_sends_of_a_transaction_are_made_once_it_commits(harness: Harn
 async def test_the_writes_go_through_the_store_asked_for(harness: HarnessEnvironment, store: str):
     await harness.client.object_call(add, key=str(uuid.uuid4()), arg="x")
     assert (python_writes > 0) == (store == "python")
+
+
+async def cancel_when_running(harness: HarnessEnvironment, invocation_id: str) -> None:
+    """Cancel the invocation, once Restate runs it."""
+    async with httpx.AsyncClient() as admin:
+        for _ in range(100):
+            status = await admin.post(
+                f"{harness.admin_api_url}/query",
+                json={"query": f"SELECT status FROM sys_invocation WHERE id = '{invocation_id}'"},
+                headers={"Accept": "application/json"},
+            )
+            rows = status.json().get("rows", [])
+            if rows and rows[0]["status"] in ("running", "suspended"):
+                break
+            await asyncio.sleep(0.05)
+        response = await admin.patch(f"{harness.admin_api_url}/invocations/{invocation_id}/cancel")
+        response.raise_for_status()
+
+
+async def attach(harness: HarnessEnvironment, invocation_id: str) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=30) as ingress:
+        return await ingress.get(f"{harness.ingress_url}/restate/invocation/{invocation_id}/attach")
+
+
+async def test_a_handler_with_explicit_cancellation_stops_its_own_work(harness: HarnessEnvironment):
+    key = str(uuid.uuid4())
+    sent = await harness.client.object_send(stoppable, key=key, arg="nap")
+    await cancel_when_running(harness, sent.invocation_id)
+    answer = await attach(harness, sent.invocation_id)
+    assert answer.status_code == 200, answer.text
+    [nap_id] = answer.json()
+    assert (await attach(harness, nap_id)).status_code == 409
+    assert await harness.client.object_call(texts, key=key, arg=None) == ["stopped: nap"]
