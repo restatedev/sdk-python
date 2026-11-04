@@ -116,6 +116,7 @@ def main() -> None:
     refused("restate.agents.tool", lambda: restate.agents.tool(lambda city: city), "pydantic")
     refused("restate.agents.langgraph", lambda: __import__("restate.agents.langgraph"), "restate-sdk[langgraph]")
     refused("restate.agents.pydantic_ai", lambda: __import__("restate.agents.pydantic_ai"), "restate-sdk[pydantic_ai]")
+    refused("restate.agents.anthropic", lambda: __import__("restate.agents.anthropic"), "restate-sdk[anthropic]")
     refused("restate.serve", lambda: asyncio.run(restate.serve(sessions.app(notes))), "restate-sdk[serve]")
 
 

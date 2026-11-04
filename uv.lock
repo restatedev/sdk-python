@@ -46,6 +46,25 @@ wheels = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "docstring-parser" },
+    { name = "httpx2" },
+    { name = "jiter" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c8/5b/6c13b126554cfec789ce14a74f2ccfd46382a0eb296ec78ea6b80eeac3b5/anthropic-2.4.0.tar.gz", hash = "sha256:c59cab76049cf581e90e2ee3a20472291029b7a6a1ee2ef32bff2b2a7010fd47", size = 1915809, upload-time = "2026-11-02T19:08:06.047Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/5d/e399d9028411ce404d7ddbe6b8060d878b2549ed8cd671a7bb496ae20ffc/anthropic-2.4.0-py3-none-any.whl", hash = "sha256:db2e691364ae2e04083ed9b8deb49f1a6967e9f184f8cbb5afcb3bcda8ab0532", size = 2340848, upload-time = "2026-11-02T19:08:03.822Z" },
+]
+
+[[package]]
 name = "anyio"
 version = "4.11.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3297,6 +3316,10 @@ source = { editable = "." }
 adk = [
     { name = "google-adk" },
 ]
+anthropic = [
+    { name = "anthropic" },
+    { name = "pydantic" },
+]
 client = [
     { name = "httpx", extra = ["http2"] },
 ]
@@ -3350,6 +3373,7 @@ zstd = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=2.4,<3" },
     { name = "anyio", marker = "extra == 'test'" },
     { name = "backports-zstd", marker = "python_full_version < '3.14' and extra == 'zstd'" },
     { name = "dacite", marker = "extra == 'serde'" },
@@ -3367,6 +3391,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'lint'", specifier = ">=1.11.2" },
     { name = "openai-agents", marker = "extra == 'openai'", specifier = ">=0.6.1" },
     { name = "opentelemetry-api", marker = "extra == 'tracing'", specifier = ">=1.36.0" },
+    { name = "pydantic", marker = "extra == 'anthropic'", specifier = ">=2" },
     { name = "pydantic", marker = "extra == 'langgraph'", specifier = ">=2" },
     { name = "pydantic", marker = "extra == 'pydantic-ai'", specifier = ">=2" },
     { name = "pydantic", marker = "extra == 'serde'" },
@@ -3378,7 +3403,7 @@ requires-dist = [
     { name = "uvicorn", marker = "python_full_version >= '3.11' and extra == 'serve'", specifier = ">=0.53" },
     { name = "zttp", marker = "python_full_version >= '3.11' and extra == 'serve'", specifier = ">=0.0.34" },
 ]
-provides-extras = ["adk", "client", "harness", "langchain", "langgraph", "lint", "openai", "pydantic-ai", "serde", "serve", "test", "tracing", "zstd"]
+provides-extras = ["adk", "anthropic", "client", "harness", "langchain", "langgraph", "lint", "openai", "pydantic-ai", "serde", "serve", "test", "tracing", "zstd"]
 
 [[package]]
 name = "rpds-py"

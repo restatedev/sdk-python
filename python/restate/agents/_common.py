@@ -72,7 +72,7 @@ MODEL_ENV = "RESTATE_AGENT_MODEL"
 DEFAULT_MODEL = "openai/gpt-6-sol"
 """The default model of the frameworks that accept any provider; it needs ``OPENAI_API_KEY``."""
 
-CLAUDE_MODEL = "anthropic/claude-sonnet-5-5"
+CLAUDE_MODEL = "anthropic/claude-opus-5-5"
 """The default model of the frameworks that accept only Anthropic models; it needs ``ANTHROPIC_API_KEY``."""
 
 
