@@ -59,7 +59,7 @@ from restate.handler import Handler, handler_from_callable, invoke_handler
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_types import ReceiveChannel, Send
 from restate.types import extract_core_type
-from restate.vm import Failure, Invocation, NotReady, VMWrapper, RunRetryConfig, Suspended  # pylint: disable=line-too-long
+from restate.vm import CANCEL_HANDLE, Failure, Invocation, NotReady, VMWrapper, RunRetryConfig, Suspended  # pylint: disable=line-too-long
 from restate.vm import (
     DoProgressAnyCompleted,
     DoProgressCancelSignalReceived,
@@ -534,6 +534,10 @@ class ServerInvocationContext(ObjectContext):
         self.request_finished_event = asyncio.Event()
         self.tasks = Tasks()
         self.extension_data: Dict[str, Any] = {}
+        # Explicit cancellation (preview): this attempt's calls that may be in flight, and the
+        # cancellation's future (the cancel notification can be taken only once).
+        self._calls_in_flight: List[ServerCallDurableFuture[Any]] = []
+        self._cancellation: Optional[ServerDurableFuture[None]] = None
 
     def _encode(self, buffer: bytes) -> bytes:
         """Apply the journal value codec encode step, if a codec is configured."""
@@ -763,7 +767,42 @@ class ServerInvocationContext(ObjectContext):
                 await self.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(invocation_id_handle))
             return await self.must_take_notification(invocation_id_handle)
 
-        return ServerCallDurableFuture(self, handle, self._create_fetch_result_coroutine(handle, serde), inv_id_factory)
+        future: ServerCallDurableFuture[T] = ServerCallDurableFuture(
+            self, handle, self._create_fetch_result_coroutine(handle, serde), inv_id_factory
+        )
+        if self.vm.explicit_cancellation:
+            self._calls_in_flight = [call for call in self._calls_in_flight if not call.is_completed()]
+            self._calls_in_flight.append(future)
+        return future
+
+    def cancellation(self) -> RestateDurableFuture[None]:
+        """Return a future that completes when Restate cancels this invocation: see restate._preview.cancellation."""
+        self._require_explicit_cancellation("cancellation")
+        if self._cancellation is None:
+
+            async def cancelled() -> None:
+                if not self.vm.is_completed(CANCEL_HANDLE):
+                    await self.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(CANCEL_HANDLE))
+                await self.must_take_notification(CANCEL_HANDLE)
+
+            self._cancellation = ServerDurableFuture(self, CANCEL_HANDLE, cancelled)
+        return self._cancellation
+
+    async def cancel_previous_calls(self) -> List[str]:
+        """Cancel this attempt's calls that are still in flight, and return their invocation ids."""
+        self._require_explicit_cancellation("cancel_previous_calls")
+        calls, self._calls_in_flight = self._calls_in_flight, []
+        cancelled: List[str] = []
+        for call in calls:
+            if not call.is_completed():
+                invocation_id = await call.invocation_id()
+                self.cancel_invocation(invocation_id)
+                cancelled.append(invocation_id)
+        return cancelled
+
+    def _require_explicit_cancellation(self, operation: str) -> None:
+        if not self.vm.explicit_cancellation:
+            raise TerminalError(f"{operation}() needs a handler with explicit_cancellation=True")
 
     def get(
         self,
