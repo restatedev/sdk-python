@@ -67,6 +67,7 @@ the loop, a subagent), comes with the agents' framework integrations.
 | ----------------------------- | ----------------------------------------------- |
 | [`notes.py`](basic/notes.py)  | SQL in a virtual object, with `ctx.db`, and no agent |
 | [`langgraph_agent.py`](basic/langgraph_agent.py) | A LangGraph agent: its checkpoints in the key's database |
+| [`pydantic_ai_agent.py`](basic/pydantic_ai_agent.py) | A Pydantic AI agent: its conversation in the key's database |
 
 ## Tips
 

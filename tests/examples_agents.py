@@ -155,6 +155,14 @@ async def test_basic_langgraph_agent():
         assert (await ingress.post("assistant/alice/status")).json() == {"answering": None, "waiting": []}
 
 
+async def test_basic_pydantic_ai_agent():
+    """The agent serves, with its companion; a message needs a model's provider, and is left to a real run."""
+    pytest.importorskip("pydantic_ai")
+    async with serving("basic/pydantic_ai_agent.py") as ingress:
+        assert (await ingress.post("assistant/alice/messages", {})).json()["messages"] == []
+        assert (await ingress.post("assistant/alice/status")).json() == {"answering": None, "waiting": []}
+
+
 def serves_http2() -> bool:
     """Whether ``sessions.serve`` can run here: uvicorn 0.53+ with zttp."""
     return importlib.util.find_spec("uvicorn") is not None and importlib.util.find_spec("zttp") is not None

@@ -175,11 +175,17 @@ _REFUSED_TEXT = re.compile(
 )
 
 
+_FOR_GOOD_STATUS = frozenset({400, 401, 403, 404})
+"""The HTTP statuses of a model request that fails again however often it is made (Pydantic AI's ``ModelHTTPError``'s)."""
+
+
 def _refused(error: BaseException) -> bool:
     """Whether ``error`` is a model provider's refusal that a retry does not change: a missing key, an unknown model..."""
     if isinstance(error, ToolError):
         return False
     if type(error).__name__ in _FOR_GOOD:
+        return True
+    if type(error).__name__ == "ModelHTTPError" and getattr(error, "status_code", None) in _FOR_GOOD_STATUS:
         return True
     return bool(_REFUSED_TEXT.search(str(error)))
 

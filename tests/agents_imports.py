@@ -53,3 +53,20 @@ def test_agents_import_without_langgraph_and_its_integration_names_its_extra():
     ran = subprocess.run([sys.executable, "-c", WITHOUT_LANGGRAPH], capture_output=True, text=True, check=False)
     assert ran.returncode == 0, ran.stderr
     assert "install the langgraph extra, pip install restate-sdk[langgraph]" in ran.stdout
+
+
+WITHOUT_PYDANTIC_AI = """
+import sys
+sys.modules["pydantic_ai"] = None
+import restate.agents, restate.agents.internal
+try:
+    import restate.agents.pydantic_ai
+except ImportError as error:
+    print(error)
+"""
+
+
+def test_agents_import_without_pydantic_ai_and_its_integration_names_its_extra():
+    ran = subprocess.run([sys.executable, "-c", WITHOUT_PYDANTIC_AI], capture_output=True, text=True, check=False)
+    assert ran.returncode == 0, ran.stderr
+    assert "install the pydantic_ai extra, pip install restate-sdk[pydantic_ai]" in ran.stdout
