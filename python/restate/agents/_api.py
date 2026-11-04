@@ -118,3 +118,69 @@ def text_part(text: str) -> TextPart:
 def is_tool_part(part: Part) -> typing.TypeGuard[ToolPart]:
     """Whether ``part`` is a tool call's."""
     return part["type"] == "tool"
+
+
+class _Waiting(TypedDict):
+    id: str
+    name: str
+    since: str
+
+
+class Waiting(_Waiting, total=False):
+    """
+    A wait for a signal, as ``pending`` lists it: its ``id``, which ``signal``
+    takes to resolve this wait and no other; the ``name`` of the signal it
+    waits for (such as ``approval``); and ``since``, when it started, as an
+    ISO date.
+    """
+
+    input: Any
+    """What it waits for, as the model said it (such as the refund to approve), if the tool takes an input."""
+
+
+class Signal(TypedDict, total=False):
+    """Which wait a signal resolves, and with what."""
+
+    id: str
+    """The wait of this id (from ``pending``)."""
+    name: str
+    """Else the oldest wait for the signal of this name."""
+    value: Any
+    """Its value: what the wait answers the model with."""
+    keep: bool
+    """With a ``name`` and no one waiting for it, keep the signal for the next wait for it (by default it is dropped)."""
+
+
+class Resolved(TypedDict):
+    """What ``signal`` did: the id of the wait it resolved, or None if none waited (and it was dropped, or kept)."""
+
+    resolved: str | None
+
+
+class Notifications(TypedDict):
+    """The revision of an agent's conversation: each change of what a client reads increases it."""
+
+    revision: int
+
+
+class _Watch(TypedDict):
+    revision: int
+
+
+class Watch(_Watch, total=False):
+    """What ``watch`` waits for: a revision newer than ``revision``, for at most ``timeoutSeconds`` (default 50, at most 60)."""
+
+    timeoutSeconds: float
+
+
+class Status(TypedDict):
+    """What an agent is doing: the message it answers, if any, and what its tools wait for, oldest first."""
+
+    answering: Turn | None
+    waiting: list[Waiting]
+
+
+class Stopped(TypedDict):
+    """What ``stop`` did: the invocation of the message it stopped, or None if none was answered."""
+
+    stopped: str | None
