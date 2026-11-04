@@ -85,11 +85,19 @@ async def restart(tx: DatabaseWriter, start: Start) -> None:
 
 @dataclass
 class _Row:
-    """A message of the log's head (the transcript as last stored): its id, the message, and its JSON."""
+    """A message of the log's head (the transcript as last stored): its id, its JSON, and the message."""
 
     id: int
-    message: Said
     json: str
+    said: Said | None = None
+    """The message: the transcript's own once synced, else parsed from ``json`` only when needed."""
+
+    @property
+    def message(self) -> Said:
+        said = self.said
+        if said is None:
+            said = self.said = json.loads(self.json)
+        return said
 
 
 @dataclass
@@ -115,10 +123,9 @@ async def _head_of(ctx: SessionContext) -> _Head:
     if cached is not None:
         return cached
     db = ctx.db
+    # Compared by their JSON: a message is parsed only if it changed (see ``sync``).
     rows = [
-        _Row(
-            id=int(typing.cast(int, id)), message=json.loads(typing.cast(str, message)), json=typing.cast(str, message)
-        )
+        _Row(id=int(typing.cast(int, id)), json=typing.cast(str, message))
         for id, message in await db.values(
             f"SELECT id, message FROM {TABLE} WHERE position IS NOT NULL ORDER BY position"
         )
@@ -145,7 +152,7 @@ async def sync(ctx: SessionContext, messages: list[Said]) -> None:
 
     def unchanged(position: int) -> bool:
         row = head.rows[position]
-        return row.message is messages[position] or row.json == json_of(position)
+        return row.said is messages[position] or row.json == json_of(position)
 
     both = min(len(head.rows), len(messages))
     same = 0
@@ -161,14 +168,14 @@ async def sync(ctx: SessionContext, messages: list[Said]) -> None:
     try:
         async with db.transaction() as tx:
             for position in range(same, grown):
-                row = _Row(id=head.rows[position].id, message=messages[position], json=json_of(position))
+                row = _Row(id=head.rows[position].id, json=json_of(position), said=messages[position])
                 seq += 1
                 await tx.execute(f"UPDATE {TABLE} SET seq = ?, message = ? WHERE id = ?", [seq, row.json, row.id])
                 rows.append(row)
             # The rest of the old transcript is replaced: its messages stay in the log, but leave the transcript.
             await tx.execute(f"UPDATE {TABLE} SET position = NULL WHERE position >= ?", [grown])
             for position in range(grown, len(messages)):
-                row = _Row(id=next_id, message=messages[position], json=json_of(position))
+                row = _Row(id=next_id, json=json_of(position), said=messages[position])
                 next_id += 1
                 seq += 1
                 await tx.execute(f"INSERT INTO {TABLE} VALUES (?, ?, ?, ?)", [row.id, seq, position, row.json])

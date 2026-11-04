@@ -15,9 +15,14 @@ framework's own items (its messages, as JSON), one row each, in order.
 
 A prompt's item carries the prompt's id, and its answer once there is one; a
 model reply's items carry the reply's id (the position of its first item) and
-the agent that gave it. Rows are only ever appended, but for a reply that is
-dropped (to ask the model again), and a prompt's answer is one update of its
-row.
+the agent that gave it. Rows are only ever appended, in one transaction per
+step, but for a reply at the end that is dropped (to ask the model again),
+which is one range delete on the primary key; and a prompt's answer is one
+update of its row, by its unique prompt id.
+
+The conversation is loaded whole, once per prompt, since the framework's
+model gets all of it. Each item is read (its text, calls and results) once,
+as it is loaded or appended, and kept beside it.
 
 On top of it, ``answer_once`` runs a prompt the same way for every framework:
 each prompt is answered once per invocation, an unfinished run (cut off by a
@@ -32,7 +37,7 @@ from __future__ import annotations
 import json
 import typing
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from restate.agents._calls import outcomes
@@ -68,7 +73,6 @@ SCHEMA = Schema(
             reply INTEGER,
             agent TEXT
         )""",
-        f"CREATE INDEX {TABLE}_reply ON {TABLE} (reply)",
     ],
 )
 
@@ -104,10 +108,24 @@ class Entry:
     """The id of the model's reply it is part of, if it is: the position of the reply's first item."""
     agent: str | None = None
     """The agent that gave the reply."""
-    calls: list[Call] = field(default_factory=list[Call])
-    """The tool calls it makes, read from ``item`` once, as the conversation loads or appends it."""
-    results: list[Result] = field(default_factory=list[Result])
-    """The tool calls' results it holds, read from ``item`` once."""
+    said: tuple[str, str] | None = None
+    """The role (``user`` or ``assistant``) and text it says, if it is a message: read from ``item`` once, as the
+    conversation loads or appends it, like ``calls`` and ``results``."""
+    calls: Sequence[Call] = ()
+    """The tool calls it makes."""
+    results: Sequence[Result] = ()
+    """The tool calls' results it holds."""
+
+
+class Parsed(typing.NamedTuple):
+    """What an item is, as ``Items.read`` parses it."""
+
+    said: tuple[str, str] | None = None
+    """The role (``user`` or ``assistant``) and text of a message, or ``None`` for any other item."""
+    calls: Sequence[Call] = ()
+    """The tool calls it makes."""
+    results: Sequence[Result] = ()
+    """The tool calls' results it holds."""
 
 
 class Items(Protocol):
@@ -125,16 +143,8 @@ class Items(Protocol):
         """Return the items that give each call its result, as text, which close a run's cut-off calls."""
         ...
 
-    def calls(self, item: Item) -> list[Call]:
-        """Return the tool calls ``item`` makes, if any."""
-        ...
-
-    def results_of(self, item: Item) -> list[Result]:
-        """Return the tool calls' results ``item`` holds, if any."""
-        ...
-
-    def said(self, item: Item) -> tuple[str, str] | None:
-        """Return the role (``user`` or ``assistant``) and text of a message item, or ``None`` for any other item."""
+    def read(self, item: Item) -> Parsed:
+        """Return what ``item`` says, and the tool calls and results it holds, parsing it once."""
         ...
 
 
@@ -152,6 +162,8 @@ class Conversation:
         self.entries: list[Entry] = []
         self._results: set[str] = set()
         """The ids of the tool calls that have a result."""
+        self._prompts: dict[str, Entry] = {}
+        """The prompts, by id."""
         self._transcript: Transcript | None = None
         self.closed = False
         """Whether a stop closed the run: the run, unwinding, then stores nothing more."""
@@ -159,9 +171,10 @@ class Conversation:
 
     def _add(self, entries: list[Entry]) -> None:
         for entry in entries:
-            entry.calls = self.items.calls(entry.item)
-            entry.results = self.items.results_of(entry.item)
+            entry.said, entry.calls, entry.results = self.items.read(entry.item)
             self._results.update(result.id for result in entry.results)
+            if entry.prompt is not None:
+                self._prompts[entry.prompt] = entry
             if self._transcript is not None:
                 self._transcribe(entry)
         self.entries.extend(entries)
@@ -176,7 +189,8 @@ class Conversation:
 
     def answer_of(self, prompt_id: str) -> str | None:
         """Return the answer of prompt ``prompt_id``, if it has one."""
-        return next((e.answer for e in self.entries if e.prompt == prompt_id), None)
+        prompt = self._prompts.get(prompt_id)
+        return prompt.answer if prompt is not None else None
 
     def running(self) -> Entry | None:
         """Return the prompt whose run the conversation ends with, if it has no answer yet."""
@@ -205,7 +219,7 @@ class Conversation:
         Results are found by their calls' ids, not by their place: what a
         framework hands back may be trimmed, or be the whole conversation again.
         """
-        return [item for item in items if any(r.id not in self._results for r in self.items.results_of(item))]
+        return [item for item in items if any(r.id not in self._results for r in self.items.read(item).results)]
 
     def final_reply(self) -> str | None:
         """Return the text of the model's reply the conversation ends with, if it ends the run: text, and no tool calls."""
@@ -215,7 +229,7 @@ class Conversation:
         entries = [e for e in self.entries if e.reply == reply]
         if any(e.calls for e in entries):
             return None
-        said = [said for e in entries if (said := self.items.said(e.item)) is not None]
+        said = [e.said for e in entries if e.said is not None]
         return said[-1][1] if said else None
 
     def transcript(self) -> Transcript:
@@ -228,9 +242,8 @@ class Conversation:
 
     def _transcribe(self, entry: Entry) -> None:
         transcript = self.transcript()
-        said = self.items.said(entry.item)
-        if said is not None:
-            role, text = said
+        if entry.said is not None:
+            role, text = entry.said
             transcript.say("user" if role == "user" else "assistant", text)
         for call in entry.calls:
             transcript.call(call.id, call.name, call.input)
@@ -259,26 +272,37 @@ class Conversation:
     async def answered(self, prompt_id: str, answer: str) -> None:
         """Store ``answer`` as the answer of prompt ``prompt_id``."""
         await self.db.execute(f"UPDATE {TABLE} SET answer = ? WHERE prompt = ?", [answer, prompt_id])
-        for entry in self.entries:
-            if entry.prompt == prompt_id:
-                entry.answer = answer
+        self._prompts[prompt_id].answer = answer
 
     async def drop(self, reply: int) -> None:
-        """Drop the items of the model's reply ``reply``, to ask the model again."""
-        await self.db.execute(f"DELETE FROM {TABLE} WHERE reply = ?", [reply])
-        self.entries = [e for e in self.entries if e.reply != reply]
-        self._results = {result.id for e in self.entries for result in e.results}
+        """Drop the model's reply ``reply``, and what came after it, to ask the model again.
+
+        It is one range delete on the primary key: the reply's items start at
+        position ``reply``, and what follows them (their tools' results, say)
+        was made from the reply.
+        """
+        await self.db.execute(f"DELETE FROM {TABLE} WHERE n >= ?", [reply])
+        kept = [e for e in self.entries if e.n < reply]
+        for dropped in self.entries[len(kept) :]:
+            self._results.difference_update(result.id for result in dropped.results)
+            if dropped.prompt is not None:
+                del self._prompts[dropped.prompt]
+        self.entries = kept
         self._transcript = None
 
     async def _insert(self, added: list[Entry]) -> None:
         if self.closed:
             raise RuntimeError("the run was stopped: it stores nothing more")
-        async with self.db.transaction() as tx:
-            for e in added:
-                await tx.execute(
-                    f"INSERT INTO {TABLE} (n, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?)",
-                    [e.n, json.dumps(e.item), e.prompt, e.reply, e.agent],
-                )
+        sql = f"INSERT INTO {TABLE} (n, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?)"
+        rows = [[e.n, json.dumps(e.item), e.prompt, e.reply, e.agent] for e in added]
+        if len(rows) == 1:
+            # One statement commits on its own.
+            await self.db.execute(sql, rows[0])
+        else:
+            async with self.db.transaction() as tx:
+                # The same SQL for each row: the database prepares it once.
+                for row in rows:
+                    await tx.execute(sql, row)
         self._add(added)
 
 

@@ -62,7 +62,7 @@ from restate.agents._common import (
     model_of,
     provider_of,
 )
-from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
@@ -126,21 +126,16 @@ class _Items:
         ]
         return [_item(Event(author=self.author, content=types.Content(role="user", parts=parts)))]
 
-    def calls(self, item: Item) -> list[Call]:
-        return [Call(call.id or "", call.name or "", call.args) for call in _event(item).get_function_calls()]
-
-    def results_of(self, item: Item) -> list[Result]:
+    def read(self, item: Item) -> Parsed:
+        event = _event(item)
+        text = _text(event)
+        calls = [Call(call.id or "", call.name or "", call.args) for call in event.get_function_calls()]
         results: list[Result] = []
-        for response in _event(item).get_function_responses():
+        for response in event.get_function_responses():
             output = (response.response or {}).get("result", response.response)
             results.append(Result(response.id or "", output if isinstance(output, str) else json.dumps(output)))
-        return results
-
-    def said(self, item: Item) -> tuple[str, str] | None:
-        event = _event(item)
-        if not (text := _text(event)):
-            return None
-        return ("user" if event.author == "user" else "assistant"), text
+        said = (("user" if event.author == "user" else "assistant"), text) if text else None
+        return Parsed(said, calls, results)
 
 
 # --- The session ----------------------------------------------------------------------------------

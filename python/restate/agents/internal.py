@@ -48,7 +48,7 @@ from restate.agents._common import (
     refusal_of,
     stored_answer,
 )
-from restate.agents._conversation import Call, Conversation, Entry, Items, Result, answer_once, close
+from restate.agents._conversation import Call, Conversation, Entry, Items, Parsed, Result, answer_once, close
 from restate.agents._signals import Companion, companion_of, deliver, signals
 from restate.agents._tools import run_tool
 from restate.agents._transcript import Transcript
@@ -78,6 +78,7 @@ __all__ = [
     "Items",
     "MessageSerde",
     "ModelError",
+    "Parsed",
     "Read",
     "Result",
     "Stop",

@@ -66,7 +66,7 @@ from agents.tool_context import ToolContext
 from pydantic_core import to_json
 
 from restate.agents._common import PerSession, check_own, configured, from_tool, model_id_of, model_of
-from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
@@ -111,27 +111,24 @@ class _Items:
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         return [{"type": "function_call_output", "call_id": call.id, "output": text} for call, text in results]
 
-    def calls(self, item: Item) -> list[Call]:
-        if item.get("type") != "function_call":
-            return []
-        arguments = str(item.get("arguments") or "{}")
-        try:
-            input: Any = json.loads(arguments)
-        except ValueError:
-            input = arguments
-        return [Call(str(item["call_id"]), str(item["name"]), input)]
-
-    def results_of(self, item: Item) -> list[Result]:
-        # The output of any kind of tool: function_call_output, shell_call_output...
-        if not str(item.get("type", "")).endswith("_output") or "call_id" not in item:
-            return []
-        output = item.get("output")
-        return [Result(str(item["call_id"]), output if isinstance(output, str) else json.dumps(output))]
-
-    def said(self, item: Item) -> tuple[str, str] | None:
-        if item.get("type", "message") == "message" and item.get("role") in ("user", "assistant"):
-            return str(item["role"]), _text(item)
-        return None
+    def read(self, item: Item) -> Parsed:
+        kind = str(item.get("type", "message"))
+        if kind == "message" and item.get("role") in ("user", "assistant"):
+            return Parsed(said=(str(item["role"]), _text(item)))
+        if kind == "function_call":
+            arguments = str(item.get("arguments") or "{}")
+            try:
+                input: Any = json.loads(arguments)
+            except ValueError:
+                input = arguments
+            return Parsed(calls=[Call(str(item["call_id"]), str(item["name"]), input)])
+        if kind.endswith("_output") and "call_id" in item:
+            # The output of any kind of tool: function_call_output, shell_call_output...
+            output = item.get("output")
+            return Parsed(
+                results=[Result(str(item["call_id"]), output if isinstance(output, str) else json.dumps(output))]
+            )
+        return Parsed()
 
 
 ITEMS = _Items()

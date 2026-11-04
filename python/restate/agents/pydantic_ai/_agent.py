@@ -63,7 +63,7 @@ from restate.agents._common import (
     model_of,
     provider_of,
 )
-from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
@@ -136,28 +136,20 @@ class _Items:
         returns = [ToolReturnPart(call.name, text, call.id) for call, text in results]
         return [_item(ModelRequest(parts=list(returns)))]
 
-    def calls(self, item: Item) -> list[Call]:
+    def read(self, item: Item) -> Parsed:
         message = _message(item)
-        if not isinstance(message, ModelResponse):
-            return []
-        return [Call(call.tool_call_id, call.tool_name, call.args_as_dict()) for call in message.tool_calls]
-
-    def results_of(self, item: Item) -> list[Result]:
-        message = _message(item)
-        if not isinstance(message, ModelRequest):
-            return []
-        return [
+        if isinstance(message, ModelResponse):
+            said = ("assistant", _text(message)) if any(isinstance(p, TextPart) for p in message.parts) else None
+            calls = [Call(call.tool_call_id, call.tool_name, call.args_as_dict()) for call in message.tool_calls]
+            return Parsed(said, calls)
+        prompts = [p.content for p in message.parts if isinstance(p, UserPromptPart)]
+        results = [
             Result(part.tool_call_id, _result(part), isinstance(part, RetryPromptPart))
             for part in message.parts
             if isinstance(part, ToolReturnPart | RetryPromptPart) and part.tool_call_id
         ]
-
-    def said(self, item: Item) -> tuple[str, str] | None:
-        message = _message(item)
-        if isinstance(message, ModelResponse):
-            return ("assistant", _text(message)) if any(isinstance(p, TextPart) for p in message.parts) else None
-        prompts = [p.content for p in message.parts if isinstance(p, UserPromptPart)]
-        return ("user", "".join(p if isinstance(p, str) else "" for p in prompts)) if prompts else None
+        said = ("user", "".join(p if isinstance(p, str) else "" for p in prompts)) if prompts else None
+        return Parsed(said, results=results)
 
 
 ITEMS = _Items()

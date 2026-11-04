@@ -58,7 +58,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import PrivateAttr
 
 from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
-from restate.agents._conversation import Call, Conversation, Item, Result, Run, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import tool_call_ended, tool_call_started
@@ -172,25 +172,16 @@ class _Items:
             _item(ToolMessage(text, tool_call_id=call.id, name=call.name, status="error")) for call, text in results
         ]
 
-    def calls(self, item: Item) -> list[Call]:
-        message = _message(item)
-        if not isinstance(message, AIMessage):
-            return []
-        return [Call(call.get("id") or "", call["name"], call["args"]) for call in message.tool_calls]
-
-    def results_of(self, item: Item) -> list[Result]:
-        message = _message(item)
-        if not isinstance(message, ToolMessage):
-            return []
-        return [Result(message.tool_call_id, _text(message), message.status == "error")]
-
-    def said(self, item: Item) -> tuple[str, str] | None:
+    def read(self, item: Item) -> Parsed:
         message = _message(item)
         if isinstance(message, HumanMessage):
-            return "user", _text(message)
+            return Parsed(("user", _text(message)))
         if isinstance(message, AIMessage):
-            return "assistant", _text(message)
-        return None
+            calls = [Call(call.get("id") or "", call["name"], call["args"]) for call in message.tool_calls]
+            return Parsed(("assistant", _text(message)), calls)
+        if isinstance(message, ToolMessage):
+            return Parsed(results=[Result(message.tool_call_id, _text(message), message.status == "error")])
+        return Parsed()
 
 
 ITEMS = _Items()
