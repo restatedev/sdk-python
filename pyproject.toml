@@ -86,6 +86,7 @@ include = [
     "python/**/*.py",
     "examples/**/*.py",
     "examples-agents/**/*.py",
+    "scripts/**/*.py",
     "tests/**/*.py",
     "test-services//**/*.py",
 ]
