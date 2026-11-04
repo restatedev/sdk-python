@@ -563,3 +563,15 @@ def request_of() -> Any:
     from sessions_object import request  # pylint: disable=import-error,import-outside-toplevel
 
     return request()
+
+
+def test_a_tool_output_of_any_kind_is_stored_once():
+    from restate.agents._conversation import Conversation, Entry  # pylint: disable=import-outside-toplevel
+    from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
+
+    shell = {"type": "shell_call_output", "call_id": "s1", "output": "ok"}
+    function = {"type": "function_call_output", "call_id": "f1", "output": "ok"}
+    stored = Conversation(typing.cast(Any, None), _agent.ITEMS, [Entry(0, shell), Entry(1, function)])
+    # The SDK hands the stored outputs back with the next request: none of them is new.
+    new = {"type": "computer_call_output", "call_id": "c1", "output": "ok"}
+    assert _agent._outputs(stored, [shell, function, new]) == [new]  # pyright: ignore[reportPrivateUsage]

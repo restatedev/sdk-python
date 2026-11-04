@@ -292,10 +292,12 @@ async def answer_once(ctx: SessionContext, text: str, items: Items, run: Run) ->
     attempt returns the stored answer, or finishes the run first. A run that
     an earlier prompt left unfinished is finished before this one starts.
     """
+    # Before any await: each prompt gets its id in the order of the code that asks it, on every attempt.
+    prompt_id = next_prompt_id(ctx)
     conversation = await Conversation.load(ctx.db, items)
 
     async def work() -> str:
-        return await _answer(ctx, conversation, text, run)
+        return await _answer(ctx, conversation, prompt_id, text, run)
 
     return await transcribing(ctx, _read(conversation), work)
 
@@ -307,8 +309,7 @@ def _read(conversation: Conversation) -> Callable[[], Awaitable[Transcript]]:
     return read
 
 
-async def _answer(ctx: SessionContext, conversation: Conversation, text: str, run: Run) -> str:
-    prompt_id = next_prompt_id(ctx)
+async def _answer(ctx: SessionContext, conversation: Conversation, prompt_id: str, text: str, run: Run) -> str:
     while True:
         if (answer := conversation.answer_of(prompt_id)) is not None:
             return stored_answer(answer)

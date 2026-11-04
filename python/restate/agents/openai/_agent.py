@@ -140,11 +140,17 @@ ITEMS = _Items()
 
 
 def _outputs(conversation: Conversation, items: Sequence[Any]) -> list[Item]:
-    """Return the tool outputs of ``items`` (the SDK's input) that the conversation does not have yet."""
-    stored = {result.id for entry in conversation.entries for result in ITEMS.results_of(entry.item)}
-    return [
-        item for item in items if str(item.get("type", "")).endswith("_output") and item.get("call_id") not in stored
-    ]
+    """Return the tool outputs of ``items`` (the SDK's input) that the conversation does not have yet.
+
+    An output of any kind of tool (``function_call_output``, ``shell_call_output``...) is
+    one, found by its call's id.
+    """
+    stored = {entry.item.get("call_id") for entry in conversation.entries if _is_output(entry.item)}
+    return [item for item in items if _is_output(item) and item.get("call_id") not in stored]
+
+
+def _is_output(item: Item) -> bool:
+    return str(item.get("type", "")).endswith("_output")
 
 
 def _final(conversation: Conversation, reply: int) -> str | None:
