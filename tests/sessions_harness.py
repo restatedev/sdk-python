@@ -235,3 +235,29 @@ async def test_a_handler_with_explicit_cancellation_stops_its_own_work(harness: 
     [nap_id] = answer.json()
     assert (await attach(harness, nap_id)).status_code == 409
     assert await harness.client.object_call(texts, key=key, arg=None) == ["stopped: nap"]
+
+
+@notes.view
+async def stop_it(ctx: sessions.ViewContext, invocation_id: str) -> None:
+    """A Stop button: a view cancels a running handler of its own object."""
+    ctx.cancel(invocation_id)
+
+
+async def test_a_view_cancels_a_handler_of_its_own_object(harness: HarnessEnvironment):
+    key = str(uuid.uuid4())
+    sent = await harness.client.object_send(stoppable, key=key, arg="nap")
+    async with httpx.AsyncClient() as admin:
+        for _ in range(100):
+            status = await admin.post(
+                f"{harness.admin_api_url}/query",
+                json={"query": f"SELECT status FROM sys_invocation WHERE id = '{sent.invocation_id}'"},
+                headers={"Accept": "application/json"},
+            )
+            rows = status.json().get("rows", [])
+            if rows and rows[0]["status"] in ("running", "suspended"):
+                break
+            await asyncio.sleep(0.05)
+    await harness.client.object_call(stop_it, key=key, arg=sent.invocation_id)
+    answer = await attach(harness, sent.invocation_id)
+    assert answer.status_code == 200, answer.text
+    assert await harness.client.object_call(texts, key=key, arg=None) == ["stopped: nap"]

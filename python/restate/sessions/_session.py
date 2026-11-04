@@ -111,6 +111,10 @@ class SqlHost(CallHost, Protocol):
         """Done once the VM has the read whose handle is ``handle``."""
         ...
 
+    def cancel_invocation(self, invocation_id: str) -> None:
+        """Cancel the invocation ``invocation_id``, as Restate's admin API does."""
+        ...
+
 
 @dataclass
 class ObjectConfig:
