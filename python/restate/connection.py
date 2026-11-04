@@ -24,6 +24,7 @@ import asyncio
 import signal
 import sys
 import typing
+import warnings
 from contextlib import asynccontextmanager
 
 from restate.server_types import RestateAppT
@@ -66,7 +67,7 @@ class Connection:
         """Metadata from the first successful handshake (``deployment_url``, ``proxy_url``, …)."""
         return self._info
 
-    async def wait(self) -> None:
+    async def wait_closed(self) -> None:
         """
         Wait until the connection stops serving: returns after :meth:`shutdown`, raises
         :class:`ConnectError` when the connection failed for good (rejected credentials,
@@ -74,12 +75,26 @@ class Connection:
         """
         await self._engine.terminated()
 
+    async def wait(self) -> None:
+        """
+        Deprecated alias of :meth:`wait_closed`.
+
+        .. deprecated:: 1.4.0
+            Use :meth:`wait_closed` instead.
+        """
+        warnings.warn(
+            "Connection.wait() is deprecated, use Connection.wait_closed() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        await self.wait_closed()
+
     async def shutdown(self, grace: float = 0.0) -> None:
         """
         Stop serving. New invocations are refused and Restate Cloud is told; in-flight
         invocations get ``grace`` seconds to finish before the connections are cut.
         ``0`` cuts them at once. Never raises: a connection that already failed reports
-        its error through :meth:`wait`, not here.
+        its error through :meth:`wait_closed`, not here.
         """
         try:
             await self._engine.shutdown(grace)
@@ -119,7 +134,7 @@ async def with_connection(
 
         async with restate.with_connection(app, name="greeter") as connection:
             print(connection.info.deployment_url)
-            await connection.wait()
+            await connection.wait_closed()
     """
     options = TunnelEngineOptions.resolve(name=name, key=key)
     engine = TunnelEngine(app, options)
@@ -199,4 +214,4 @@ async def connect(
             file=sys.stderr,
             flush=True,
         )
-        await connection.wait()
+        await connection.wait_closed()
