@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterable, AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterable, Generator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from typing import Any, overload
 
@@ -133,7 +133,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         self._toolsets = [toolset.visit_and_replace(set_context) for toolset in wrapped.toolsets]
 
     @contextmanager
-    def _restate_overrides(self) -> Iterator[None]:
+    def _restate_overrides(self) -> Generator[None, None, None]:
         with (
             super().override(model=self._model, toolsets=self._toolsets, tools=[], native_tools=[]),
         ):
@@ -378,7 +378,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
         spec: dict[str, Any] | AgentSpec | None = None,
-    ) -> AsyncIterator[StreamedRunResult[AgentDepsT, Any]]:
+    ) -> AsyncGenerator[StreamedRunResult[AgentDepsT, Any], None]:
         """Run the agent with a user prompt in async mode, returning a streamed response.
 
         Example:

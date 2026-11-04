@@ -177,6 +177,12 @@ def identity_headers(audience: str) -> typing.List[typing.Tuple[str, str]]:
 TEST_TIMEOUT = 5.0
 
 
+def _fail(future: "asyncio.Future[None]", error: BaseException) -> None:
+    """Fail ``future``, which a test may no longer await: its exception is not one the loop must report."""
+    future.set_exception(error)
+    future.exception()
+
+
 class Response:
     def __init__(self) -> None:
         self.stream_id = 0
@@ -284,9 +290,9 @@ class FakeCloud:
                 self._closed.set_result(None)
             for response in self._responses.values():
                 if not response.ended.done():
-                    response.ended.set_exception(ConnectionError("session closed"))
+                    _fail(response.ended, ConnectionError("session closed"))
                 if not response.started.done():
-                    response.started.set_exception(ConnectionError("session closed"))
+                    _fail(response.started, ConnectionError("session closed"))
 
     def _dispatch(self, event: typing.Any) -> None:
         assert self._conn is not None
@@ -311,7 +317,7 @@ class FakeCloud:
         elif isinstance(event, StreamReset):
             reset = self._responses.get(event.stream_id)
             if reset is not None and not reset.ended.done():
-                reset.ended.set_exception(ConnectionError(f"stream reset: {event.error_code}"))
+                _fail(reset.ended, ConnectionError(f"stream reset: {event.error_code}"))
         elif isinstance(event, ConnectionTerminated):
             if not self._goaway.done():
                 self._goaway.set_result(None)

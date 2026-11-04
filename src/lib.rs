@@ -14,6 +14,8 @@ use restate_sdk_shared_core::{
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
+mod sessions;
+
 // Current crate version
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -1089,6 +1091,8 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "CANCEL_NOTIFICATION_HANDLE",
         PyNotificationHandle::from(CANCEL_NOTIFICATION_HANDLE),
     )?;
+
+    sessions::register(m)?;
 
     // Set customized error formatter
     set_error_formatter(PythonErrorFormatter);

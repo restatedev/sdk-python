@@ -32,8 +32,9 @@ serve = [
 ]
 adk = ["google-adk>=1.20.0"]
 openai = ["openai-agents>=0.6.1"]
-pydantic_ai = ["pydantic-ai-slim>=2.0,<3"]
+pydantic_ai = ["pydantic-ai-slim>=2.0,<3", "pydantic>=2"]
 langchain = ["langchain>=1.0.0", "langgraph>=1.0.0", "langchain-core>=1.0.0"]
+langgraph = ["langgraph>=1.0.0", "langchain-core>=1.0.0", "pydantic>=2"]
 tracing = ["opentelemetry-api>=1.36.0"]
 zstd = [
     "backports.zstd ; python_version < '3.14'",
@@ -48,12 +49,44 @@ features = ["pyo3/extension-module"]
 module-name = "restate._internal"
 python-source = "python"
 
+# Rebuilt by `uv sync` when the Rust changes, not only the Python.
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+]
+
+# The packages written to be fully typed: strict in both type checkers.
+# basedpyright (an editor's, say) reads this section too, as there is no
+# [tool.basedpyright] (it refuses both): the mode is set, standard, for it to
+# check what pyright does rather than its stricter default, whose Any rules
+# do not fit an SDK (Any is what a handler's input or a serialized value is).
+# Deprecations are reported, by both.
+[tool.pyright]
+typeCheckingMode = "standard"
+strict = ["python/restate/sessions", "python/restate/agents"]
+reportDeprecated = "warning"
+
+[[tool.mypy.overrides]]
+module = ["restate.sessions.*", "restate.agents.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_return_any = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+strict_equality = true
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"
 include = [
     "python/**/*.py",
     "examples/**/*.py",
+    "examples-agents/**/*.py",
+    "scripts/**/*.py",
     "tests/**/*.py",
     "test-services//**/*.py",
 ]

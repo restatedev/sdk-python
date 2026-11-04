@@ -32,3 +32,28 @@ jobs:
         run: just build
       - name: Verify
         run: just verify
+
+  no-extras:
+    # An ordinary user's install, `pip install restate-sdk`: no new dependencies, and the optional parts
+    # (restate.sessions' server, restate.agents' integrations) fail only when used, naming their extra.
+    name: "Install without extras (Python ${{ matrix.python }})"
+    runs-on: warp-ubuntu-latest-x64-4x
+    strategy:
+      matrix:
+        python: [ "3.10", "3.14" ]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - uses: astral-sh/setup-uv@v5.4.2
+        with:
+          enable-cache: true
+      - name: Build the wheel
+        run: uv build --wheel --out-dir dist
+      - name: Install it alone into a fresh environment
+        run: |
+          uv venv /tmp/plain
+          uv pip install --python /tmp/plain/bin/python dist/restate_sdk-*.whl
+      - name: Check it as an ordinary user gets it
+        working-directory: /tmp
+        run: /tmp/plain/bin/python -I "$GITHUB_WORKSPACE/scripts/check_no_extras.py"
