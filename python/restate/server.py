@@ -15,6 +15,7 @@ import functools
 import logging
 import signal
 import weakref
+from types import FrameType
 from typing import Callable, Dict, List, Optional, Set, TypedDict, Literal
 
 from restate.discovery import compute_discovery_json
@@ -39,13 +40,27 @@ _shutdown_hooks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[int,
 
 
 def install_shutdown_hook(
-    loop: asyncio.AbstractEventLoop, hook: Callable[[], None], signum: int = signal.SIGTERM
+    loop: asyncio.AbstractEventLoop,
+    hook: Callable[[], None],
+    signum: int = signal.SIGTERM,
+    *,
+    chain: bool = False,
 ) -> None:
     """
     Run ``hook`` when ``signum`` (default SIGTERM) is received while ``loop`` runs.
 
-    Raises what ``loop.add_signal_handler`` raises when signals cannot be handled here
-    (Windows, or a non-main thread).
+    All hooks of a loop and signal share one signal handler, which the first hook installs:
+
+    - By default, with ``loop.add_signal_handler``. That replaces whatever handler the process
+      had for ``signum``, which is right for a program that owns its signals, such as
+      ``restate.connect``.
+    - With ``chain=True``, as a handler that also calls the process's previous handler. That is
+      right for an app run by an ASGI server (uvicorn, hypercorn...): the server has installed
+      its own handler to shut down, and replacing it would keep the server running. Without a
+      previous handler to keep, it is installed as by default.
+
+    Raises what ``loop.add_signal_handler`` or ``signal.signal`` raise when signals cannot be
+    handled here (Windows, or a non-main thread).
     """
     hooks = _shutdown_hooks.setdefault(loop, {})
     if signum not in hooks:
@@ -58,9 +73,48 @@ def install_shutdown_hook(
                 except Exception:  # pylint: disable=broad-except
                     logger.exception("Shutdown hook failed")
 
-        loop.add_signal_handler(signum, dispatch)
+        if chain and _handled_in_python(signum):
+            _install_chained_handler(loop, signum, dispatch)
+        else:
+            loop.add_signal_handler(signum, dispatch)
         hooks[signum] = registered
     hooks[signum].append(hook)
+
+
+def _handled_in_python(signum: int) -> bool:
+    """
+    Return whether a server has a Python-level handler for ``signum`` to keep.
+
+    Python's default SIGINT handler does not count: calling it would raise ``KeyboardInterrupt``
+    into whatever code happens to be running.
+    """
+    previous = signal.getsignal(signum)
+    return callable(previous) and previous is not signal.default_int_handler
+
+
+def _install_chained_handler(loop: asyncio.AbstractEventLoop, signum: int, dispatch: Callable[[], None]) -> None:
+    """
+    Install a ``signal.signal`` handler for ``signum`` that schedules ``dispatch`` on ``loop``, and then
+    calls the handler it replaced.
+
+    This keeps both kinds of server handler working:
+
+    - one installed with ``signal.signal`` (uvicorn's) is the previous handler, which this calls;
+    - one installed with ``loop.add_signal_handler`` (hypercorn's) keeps running regardless, because
+      asyncio delivers those through the loop's wakeup fd, not through the Python-level handler.
+
+    It is only installed over such a handler, which the server (or ``loop.close()``) restores when
+    it stops; so it never outlives the server.
+    """
+    previous = signal.getsignal(signum)
+
+    def handler(received: int, frame: Optional[FrameType]) -> None:
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(dispatch)
+        if callable(previous):
+            previous(received, frame)
+
+    signal.signal(signum, handler)
 
 
 X_RESTATE_SERVER = header_to_binary([("x-restate-server", f"restate-sdk-python/{SDK_VERSION}")])
@@ -297,7 +351,8 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
         if not sigterm_installed:
             loop = asyncio.get_running_loop()
             try:
-                install_shutdown_hook(loop, _on_sigterm, signal.SIGTERM)
+                # Chained: the ASGI server running this app has its own SIGTERM handler, to shut down.
+                install_shutdown_hook(loop, _on_sigterm, signal.SIGTERM, chain=True)
             except (NotImplementedError, RuntimeError, ValueError):
                 pass  # Windows or non-main thread
             sigterm_installed = True
