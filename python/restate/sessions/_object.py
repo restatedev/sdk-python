@@ -27,6 +27,7 @@ nothing else of the SDK's context::
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import typing
 from collections.abc import Awaitable, Callable, Sequence
@@ -36,12 +37,12 @@ from typing import Any
 
 from restate import _preview
 from restate.context import Request
-from restate.exceptions import SuspendedException, TerminalError
+from restate.exceptions import SdkInternalBaseException, SuspendedException, TerminalError
 from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL, Handler, handler_from_callable
 from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import BytesSerde, DefaultSerde, Serde
-from restate.server_context import ServerInvocationContext
+from restate.server_context import DisconnectedException, ServerInvocationContext
 from restate.vm import SingleUnresolvedFuture
 from restate.sessions import _selector
 from restate.sessions._calls import CallFuture, Rpc, Send, send_now
@@ -301,8 +302,17 @@ async def cancelled(ctx: SessionContext) -> None:
         async def stop_when_cancelled():
             await sessions.cancelled(ctx)
             await sessions.cancel_calls(ctx)
+
+        asyncio.ensure_future(stop_when_cancelled())
+
+    If the attempt ends first (the handler returned, or Restate suspended
+    it), it raises ``asyncio.CancelledError``: a task that waits for it ends
+    cancelled, quietly, as a task whose work is over does.
     """
-    await _preview.cancellation(_explicit_of(ctx, "cancelled"))
+    try:
+        await _preview.cancellation(_explicit_of(ctx, "cancelled"))
+    except (SdkInternalBaseException, DisconnectedException) as ended:
+        raise asyncio.CancelledError() from ended
 
 
 async def cancel_calls(ctx: SessionContext) -> list[str]:
