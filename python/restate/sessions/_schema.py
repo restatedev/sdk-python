@@ -16,7 +16,7 @@ opens it. A database keeps how far each schema got in its record ``schema``
 added later (a column, an index) runs on each key's database once, as that key
 is next opened::
 
-    notes = sessions.SessionObject("notes", schema=[
+    notes = sessions.SessionObject("notes", migrations=[
         "CREATE TABLE notes (text TEXT NOT NULL)",
         "ALTER TABLE notes ADD COLUMN at TEXT",
     ])
@@ -48,28 +48,27 @@ One record, so that ``reset`` clears all of them, a library's this process
 never loaded too.
 """
 
-Step = str | Callable[[Any], Awaitable[None]]
-"""A statement, or an async function of the transaction."""
+Migration = str | Callable[[Any], Awaitable[None]]
+"""One step of a database's migrations: a SQL statement, or an async function of the transaction."""
 
 _ENSURE = "_restate_sessions_ensure"
 """The attribute of a database of this package's: how it applies schemas (see ``Schema.ensure``)."""
 
 
-def steps_of(steps: Sequence[Step]) -> tuple[Step, ...]:
-    """``steps`` as a tuple; a lone string (a sequence of characters) is a mistake, not a list of statements."""
+def steps_of(steps: Sequence[Migration]) -> tuple[Migration, ...]:
+    """Return ``steps`` as a tuple; raise ``TypeError`` for a lone string, which is a sequence of characters."""
     if isinstance(steps, str):
-        raise TypeError(
-            f"schema takes a list of steps, not a string: schema=[{steps[:40]!r}{'...' if len(steps) > 40 else ''}]"
-        )
+        shown = f"{steps[:40]!r}{'...' if len(steps) > 40 else ''}"
+        raise TypeError(f"migrations takes a list of steps, not a string: migrations=[{shown}]")
     return tuple(steps)
 
 
 class Schema:
     """A part of a database's schema: its ``name``, and the ``steps`` that make it, in order."""
 
-    def __init__(self, name: str, steps: Sequence[Step]) -> None:
+    def __init__(self, name: str, steps: Sequence[Migration]) -> None:
         self.name: str = name
-        self.steps: tuple[Step, ...] = steps_of(steps)
+        self.steps: tuple[Migration, ...] = steps_of(steps)
 
     async def ensure(self, db: Any) -> None:
         """

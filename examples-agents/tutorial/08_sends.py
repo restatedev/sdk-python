@@ -25,7 +25,7 @@ from restate import sessions
 
 wallet = sessions.SessionObject(
     "wallet",
-    schema=[
+    migrations=[
         "CREATE TABLE entries (amount INTEGER NOT NULL)",
         "ALTER TABLE entries ADD COLUMN note TEXT",
         "ALTER TABLE entries ADD COLUMN id TEXT",

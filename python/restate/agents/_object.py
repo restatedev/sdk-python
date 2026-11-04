@@ -37,7 +37,7 @@ from restate.agents._api import (
 from restate.agents._common import MessageSerde, refusal_of
 from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared
 from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import SessionContext, SessionObject, Step, ViewContext
+from restate.sessions import Migration, SessionContext, SessionObject, ViewContext
 from restate.sessions.internal import reset
 
 T = typing.TypeVar("T")
@@ -111,7 +111,7 @@ class AgentObject(SessionObject):
     forgets it (its database too), and ``sync``, which a client following it
     reads. A framework's ``agent()`` makes one.
 
-    ``schema``: tables of your own, beside the agent's (named ``restate_...``).
+    ``migrations``: tables of your own, beside the agent's (named ``restate_...``).
     ``background``: it works unwatched (a subagent, say): its turn publishes at
     its end only, not at each step.
     """
@@ -121,7 +121,7 @@ class AgentObject(SessionObject):
         name: str,
         *,
         description: str | None = None,
-        schema: Sequence[Step] = (),
+        migrations: Sequence[Migration] = (),
         background: bool = False,
         metadata: dict[str, str] | None = None,
         inactivity_timeout: timedelta | None = None,
@@ -133,7 +133,7 @@ class AgentObject(SessionObject):
     ) -> None:
         super().__init__(
             name,
-            schema=schema,
+            migrations=migrations,
             description=description,
             metadata=metadata,
             inactivity_timeout=inactivity_timeout,

@@ -27,7 +27,7 @@ from restate import sessions
 
 wallet = sessions.SessionObject(
     "wallet",
-    schema=[
+    migrations=[
         "CREATE TABLE entries (amount INTEGER NOT NULL)",
         "ALTER TABLE entries ADD COLUMN note TEXT",
         # New: an id per entry. Entries from earlier lessons have none, which a unique index allows.

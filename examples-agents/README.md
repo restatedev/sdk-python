@@ -47,7 +47,7 @@ real application keeps its data across releases.
 | [`01_object.py`](tutorial/01_object.py)      | A virtual object: handlers that Restate calls by key   |
 | [`02_database.py`](tutorial/02_database.py)  | `ctx.db`: every wallet has its own SQL database        |
 | [`03_views.py`](tutorial/03_views.py)        | Views: reading the database while a handler is running |
-| [`04_schema.py`](tutorial/04_schema.py)      | Changing the tables of databases that already exist    |
+| [`04_migrations.py`](tutorial/04_migrations.py)      | Changing the tables of databases that already exist    |
 
 ### Part 2 · Changes that happen once
 

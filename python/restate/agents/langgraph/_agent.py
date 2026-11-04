@@ -69,7 +69,7 @@ from restate.agents._turn import AttemptEnded, stop_signal_of, tool_call_ended, 
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
 from restate.exceptions import TerminalError
 from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import SessionContext, Step
+from restate.sessions import Migration, SessionContext
 
 _CANCELLATION = 409
 """The status of Restate's cancellation, as a turn that was stopped fails with it."""
@@ -345,7 +345,7 @@ def agent(
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
     description: str | None = None,
-    schema: Sequence[Step] = (),
+    migrations: Sequence[Migration] = (),
     background: bool = False,
     metadata: dict[str, str] | None = None,
     inactivity_timeout: timedelta | None = None,
@@ -375,7 +375,7 @@ def agent(
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.
         description: The object's description, shown in Restate's UI.
-        schema: Tables of your own, beside the agent's.
+        migrations: Tables of your own, beside the agent's.
         background: Whether it works unwatched (a subagent, say): it then
             publishes its progress once a turn ends, not at each step.
         metadata: The object's metadata.
@@ -395,7 +395,7 @@ def agent(
     obj = AgentObject(
         name,
         description=description,
-        schema=schema,
+        migrations=migrations,
         background=background,
         metadata=metadata,
         inactivity_timeout=inactivity_timeout,

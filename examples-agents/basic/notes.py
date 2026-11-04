@@ -15,7 +15,7 @@ key; ``list`` is a view, which reads while ``add`` writes::
 from restate import sessions
 
 # The schema of each key's database: its steps, applied once per key (a step added later runs then).
-notes = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
+notes = sessions.SessionObject("notes", migrations=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
 
 @notes.handler

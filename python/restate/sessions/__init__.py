@@ -15,7 +15,7 @@ so there is no database to run::
 
     from restate import sessions
 
-    notes = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
+    notes = sessions.SessionObject("notes", migrations=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
 
     @notes.handler
@@ -55,7 +55,7 @@ from restate.sessions._api import (
 from restate.sessions._calls import CallFuture
 from restate.sessions._database import Row, Rows, SqlError, SqlParam, SqlValue
 from restate.sessions._object import SessionObject
-from restate.sessions._schema import Step
+from restate.sessions._schema import Migration
 from restate.sessions._serve import app, serve
 
 __all__ = [
@@ -64,6 +64,7 @@ __all__ = [
     "Database",
     "DatabaseReader",
     "DatabaseWriter",
+    "Migration",
     "Row",
     "Rows",
     "Sender",
@@ -72,7 +73,6 @@ __all__ = [
     "SqlError",
     "SqlParam",
     "SqlValue",
-    "Step",
     "Transaction",
     "ViewContext",
     "app",

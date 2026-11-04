@@ -94,7 +94,7 @@ async def test_03_views():
 
 
 async def test_04_schema():
-    async with serving("tutorial/04_schema.py") as ingress:
+    async with serving("tutorial/04_migrations.py") as ingress:
         await ingress.post("wallet/alice/deposit", {"amount": 50, "note": "birthday"})
         assert (await ingress.post("wallet/alice/history")).json() == [{"amount": 50, "note": "birthday"}]
 

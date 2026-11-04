@@ -15,7 +15,7 @@ can't write::
 
 from restate import sessions
 
-wallet = sessions.SessionObject("wallet", schema=["CREATE TABLE entries (amount INTEGER NOT NULL)"])
+wallet = sessions.SessionObject("wallet", migrations=["CREATE TABLE entries (amount INTEGER NOT NULL)"])
 
 
 async def balance_of(db: sessions.DatabaseReader) -> int:

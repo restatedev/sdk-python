@@ -158,7 +158,7 @@ def run(obj: sessions.SessionObject, name: str, host: Host, *args: Any) -> typin
 
 # --- The objects --------------------------------------------------------------------------------
 
-notes = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
+notes = sessions.SessionObject("notes", migrations=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
 
 @notes.handler
@@ -205,7 +205,7 @@ async def test_a_view_of_a_key_never_written_reads_empty_tables_and_stores_nothi
 
 async def test_a_step_added_later_runs_once_on_each_database():
     backend = Backend()
-    v1 = sessions.SessionObject("evolving", schema=["CREATE TABLE t (a INTEGER)"])
+    v1 = sessions.SessionObject("evolving", migrations=["CREATE TABLE t (a INTEGER)"])
 
     @v1.handler()
     async def put(ctx: sessions.SessionContext) -> None:
@@ -213,7 +213,9 @@ async def test_a_step_added_later_runs_once_on_each_database():
 
     await run(v1, "put", Host(backend, service="evolving"))
 
-    v2 = sessions.SessionObject("evolving", schema=["CREATE TABLE t (a INTEGER)", "ALTER TABLE t ADD COLUMN b TEXT"])
+    v2 = sessions.SessionObject(
+        "evolving", migrations=["CREATE TABLE t (a INTEGER)", "ALTER TABLE t ADD COLUMN b TEXT"]
+    )
 
     @v2.handler()
     async def columns(ctx: sessions.SessionContext) -> list[str]:
@@ -225,7 +227,7 @@ async def test_a_step_added_later_runs_once_on_each_database():
 
 
 async def test_the_sends_of_a_transaction_are_made_once_it_commits_and_never_if_it_rolls_back():
-    shop = sessions.SessionObject("shop", schema=["CREATE TABLE orders (id TEXT PRIMARY KEY)"])
+    shop = sessions.SessionObject("shop", migrations=["CREATE TABLE orders (id TEXT PRIMARY KEY)"])
 
     @shop.handler()
     async def place(ctx: sessions.SessionContext, order: str) -> None:
@@ -251,7 +253,7 @@ async def test_the_sends_of_a_transaction_are_made_once_it_commits_and_never_if_
 
 
 async def test_the_sends_a_crash_left_in_the_outbox_are_made_again_with_the_same_keys():
-    shop = sessions.SessionObject("shop2", schema=["CREATE TABLE orders (id TEXT PRIMARY KEY)"])
+    shop = sessions.SessionObject("shop2", migrations=["CREATE TABLE orders (id TEXT PRIMARY KEY)"])
 
     @shop.handler()
     async def place(ctx: sessions.SessionContext, order: str) -> None:
@@ -281,7 +283,7 @@ async def test_the_sends_a_crash_left_in_the_outbox_are_made_again_with_the_same
 
 async def test_an_sql_error_fails_the_handler_with_a_terminal_error():
     host = Host(Backend())
-    broken = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
+    broken = sessions.SessionObject("notes", migrations=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
     @broken.handler()
     async def bad(ctx: sessions.SessionContext) -> None:
@@ -294,7 +296,7 @@ async def test_an_sql_error_fails_the_handler_with_a_terminal_error():
 
 async def test_a_handler_catches_an_sql_error_and_goes_on():
     host = Host(Backend())
-    users = sessions.SessionObject("users", schema=["CREATE TABLE users (email TEXT PRIMARY KEY)"])
+    users = sessions.SessionObject("users", migrations=["CREATE TABLE users (email TEXT PRIMARY KEY)"])
 
     @users.handler
     async def register(ctx: sessions.SessionContext, email: str) -> str:
@@ -309,7 +311,7 @@ async def test_a_handler_catches_an_sql_error_and_goes_on():
 
 
 async def test_a_call_to_ctx_db_inside_its_transaction_is_refused():
-    nested = sessions.SessionObject("nested", schema=["CREATE TABLE t (a INTEGER)"])
+    nested = sessions.SessionObject("nested", migrations=["CREATE TABLE t (a INTEGER)"])
 
     @nested.handler()
     async def inside(ctx: sessions.SessionContext) -> None:
@@ -323,7 +325,7 @@ async def test_a_call_to_ctx_db_inside_its_transaction_is_refused():
 async def test_a_view_writes_nothing():
     host = Host(Backend())
     await run(notes, "add", host, "milk")
-    writer = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
+    writer = sessions.SessionObject("notes", migrations=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
     @writer.view()
     async def sneaky(ctx: sessions.ViewContext) -> None:
@@ -374,7 +376,7 @@ async def test_ctx_send_is_made_at_once_and_cancel_takes_an_invocation_id():
 
 
 async def test_another_database_of_the_key_is_apart_from_the_objects_own():
-    multi = sessions.SessionObject("multi", schema=["CREATE TABLE own (a INTEGER)"])
+    multi = sessions.SessionObject("multi", migrations=["CREATE TABLE own (a INTEGER)"])
 
     @multi.handler()
     async def both(ctx: sessions.SessionContext) -> list[str]:
@@ -389,7 +391,7 @@ async def test_another_database_of_the_key_is_apart_from_the_objects_own():
 
 
 async def test_reset_empties_the_database_and_applies_the_schema_again():
-    resettable = sessions.SessionObject("resettable", schema=["CREATE TABLE t (a INTEGER)"])
+    resettable = sessions.SessionObject("resettable", migrations=["CREATE TABLE t (a INTEGER)"])
 
     @resettable.handler()
     async def fill(ctx: sessions.SessionContext) -> None:
@@ -656,7 +658,7 @@ async def test_an_attempt_is_freed_once_it_ends():
     import weakref  # pylint: disable=import-outside-toplevel
 
     kept: list[weakref.ref[Any]] = []
-    freed = sessions.SessionObject("freed", schema=["CREATE TABLE t (a INTEGER)"])
+    freed = sessions.SessionObject("freed", migrations=["CREATE TABLE t (a INTEGER)"])
 
     @freed.handler
     async def use(ctx: sessions.SessionContext) -> None:

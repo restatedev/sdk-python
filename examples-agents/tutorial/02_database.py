@@ -3,7 +3,7 @@
 
 Each key of a session object has its own SQLite database, ``ctx.db``. It is
 stored in Restate together with the object's state, so there is no database
-server to run. ``schema`` lists the statements that create the tables; they
+server to run. ``migrations`` lists the statements that create the tables; they
 run once per key, the first time that key is used.
 
 The wallet records each deposit as a row, and the balance is their sum. Bob's
@@ -17,7 +17,7 @@ wallet is another key, so it has a database of its own::
 
 from restate import sessions
 
-wallet = sessions.SessionObject("wallet", schema=["CREATE TABLE entries (amount INTEGER NOT NULL)"])
+wallet = sessions.SessionObject("wallet", migrations=["CREATE TABLE entries (amount INTEGER NOT NULL)"])
 
 
 @wallet.handler

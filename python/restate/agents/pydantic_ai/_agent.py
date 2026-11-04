@@ -74,7 +74,7 @@ from restate.agents._transcript import Transcript
 from restate.agents._turn import AttemptEnded, stop_signal_of, tool_call_ended, tool_call_started, transcribing
 from restate.exceptions import TerminalError
 from restate.retry_policy import InvocationRetryPolicy
-from restate.sessions import Database, SessionContext, Step
+from restate.sessions import Database, Migration, SessionContext
 from restate.sessions.internal import Schema
 
 _CANCELLATION = 409
@@ -406,7 +406,7 @@ def agent(
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
     description: str | None = None,
-    schema: Sequence[Step] = (),
+    migrations: Sequence[Migration] = (),
     background: bool = False,
     metadata: dict[str, str] | None = None,
     inactivity_timeout: timedelta | None = None,
@@ -442,7 +442,7 @@ def agent(
         system: The instructions, when there is no ``pydantic_agent``.
         tools: ``restate.agents`` tools, Pydantic AI tools or tool functions.
         description: The object's description, shown in Restate's UI.
-        schema: Tables of your own, beside the agent's.
+        migrations: Tables of your own, beside the agent's.
         background: Whether it works unwatched (a subagent, say): it then
             publishes its progress once a turn ends, not at each step.
         metadata: The object's metadata.
@@ -461,7 +461,7 @@ def agent(
     obj = AgentObject(
         name,
         description=description,
-        schema=schema,
+        migrations=migrations,
         background=background,
         metadata=metadata,
         inactivity_timeout=inactivity_timeout,

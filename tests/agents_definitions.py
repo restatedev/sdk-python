@@ -19,9 +19,9 @@ from restate.agents import AgentObject
 from restate.agents.internal import provider_of
 
 
-def test_a_schema_given_as_one_string_is_refused():
+def test_migrations_given_as_one_string_are_refused():
     with pytest.raises(TypeError, match="a list of steps, not a string"):
-        sessions.SessionObject("p", schema="CREATE TABLE x (a)")  # type: ignore[arg-type]
+        sessions.SessionObject("p", migrations="CREATE TABLE x (a)")  # type: ignore[arg-type]
 
 
 def test_a_sync_function_is_refused_as_a_handler_or_view():

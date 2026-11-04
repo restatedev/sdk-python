@@ -88,7 +88,7 @@ async def price(ctx: restate.Context, sku: str) -> int:
 
 # --- Session objects ----------------------------------------------------------------------------
 
-notes = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
+notes = sessions.SessionObject("notes", migrations=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
 
 @notes.handler()

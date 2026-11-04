@@ -14,7 +14,7 @@ key. Its handlers run one at a time per key, its views beside them; each gets a
 context of its own, made of the key, the request, the database and calls, and
 nothing else of the SDK's context::
 
-    notes = sessions.SessionObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
+    notes = sessions.SessionObject("notes", migrations=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
     @notes.handler
     async def add(ctx: sessions.SessionContext, text: str) -> None:
@@ -48,7 +48,7 @@ from restate.server_context import DisconnectedException, ServerInvocationContex
 from restate.sessions._api import Database, DatabaseReader, SessionContext, ViewContext
 from restate.sessions._calls import CallHost, Calls, GenericSend, Sends, send_now
 from restate.sessions._link import Link
-from restate.sessions._schema import Schema, Step, steps_of
+from restate.sessions._schema import Migration, Schema, steps_of
 from restate.sessions._scope import SCOPE, Scope
 from restate.sessions._selector import FutureSelector, hook
 from restate.sessions._session import Attempt, ObjectConfig, SqlHost, reader_of, with_attempt
@@ -337,7 +337,7 @@ class SessionObject(VirtualObject):
     """
     A virtual object whose state is a SQL database per key.
 
-    - ``schema``: the steps that make each key's database, in order, applied
+    - ``migrations``: the steps that make each key's database, in order, applied
       once per key by the first handler that uses it. A step that ran never
       changes: a change is a step of its own.
     - ``@obj.handler``: handlers run one at a time per key, each with a
@@ -354,7 +354,7 @@ class SessionObject(VirtualObject):
         self,
         name: str,
         *,
-        schema: Sequence[Step] = (),
+        migrations: Sequence[Migration] = (),
         description: str | None = None,
         metadata: dict[str, str] | None = None,
         inactivity_timeout: timedelta | None = None,
@@ -379,7 +379,7 @@ class SessionObject(VirtualObject):
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
         )
-        self._config: ObjectConfig = ObjectConfig(schema=Schema(name, schema) if steps_of(schema) else None)
+        self._config: ObjectConfig = ObjectConfig(schema=Schema(name, migrations) if steps_of(migrations) else None)
         ENTRIES.on(self, {})
 
     def __repr__(self) -> str:

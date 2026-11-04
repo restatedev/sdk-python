@@ -1,15 +1,15 @@
 """
-04 · Changing the schema
+04 · Migrations: changing the tables
 
 Alice's database already exists, so editing its CREATE TABLE statement would
-change nothing for her. That's why ``schema`` is a list of steps: to change the
-tables, add a step at the end. Each key's database runs the steps it hasn't run
-yet, the next time it is used. Never edit or remove a step that may have run
-somewhere; add a new one instead.
+change nothing for her. That's why ``migrations`` is a list of steps: to change
+the tables, add a step at the end. Each key's database runs the steps it hasn't
+run yet, the next time it is used. Never edit or remove a step that may have
+run somewhere; add a new one instead.
 
 Here, deposits get a note::
 
-    uv run examples-agents/tutorial/04_schema.py                                        # and register it (see 01)
+    uv run examples-agents/tutorial/04_migrations.py                                    # and register it (see 01)
     curl localhost:8080/wallet/alice/deposit --json '{"amount": 50, "note": "birthday"}'
     curl localhost:8080/wallet/alice/history                                            # the earlier deposits have no note
 """
@@ -20,7 +20,7 @@ from restate import sessions
 
 wallet = sessions.SessionObject(
     "wallet",
-    schema=[
+    migrations=[
         "CREATE TABLE entries (amount INTEGER NOT NULL)",  # from lesson 02
         "ALTER TABLE entries ADD COLUMN note TEXT",  # new: runs once on each wallet's database
     ],

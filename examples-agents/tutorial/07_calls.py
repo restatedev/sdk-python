@@ -23,7 +23,7 @@ from pydantic import BaseModel
 import restate
 from restate import sessions
 
-handle = sessions.SessionObject("handle", schema=["CREATE TABLE owner (wallet TEXT NOT NULL)"])
+handle = sessions.SessionObject("handle", migrations=["CREATE TABLE owner (wallet TEXT NOT NULL)"])
 
 
 @handle.handler(name="claim")
@@ -43,7 +43,7 @@ async def owner(ctx: sessions.ViewContext) -> str | None:
 
 wallet = sessions.SessionObject(
     "wallet",
-    schema=[
+    migrations=[
         "CREATE TABLE entries (amount INTEGER NOT NULL)",
         "ALTER TABLE entries ADD COLUMN note TEXT",
         "ALTER TABLE entries ADD COLUMN id TEXT",
