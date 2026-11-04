@@ -15,6 +15,7 @@
 import asyncio
 import collections
 import sys
+import types
 import typing
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -293,6 +294,21 @@ def test_a_named_model_whose_provider_package_is_missing_says_which_to_install(m
     with pytest.raises(restate.TerminalError, match="need langchain-anthropic: install it beside") as refused:
         _agent._chat_model("anthropic/claude-sonnet-5-5")  # pyright: ignore[reportPrivateUsage]
     assert refused.value.status_code == 424
+
+
+def test_an_openai_model_is_on_the_responses_api_where_reasoning_models_take_tools(monkeypatch: pytest.MonkeyPatch):
+    from restate.agents.langgraph import _agent  # pylint: disable=import-outside-toplevel
+
+    made: list[dict[str, Any]] = []
+
+    class ChatOpenAI:
+        def __init__(self, **options: Any) -> None:
+            made.append(options)
+
+    monkeypatch.setitem(sys.modules, "langchain_openai", types.SimpleNamespace(ChatOpenAI=ChatOpenAI))
+    _agent._chat_model("openai/gpt-6-sol")  # pyright: ignore[reportPrivateUsage]
+    # On Chat Completions, OpenAI refuses function tools to a reasoning model ("use /v1/responses").
+    assert made == [{"model": "gpt-6-sol", "use_responses_api": True}]
 
 
 async def test_a_langchain_tools_terminal_error_ends_the_turn_and_the_next_message_is_answered(

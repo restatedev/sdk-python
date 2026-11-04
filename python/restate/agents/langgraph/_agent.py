@@ -88,6 +88,10 @@ _PROVIDERS = {
 }
 """The providers that can be named in a model string, each with its LangChain module, class and package."""
 
+_OPTIONS: dict[str, dict[str, Any]] = {"openai": {"use_responses_api": True}}
+"""The options of each provider's chat model. OpenAI's reasoning models take function tools only on the
+Responses API (on Chat Completions they refuse them, unless reasoning is off), so its models use it."""
+
 
 def _provider_of_model(named: str) -> tuple[str, str]:
     """Split ``provider/model-id`` into provider and model id, or raise ``ModelError`` for an unsupported provider."""
@@ -113,7 +117,7 @@ def _chat_model(named: str) -> BaseChatModel:
         raise ModelError(
             f"{provider}/<model-id> models need {package}: install it beside restate-sdk[langgraph]"
         ) from error
-    return typing.cast(BaseChatModel, getattr(integration, class_name)(model=model_id))
+    return typing.cast(BaseChatModel, getattr(integration, class_name)(model=model_id, **_OPTIONS.get(provider, {})))
 
 
 class _RestateTool(BaseTool):
