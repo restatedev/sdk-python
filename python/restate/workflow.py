@@ -22,7 +22,7 @@ from datetime import timedelta
 
 from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import DefaultSerde, Serde
-from restate.handler import Handler, HandlerIO, ServiceTag, make_handler
+from restate.handler import Handler, HandlerIO, ServiceTag, check_state_preload_options, make_handler
 
 I = typing.TypeVar("I")
 O = typing.TypeVar("O")
@@ -68,9 +68,13 @@ class Workflow:
         idempotency_retention (timedelta, optional): The retention duration of idempotent requests to this service.
             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
             otherwise the service discovery will fail.
-        enable_lazy_state (bool, optional): When set to True, lazy state will be enabled for all invocations to this service.
-            NOTE: You can set this field only if you register this service against restate-server >= 1.4,
-            otherwise the service discovery will fail.
+        enable_lazy_state (bool, optional): Deprecated, use `state_preload` instead.
+        state_preload (bool | List[str], optional): Configures which state keys are preloaded ("eager state")
+            at the start of each invocation to this workflow. Can be overridden per handler.
+            - `True`: preload all state (this is the default behavior).
+            - `False`: preload nothing (lazy state).
+            - `["key1", "key2"]`: preload only the listed keys eagerly.
+            NOTE: The list form is supported only by restate-server >= 1.8, otherwise the service discovery will fail.
         ingress_private (bool, optional): When set to True this service, with all its handlers, cannot be invoked from the restate-server
             HTTP and Kafka ingress, but only from other services.
             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
@@ -91,6 +95,7 @@ class Workflow:
         journal_retention: typing.Optional[timedelta] = None,
         idempotency_retention: typing.Optional[timedelta] = None,
         enable_lazy_state: typing.Optional[bool] = None,
+        state_preload: typing.Optional[typing.Union[bool, typing.List[str]]] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
         invocation_context_managers: typing.Optional[
@@ -103,7 +108,9 @@ class Workflow:
         self.abort_timeout = abort_timeout
         self.journal_retention = journal_retention
         self.idempotency_retention = idempotency_retention
+        check_state_preload_options(state_preload, enable_lazy_state)
         self.enable_lazy_state = enable_lazy_state
+        self.state_preload = state_preload
         self.ingress_private = ingress_private
         self.invocation_retry_policy = invocation_retry_policy
         self.context_managers = invocation_context_managers
@@ -129,6 +136,7 @@ class Workflow:
         journal_retention: typing.Optional[timedelta] = None,
         workflow_retention: typing.Optional[timedelta] = None,
         enable_lazy_state: typing.Optional[bool] = None,
+        state_preload: typing.Optional[typing.Union[bool, typing.List[str]]] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
         invocation_context_managers: typing.Optional[
@@ -166,9 +174,13 @@ class Workflow:
             workflow_retention: The retention duration for this workflow handler.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
-            enable_lazy_state: When set to True, lazy state will be enabled for all invocations to this handler.
-                NOTE: You can set this field only if you register this service against restate-server >= 1.4,
-                otherwise the service discovery will fail.
+            enable_lazy_state: Deprecated, use `state_preload` instead.
+            state_preload: Configures which state keys are preloaded ("eager state") at the start of each
+                invocation to this handler. Overrides the value set on the service.
+                - `True`: preload all state (this is the default behavior).
+                - `False`: preload nothing (lazy state).
+                - `["key1", "key2"]`: preload only the listed keys eagerly.
+                NOTE: The list form is supported only by restate-server >= 1.8, otherwise the service discovery will fail.
             ingress_private: When set to True this handler cannot be invoked from the restate-server HTTP and Kafka ingress,
                 but only from other services.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
@@ -189,6 +201,7 @@ class Workflow:
             idempotency_retention=None,
             workflow_retention=workflow_retention,
             enable_lazy_state=enable_lazy_state,
+            state_preload=state_preload,
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
             invocation_context_managers=invocation_context_managers,
@@ -207,6 +220,7 @@ class Workflow:
         journal_retention: typing.Optional[timedelta] = None,
         idempotency_retention: typing.Optional[timedelta] = None,
         enable_lazy_state: typing.Optional[bool] = None,
+        state_preload: typing.Optional[typing.Union[bool, typing.List[str]]] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
         invocation_context_managers: typing.Optional[
@@ -244,9 +258,13 @@ class Workflow:
             idempotency_retention: The retention duration of idempotent requests to this service.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
-            enable_lazy_state: When set to True, lazy state will be enabled for all invocations to this handler.
-                NOTE: You can set this field only if you register this service against restate-server >= 1.4,
-                otherwise the service discovery will fail.
+            enable_lazy_state: Deprecated, use `state_preload` instead.
+            state_preload: Configures which state keys are preloaded ("eager state") at the start of each
+                invocation to this handler. Overrides the value set on the service.
+                - `True`: preload all state (this is the default behavior).
+                - `False`: preload nothing (lazy state).
+                - `["key1", "key2"]`: preload only the listed keys eagerly.
+                NOTE: The list form is supported only by restate-server >= 1.8, otherwise the service discovery will fail.
             ingress_private: When set to True this handler cannot be invoked from the restate-server HTTP and Kafka ingress,
                 but only from other services.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
@@ -268,6 +286,7 @@ class Workflow:
             idempotency_retention,
             None,
             enable_lazy_state,
+            state_preload,
             ingress_private,
             invocation_retry_policy,
             invocation_context_managers,
@@ -289,6 +308,7 @@ class Workflow:
         idempotency_retention: typing.Optional[timedelta] = None,
         workflow_retention: typing.Optional[timedelta] = None,
         enable_lazy_state: typing.Optional[bool] = None,
+        state_preload: typing.Optional[typing.Union[bool, typing.List[str]]] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional["InvocationRetryPolicy"] = None,
         invocation_context_managers: typing.Optional[
@@ -330,9 +350,13 @@ class Workflow:
             workflow_retention: The retention duration for this workflow handler.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
-            enable_lazy_state: When set to True, lazy state will be enabled for all invocations to this handler.
-                NOTE: You can set this field only if you register this service against restate-server >= 1.4,
-                otherwise the service discovery will fail.
+            enable_lazy_state: Deprecated, use `state_preload` instead.
+            state_preload: Configures which state keys are preloaded ("eager state") at the start of each
+                invocation to this handler. Overrides the value set on the service.
+                - `True`: preload all state (this is the default behavior).
+                - `False`: preload nothing (lazy state).
+                - `["key1", "key2"]`: preload only the listed keys eagerly.
+                NOTE: The list form is supported only by restate-server >= 1.8, otherwise the service discovery will fail.
             ingress_private: When set to True this handler cannot be invoked from the restate-server HTTP and Kafka ingress,
                 but only from other services.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
@@ -380,6 +404,7 @@ class Workflow:
                 idempotency_retention=idempotency_retention,
                 workflow_retention=workflow_retention,
                 enable_lazy_state=enable_lazy_state,
+                state_preload=state_preload,
                 ingress_private=ingress_private,
                 invocation_retry_policy=invocation_retry_policy,
                 context_managers=combined_context_managers,

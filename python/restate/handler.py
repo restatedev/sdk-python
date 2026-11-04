@@ -29,6 +29,7 @@ from typing import (
     Literal,
     Optional,
     TypeVar,
+    Union,
 )
 
 from restate.retry_policy import InvocationRetryPolicy
@@ -216,6 +217,19 @@ def update_handler_io_with_type_hints(handler_io: HandlerIO[I, O], signature: Si
     update_handler_io_with_return_type_hints(handler_io, signature)
 
 
+def check_state_preload_options(
+    state_preload: Optional[Union[bool, List[str]]], enable_lazy_state: Optional[bool]
+) -> None:
+    """
+    Validate that the new `state_preload` option and the deprecated `enable_lazy_state` option are not both set.
+    """
+    if state_preload is not None and enable_lazy_state is not None:
+        raise ValueError(
+            "Cannot set both the 'state_preload' option and the deprecated 'enable_lazy_state' option at the same time. "
+            "Use only 'state_preload'."
+        )
+
+
 # pylint: disable=R0902
 @dataclass
 class Handler(Generic[I, O]):
@@ -236,7 +250,9 @@ class Handler(Generic[I, O]):
         journal_retention: Journal retention duration.
         idempotency_retention: Idempotency retention duration.
         workflow_retention: Workflow completion retention duration.
-        enable_lazy_state: If true, lazy state is enabled.
+        enable_lazy_state: Deprecated, use `state_preload` instead.
+        state_preload: Configures which state keys are preloaded ("eager state") at the start of each invocation.
+            True preloads all state, False preloads nothing, a list preloads only the listed keys.
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
         invocation_retry_policy: Optional retry policy configuration applied to this handler.
         explicit_recovery: If true, the handler runs with explicit recovery, see restate._preview.explicit_recovery.
@@ -256,6 +272,7 @@ class Handler(Generic[I, O]):
     idempotency_retention: Optional[timedelta] = None
     workflow_retention: Optional[timedelta] = None
     enable_lazy_state: Optional[bool] = None
+    state_preload: Optional[Union[bool, List[str]]] = None
     ingress_private: Optional[bool] = None
     invocation_retry_policy: Optional[InvocationRetryPolicy] = None
     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None
@@ -280,6 +297,7 @@ def make_handler(
     idempotency_retention: Optional[timedelta] = None,
     workflow_retention: Optional[timedelta] = None,
     enable_lazy_state: Optional[bool] = None,
+    state_preload: Optional[Union[bool, List[str]]] = None,
     ingress_private: Optional[bool] = None,
     invocation_retry_policy: Optional[InvocationRetryPolicy] = None,
     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None,
@@ -301,7 +319,9 @@ def make_handler(
         journal_retention: Journal retention duration.
         idempotency_retention: Idempotency retention duration.
         workflow_retention: Workflow completion retention duration.
-        enable_lazy_state: If true, lazy state is enabled.
+        enable_lazy_state: Deprecated, use `state_preload` instead.
+        state_preload: Configures which state keys are preloaded ("eager state") at the start of each invocation.
+            True preloads all state, False preloads nothing, a list preloads only the listed keys.
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
         invocation_retry_policy: Retry policy used by Restate when invoking this handler.
             NOTE: only supported with restate-server >= 1.5.
@@ -315,6 +335,8 @@ def make_handler(
 
     if len(signature.parameters) == 0:
         raise ValueError("Handler must have at least one parameter")
+
+    check_state_preload_options(state_preload, enable_lazy_state)
 
     arity = len(signature.parameters)
     update_handler_io_with_type_hints(handler_io, signature)  # mutates handler_io
@@ -334,6 +356,7 @@ def make_handler(
         idempotency_retention=idempotency_retention,
         workflow_retention=workflow_retention,
         enable_lazy_state=enable_lazy_state,
+        state_preload=state_preload,
         ingress_private=ingress_private,
         invocation_retry_policy=invocation_retry_policy,
         context_managers=context_managers,

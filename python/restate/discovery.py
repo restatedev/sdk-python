@@ -27,7 +27,7 @@ case that the restate server understands.
 import json
 import typing
 from enum import Enum
-from typing import Dict, Optional, Any, List, get_args, get_origin
+from typing import Dict, Optional, Any, List, Tuple, Union, get_args, get_origin
 
 
 from restate.endpoint import Endpoint as RestateEndpoint
@@ -86,6 +86,7 @@ class Handler:
         idempotencyRetention: Optional[int] = None,
         workflowCompletionRetention: Optional[int] = None,
         enableLazyState: Optional[bool] = None,
+        eagerStateKeysWhitelist: Optional[List[str]] = None,
         ingressPrivate: Optional[bool] = None,
         retryPolicyInitialInterval: Optional[int] = None,
         retryPolicyMaxInterval: Optional[int] = None,
@@ -105,6 +106,7 @@ class Handler:
         self.idempotencyRetention = idempotencyRetention
         self.workflowCompletionRetention = workflowCompletionRetention
         self.enableLazyState = enableLazyState
+        self.eagerStateKeysWhitelist = eagerStateKeysWhitelist
         self.ingressPrivate = ingressPrivate
         self.retryPolicyInitialInterval = retryPolicyInitialInterval
         self.retryPolicyMaxInterval = retryPolicyMaxInterval
@@ -127,6 +129,7 @@ class Service:
         journalRetention: Optional[int] = None,
         idempotencyRetention: Optional[int] = None,
         enableLazyState: Optional[bool] = None,
+        eagerStateKeysWhitelist: Optional[List[str]] = None,
         ingressPrivate: Optional[bool] = None,
         retryPolicyInitialInterval: Optional[int] = None,
         retryPolicyMaxInterval: Optional[int] = None,
@@ -144,6 +147,7 @@ class Service:
         self.journalRetention = journalRetention
         self.idempotencyRetention = idempotencyRetention
         self.enableLazyState = enableLazyState
+        self.eagerStateKeysWhitelist = eagerStateKeysWhitelist
         self.ingressPrivate = ingressPrivate
         self.retryPolicyInitialInterval = retryPolicyInitialInterval
         self.retryPolicyMaxInterval = retryPolicyMaxInterval
@@ -225,6 +229,27 @@ def json_schema_from_type_hint(type_hint: Optional[TypeHint[Any]]) -> Any:
     return type_hint_to_json_schema(type_hint.annotation)
 
 
+def resolve_state_preload(
+    state_preload: Optional[Union[bool, List[str]]], enable_lazy_state: Optional[bool]
+) -> Tuple[Optional[bool], Optional[List[str]]]:
+    """
+    Resolve the user facing state preload options into the manifest pair (enableLazyState, eagerStateKeysWhitelist).
+    """
+    if state_preload is None:
+        # Legacy passthrough (may itself be None).
+        return enable_lazy_state, None
+
+    if isinstance(state_preload, bool):
+        # True  => eager (preload all)  => not lazy
+        # False => lazy  (preload none) => lazy
+        return not state_preload, None
+
+    # state_preload is a whitelist of keys to preload eagerly (selective preloading).
+    # An empty whitelist is equivalent to fully lazy state.
+    # Copy, so later mutations of the user's list don't affect discovery.
+    return True, list(state_preload) if len(state_preload) > 0 else None
+
+
 # pylint: disable=R0912,R0915
 def compute_discovery_json(
     endpoint: RestateEndpoint, version: int, discovered_as: typing.Literal["bidi", "request_response"]
@@ -236,6 +261,15 @@ def compute_discovery_json(
     ep = compute_discovery(endpoint, discovered_as)
 
     # Validate that new discovery fields aren't used with older protocol versions
+    if version <= 4:
+        # Note: enableLazyState itself is available since v3; only the eager state whitelist requires v5.
+        for service in ep.services:
+            if service.eagerStateKeysWhitelist is not None:
+                raise ValueError("eagerStateKeysWhitelist is only supported in discovery protocol version 5")
+            for handler in service.handlers:
+                if handler.eagerStateKeysWhitelist is not None:
+                    raise ValueError("eagerStateKeysWhitelist is only supported in discovery protocol version 5")
+
     if version <= 3:
         # Strip lambdaCompression for older discovery versions
         ep.lambdaCompression = None
@@ -336,6 +370,9 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                     contentType=handler.handler_io.content_type,
                     jsonSchema=json_schema_from_type_hint(handler.handler_io.output_type),
                 )
+            handler_enable_lazy_state, handler_eager_state_keys_whitelist = resolve_state_preload(
+                handler.state_preload, handler.enable_lazy_state
+            )
             # add the handler
             service_handlers.append(
                 Handler(
@@ -360,7 +397,8 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                     workflowCompletionRetention=int(handler.workflow_retention.total_seconds() * 1000)
                     if handler.workflow_retention is not None
                     else None,
-                    enableLazyState=handler.enable_lazy_state,
+                    enableLazyState=handler_enable_lazy_state,
+                    eagerStateKeysWhitelist=handler_eager_state_keys_whitelist,
                     ingressPrivate=handler.ingress_private,
                     retryPolicyInitialInterval=int(
                         handler.invocation_retry_policy.initial_interval.total_seconds() * 1000
@@ -386,6 +424,13 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                 )
             )
         # add the service
+        if isinstance(service, (Workflow, VirtualObject)):
+            service_enable_lazy_state, service_eager_state_keys_whitelist = resolve_state_preload(
+                service.state_preload, service.enable_lazy_state
+            )
+        else:
+            # Stateless services must not advertise state options.
+            service_enable_lazy_state, service_eager_state_keys_whitelist = None, None
         description = service.service_tag.description
         metadata = service.service_tag.metadata
         services.append(
@@ -407,7 +452,8 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                 idempotencyRetention=int(service.idempotency_retention.total_seconds() * 1000)
                 if service.idempotency_retention is not None
                 else None,
-                enableLazyState=service.enable_lazy_state if isinstance(service, (Workflow, VirtualObject)) else None,
+                enableLazyState=service_enable_lazy_state,
+                eagerStateKeysWhitelist=service_eager_state_keys_whitelist,
                 ingressPrivate=service.ingress_private,
                 retryPolicyInitialInterval=int(service.invocation_retry_policy.initial_interval.total_seconds() * 1000)
                 if service.invocation_retry_policy and service.invocation_retry_policy.initial_interval

@@ -64,10 +64,13 @@ The compatibility with Restate is described in the following table. sdk-python v
 | 1.3 - 1.4                 | ✅ <sup>(1)</sup> | ✅ <sup>(1)(2)</sup> |
 | 1.5 - 1.6                 | ✅                | ✅ <sup>(2)</sup>    |
 | 1.7                       | ✅                | ✅                   |
+| 1.8                       | ✅                | ✅ <sup>(3)</sup>    |
 
 <sup>(1)</sup> **Note** The new Service/Object/Workflow constructor field and the decorator field `invocation_retry_policy` works only from Restate 1.4 onward. Check the in-code documentation for more details.
 
 <sup>(2)</sup> **Note** Scopes and limit keys work only from Restate 1.7 onward. Check the in-code documentation for more details.
+
+<sup>(3)</sup> **Note** The list form of `state_preload` (eager state keys whitelist) works only from Restate 1.8 onward. Check the in-code documentation for more details.
 
 ## Contributing
 
