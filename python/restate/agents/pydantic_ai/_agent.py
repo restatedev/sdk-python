@@ -453,7 +453,7 @@ def agent(
         invocation_retry_policy: How Restate retries a failed turn.
 
     Returns:
-        The agent, to serve with ``sessions.serve`` or ``sessions.app``.
+        The agent, to serve with ``restate.serve(sessions.app(agent))``, or any ASGI server.
 
     Raises:
         TypeError: If both ``pydantic_agent`` and ``system`` are given.

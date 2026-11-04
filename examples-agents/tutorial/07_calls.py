@@ -18,6 +18,8 @@ instead of running it again::
     curl localhost:8080/handle/ace/owner                      # "alice"
 """
 
+import asyncio
+
 from pydantic import BaseModel
 
 import restate
@@ -85,4 +87,4 @@ async def balance(ctx: sessions.ViewContext) -> int:
 
 
 if __name__ == "__main__":
-    sessions.serve(wallet, handle)
+    asyncio.run(restate.serve(sessions.app(wallet, handle)))

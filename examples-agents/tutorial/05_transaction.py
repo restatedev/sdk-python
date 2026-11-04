@@ -20,6 +20,8 @@ suits failures that may go away, such as a lost connection::
     curl localhost:8080/wallet/alice/history                                            # lunch, but no boat
 """
 
+import asyncio
+
 from pydantic import BaseModel
 
 import restate
@@ -69,4 +71,4 @@ async def history(ctx: sessions.ViewContext) -> list[sessions.Row]:
 
 
 if __name__ == "__main__":
-    sessions.serve(wallet)
+    asyncio.run(restate.serve(sessions.app(wallet)))

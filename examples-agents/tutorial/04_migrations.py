@@ -14,8 +14,11 @@ Here, deposits get a note::
     curl localhost:8080/wallet/alice/history                                            # the earlier deposits have no note
 """
 
+import asyncio
+
 from pydantic import BaseModel
 
+import restate
 from restate import sessions
 
 wallet = sessions.SessionObject(
@@ -54,4 +57,4 @@ async def history(ctx: sessions.ViewContext) -> list[sessions.Row]:
 
 
 if __name__ == "__main__":
-    sessions.serve(wallet)
+    asyncio.run(restate.serve(sessions.app(wallet)))

@@ -18,6 +18,8 @@ So the money leaves alice and arrives at bob together, or not at all::
     curl localhost:8080/wallet/alice/transfer --json '{"to": "bob", "amount": 5000}'    # fails, and bob gets nothing
 """
 
+import asyncio
+
 from pydantic import BaseModel
 
 import restate
@@ -87,4 +89,4 @@ async def history(ctx: sessions.ViewContext) -> list[sessions.Row]:
 
 
 if __name__ == "__main__":
-    sessions.serve(wallet)
+    asyncio.run(restate.serve(sessions.app(wallet)))

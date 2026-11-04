@@ -18,6 +18,9 @@ Every lesson serves on port 9080, so stop this one before you start the next,
 and register again.
 """
 
+import asyncio
+
+import restate
 from restate import sessions
 
 # A session object: a virtual object that gets a database in the next lesson.
@@ -31,4 +34,4 @@ async def hello(ctx: sessions.SessionContext) -> str:
 
 
 if __name__ == "__main__":
-    sessions.serve(wallet)
+    asyncio.run(restate.serve(sessions.app(wallet)))

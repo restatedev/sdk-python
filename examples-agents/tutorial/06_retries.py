@@ -20,6 +20,8 @@ counts the deposit once::
     curl localhost:8080/wallet/alice/deposit --json '{"id": "d1", "amount": 10, "note": "refund"}'   # sent again: the balance stays the same
 """
 
+import asyncio
+
 from pydantic import BaseModel
 
 import restate
@@ -97,4 +99,4 @@ async def history(ctx: sessions.ViewContext) -> list[sessions.Row]:
 
 
 if __name__ == "__main__":
-    sessions.serve(wallet)
+    asyncio.run(restate.serve(sessions.app(wallet)))

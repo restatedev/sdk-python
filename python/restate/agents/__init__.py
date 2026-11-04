@@ -13,6 +13,9 @@
 A crash, a restart, or a person who takes a day to approve something changes
 nothing: each message is answered once, and each tool call is made once::
 
+    import asyncio
+
+    import restate
     from restate import sessions
     from restate.agents import langgraph, tool
 
@@ -26,7 +29,7 @@ nothing: each message is answered once, and each tool call is made once::
     assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
 
     if __name__ == "__main__":
-        sessions.serve(assistant)
+        asyncio.run(restate.serve(sessions.app(assistant)))
 
 This package holds what all frameworks share:
 

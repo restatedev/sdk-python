@@ -15,6 +15,9 @@ wallet is another key, so it has a database of its own::
     curl localhost:8080/wallet/bob/deposit --json 7      # 7
 """
 
+import asyncio
+
+import restate
 from restate import sessions
 
 wallet = sessions.SessionObject("wallet", migrations=["CREATE TABLE entries (amount INTEGER NOT NULL)"])
@@ -29,4 +32,4 @@ async def deposit(ctx: sessions.SessionContext, amount: int) -> int:
 
 
 if __name__ == "__main__":
-    sessions.serve(wallet)
+    asyncio.run(restate.serve(sessions.app(wallet)))

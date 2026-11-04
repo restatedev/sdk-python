@@ -12,6 +12,9 @@
 
 For example::
 
+    import asyncio
+
+    import restate
     from restate import sessions
     from restate.agents import langgraph, tool
 
@@ -21,7 +24,7 @@ For example::
         return f"Sunny in {city}"
 
     assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
-    sessions.serve(assistant)
+    asyncio.run(restate.serve(sessions.app(assistant)))
 
 ``agent`` creates an agent, ``prompt`` answers a prompt from a handler of your
 own, and ``SqlCheckpointSaver`` stores the checkpoints of a graph of your own

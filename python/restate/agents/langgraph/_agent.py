@@ -389,7 +389,7 @@ def agent(
         invocation_retry_policy: How Restate retries a failed turn.
 
     Returns:
-        The agent, to serve with ``sessions.serve`` or ``sessions.app``.
+        The agent, to serve with ``restate.serve(sessions.app(agent))``, or any ASGI server.
 
     Raises:
         TerminalError: If ``model`` names a provider other than OpenAI or Anthropic.

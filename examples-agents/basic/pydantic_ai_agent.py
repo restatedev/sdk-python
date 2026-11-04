@@ -14,6 +14,9 @@ Pydantic AI's providers: ``anthropic/<model-id>`` takes
 ``pydantic-ai-slim[anthropic]`` (and ANTHROPIC_API_KEY) instead.
 """
 
+import asyncio
+
+import restate
 from restate import sessions
 from restate.agents import pydantic_ai, tool
 
@@ -28,4 +31,4 @@ assistant = pydantic_ai.agent("assistant", system="Answer briefly.", tools=[get_
 
 
 if __name__ == "__main__":
-    sessions.serve(assistant)
+    asyncio.run(restate.serve(sessions.app(assistant)))

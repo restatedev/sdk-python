@@ -13,6 +13,9 @@ can't write::
     curl localhost:8080/wallet/alice/history           # every deposit, oldest first
 """
 
+import asyncio
+
+import restate
 from restate import sessions
 
 wallet = sessions.SessionObject("wallet", migrations=["CREATE TABLE entries (amount INTEGER NOT NULL)"])
@@ -41,4 +44,4 @@ async def history(ctx: sessions.ViewContext) -> list[int]:
 
 
 if __name__ == "__main__":
-    sessions.serve(wallet)
+    asyncio.run(restate.serve(sessions.app(wallet)))

@@ -23,7 +23,7 @@ It checks that:
 - ``import restate`` loads neither ``restate.sessions`` nor ``restate.agents``;
 - an ordinary ``restate.app`` serves its discovery;
 - ``restate.sessions`` and ``restate.agents`` import, and their apps serve too;
-- each optional part fails only when used, with an ``ImportError`` that names
+- each optional part (``restate.serve`` included) fails only when used, with an ``ImportError`` that names
   what to install.
 """
 
@@ -116,7 +116,7 @@ def main() -> None:
     refused("restate.agents.tool", lambda: restate.agents.tool(lambda city: city), "pydantic")
     refused("restate.agents.langgraph", lambda: __import__("restate.agents.langgraph"), "restate-sdk[langgraph]")
     refused("restate.agents.pydantic_ai", lambda: __import__("restate.agents.pydantic_ai"), "restate-sdk[pydantic_ai]")
-    refused("sessions.serve", lambda: sessions.serve(notes), "restate-sdk[serve]")
+    refused("restate.serve", lambda: asyncio.run(restate.serve(sessions.app(notes))), "restate-sdk[serve]")
 
 
 if __name__ == "__main__":

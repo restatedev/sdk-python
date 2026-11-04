@@ -12,6 +12,9 @@
 
 For example::
 
+    import asyncio
+
+    import restate
     from restate import sessions
     from restate.agents import pydantic_ai, tool
 
@@ -21,7 +24,7 @@ For example::
         return f"Sunny in {city}"
 
     assistant = pydantic_ai.agent("assistant", system="Answer briefly.", tools=[get_weather])
-    sessions.serve(assistant)
+    asyncio.run(restate.serve(sessions.app(assistant)))
 
 ``agent`` creates an agent, and ``prompt`` answers a prompt from a handler of
 your own. The conversation is stored one step at a time.

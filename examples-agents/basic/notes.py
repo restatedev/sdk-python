@@ -12,6 +12,9 @@ key; ``list`` is a view, which reads while ``add`` writes::
     curl localhost:8080/notes/alice/list                                            # ["Buy milk"]
 """
 
+import asyncio
+
+import restate
 from restate import sessions
 
 # The schema of each key's database: its steps, applied once per key (a step added later runs then).
@@ -30,4 +33,4 @@ async def list_notes(ctx: sessions.ViewContext) -> list[str]:
 
 
 if __name__ == "__main__":
-    sessions.serve(notes)
+    asyncio.run(restate.serve(sessions.app(notes)))

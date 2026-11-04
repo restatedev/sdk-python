@@ -14,6 +14,9 @@ The model is ``openai/gpt-6-sol`` unless RESTATE_AGENT_MODEL names another:
 ANTHROPIC_API_KEY) instead of ``langchain-openai``.
 """
 
+import asyncio
+
+import restate
 from restate import sessions
 from restate.agents import langgraph, tool
 
@@ -28,4 +31,4 @@ assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_we
 
 
 if __name__ == "__main__":
-    sessions.serve(assistant)
+    asyncio.run(restate.serve(sessions.app(assistant)))

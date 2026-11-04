@@ -11,26 +11,20 @@
 """Serving session objects.
 
 ``app`` builds the ASGI app of a program's services, together with any
-services they depend on (such as the ``signals`` object that agents use). Run
-it with an ASGI server of your choice (hypercorn, uvicorn, ...), as you would
-``restate.app``, or call ``serve`` to run it in one line.
+services they depend on (such as the ``signals`` object that agents use). Serve
+it as you would ``restate.app``: with ``restate.serve``, or any ASGI server::
+
+    asyncio.run(restate.serve(sessions.app(notes)))
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import importlib
 import os
-import re
-import signal
 import typing
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any
 
 import restate
 from restate.entry_codec import JournalValueCodec, JournalValueCodecProvider
-from restate.server import install_shutdown_hook
 from restate.server_types import RestateAppT
 from restate.sessions._link import Link
 
@@ -137,83 +131,3 @@ def app(
         identity_keys=identity_keys,
         journal_value_codec=journal_value_codec,
     )
-
-
-def serve(
-    *services: Service,
-    port: int | None = None,
-    identity_keys: list[str] | None = None,
-    journal_value_codec: JournalValueCodec | JournalValueCodecProvider | None = None,
-) -> None:
-    """Serve ``services`` over HTTP until the process is stopped.
-
-    This runs ``app(*services)`` on uvicorn with cleartext HTTP/2, which is
-    how Restate connects to services::
-
-        if __name__ == "__main__":
-            sessions.serve(wallet, handle)
-
-    It needs the ``serve`` extra (``pip install "restate-sdk[serve]"``, which
-    installs uvicorn 0.53 or later and zttp) and Python 3.11 or later. On
-    other setups, serve ``app(...)`` with an ASGI server of your own. It stops
-    within a few seconds of SIGINT or SIGTERM.
-
-    Args:
-        *services: The services, virtual objects (session objects included)
-            and workflows to serve, as for ``app``.
-        port: The port to listen on. Defaults to ``$PORT``, else 9080.
-        identity_keys: Passed to ``restate.app``.
-        journal_value_codec: Passed to ``restate.app``.
-
-    Raises:
-        ImportError: If uvicorn 0.53 or later, or zttp, is not installed.
-    """
-    try:
-        uvicorn = importlib.import_module("uvicorn")
-        importlib.import_module("zttp")
-    except ImportError as error:
-        raise ImportError(_NO_SERVER) from error
-    version = re.match(r"(\d+)\.(\d+)", str(getattr(uvicorn, "__version__", "")))
-    if version is None or (int(version[1]), int(version[2])) < (0, 53):
-        raise ImportError(_NO_SERVER)
-    config = uvicorn.Config(
-        app(*services, identity_keys=identity_keys, journal_value_codec=journal_value_codec),
-        host="0.0.0.0",
-        port=port or int(os.environ.get("PORT", "9080")),
-        http="zttp",
-        http2=True,
-        # The endpoint has no lifespan; and a graceful shutdown would wait for Restate's open connections.
-        lifespan="off",
-        timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN,
-    )
-    asyncio.run(_until_stopped(uvicorn.Server(config)))
-
-
-async def _until_stopped(server: Any) -> None:
-    """Run the uvicorn ``server`` until SIGINT or SIGTERM.
-
-    The SDK's endpoint registers its own SIGTERM hook (to wind down the
-    invocations in flight) through ``install_shutdown_hook``, which keeps one
-    asyncio handler per signal. Uvicorn's handlers would be replaced by it on
-    the first request, so the server's exit is registered through the same
-    hook instead, and uvicorn captures no signals itself: both then run.
-    """
-    loop = asyncio.get_running_loop()
-
-    def exit_on(signum: int) -> Callable[[], None]:
-        return lambda: server.handle_exit(signum, None)
-
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):  # Windows, or not the main thread
-            install_shutdown_hook(loop, exit_on(signum), signum)
-    server.capture_signals = contextlib.nullcontext
-    await server.serve()
-
-
-_NO_SERVER = (
-    "sessions.serve runs on uvicorn's HTTP/2: install restate-sdk[serve] (uvicorn 0.53 or later, and zttp; "
-    "Python 3.11 or later), or serve sessions.app(...) with an ASGI server of your own"
-)
-
-_GRACEFUL_SHUTDOWN = 3
-"""How many seconds a stopping ``serve`` waits for requests in flight; Restate retries the rest."""

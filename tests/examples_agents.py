@@ -164,11 +164,11 @@ async def test_basic_pydantic_ai_agent():
 
 
 def serves_http2() -> bool:
-    """Whether ``sessions.serve`` can run here: uvicorn 0.53+ with zttp."""
+    """Whether ``restate.serve`` can run here: uvicorn 0.53+ with zttp."""
     return importlib.util.find_spec("uvicorn") is not None and importlib.util.find_spec("zttp") is not None
 
 
-@pytest.mark.skipif(not serves_http2(), reason="sessions.serve needs the serve extra (Python 3.11+)")
+@pytest.mark.skipif(not serves_http2(), reason="restate.serve needs the serve extra (Python 3.11+)")
 async def test_an_example_as_a_program():
     """``uv run`` an example: it serves on PORT, Restate calls it over HTTP/2, and it stops on SIGTERM."""
     port = find_free_port()
