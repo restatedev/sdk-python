@@ -36,6 +36,7 @@ from restate._internal import (  # pylint: disable=import-error,no-name-in-modul
     SQL_KEYS,
     SQL_SET,
     SQL_SYNC,
+    SQL_WAIT,
     SqlRefusedException,
     sql_open,
 )
@@ -79,6 +80,13 @@ class Store(Protocol):
     A store may also have ``keys()``: every key, as ``ctx.state_keys()``, or an
     awaitable of them. Then a commit that checkpoints deletes the packs no
     checkpoint needs any more; a store without it keeps them.
+
+    A store over a Restate context may give the invocation's VM, as ``vm``
+    (``restate._internal.PyVM``): then the extension writes to it, and reads
+    from it, directly, without the store's ``get``, ``set`` and ``clear``; it
+    calls ``wait(handle)`` (an awaitable, done once the VM has the read whose
+    handle it is) only for a read it must wait for. ``database_name`` names the
+    key's database, apart from the object's own (see ``_session.database``).
     """
 
     def get(self, key: str) -> bytes | None | Awaitable[bytes | None]: ...
@@ -95,8 +103,10 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Connect
     meanwhile, until the owner's second checkpoint after it; it writes nothing.
     """
     boundary = _Boundary(store, asyncio.get_running_loop())
+    vm = getattr(store, "vm", None)
+    name = getattr(store, "database_name", None) if vm is not None else None
     try:
-        native = await sql_open(namespace, boundary.dispatch, boundary.loop, boundary.lists_keys, reader)
+        native = await _settled(sql_open(namespace, boundary.dispatch, boundary.lists_keys, reader, vm, name))
     except Exception as error:
         if boundary.failed is not None:
             raise boundary.failed from error
@@ -104,9 +114,15 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Connect
     return Connection(native, boundary)
 
 
+async def _settled(answer: Any) -> Any:
+    """A call's answer: its value, as it gave it, or once the asyncio future it gave is done."""
+    return await answer if inspect.isawaitable(answer) else answer
+
+
 class _Boundary:
     """
-    The store as the extension calls it, through ``dispatch`` on ``loop``. An
+    The store as the extension calls it, through ``dispatch``, on the loop's
+    thread, in the order of the extension's requests. An
     error of the store's crosses the extension as text, which ends the
     session: the first is kept here, and the calls that fail on the session it
     ended raise it as it was raised (the SDK's suspension, say). A failed write
@@ -131,8 +147,8 @@ class _Boundary:
         if self.failed is None:
             self.failed = error
 
-    def dispatch(self, op: int, key: str, value: bytes | None, reply: Any) -> None:
-        """One request of the extension's, on the event loop, in the order it made them."""
+    def dispatch(self, op: int, key: Any, value: bytes | None, reply: Any) -> None:
+        """One request of the extension's: ``key`` is a key of the store, or for ``SQL_WAIT`` a handle of the VM."""
         if op in (SQL_SET, SQL_CLEAR):
             try:
                 if op == SQL_SET:
@@ -149,6 +165,8 @@ class _Boundary:
                 result: Any = self.store.get(key)
             elif op == SQL_KEYS:
                 result = self.store.keys()  # type: ignore[attr-defined]
+            elif op == SQL_WAIT:
+                result = self.store.wait(key)  # type: ignore[attr-defined]
             elif self._write_failed is not None:
                 reply(None, str(self._write_failed))
                 return
@@ -183,7 +201,7 @@ class _Boundary:
 
 def _reply_value(op: int, result: Any) -> Any:
     """A request's answer as the extension reads it: a value, the keys as a list, or nothing for a sync."""
-    if op == SQL_SYNC:
+    if op in (SQL_SYNC, SQL_WAIT):
         return None
     if op == SQL_KEYS:
         return list(result)
@@ -362,7 +380,7 @@ class Connection(_Sql):
 
     async def close(self) -> None:
         """End the session now, whatever its state: queued calls fail."""
-        await self._native.close()
+        await _settled(self._native.close())
 
     async def _rollback(self) -> None:
         """Roll back, unless a storage error ended the session: the caller raises its own error, which says why."""

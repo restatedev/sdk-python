@@ -41,6 +41,7 @@ from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_context import ServerInvocationContext
+from restate.vm import SingleUnresolvedFuture
 from restate.sessions import _selector
 from restate.sessions._calls import CallFuture, Rpc, Send, send_now
 from restate.sessions._database import Store
@@ -135,6 +136,19 @@ class _ContextHost:
             attempt_finished()
 
         context.on_attempt_finished = on_attempt_finished  # type: ignore[method-assign]
+
+    @property
+    def vm(self) -> Any:
+        """
+        The invocation's VM, which the database's store writes and reads
+        directly (see ``_database.Store``); none with a journal codec, whose
+        values only the context's state commands encode.
+        """
+        return None if self.context.journal_codec is not None else self.context.vm.vm
+
+    def wait(self, handle: int) -> Awaitable[None]:
+        """Done once the VM has the read whose handle is ``handle``: through the selector, as every wait."""
+        return self.selector.wait(SingleUnresolvedFuture(handle))
 
     def get(self, key: str) -> Awaitable[bytes | None]:
         return self.context.get(key, serde=BytesSerde(), entry_name=key)

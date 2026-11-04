@@ -153,18 +153,31 @@ def _unbeside(name: str, key: str) -> str | None:
     return None
 
 
+def _vm_of(host: SqlHost) -> Any:
+    """The invocation's VM, if ``host`` gives it (see ``Store``): the SDK's context does."""
+    return getattr(host, "vm", None)
+
+
 class _ObjectStore:
     """
     The object's state as an ordered store: ``get`` is a state get, ``set`` and
     ``clear`` are state writes, which return at once and which the runtime
     stores in order; ``sync`` is an empty run, done once the commands before it
-    are stored. A ``get`` or ``sync`` the attempt's end leaves waiting raises,
-    so the session that made it ends instead of holding its lock.
+    are stored. A ``get``, ``wait`` or ``sync`` the attempt's end leaves
+    waiting raises, so the session that made it ends instead of holding its
+    lock. With the invocation's VM (``vm``), the extension writes and reads it
+    directly, and waits for a read with ``wait``.
     """
 
     def __init__(self, host: SqlHost, name: str | None) -> None:
         self._host = host
         self._name = name
+        self.vm = _vm_of(host)
+        self.database_name = name
+
+    def wait(self, handle: int) -> Awaitable[None]:
+        """Done once the VM has the read whose handle is ``handle``."""
+        return _until_attempt_end(self._host, self._host.wait(handle))  # type: ignore[attr-defined]
 
     def _key(self, key: str) -> str:
         return key if self._name is None else _beside(self._name, key)
@@ -204,6 +217,12 @@ class _ReaderStore:
     def __init__(self, host: SqlHost, name: str | None) -> None:
         self._host = host
         self._name = name
+        self.vm = _vm_of(host)
+        self.database_name = name
+
+    def wait(self, handle: int) -> Awaitable[None]:
+        """Done once the VM has the read whose handle is ``handle``."""
+        return _until_attempt_end(self._host, self._host.wait(handle))  # type: ignore[attr-defined]
 
     def get(self, key: str) -> Awaitable[bytes | None]:
         key = key if self._name is None else _beside(self._name, key)
