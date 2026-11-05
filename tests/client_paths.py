@@ -66,7 +66,7 @@ async def harness():
 
 JSON = {"Content-Type": "application/json"}
 
-KEYS = ["plain", "a/b", "a b", "a?b=c", "a#b", "100%", "ünï/cødé", "a/../b"]
+KEYS = ["plain", "a/b", "a b", "a?b=c", "a#b", "100%", "ünï/cødé", "a/../b", ".", ".."]
 """Keys whose characters a URL path gives a meaning of its own, unless they are encoded."""
 
 

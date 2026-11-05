@@ -36,8 +36,12 @@ TIMEOUT = httpx2.Timeout(None, connect=10.0)
 
 
 def _segment(fragment: str) -> str:
-    """Return ``fragment`` as one segment of a URL path: percent-encoded, with no character left as it is."""
-    return urllib.parse.quote(fragment, safe="")
+    """Return ``fragment`` as one segment of a URL path: percent-encoded, ``/`` included.
+
+    A segment of only dots, such as ``.`` or ``..``, is encoded too, or the URL would drop it (or the one before it).
+    """
+    encoded = urllib.parse.quote(fragment, safe="")
+    return encoded if encoded.strip(".") else encoded.replace(".", "%2E")
 
 
 class Client(RestateClient):

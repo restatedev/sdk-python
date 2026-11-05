@@ -13,6 +13,8 @@
 # pylint: disable=missing-function-docstring,missing-class-docstring
 
 import asyncio
+import signal
+import subprocess
 import sys
 import time
 import types
@@ -315,6 +317,21 @@ async def test_the_command_line_says_when_it_cannot_follow_the_conversation(
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(readline=readline))
     await cli.chat("nobody/alice", harness.ingress_url)
     assert "Following the conversation failed: HTTP 404" in capsys.readouterr().out
+
+
+async def test_the_command_line_leaves_on_ctrl_c_while_it_waits_for_a_line(harness: HarnessEnvironment):
+    chat = subprocess.Popen(
+        [sys.executable, "-m", "restate.agents", "chat", f"assistant/{uuid.uuid4()}", "--ingress", harness.ingress_url],
+        stdin=subprocess.PIPE,  # stays open: nothing typed, no Ctrl-D
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert chat.stdout is not None and chat.stdout.readline().startswith("commands:")
+        chat.send_signal(signal.SIGINT)
+        assert chat.wait(timeout=5) == 0
+    finally:
+        chat.kill()
 
 
 def test_the_command_line_takes_an_agent_and_a_key():
