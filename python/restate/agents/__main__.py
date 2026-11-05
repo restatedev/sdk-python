@@ -34,6 +34,7 @@ import contextlib
 import json
 import os
 import sys
+import threading
 from typing import Any
 
 from restate.agents._api import Part
@@ -134,8 +135,9 @@ async def chat(target: str, ingress: str | None) -> None:
 
         shown = asyncio.ensure_future(following())
         print(USAGE, end="", flush=True)
+        typed = _lines()
         try:
-            while line := await asyncio.to_thread(sys.stdin.readline):
+            while line := await typed.get():
                 if not line.strip():
                     continue
                 try:
@@ -146,6 +148,28 @@ async def chat(target: str, ingress: str | None) -> None:
             shown.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await shown
+
+
+def _lines() -> asyncio.Queue[str]:
+    """Return the lines typed, then ``""`` at the end (Ctrl-D).
+
+    They are read on a daemon thread: Ctrl-C leaves at once, while ``asyncio.to_thread``'s thread would be waited for,
+    still reading a line.
+    """
+    loop = asyncio.get_running_loop()
+    lines: asyncio.Queue[str] = asyncio.Queue()
+
+    def read() -> None:
+        line = None
+        while line != "":
+            line = sys.stdin.readline()
+            try:
+                loop.call_soon_threadsafe(lines.put_nowait, line)
+            except RuntimeError:  # the chat has ended, and its loop is closed
+                return
+
+    threading.Thread(target=read, name="restate-agents-chat-input", daemon=True).start()
+    return lines
 
 
 def _target(text: str) -> str:
