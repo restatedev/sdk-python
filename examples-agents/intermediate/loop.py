@@ -161,13 +161,14 @@ MESSAGES = Messages()
 
 
 async def all_of(runs: Iterable[Awaitable[None]]) -> None:
-    """Run ``runs`` at once; if one fails, cancel the others, and fail with its error."""
+    """Run ``runs`` at once; if one fails, cancel the others, and fail with its error once they have unwound."""
     tasks = [asyncio.ensure_future(r) for r in runs]
     try:
         await asyncio.gather(*tasks)
     except BaseException:
         for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)  # let them unwind, before the turn closes
         raise
 
 
