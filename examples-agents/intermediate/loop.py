@@ -21,6 +21,7 @@ The loop is plain Python, and Restate makes it durable:
 
 - The conversation is in the key's database. Each of the model's replies is
   stored before its tools run, and each tool's result as it comes back.
+- The tools a reply calls run at once, and each result is stored as it comes.
 - A crash, or a lost connection, retries the turn. The loop starts again from
   what is stored: it runs the tool calls that have no result yet (with the same
   call ids), then asks the model, so a tool that already answered does not run
@@ -38,7 +39,7 @@ import asyncio
 import functools
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import Awaitable, Iterable, Sequence
 from typing import Any
 
 from pydantic import BaseModel
@@ -151,6 +152,17 @@ def _arguments(arguments: str) -> Any:
 MESSAGES = Messages()
 
 
+async def all_of(runs: Iterable[Awaitable[None]]) -> None:
+    """Run ``runs`` at once; if one fails, cancel the others, and fail with its error."""
+    tasks = [asyncio.ensure_future(r) for r in runs]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        raise
+
+
 # --- The loop ---------------------------------------------------------------------------------------
 
 
@@ -158,16 +170,18 @@ async def answer(ctx: sessions.SessionContext, text: str) -> str:
     """Answer a message: the model, and the tools it calls, until it answers with no more calls."""
 
     async def run(conversation: Conversation) -> str:
+        async def run_call(call: Call) -> None:
+            found = TOOLS.get(call.name)
+            output = (
+                await run_tool(found, call.input, ToolCall(ctx, call.id))
+                if found is not None
+                else f"Error: there is no tool named {call.name}"
+            )
+            await conversation.append(result(call.id, output))  # stored as soon as it comes
+
         while True:
-            # The tool calls with no result yet: the last reply's, or those a crash cut off.
-            for call in conversation.unanswered():
-                found = TOOLS.get(call.name)
-                output = (
-                    await run_tool(found, call.input, ToolCall(ctx, call.id))
-                    if found is not None
-                    else f"Error: there is no tool named {call.name}"
-                )
-                await conversation.append(result(call.id, output))
+            # The tool calls with no result yet (the last reply's, or those a crash cut off), all at once.
+            await all_of(run_call(call) for call in conversation.unanswered())
             reply = await complete([e.item for e in conversation.entries])
             await conversation.append_reply(*reply)
             if not any(item["type"] == "function_call" for item in reply):

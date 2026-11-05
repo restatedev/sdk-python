@@ -12,6 +12,7 @@
 
 # pylint: disable=missing-function-docstring,import-error
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
@@ -98,6 +99,35 @@ async def test_a_prompt_is_answered_once_and_a_retry_returns_the_stored_answer()
     assert await ask("hi", invocation) == "hello"
     assert await ask("hi", invocation) == "hello"
     assert runs == ["ran"]
+
+
+async def test_tool_calls_run_at_once_append_each_result_as_it_comes():
+    seen: list[list[Item]] = []
+
+    async def run(conversation: Conversation) -> str:
+        seen.append([entry.item for entry in conversation.entries])
+        if len(seen) > 1:
+            return "fine"
+        calls = [{"id": "c1", "name": "lookup", "input": {}}, {"id": "c2", "name": "lookup", "input": {}}]
+        await conversation.append_reply({"role": "assistant", "text": "", "calls": calls})
+
+        async def result(call_id: str) -> None:
+            await conversation.append({"result": call_id, "output": f"{call_id} done"})
+
+        await asyncio.gather(result("c1"), result("c2"))
+        await conversation.append_reply({"role": "assistant", "text": "both"})
+        return "both"
+
+    ask = asking(run)
+    assert await ask("first") == "both"
+    assert await ask("second") == "fine"
+    # Each result is stored, at a place of its own, and the reply follows them.
+    assert seen[1][-4:] == [
+        {"result": "c1", "output": "c1 done"},
+        {"result": "c2", "output": "c2 done"},
+        {"role": "assistant", "text": "both"},
+        {"role": "user", "text": "second"},
+    ]
 
 
 async def test_a_failed_run_is_closed_with_its_error_and_the_next_prompt_starts_afresh():

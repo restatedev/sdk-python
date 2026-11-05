@@ -235,28 +235,28 @@ async def test_intermediate_triage():
 
 
 async def test_intermediate_loop():
-    """The loop, on a scripted model: it looks the order up, waits for approval, and refunds; a crash after the
-    refund ran retries the turn, which asks the model again without refunding again."""
+    """The loop, on a scripted model: it looks two orders up at once, waits for approval, and refunds; a crash
+    after the refund ran retries the turn, which asks the model again without refunding again."""
     pytest.importorskip("pydantic")
+    looked_up: list[str] = []
     refunded: list[str] = []
     crashed: list[bool] = []
     approval = "wait_for_approval"  # the name of the example's wait_for_signal("approval") tool
 
-    def call(call_id: str, name: str, arguments: dict[str, Any]) -> list[dict[str, Any]]:
-        thought = {"type": "reasoning", "id": f"rs-{call_id}", "summary": []}
-        return [
-            thought,
-            {"type": "function_call", "call_id": call_id, "name": name, "arguments": json.dumps(arguments)},
-        ]
+    def call(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"type": "function_call", "call_id": call_id, "name": name, "arguments": json.dumps(arguments)}
+
+    def reply(*calls: dict[str, Any]) -> list[dict[str, Any]]:
+        return [{"type": "reasoning", "id": f"rs-{calls[0]['call_id']}", "summary": []}, *calls]
 
     async def complete(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         last = items[-1]
-        if last.get("role") == "user":
-            return call("c1", "order_status", {"order": "103"})
-        if last["call_id"] == "c1":
-            return call("c2", approval, {"order": "103", "amount": 30})
+        if last.get("role") == "user":  # two tool calls in one reply
+            return reply(call("c1", "order_status", {"order": "103"}), call("c1b", "order_status", {"order": "104"}))
+        if last["call_id"] in ("c1", "c1b"):
+            return reply(call("c2", approval, {"order": "103", "amount": 30}))
         if last["call_id"] == "c2":
-            return call("c3", "refund", {"order": "103", "amount": 30})
+            return reply(call("c3", "refund", {"order": "103", "amount": 30}))
         if not crashed:
             crashed.append(True)
             raise ConnectionError("the model's connection dropped")  # Restate retries the turn
@@ -264,12 +264,22 @@ async def test_intermediate_loop():
         return [{"type": "message", "role": "assistant", "content": [text]}]
 
     def setup(module: ModuleType) -> None:
+        async def at_once(order: str) -> str:
+            """Look an order up, once the other lookup has started too: the calls of a reply run at once."""
+            looked_up.append(order)
+            for _ in range(50):
+                if len(looked_up) == 2:
+                    return f"Order {order} was delivered yesterday."
+                await asyncio.sleep(0.1)
+            return f"Order {order} was looked up alone."
+
         def counted(order: str, amount: float) -> str:
             refunded.append(order)
             return f"Refunded ${amount:g} for order {order}."
 
         assert module.approval.name == approval
         setattr(module, "complete", complete)  # the model, scripted
+        module.TOOLS["order_status"] = module.tool(at_once, name="order_status", description="Look an order up.")
         module.TOOLS["refund"] = module.tool(counted, name="refund", description="Refund an order.")
 
     async with serving("intermediate/loop.py", setup) as ingress:
@@ -287,6 +297,7 @@ async def test_intermediate_loop():
         tools = [(p["name"], p["output"]) for p in shown[1]["parts"]]
         assert tools == [
             ("order_status", "Order 103 was delivered yesterday."),
+            ("order_status", "Order 104 was delivered yesterday."),
             (approval, "approved"),
             ("refund", "Refunded $30 for order 103."),
         ]
