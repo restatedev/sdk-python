@@ -234,10 +234,14 @@ async def test_intermediate_triage():
             assert (await ingress.post(f"{agent}/messages", {})).json()["messages"] == []
 
 
-async def test_intermediate_loop():
+async def test_intermediate_loop(monkeypatch: pytest.MonkeyPatch):
     """The loop, on a scripted model: it looks two orders up at once, waits for approval, and refunds; a crash
-    after the refund ran retries the turn, which asks the model again without refunding again."""
+    after the refund ran retries the turn, which asks the model again without refunding again; and a crash after
+    the final reply was stored retries the turn, which answers with it, without asking the model again."""
     pytest.importorskip("pydantic")
+    from restate.agents._conversation import Conversation  # pylint: disable=import-outside-toplevel
+
+    asked: list[str] = []
     looked_up: list[str] = []
     refunded: list[str] = []
     crashed: list[bool] = []
@@ -251,6 +255,9 @@ async def test_intermediate_loop():
 
     async def complete(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         last = items[-1]
+        asked.append(last.get("call_id") or last["role"])
+        if last.get("role") == "assistant":
+            raise restate.TerminalError("the model was asked again after its final reply")
         if last.get("role") == "user":  # two tool calls in one reply
             return reply(call("c1", "order_status", {"order": "103"}), call("c1b", "order_status", {"order": "104"}))
         if last["call_id"] in ("c1", "c1b"):
@@ -262,6 +269,17 @@ async def test_intermediate_loop():
             raise ConnectionError("the model's connection dropped")  # Restate retries the turn
         text = {"type": "output_text", "text": f"Done: {last['output']}", "annotations": []}
         return [{"type": "message", "role": "assistant", "content": [text]}]
+
+    answered = Conversation.answered
+    unanswered: list[bool] = []
+
+    async def answered_once_crashing(conversation: Conversation, prompt_id: str, answer: str) -> None:
+        if not unanswered:
+            unanswered.append(True)
+            raise ConnectionError("lost before the answer was stored")  # after the final reply was
+        await answered(conversation, prompt_id, answer)
+
+    monkeypatch.setattr(Conversation, "answered", answered_once_crashing)
 
     def setup(module: ModuleType) -> None:
         async def at_once(order: str) -> str:
@@ -292,7 +310,10 @@ async def test_intermediate_loop():
         assert [w["name"] for w in waiting] == ["approval"] and not refunded  # it waits, and has not refunded
         await ingress.post("refunds/alice/signal", {"name": "approval", "value": "approved"})
         assert (await chat).json() == "Done: Refunded $30 for order 103."
-        assert refunded == ["103"] and crashed == [True]
+        assert refunded == ["103"] and crashed == [True] and unanswered == [True]
+        # The model was asked once for each step (and again after the crash that cut its connection), not after the
+        # crash that came once its final reply was stored.
+        assert asked == ["user", asked[1], "c2", "c3", "c3"] and asked[1] in ("c1", "c1b")
         shown = (await ingress.post("refunds/alice/messages", {})).json()["messages"]
         tools = [(p["name"], p["output"]) for p in shown[1]["parts"]]
         assert tools == [

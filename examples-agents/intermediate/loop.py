@@ -25,7 +25,7 @@ The loop is plain Python, and Restate makes it durable:
 - A crash, or a lost connection, retries the turn. The loop starts again from
   what is stored: it runs the tool calls that have no result yet (with the same
   call ids), then asks the model, so a tool that already answered does not run
-  again.
+  again; and a final reply already stored is the answer.
 - ``answer_once`` answers each message once: a retried message returns its
   stored answer. ``stop`` cancels a turn, even mid-tool.
 - The tools are ``restate.agents`` tools: a function of your own, or Restate
@@ -95,7 +95,15 @@ def openai_client() -> Any:
 
 async def complete(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Ask the model, and return its reply: its items, such as its reasoning, its text, and the tools it calls."""
-    response = await openai_client().responses.create(model=MODEL, instructions=SYSTEM, input=items, tools=SCHEMAS)
+    response = await openai_client().responses.create(
+        model=MODEL,
+        instructions=SYSTEM,
+        input=items,
+        tools=SCHEMAS,
+        # The conversation is in Restate, not OpenAI's: each reasoning item carries its own (encrypted) content.
+        store=False,
+        include=["reasoning.encrypted_content"],
+    )
     return [item.model_dump(exclude_none=True) for item in response.output]
 
 
@@ -179,6 +187,9 @@ async def answer(ctx: sessions.SessionContext, text: str) -> str:
             )
             await conversation.append(result(call.id, output))  # stored as soon as it comes
 
+        if (final := conversation.final_reply()) is not None:
+            # A crash came after the model's final reply was stored, before its answer was: that is the answer.
+            return final
         while True:
             # The tool calls with no result yet (the last reply's, or those a crash cut off), all at once.
             await all_of(run_call(call) for call in conversation.unanswered())
