@@ -14,6 +14,7 @@
 
 import json
 import uuid
+from datetime import timedelta
 
 import pytest
 from agents_conversation import ITEMS  # pylint: disable=import-error
@@ -58,7 +59,7 @@ agent.chat(answer, items=ITEMS)
 @pytest.fixture(scope="module")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(echo, agent), restate_image="ghcr.io/restatedev/restate:latest"
+        sessions.app(echo, agent, slow), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -86,3 +87,19 @@ async def test_the_agent_client_reaches_the_key_it_names(harness: HarnessEnviron
         assert await keyed.chat("Hi") == unique
         assert [m["parts"][0].get("text") for m in (await keyed.messages())["messages"]] == ["Hi", unique]
         assert (await keyed.status())["answering"] is None
+
+
+slow = restate.VirtualObject("slow")
+
+
+@slow.handler()
+async def answer_slowly(ctx: restate.ObjectContext, seconds: float) -> str:
+    await ctx.sleep(timedelta(seconds=seconds))
+    return "done"
+
+
+async def test_a_call_waits_as_long_as_its_handler_takes(harness: HarnessEnvironment):
+    # An agent's answer takes as long as its model: longer than an HTTP client's default timeout (5 seconds).
+    async with create_client(harness.ingress_url) as client:
+        answered = await client.generic_call("slow", "answer_slowly", b"7", key="k", headers=JSON)
+        assert json.loads(answered) == "done"

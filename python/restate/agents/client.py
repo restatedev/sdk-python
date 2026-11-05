@@ -15,7 +15,7 @@ It talks to an agent through Restate's ingress, with ``restate.client``
 code, and works with an agent of any framework, in Python or TypeScript::
 
     from restate.client import create_client
-    from restate.agents.client import AgentClient
+    from restate.agents.client import AgentClient, as_text
 
     async with create_client("http://localhost:8080") as restate:
         alice = AgentClient(restate, "assistant", "alice")

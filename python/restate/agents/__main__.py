@@ -126,8 +126,11 @@ async def chat(target: str, ingress: str | None) -> None:
         terminal = Terminal(name)
 
         async def following() -> None:
-            async for change in agent.follow():
-                terminal.show(change)
+            try:
+                async for change in agent.follow():
+                    terminal.show(change)
+            except Exception as error:  # said, rather than following silently no more
+                print(f"Following the conversation failed: {error}", flush=True)
 
         shown = asyncio.ensure_future(following())
         print(USAGE, end="", flush=True)
@@ -141,6 +144,8 @@ async def chat(target: str, ingress: str | None) -> None:
                     print(f"Restate answered {error}", flush=True)
         finally:
             shown.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await shown
 
 
 def _target(text: str) -> str:

@@ -30,6 +30,11 @@ I = typing.TypeVar("I")
 O = typing.TypeVar("O")
 
 
+TIMEOUT = httpx2.Timeout(None, connect=10.0)
+"""The timeouts of ``create_client``'s requests: none for the answer, which comes when the handler is done
+(an agent's, when its model is), and 10 seconds to connect."""
+
+
 def _segment(fragment: str) -> str:
     """Return ``fragment`` as one segment of a URL path: percent-encoded, with no character left as it is."""
     return urllib.parse.quote(fragment, safe="")
@@ -533,5 +538,5 @@ async def create_client(
             NOTE: This is experimental and may change in future releases.
     """
     ingress, headers = resolve_ingress(ingress, headers)
-    async with httpx2.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
+    async with httpx2.AsyncClient(base_url=ingress, headers=headers, http2=True, timeout=TIMEOUT) as http_client:
         yield Client(http_client, headers, journal_codec=journal_value_codec)

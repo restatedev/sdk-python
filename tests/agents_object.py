@@ -305,6 +305,18 @@ async def test_the_command_line_sends_what_you_type_and_shows_the_answers(
     assert "assistant: echo: Hi" in shown and '"answering"' in shown
 
 
+async def test_the_command_line_says_when_it_cannot_follow_the_conversation(
+    harness: HarnessEnvironment, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    def readline() -> str:
+        time.sleep(2)
+        return ""
+
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(readline=readline))
+    await cli.chat("nobody/alice", harness.ingress_url)
+    assert "Following the conversation failed: HTTP 404" in capsys.readouterr().out
+
+
 def test_the_command_line_takes_an_agent_and_a_key():
     with pytest.raises(SystemExit):
         cli.main(["chat", "assistant"])
