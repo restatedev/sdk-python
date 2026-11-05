@@ -7,9 +7,8 @@ top of it. Each example is a single file that runs on its own.
 
 ## Run an example
 
-The examples serve themselves with `restate.serve(sessions.app(...))`,
-which needs Python 3.11 or later. (The SDK itself supports Python 3.10; there,
-serve `sessions.app(...)` with any ASGI server, such as hypercorn.)
+The examples serve themselves with `restate.serve(sessions.app(...))`, on
+Python 3.11 or later.
 
 Install the SDK with the `serve` extra, which adds the HTTP/2 server that
 `restate.serve` runs on:
@@ -43,6 +42,16 @@ The agent examples also need their framework's extra and the package of their
 model's provider; the comment at the top of each agent's file says which. For
 example: `pip install "restate-sdk[serve,langgraph]" langchain-openai`, or
 `uv run --extra langgraph --with langchain-openai ...` from source.
+
+To talk with an agent from a terminal, as it works, run the agents' command
+line (it needs the `client` extra: `pip install "restate-sdk[client]"`):
+
+```sh
+python -m restate.agents chat assistant/alice    # what you type goes to the agent; /help for the commands
+```
+
+It shows the conversation so far, then each message, tool call and wait as it
+comes; `/signal approval approved` answers a wait, and Ctrl-D leaves.
 
 Most handlers take and return JSON, so their requests use `curl --json`. An
 agent's `chat` handler is the exception: it takes the message as plain text

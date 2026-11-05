@@ -28,7 +28,7 @@ import json
 import typing
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, TypedDict
 
 import restate
@@ -95,7 +95,7 @@ def _public(wait: _WaitingOn) -> Waiting:
 
 def iso(seconds: float) -> str:
     """Format ``seconds`` since the epoch as an ISO 8601 UTC timestamp with milliseconds, like JavaScript's ``toISOString``."""
-    moment = datetime.fromtimestamp(seconds, tz=timezone.utc)
+    moment = datetime.fromtimestamp(seconds, tz=UTC)
     return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 

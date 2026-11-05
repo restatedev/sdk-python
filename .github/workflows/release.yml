@@ -104,7 +104,6 @@ jobs:
         with:
           # --find-interpreter picks up whatever is on PATH, so install every supported version explicitly
           python-version: |
-            3.10
             3.11
             3.12
             3.13

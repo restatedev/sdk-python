@@ -13,7 +13,9 @@ This is a basic remote client for the Restate service.
 """
 
 from datetime import timedelta
-import httpx
+import urllib.parse
+
+import httpx2
 import typing
 from contextlib import asynccontextmanager
 
@@ -28,6 +30,16 @@ I = typing.TypeVar("I")
 O = typing.TypeVar("O")
 
 
+TIMEOUT = httpx2.Timeout(None, connect=10.0)
+"""The timeouts of ``create_client``'s requests: none for the answer, which comes when the handler is done
+(an agent's, when its model is), and 10 seconds to connect."""
+
+
+def _segment(fragment: str) -> str:
+    """Return ``fragment`` as one segment of a URL path: percent-encoded, with no character left as it is."""
+    return urllib.parse.quote(fragment, safe="")
+
+
 class Client(RestateClient):
     """
     A basic client for connecting to the Restate service.
@@ -35,8 +47,8 @@ class Client(RestateClient):
 
     def __init__(
         self,
-        client: httpx.AsyncClient,
-        headers: typing.Optional[dict] = None,
+        client: httpx2.AsyncClient,
+        headers: typing.Optional[typing.Dict[str, str]] = None,
         journal_codec: typing.Optional[JournalValueCodec] = None,
     ):
         self.headers = headers or {}
@@ -155,21 +167,23 @@ class Client(RestateClient):
         """
         Send a POST request to the Restate service.
         """
+        # Each fragment percent-encoded, "/" too: a key such as "a/b" or "a?b" is one segment of the path.
+        service, handler = _segment(service), _segment(handler)
         if scope is not None:
             # Scoped invocations use the dedicated ingress path:
             #   restate/scope/{scope}/call/{service}[/{key}]/{handler}
             #   restate/scope/{scope}/send/{service}[/{key}]/{handler}
             verb = "send" if send else "call"
-            endpoint = f"restate/scope/{scope}/{verb}/{service}"
+            endpoint = f"restate/scope/{_segment(scope)}/{verb}/{service}"
             if key:
-                endpoint += f"/{key}"
+                endpoint += f"/{_segment(key)}"
             endpoint += f"/{handler}"
             if send and delay is not None:
                 endpoint = endpoint + f"?delay={delay}"
         else:
             endpoint = service
             if key:
-                endpoint += f"/{key}"
+                endpoint += f"/{_segment(key)}"
             endpoint += f"/{handler}"
             if send:
                 endpoint += "/send"
@@ -482,8 +496,8 @@ class ScopedClient(RestateScopedClient):
 
 
 def resolve_ingress(
-    ingress: typing.Optional[str], headers: typing.Optional[dict]
-) -> typing.Tuple[str, typing.Optional[dict]]:
+    ingress: typing.Optional[str], headers: typing.Optional[typing.Dict[str, str]]
+) -> typing.Tuple[str, typing.Optional[typing.Dict[str, str]]]:
     """
     The ingress URL and default headers: the given ones, or the URL and bearer token of
     ``RESTATE_INGRESS_KEY`` (an ingress key from the Cloud UI, Development → Configure Client).
@@ -508,7 +522,7 @@ def resolve_ingress(
 @asynccontextmanager
 async def create_client(
     ingress: typing.Optional[str] = None,
-    headers: typing.Optional[dict] = None,
+    headers: typing.Optional[typing.Dict[str, str]] = None,
     journal_value_codec: typing.Optional[JournalValueCodec] = None,
 ) -> typing.AsyncGenerator[RestateClient, None]:
     """
@@ -524,5 +538,5 @@ async def create_client(
             NOTE: This is experimental and may change in future releases.
     """
     ingress, headers = resolve_ingress(ingress, headers)
-    async with httpx.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
+    async with httpx2.AsyncClient(base_url=ingress, headers=headers, http2=True, timeout=TIMEOUT) as http_client:
         yield Client(http_client, headers, journal_codec=journal_value_codec)

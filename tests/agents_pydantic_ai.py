@@ -19,7 +19,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 pytest.importorskip("pydantic_ai")
@@ -207,12 +207,12 @@ async def harness():
 TEXT = {"content-type": "text/plain"}
 
 
-async def post(harness: HarnessEnvironment, path: str, **kwargs: Any) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=60) as ingress:
+async def post(harness: HarnessEnvironment, path: str, **kwargs: Any) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         return await ingress.post(f"{harness.ingress_url}/pai_assistant/{path}", **kwargs)
 
 
-async def chat(harness: HarnessEnvironment, key: str, text: str) -> httpx.Response:
+async def chat(harness: HarnessEnvironment, key: str, text: str) -> httpx2.Response:
     return await post(harness, f"{key}/chat", content=text, headers=TEXT)
 
 
@@ -287,7 +287,7 @@ async def test_a_refused_message_fails_with_424_and_the_next_is_answered(harness
 
 async def test_a_stopped_turn_ends_cancelled_and_the_next_message_starts_afresh(harness: HarnessEnvironment):
     k = key()
-    async with httpx.AsyncClient(timeout=60) as ingress:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         sent = await ingress.post(
             f"{harness.ingress_url}/pai_assistant/{k}/chat/send", content=f"wait {k}", headers=TEXT
         )
@@ -349,7 +349,7 @@ async def test_an_agent_of_your_own_runs_with_its_instructions_and_this_packages
 
 async def test_with_a_history_processor_that_trims_each_tool_result_is_still_stored(harness: HarnessEnvironment):
     k = key()
-    async with httpx.AsyncClient(timeout=60) as ingress:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         base = f"{harness.ingress_url}/pai_trimmed/{k}"
         for city in ("Rome", "Oslo"):
             answered = await ingress.post(f"{base}/chat", content=f"weather {city}", headers=TEXT)
@@ -364,7 +364,7 @@ async def test_with_a_history_processor_that_trims_each_tool_result_is_still_sto
 
 async def test_options_may_be_functions_of_the_context(harness: HarnessEnvironment):
     k = key()
-    async with httpx.AsyncClient(timeout=60) as ingress:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         url = f"{harness.ingress_url}/pai_per_user/{k}/chat"
         assert (await ingress.post(url, content=f"system {k}", headers=TEXT)).json() == f"system: You help {k}."
         assert (await ingress.post(url, content=f"weather {k}", headers=TEXT)).json() == f"tool said: sunny in {k}"

@@ -37,7 +37,7 @@ import json
 import time
 import typing
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Unpack
 
 from google.adk.agents import BaseAgent, LlmAgent
 from google.adk.agents.invocation_context import new_invocation_context_id
@@ -68,9 +68,6 @@ from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
-
-if typing.TYPE_CHECKING:
-    from typing_extensions import Unpack
 
 AnyModel = str | BaseLlm
 """A model: ``"google/<model-id>"`` (a Gemini model), or a model of ADK (``LiteLlm(...)`` for others)."""

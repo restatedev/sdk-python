@@ -17,7 +17,7 @@ import typing
 import uuid
 from datetime import timedelta
 
-import httpx
+import httpx2
 
 import pytest
 
@@ -206,7 +206,7 @@ async def test_the_writes_go_through_the_store_asked_for(harness: HarnessEnviron
 
 async def cancel_when_running(harness: HarnessEnvironment, invocation_id: str) -> None:
     """Cancel the invocation, once Restate runs it."""
-    async with httpx.AsyncClient() as admin:
+    async with httpx2.AsyncClient() as admin:
         for _ in range(100):
             status = await admin.post(
                 f"{harness.admin_api_url}/query",
@@ -221,8 +221,8 @@ async def cancel_when_running(harness: HarnessEnvironment, invocation_id: str) -
         response.raise_for_status()
 
 
-async def attach(harness: HarnessEnvironment, invocation_id: str) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=30) as ingress:
+async def attach(harness: HarnessEnvironment, invocation_id: str) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=30) as ingress:
         return await ingress.get(f"{harness.ingress_url}/restate/invocation/{invocation_id}/attach")
 
 
@@ -246,7 +246,7 @@ async def stop_it(ctx: sessions.ViewContext, invocation_id: str) -> None:
 async def test_a_view_cancels_a_handler_of_its_own_object(harness: HarnessEnvironment):
     key = str(uuid.uuid4())
     sent = await harness.client.object_send(stoppable, key=key, arg="nap")
-    async with httpx.AsyncClient() as admin:
+    async with httpx2.AsyncClient() as admin:
         for _ in range(100):
             status = await admin.post(
                 f"{harness.admin_api_url}/query",

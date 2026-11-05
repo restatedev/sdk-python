@@ -17,7 +17,7 @@ import typing
 import uuid
 from collections.abc import Awaitable, Callable
 
-import httpx
+import httpx2
 import pytest
 
 import restate
@@ -65,8 +65,8 @@ async def harness():
         yield harness
 
 
-async def attach(harness: HarnessEnvironment, invocation_id: str) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=60) as ingress:
+async def attach(harness: HarnessEnvironment, invocation_id: str) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         return await ingress.get(f"{harness.ingress_url}/restate/invocation/{invocation_id}/attach")
 
 

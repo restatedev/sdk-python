@@ -27,8 +27,8 @@ GRACEFUL_SHUTDOWN_SECONDS = 3
 """How long a stopping server waits for the requests in flight; Restate retries the rest elsewhere."""
 
 _MISSING = (
-    "restate.serve runs on uvicorn's HTTP/2: install restate-sdk[serve] (uvicorn 0.53 or later, and zttp; "
-    "Python 3.11 or later), or serve the app with an ASGI server of your own, such as hypercorn"
+    "restate.serve runs on uvicorn's HTTP/2: install restate-sdk[serve] (uvicorn 0.53 or later, and zttp), "
+    "or serve the app with an ASGI server of your own, such as hypercorn"
 )
 
 

@@ -11,7 +11,7 @@
 
 from datetime import timedelta
 
-import httpx
+import httpx2
 import pytest
 
 import restate
@@ -93,7 +93,7 @@ async def test_a_retry_runs_the_handler_again_and_entries_are_named():
         invocation_id = await harness.client.object_call(add, key="a", arg=None)
         assert calls == 2
 
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             response = await http.post(
                 f"{harness.admin_api_url}/query",
                 json={"query": f"SELECT entry_type, name FROM sys_journal WHERE id = '{invocation_id}'"},

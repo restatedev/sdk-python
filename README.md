@@ -18,7 +18,7 @@
 ## Using the SDK
 
 **Prerequisites**:
-- Python >= v3.10
+- Python >= v3.11
 
 To use this SDK, add the dependency to your project:
 
@@ -42,8 +42,8 @@ async def greet(ctx: restate.Context, name: str) -> str:
 app = restate.app(services=[greeter])
 ```
 
-Serve it with `restate.serve`, which needs the `serve` extra (`pip install "restate-sdk[serve]"`,
-Python 3.11 or later). It listens on `$PORT`, or 9080, with the HTTP/2 that Restate connects with, and
+Serve it with `restate.serve`, which needs the `serve` extra (`pip install "restate-sdk[serve]"`).
+It listens on `$PORT`, or 9080, with the HTTP/2 that Restate connects with, and
 stops on SIGINT or SIGTERM:
 
 ```python
@@ -54,7 +54,7 @@ if __name__ == "__main__":
 ```
 
 `restate.app(...)` returns an ASGI application, so any ASGI server can serve it instead, for example
-[Hypercorn](https://github.com/pgjones/hypercorn), which also works on Python 3.10:
+[Hypercorn](https://github.com/pgjones/hypercorn):
 
 ```shell
 pip install hypercorn

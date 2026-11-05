@@ -48,6 +48,11 @@ Each framework has a subpackage and an extra of its own:
 ``restate.agents.adk``, on Google ADK (``pip install "restate-sdk[adk]"``).
 ``restate.agents.internal`` has the building blocks for writing another
 integration.
+
+``restate.agents.client`` talks to an agent from any Python code (send
+messages, follow the conversation, resolve waits), and
+``python -m restate.agents chat assistant/alice`` from a terminal; both need
+the ``client`` extra (``pip install "restate-sdk[client]"``).
 """
 
 from restate.agents._api import (

@@ -39,7 +39,7 @@ import json
 import os
 import typing
 from collections.abc import Callable, Sequence
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, TypedDict, Unpack
 
 from langchain_core import messages as langchain_messages
 from langchain_core.language_models import BaseChatModel
@@ -64,9 +64,6 @@ from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.sessions import SessionContext
-
-if typing.TYPE_CHECKING:
-    from typing_extensions import Unpack
 
 
 class State(TypedDict):

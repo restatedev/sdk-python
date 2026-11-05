@@ -19,7 +19,7 @@ import json
 import uuid
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from agents_conversation import ITEMS  # pylint: disable=import-error
 
@@ -74,9 +74,9 @@ def signature(body: bytes) -> str:
     return hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
 
 
-async def post(harness: HarnessEnvironment, path: str, body: bytes, headers: dict[str, str]) -> httpx.Response:
+async def post(harness: HarnessEnvironment, path: str, body: bytes, headers: dict[str, str]) -> httpx2.Response:
     """Post a delivery as the other systems do: as JSON."""
-    async with httpx.AsyncClient(timeout=60) as ingress:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         sent = {"content-type": "application/json", **headers}
         return await ingress.post(f"{harness.ingress_url}/{path}", content=body, headers=sent)
 

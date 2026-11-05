@@ -13,11 +13,14 @@
 # pylint: disable=missing-function-docstring,missing-class-docstring
 
 import asyncio
+import sys
+import time
+import types
 import typing
 import uuid
 from collections.abc import Awaitable, Callable
 
-import httpx
+import httpx2
 import pydantic
 from agents_conversation import ITEMS  # pylint: disable=import-error
 import pytest
@@ -29,6 +32,9 @@ from restate.agents._object import AgentObject
 from restate.agents._tools import ToolCall, run_tool, wait_for_signal
 from restate.agents._conversation import Conversation, answer_once
 from restate.agents._turn import stop_signal_of
+from restate.agents import __main__ as cli
+from restate.agents.client import AgentClient, Followed
+from restate.client import create_client
 
 
 @pytest.fixture(scope="session")
@@ -99,19 +105,19 @@ TEXT = {"content-type": "text/plain"}
 """A message as text, as `curl -d` sends one."""
 
 
-async def call(harness: HarnessEnvironment, handler: str, key: str, body: object = None) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=60) as ingress:
+async def call(harness: HarnessEnvironment, handler: str, key: str, body: object = None) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         return await ingress.post(f"{harness.ingress_url}/assistant/{key}/{handler}", json=body)
 
 
 async def send(harness: HarnessEnvironment, key: str, text: str) -> str:
-    async with httpx.AsyncClient(timeout=60) as ingress:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         sent = await ingress.post(f"{harness.ingress_url}/assistant/{key}/chat/send", content=text, headers=TEXT)
         return typing.cast(str, sent.json()["invocationId"])
 
 
-async def attach(harness: HarnessEnvironment, invocation_id: str) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=60) as ingress:
+async def attach(harness: HarnessEnvironment, invocation_id: str) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         return await ingress.get(f"{harness.ingress_url}/restate/invocation/{invocation_id}/attach")
 
 
@@ -132,7 +138,7 @@ def texts(page: Messages) -> list[tuple[int, str, str]]:
 
 async def test_a_message_is_answered_and_the_conversation_read_and_followed(harness: HarnessEnvironment):
     key = str(uuid.uuid4())
-    async with httpx.AsyncClient(timeout=60) as ingress:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         answered = await ingress.post(f"{harness.ingress_url}/assistant/{key}/chat", content="Hi", headers=TEXT)
     assert answered.json() == "echo: Hi"
     page = (await call(harness, "messages", key, {})).json()
@@ -175,7 +181,7 @@ async def test_a_sync_that_waited_returns_every_change_its_revision_counts(harne
 async def test_the_views_without_input_take_a_request_with_a_json_content_type(harness: HarnessEnvironment):
     # Restate's TypeScript client sends `content-type: application/json` with every call, an argument or not.
     key = str(uuid.uuid4())
-    async with httpx.AsyncClient(timeout=60) as ingress:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         for view in ("status", "pending", "notifications", "stop", "clear"):
             response = await ingress.post(
                 f"{harness.ingress_url}/assistant/{key}/{view}",
@@ -246,3 +252,71 @@ async def test_a_tool_waits_for_a_signal_which_the_agents_signal_view_resolves(h
     [tool_call] = page["messages"][1]["parts"]
     assert tool_call["name"] == "wait_for_approval" and tool_call["output"] == "approved"
     assert (await call(harness, "pending", key)).json() == []
+
+
+# --- The agent client and the command line --------------------------------------------------------
+
+
+async def test_the_agent_client_chats_reads_follows_and_resolves_waits(harness: HarnessEnvironment):
+    key = str(uuid.uuid4())
+    async with create_client(harness.ingress_url) as restate_client:
+        alice = AgentClient(restate_client, "assistant", key)
+        assert await alice.chat("Hi") == "echo: Hi"
+        page = await alice.messages(limit=10)
+        assert texts(page) == [(0, "user", "Hi"), (1, "assistant", "echo: Hi")]
+
+        following = alice.follow(wait=10)
+        first = await anext(following)
+        assert [m["id"] for m in first.messages] == [0, 1] and first.status["answering"] is None
+        invocation = await alice.send("refund o9")
+        # The next changes: the tool call, then its wait, which the client resolves.
+        seen: list[Followed] = []
+        while not any(change.waiting for change in seen):
+            seen.append(await anext(following))
+        assert (await alice.pending())[0]["name"] == "approval"
+        assert (await alice.signal("approval", "approved")) == f"{invocation}:call-o9"
+        while not any(m["parts"][0].get("text") == "refund: approved" for change in seen for m in change.messages):
+            seen.append(await anext(following))
+        await following.aclose()
+
+        assert await alice.signal("approval", "again") is None
+        assert await alice.stop() is None
+        assert await alice.clear() is None
+        cleared = await alice.messages()
+        assert cleared["messages"] == [] and cleared.get("first", 0) > 0
+
+
+async def test_the_command_line_sends_what_you_type_and_shows_the_answers(
+    harness: HarnessEnvironment, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    key = str(uuid.uuid4())
+    lines = iter(["Hi\n", "/status\n"])
+
+    def readline() -> str:
+        line = next(lines, None)
+        if line is None:
+            time.sleep(3)  # as a person who reads the answer before leaving (Ctrl-D)
+            return ""
+        return line
+
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(readline=readline))
+    await cli.chat(f"assistant/{key}", harness.ingress_url)
+    shown = capsys.readouterr().out
+    assert "assistant: echo: Hi" in shown and '"answering"' in shown
+
+
+async def test_the_command_line_says_when_it_cannot_follow_the_conversation(
+    harness: HarnessEnvironment, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    def readline() -> str:
+        time.sleep(2)
+        return ""
+
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(readline=readline))
+    await cli.chat("nobody/alice", harness.ingress_url)
+    assert "Following the conversation failed: HTTP 404" in capsys.readouterr().out
+
+
+def test_the_command_line_takes_an_agent_and_a_key():
+    with pytest.raises(SystemExit):
+        cli.main(["chat", "assistant"])
