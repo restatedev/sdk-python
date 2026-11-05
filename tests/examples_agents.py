@@ -14,6 +14,7 @@
 
 import asyncio
 import importlib.util
+import json
 import os
 import pathlib
 import signal
@@ -21,9 +22,10 @@ import subprocess
 import sys
 import typing
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from types import ModuleType
+from typing import Any
 
 import httpx2
 import pytest
@@ -65,9 +67,14 @@ class Ingress:
 
 
 @asynccontextmanager
-async def serving(path: str) -> AsyncGenerator[Ingress, None]:
-    """The services, objects and workflows of the example at ``path``, served to a Restate server of their own."""
+async def serving(path: str, setup: Callable[[ModuleType], None] | None = None) -> AsyncGenerator[Ingress, None]:
+    """The services, objects and workflows of the example at ``path``, served to a Restate server of their own.
+
+    ``setup``, if given, gets the example's module first: to script its model, say.
+    """
     module = load(path)
+    if setup is not None:
+        setup(module)
     objects = [value for value in vars(module).values() if isinstance(value, SERVABLE)]
     async with restate.create_test_harness(
         sessions.app(*objects), restate_image="ghcr.io/restatedev/restate:latest"
@@ -225,6 +232,97 @@ async def test_intermediate_triage():
         assert no_draft.status_code == 200 and not no_draft.content  # None, before the workflow runs
         for agent in ("classifier/t1", "drafter/t1"):
             assert (await ingress.post(f"{agent}/messages", {})).json()["messages"] == []
+
+
+async def test_intermediate_loop(monkeypatch: pytest.MonkeyPatch):
+    """The loop, on a scripted model: it looks two orders up at once, waits for approval, and refunds; a crash
+    after the refund ran retries the turn, which asks the model again without refunding again; and a crash after
+    the final reply was stored retries the turn, which answers with it, without asking the model again."""
+    pytest.importorskip("pydantic")
+    from restate.agents._conversation import Conversation  # pylint: disable=import-outside-toplevel
+
+    asked: list[str] = []
+    looked_up: list[str] = []
+    refunded: list[str] = []
+    crashed: list[bool] = []
+    approval = "wait_for_approval"  # the name of the example's wait_for_signal("approval") tool
+
+    def call(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"type": "function_call", "call_id": call_id, "name": name, "arguments": json.dumps(arguments)}
+
+    def reply(*calls: dict[str, Any]) -> list[dict[str, Any]]:
+        return [{"type": "reasoning", "id": f"rs-{calls[0]['call_id']}", "summary": []}, *calls]
+
+    async def complete(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        last = items[-1]
+        asked.append(last.get("call_id") or last["role"])
+        if last.get("role") == "assistant":
+            raise restate.TerminalError("the model was asked again after its final reply")
+        if last.get("role") == "user":  # two tool calls in one reply
+            return reply(call("c1", "order_status", {"order": "103"}), call("c1b", "order_status", {"order": "104"}))
+        if last["call_id"] in ("c1", "c1b"):
+            return reply(call("c2", approval, {"order": "103", "amount": 30}))
+        if last["call_id"] == "c2":
+            return reply(call("c3", "refund", {"order": "103", "amount": 30}))
+        if not crashed:
+            crashed.append(True)
+            raise ConnectionError("the model's connection dropped")  # Restate retries the turn
+        text = {"type": "output_text", "text": f"Done: {last['output']}", "annotations": []}
+        return [{"type": "message", "role": "assistant", "content": [text]}]
+
+    answered = Conversation.answered
+    unanswered: list[bool] = []
+
+    async def answered_once_crashing(conversation: Conversation, prompt_id: str, answer: str) -> None:
+        if not unanswered:
+            unanswered.append(True)
+            raise ConnectionError("lost before the answer was stored")  # after the final reply was
+        await answered(conversation, prompt_id, answer)
+
+    monkeypatch.setattr(Conversation, "answered", answered_once_crashing)
+
+    def setup(module: ModuleType) -> None:
+        async def at_once(order: str) -> str:
+            """Look an order up, once the other lookup has started too: the calls of a reply run at once."""
+            looked_up.append(order)
+            for _ in range(50):
+                if len(looked_up) == 2:
+                    return f"Order {order} was delivered yesterday."
+                await asyncio.sleep(0.1)
+            return f"Order {order} was looked up alone."
+
+        def counted(order: str, amount: float) -> str:
+            refunded.append(order)
+            return f"Refunded ${amount:g} for order {order}."
+
+        assert module.approval.name == approval
+        setattr(module, "complete", complete)  # the model, scripted
+        module.TOOLS["order_status"] = module.tool(at_once, name="order_status", description="Look an order up.")
+        module.TOOLS["refund"] = module.tool(counted, name="refund", description="Refund an order.")
+
+    async with serving("intermediate/loop.py", setup) as ingress:
+        chat = asyncio.create_task(ingress.post("refunds/alice/chat", "Order 103 arrived broken"))
+        waiting: list[dict[str, Any]] = []
+        for _ in range(100):
+            if waiting := (await ingress.post("refunds/alice/pending")).json():
+                break
+            await asyncio.sleep(0.1)
+        assert [w["name"] for w in waiting] == ["approval"] and not refunded  # it waits, and has not refunded
+        await ingress.post("refunds/alice/signal", {"name": "approval", "value": "approved"})
+        assert (await chat).json() == "Done: Refunded $30 for order 103."
+        assert refunded == ["103"] and crashed == [True] and unanswered == [True]
+        # The model was asked once for each step (and again after the crash that cut its connection), not after the
+        # crash that came once its final reply was stored.
+        assert asked == ["user", asked[1], "c2", "c3", "c3"] and asked[1] in ("c1", "c1b")
+        shown = (await ingress.post("refunds/alice/messages", {})).json()["messages"]
+        tools = [(p["name"], p["output"]) for p in shown[1]["parts"]]
+        assert tools == [
+            ("order_status", "Order 103 was delivered yesterday."),
+            ("order_status", "Order 104 was delivered yesterday."),
+            (approval, "approved"),
+            ("refund", "Refunded $30 for order 103."),
+        ]
+        assert shown[-1]["parts"] == [{"type": "text", "text": "Done: Refunded $30 for order 103."}]
 
 
 def serves_http2() -> bool:

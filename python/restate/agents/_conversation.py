@@ -45,6 +45,7 @@ conversation to the answer, storing each step with ``append`` as it goes).
 
 from __future__ import annotations
 
+import asyncio
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -228,6 +229,8 @@ class Conversation:
         """The prompts, by id."""
         self.closed = False
         """Whether a stop closed the run: the run, unwinding, then stores nothing more."""
+        self._writing = asyncio.Lock()
+        """Held while the conversation changes: tool calls run at once append their results one after another."""
         self._add(entries)
 
     def _add(self, entries: list[Entry]) -> None:
@@ -306,21 +309,23 @@ class Conversation:
     # --- Writing ---
 
     async def append(self, *items: Item) -> None:
-        """Append ``items`` (a tool's results, say), in one transaction."""
-        await self._insert([Entry(n, item) for n, item in enumerate(items, start=self._next())])
+        """Append ``items`` (a tool's results, say), in one transaction.
+
+        Appends may run at once, such as those of tool calls that run at once:
+        each is stored after the ones before it.
+        """
+        await self._insert(lambda n: [Entry(n + i, item) for i, item in enumerate(items)])
 
     async def append_reply(self, *items: Item, agent: str | None = None) -> int:
         """Append the model's reply, of ``items`` (given by ``agent``), in one transaction, and return its id."""
-        reply = self._next()
-        await self._insert([Entry(n, item, reply=reply, agent=agent) for n, item in enumerate(items, start=reply)])
-        return reply
+        return await self._insert(lambda n: [Entry(n + i, item, reply=n, agent=agent) for i, item in enumerate(items)])
 
     def _next(self) -> int:
         return self.entries[-1].n + 1 if self.entries else self._start.n
 
     async def ask(self, prompt_id: str, text: str) -> None:
         """Append prompt ``prompt_id``, with ``text``."""
-        await self._insert([Entry(self._next(), self.items.prompt(text), prompt=prompt_id)])
+        await self._insert(lambda n: [Entry(n, self.items.prompt(text), prompt=prompt_id)])
 
     async def answered(self, prompt_id: str, answer: str) -> None:
         """Store ``answer`` as the answer of prompt ``prompt_id``."""
@@ -336,7 +341,7 @@ class Conversation:
         reply's messages take the dropped ones' ids; the ``seq`` is kept, so
         that a client's cursor still sees them.
         """
-        async with self.db.transaction() as tx:
+        async with self._writing, self.db.transaction() as tx:
             await tx.execute(f"DELETE FROM {TABLE} WHERE n >= ?", [reply])
             await restart(tx, Start(self._start.n, self._seq))
         kept = [e for e in self.entries if e.n < reply]
@@ -347,23 +352,33 @@ class Conversation:
                 del self._prompts[dropped.prompt]
         self.entries = kept
 
-    async def _insert(self, added: list[Entry]) -> None:
-        if self.closed:
-            raise RuntimeError("the run was stopped: it stores nothing more")
-        sql = f"INSERT INTO {TABLE} (n, seq, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?, ?)"
-        rows = [
-            [e.n, self._seq + i, self.items.dump(e.item), e.prompt, e.reply, e.agent] for i, e in enumerate(added, 1)
-        ]
-        if len(rows) == 1:
-            # One statement commits on its own.
-            await self.db.execute(sql, rows[0])
-        else:
-            async with self.db.transaction() as tx:
-                # The same SQL for each row: the database prepares it once.
-                for row in rows:
-                    await tx.execute(sql, row)
-        self._seq += len(rows)
-        self._add(added)
+    async def _insert(self, made: Callable[[int], list[Entry]]) -> int:
+        """Store the entries that ``made`` makes from the next position, and return that position.
+
+        The position is taken once the appends before have stored theirs, so
+        appends that run at once each get places of their own.
+        """
+        async with self._writing:
+            if self.closed:
+                raise RuntimeError("the run was stopped: it stores nothing more")
+            n = self._next()
+            added = made(n)
+            sql = f"INSERT INTO {TABLE} (n, seq, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?, ?)"
+            rows = [
+                [e.n, self._seq + i, self.items.dump(e.item), e.prompt, e.reply, e.agent]
+                for i, e in enumerate(added, 1)
+            ]
+            if len(rows) == 1:
+                # One statement commits on its own.
+                await self.db.execute(sql, rows[0])
+            else:
+                async with self.db.transaction() as tx:
+                    # The same SQL for each row: the database prepares it once.
+                    for row in rows:
+                        await tx.execute(sql, row)
+            self._seq += len(rows)
+            self._add(added)
+            return n
 
 
 def _str(value: object) -> str | None:
