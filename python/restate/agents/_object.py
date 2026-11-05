@@ -302,6 +302,7 @@ class AgentObject(SessionObject):
         *,
         items: Items,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
+        output: type[Any] | None = None,
     ) -> A: ...
 
     @typing.overload
@@ -311,6 +312,7 @@ class AgentObject(SessionObject):
         *,
         items: Items,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
+        output: type[Any] | None = None,
     ) -> Callable[[A], A]: ...
 
     def chat(
@@ -320,6 +322,7 @@ class AgentObject(SessionObject):
         *,
         items: Items,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
+        output: type[Any] | None = None,
     ) -> Any:
         """Turn this object into an agent that answers each message with ``answer``.
 
@@ -344,6 +347,9 @@ class AgentObject(SessionObject):
                 reads the conversation.
             clear: Clears whatever the agent keeps outside its database; the
                 ``clear`` view calls it after emptying the database.
+            output: The type of ``answer``'s answers, if not text (see the
+                frameworks' ``output``). It is the ``chat`` handler's output,
+                as Restate's discovery and serde see it.
 
         Returns:
             ``answer`` itself.
@@ -353,7 +359,7 @@ class AgentObject(SessionObject):
             def decorate(
                 fn: Callable[[SessionContext, str], Awaitable[Any]],
             ) -> Callable[[SessionContext, str], Awaitable[Any]]:
-                return self.chat(fn, items=items, clear=clear)
+                return self.chat(fn, items=items, clear=clear, output=output)
 
             return decorate
         AGENT.on(self, AgentInfo(background=self.background, clear=clear))
@@ -361,6 +367,8 @@ class AgentObject(SessionObject):
 
         async def chat(ctx: SessionContext, text: str) -> Any:
             return await chat_turn(ctx, text, answering)
+
+        chat.__annotations__["return"] = output if output is not None else str
 
         self._building = True
         try:

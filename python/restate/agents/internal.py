@@ -19,6 +19,8 @@ An integration needs, beyond the public API:
   ``Result``) and its own run, which appends each step as it goes.
 - ``stop_signal_of``, to stop a turn when it is cancelled or its attempt ends.
 - ``run_tool``, to run a ``restate.agents`` tool for a tool call.
+- ``with_output`` and ``answer_with``, to answer with a Pydantic model
+  (``output=``) rather than text.
 - ``model_of``, ``provider_of`` and the related helpers, to resolve the model.
 - ``refusal_of`` and ``from_tool``, to tell a model provider's refusal from a
   tool's error.
@@ -47,6 +49,7 @@ from restate.agents._common import (
     stored_answer,
 )
 from restate.agents._conversation import Call, Conversation, Entry, Items, Parsed, Result, answer_once, close
+from restate.agents._output import answer_with, with_output
 from restate.agents._signals import Companion, companion_of, deliver, signals
 from restate.agents._tools import run_tool
 from restate.agents._turn import (
@@ -79,6 +82,7 @@ __all__ = [
     "Stop",
     "ToolError",
     "answer_once",
+    "answer_with",
     "answering",
     "close",
     "companion_of",
@@ -98,4 +102,5 @@ __all__ = [
     "stored_answer",
     "tool_call_ended",
     "tool_call_started",
+    "with_output",
 ]

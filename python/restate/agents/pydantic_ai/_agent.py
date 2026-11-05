@@ -31,10 +31,10 @@ stored:
 from __future__ import annotations
 
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
@@ -65,10 +65,13 @@ from restate.agents._common import (
 )
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
+from restate.agents._output import with_output
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
+
+M = typing.TypeVar("M", bound=BaseModel)
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"<provider>/<model-id>"`` (or Pydantic AI's ``"<provider>:<model-id>"``), or a Pydantic AI model."""
@@ -264,6 +267,7 @@ def _run(
     return run
 
 
+@typing.overload
 async def prompt(
     ctx: SessionContext,
     text: str,
@@ -272,7 +276,33 @@ async def prompt(
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
-) -> str:
+    output: None = None,
+) -> str: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: Agent[Any, str] | None = None,
+    model: AnyModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[M],
+) -> M: ...
+
+
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: Agent[Any, str] | None = None,
+    model: AnyModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[BaseModel] | None = None,
+) -> Any:
     """Answer a prompt with a Pydantic AI agent, exactly once.
 
     For a handler of your own; the conversation is the object's key, shared
@@ -294,16 +324,25 @@ async def prompt(
         system: The instructions, when there is no ``agent``.
         tools: ``restate.agents`` tools, Pydantic AI tools or tool functions,
             beside ``agent``'s own.
+        output: A Pydantic model, for an answer that is one rather than
+            text. The agent then answers with its JSON.
 
     Returns:
-        The agent's answer.
+        The agent's answer: its text, or a value of ``output``.
 
     Raises:
         TypeError: If both ``agent`` and ``system`` are given.
+        TerminalError: If the agent's reply is not a value of ``output``,
+            twice.
     """
     check_own(agent, system)
 
-    return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
+    def ask(text: str, system: str | None) -> Awaitable[str]:
+        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
+
+    if output is None:
+        return await ask(text, system)
+    return await with_output(output, text, system, ask, own=agent is not None)
 
 
 def agent(
@@ -314,6 +353,7 @@ def agent(
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
+    output: type[BaseModel] | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
@@ -343,6 +383,9 @@ def agent(
             ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
         system: The instructions, when there is no ``pydantic_agent``.
         tools: ``restate.agents`` tools, Pydantic AI tools or tool functions.
+        output: A Pydantic model, for answers that are one rather than
+            text. The agent then answers with its JSON, which ``chat``
+            returns.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -355,7 +398,7 @@ def agent(
     check_own(pydantic_agent, system)
     obj = AgentObject(name, **options)
 
-    async def answer(ctx: SessionContext, text: str) -> str:
+    async def answer(ctx: SessionContext, text: str) -> Any:
         return await prompt(
             ctx,
             text,
@@ -363,7 +406,8 @@ def agent(
             model=await configured(model, ctx),
             system=await configured(system, ctx),
             tools=await configured(tools, ctx),
+            output=output,
         )
 
-    obj.chat(answer, items=ITEMS)
+    obj.chat(answer, items=ITEMS, output=output)
     return obj

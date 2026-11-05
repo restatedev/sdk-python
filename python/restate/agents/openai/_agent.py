@@ -63,15 +63,20 @@ from agents import (
 from agents import Tool as SdkTool
 from agents.run import CallModelData, ModelInputData
 from agents.tool_context import ToolContext
+from pydantic import BaseModel
 from pydantic_core import to_json
 
 from restate.agents._common import PerSession, check_own, configured, from_tool, model_id_of, model_of
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
+from restate.agents._output import with_output
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
+
+M = typing.TypeVar("M", bound=BaseModel)
+
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"openai/<model-id>"`` (or the model id alone), or a model of the SDK."""
@@ -357,6 +362,7 @@ def _model(model: AnyModel | None) -> str | Model:
 # --- The API --------------------------------------------------------------------------------------
 
 
+@typing.overload
 async def prompt(
     ctx: SessionContext,
     text: str,
@@ -365,7 +371,33 @@ async def prompt(
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
-) -> str:
+    output: None = None,
+) -> str: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: Agent[Any] | None = None,
+    model: AnyModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[M],
+) -> M: ...
+
+
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: Agent[Any] | None = None,
+    model: AnyModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[BaseModel] | None = None,
+) -> Any:
     """Answer a prompt with an OpenAI Agents SDK agent, exactly once.
 
     For a handler of your own; the conversation is the object's key, shared
@@ -388,16 +420,25 @@ async def prompt(
         system: The instructions, when there is no ``agent``.
         tools: ``restate.agents`` tools, or tools of the SDK, beside
             ``agent``'s own. For the agents it hands off to, see ``tools()``.
+        output: A Pydantic model, for an answer that is one rather than
+            text. The agent then answers with its JSON.
 
     Returns:
-        The agent's answer.
+        The agent's answer: its text, or a value of ``output``.
 
     Raises:
         TypeError: If both ``agent`` and ``system`` are given.
+        TerminalError: If the agent's reply is not a value of ``output``,
+            twice.
     """
     check_own(agent, system)
 
-    return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
+    def ask(text: str, system: str | None) -> Awaitable[str]:
+        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
+
+    if output is None:
+        return await ask(text, system)
+    return await with_output(output, text, system, ask, own=agent is not None)
 
 
 def agent(
@@ -408,6 +449,7 @@ def agent(
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
+    output: type[BaseModel] | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create an OpenAI Agents SDK agent: a virtual object with one conversation per key.
@@ -437,6 +479,9 @@ def agent(
             ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
         system: The instructions, when there is no ``openai_agent``.
         tools: ``restate.agents`` tools, or tools of the SDK.
+        output: A Pydantic model, for answers that are one rather than
+            text. The agent then answers with its JSON, which ``chat``
+            returns.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -452,7 +497,7 @@ def agent(
         _model(model)
     obj = AgentObject(name, **options)
 
-    async def answer(ctx: SessionContext, text: str) -> str:
+    async def answer(ctx: SessionContext, text: str) -> Any:
         return await prompt(
             ctx,
             text,
@@ -460,7 +505,8 @@ def agent(
             model=await configured(model, ctx),
             system=await configured(system, ctx),
             tools=await configured(tools, ctx),
+            output=output,
         )
 
-    obj.chat(answer, items=ITEMS)
+    obj.chat(answer, items=ITEMS, output=output)
     return obj
