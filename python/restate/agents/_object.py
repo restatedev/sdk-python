@@ -91,11 +91,12 @@ class AgentOptions(TypedDict, total=False):
     invocation_retry_policy: InvocationRetryPolicy | None
 
 
-WAITS = timedelta(minutes=5)
+WAITS = timedelta(seconds=15)
 """The inactivity timeout of the views that wait (``watch``, ``sync`` and ``clear``).
 
-Restate suspends a view that waits longer than this, which restarts it, so the
-timeout is longer than any of their waits.
+Restate suspends a view that waits longer than this, which frees its compute
+slot. The call it waits for resumes it: it runs again from the start, and
+joins the same calls through their idempotency keys.
 """
 
 
@@ -284,7 +285,8 @@ class AgentObject(SessionObject):
 
         for fn in (signal, pending, status, stop, notifications):
             self.view(fn)
-        self.view(inactivity_timeout=WAITS)(watch)
+        # A client follows with one watch (or sync) after another: their journals are not kept.
+        self.view(inactivity_timeout=WAITS, journal_retention=timedelta(0))(watch)
 
     @typing.overload
     def chat(
@@ -455,4 +457,4 @@ def _followed(agent: AgentObject, items: Items) -> None:
     agent.view(messages)
     agent.handler(ingress_private=True)(erase)
     agent.view(inactivity_timeout=WAITS)(clear)
-    agent.view(inactivity_timeout=WAITS)(sync)
+    agent.view(inactivity_timeout=WAITS, journal_retention=timedelta(0))(sync)
