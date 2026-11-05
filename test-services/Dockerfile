@@ -19,8 +19,10 @@ COPY README.md .
 COPY uv.lock .
 
 
-RUN uv sync --all-extras --all-packages
-RUN uv build --all-packages
+# Only the wheel is needed, built once from the source tree: no editable install of
+# the extras, and no sdist to build it again from (each compiles the Rust extension,
+# which under QEMU, for linux/arm64, takes the better part of an hour).
+RUN uv build --wheel
 
 FROM python:3.12-slim AS test-services
 
