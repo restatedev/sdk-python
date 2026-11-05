@@ -51,6 +51,14 @@ are called only by the agents' own handlers.
 WATCH = timedelta(hours=1)
 """How long one ``awaitTurn`` invocation waits for its turn to end before handing over to a new one."""
 
+PARKED = timedelta(seconds=1)
+"""The inactivity timeout of the handlers that wait (``wait``, ``awaitTurn`` and ``watch``).
+
+They do nothing but wait, so Restate suspends them after a second, which frees
+their compute slot; the completion they wait for resumes them, replaying their
+short journals.
+"""
+
 
 class _WaitRequest(TypedDict):
     id: str
@@ -132,7 +140,7 @@ async def _closed(ctx: ObjectContext, turn: str) -> None:
         await _publish(ctx)
 
 
-@signals.handler(kind="shared")
+@signals.handler(kind="shared", inactivity_timeout=PARKED)
 async def wait(ctx: ObjectSharedContext, request: WaitRequest) -> Any:
     """Wait for the signal ``name`` as wait ``id``, and return its value."""
     awakeable, value = ctx.awakeable(type_hint=object)
@@ -215,6 +223,7 @@ async def start(ctx: ObjectContext, turn: Turn) -> None:
     name="awaitTurn",
     kind="shared",
     ingress_private=True,
+    inactivity_timeout=PARKED,
     # Keep nothing once it is done: there is one at a time per turn.
     journal_retention=timedelta(0),
     idempotency_retention=timedelta(0),
@@ -253,7 +262,8 @@ async def status(ctx: ObjectSharedContext) -> Status:
     }
 
 
-@signals.handler(kind="shared")
+# Its journal is not kept once it is done: a client follows with one watch after another.
+@signals.handler(kind="shared", inactivity_timeout=PARKED, journal_retention=timedelta(0))
 async def watch(ctx: ObjectSharedContext, request: Watch) -> Notifications:
     """Wait for a revision newer than ``revision``, or the timeout, and return the current revision.
 
