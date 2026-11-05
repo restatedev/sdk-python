@@ -25,6 +25,8 @@ restate-sdk-shared-core = { version = "8.3.0", features = [
     "tunnel",
     "sql",
 ] }
+# TODO remove once we bump to shared core > 8.3.0
+aegis = { version = "0.9", features = ["pure-rust"] }
 
 # ASGI bridge for the tunnel
 bytes = "1.10"
