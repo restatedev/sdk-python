@@ -53,6 +53,9 @@ if __name__ == "__main__":
     asyncio.run(restate.serve(app))
 ```
 
+Or from the command line, with no `__main__` block: `python -m restate serve app:app` (`--port`
+to choose the port).
+
 `restate.app(...)` returns an ASGI application, so any ASGI server can serve it instead, for example
 [Hypercorn](https://github.com/pgjones/hypercorn):
 
