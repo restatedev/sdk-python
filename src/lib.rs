@@ -1044,7 +1044,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use tracing_subscriber::EnvFilter;
 
     // RESTATE_CORE_LOG controls everything when set. When it is not, the Restate Cloud
-    // tunnel still reports its lifecycle (the registration hint, connection changes).
+    // tunnel still reports its problems.
     let filter = match std::env::var("RESTATE_CORE_LOG") {
         Ok(directives) => EnvFilter::new(directives),
         Err(_) => EnvFilter::new(

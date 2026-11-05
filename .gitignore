@@ -177,3 +177,6 @@ restate-sdk-test-suite.jar
 
 # macOS
 .DS_Store
+
+# restate credentials
+restate.env

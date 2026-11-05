@@ -18,15 +18,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # The feature `sql` is the sessions' storage: the SQLite-compatible database kept in an
 # object's state, with its page cache (foyer); `tunnel` is Restate Cloud's.
-restate-sdk-shared-core = { version = "8.3.0", features = [
+restate-sdk-shared-core = { version = "8.3.1", features = [
     "request_identity",
     "sha2_random_seed",
     "rust_crypto",
     "tunnel",
     "sql",
 ] }
-# TODO remove once we bump to shared core > 8.3.0
-aegis = { version = "0.9", features = ["pure-rust"] }
 
 # ASGI bridge for the tunnel
 bytes = "1.10"
