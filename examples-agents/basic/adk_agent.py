@@ -16,7 +16,6 @@ another provider, pass an ADK model of your own: ``model=LiteLlm(...)``.
 import asyncio
 
 import restate
-from restate import sessions
 from restate.agents import adk, tool
 
 
@@ -30,4 +29,4 @@ assistant = adk.agent("assistant", system="Answer briefly.", tools=[get_weather]
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(assistant)))
+    asyncio.run(restate.serve(restate.app([assistant])))

@@ -33,4 +33,4 @@ async def list_notes(ctx: sessions.ViewContext) -> list[str]:
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(notes)))
+    asyncio.run(restate.serve(restate.app([notes])))

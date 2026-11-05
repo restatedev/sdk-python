@@ -65,7 +65,7 @@ unsigned = webhook("anything", route=[triage])
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(issues, unsigned, triage), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([issues, unsigned, triage]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 

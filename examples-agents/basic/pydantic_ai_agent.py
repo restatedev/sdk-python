@@ -17,7 +17,6 @@ Pydantic AI's providers: ``anthropic/<model-id>`` takes
 import asyncio
 
 import restate
-from restate import sessions
 from restate.agents import pydantic_ai, tool
 
 
@@ -31,4 +30,4 @@ assistant = pydantic_ai.agent("assistant", system="Answer briefly.", tools=[get_
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(assistant)))
+    asyncio.run(restate.serve(restate.app([assistant])))

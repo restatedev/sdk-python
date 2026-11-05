@@ -14,6 +14,7 @@ This module defines the Endpoint class, which serves as a container for all the 
 
 import typing
 
+from restate.servable import Servable, definitions_of
 from restate.service import Service
 from restate.object import VirtualObject
 from restate.workflow import Workflow
@@ -50,26 +51,27 @@ class Endpoint:
         # transforms serialized journal values through it. None means no codec is configured.
         self.journal_value_codec = None
 
-    def bind(self, *services: typing.Union[Service, VirtualObject, Workflow]):
+    def bind(self, *services: Servable):
         """
-        Bind a service to the endpoint
+        Bind services to the endpoint, with what they bring along (see ``restate.Servable``).
 
         Args:
-            service: The service or virtual object to bind to the endpoint
+            services: The services, virtual objects, workflows, or other servables to bind
 
         Raises:
-            ValueError: If a service with the same name already exists in the endpoint
+            ValueError: If a different service with the same name already exists in the endpoint
+            TypeError: If one of them is not servable
 
         Returns:
             The updated Endpoint instance
         """
-        for service in services:
-            if service.name in self.services:
+        for service in definitions_of(services):
+            existing = self.services.get(service.name)
+            if existing is service:
+                continue  # brought along by more than one servable: served once
+            if existing is not None:
                 raise ValueError(f"Service {service.name} already exists")
-            if isinstance(service, (Service, VirtualObject, Workflow)):
-                self.services[service.name] = service
-            else:
-                raise ValueError(f"Invalid service type {service}")
+            self.services[service.name] = service
         return self
 
     def streaming_protocol(self):
@@ -121,19 +123,30 @@ class Endpoint:
 
 
 def app(
-    services: typing.Iterable[typing.Union[Service, VirtualObject, Workflow]],
+    services: typing.Iterable[Servable],
     protocol: typing.Optional[typing.Literal["bidi", "request_response"]] = None,
     identity_keys: typing.Optional[typing.List[str]] = None,
     journal_value_codec: typing.Optional[typing.Union[JournalValueCodec, JournalValueCodecProvider]] = None,
 ):
-    """A restate ASGI application that hosts the given services."""
+    """
+    A restate ASGI application that hosts the given services.
+
+    ``services`` are services, virtual objects and workflows, or anything else ``restate.Servable``:
+    a session object, an agent (which brings the ``signals`` object its tools wait on), or a group of
+    them. Each is served with what it brings along, once::
+
+        app = restate.app([greeter, notes, assistant])
+
+    Raises:
+        ValueError: If two different services have the same name.
+        TypeError: If one of ``services`` is not servable.
+    """
     endpoint = Endpoint()
     if protocol == "bidi":
         endpoint.streaming_protocol()
     elif protocol == "request_response":
         endpoint.request_response_protocol()
-    for service in services:
-        endpoint.bind(service)
+    endpoint.bind(*services)
     if identity_keys:
         for key in identity_keys:
             endpoint.identity_key(key)

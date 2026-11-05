@@ -87,4 +87,4 @@ async def balance(ctx: sessions.ViewContext) -> int:
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(wallet, handle)))
+    asyncio.run(restate.serve(restate.app([wallet, handle])))

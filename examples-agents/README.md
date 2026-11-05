@@ -7,7 +7,7 @@ top of it. Each example is a single file that runs on its own.
 
 ## Run an example
 
-The examples serve themselves with `restate.serve(sessions.app(...))`, on
+The examples serve themselves with `restate.serve(restate.app([...]))`, on
 Python 3.11 or later.
 
 Install the SDK with the `serve` extra, which adds the HTTP/2 server that

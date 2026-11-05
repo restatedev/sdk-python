@@ -37,6 +37,7 @@ from restate.agents._api import (
 from restate.agents._common import MessageSerde, refusal_of
 from restate.agents._conversation import SCHEMA, Items, next_start, restart
 from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared
+from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.sessions import Migration, SessionContext, SessionObject, ViewContext
 from restate.sessions.internal import reset
@@ -225,6 +226,11 @@ class AgentObject(SessionObject):
             self._built_in()
         finally:
             self._building = False
+
+    def __restate_services__(self) -> tuple[VirtualObject, ...]:
+        """What ``restate.app`` serves for an agent (see ``restate.Servable``): itself, and ``signals``,
+        the object its tools wait on, shared by every agent."""
+        return (self, _signals.signals)
 
     def _reserved(self, name: str) -> str | None:
         if name not in BUILT_IN or getattr(self, "_building", False):

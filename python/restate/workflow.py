@@ -89,6 +89,10 @@ class Workflow:
 
     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
 
+    def __restate_services__(self) -> typing.Tuple["Workflow", ...]:
+        """What ``restate.app`` serves for this (see ``restate.Servable``): itself."""
+        return (self,)
+
     def __init__(
         self,
         name: str,

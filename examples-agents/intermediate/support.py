@@ -24,7 +24,6 @@ from datetime import timedelta
 from pydantic import BaseModel
 
 import restate
-from restate import sessions
 from restate.agents import call, openai, wait_for_signal, workflow
 
 
@@ -72,4 +71,4 @@ support = openai.agent(
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(orders, refund, support)))
+    asyncio.run(restate.serve(restate.app([orders, refund, support])))

@@ -168,7 +168,7 @@ triage = adk.agent("adk_desk", desk())
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(assistant, triage), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, triage]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 

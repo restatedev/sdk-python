@@ -98,7 +98,7 @@ assistant.chat(answer, items=ITEMS, clear=forget)
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(assistant), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 

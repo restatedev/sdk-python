@@ -18,7 +18,6 @@ import asyncio
 import json
 
 import restate
-from restate import sessions
 from restate.agents import AgentObject, langgraph, pydantic_ai
 
 classifier = langgraph.agent(
@@ -64,4 +63,4 @@ async def review(ctx: restate.WorkflowSharedContext, reply: str) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(triage, classifier, drafter)))
+    asyncio.run(restate.serve(restate.app([triage, classifier, drafter])))

@@ -441,7 +441,7 @@ def agent(
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
     Returns:
-        The agent, to serve with ``restate.serve(sessions.app(agent))``, or any ASGI server.
+        The agent, to serve with ``restate.serve(restate.app([agent]))``, or any ASGI server.
 
     Raises:
         TypeError: If both ``openai_agent`` and ``system`` are given.

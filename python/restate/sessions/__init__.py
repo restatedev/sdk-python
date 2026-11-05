@@ -32,7 +32,7 @@ so there is no database to run::
 
 
     if __name__ == "__main__":
-        asyncio.run(restate.serve(sessions.app(notes)))
+        asyncio.run(restate.serve(restate.app([notes])))
 
 Handlers run one at a time per key; views run beside them and read what was
 committed. A handler is not replayed from a journal: a retried attempt runs
@@ -59,7 +59,6 @@ from restate.sessions._calls import CallFuture
 from restate.sessions._database import Row, Rows, SqlError, SqlParam, SqlValue
 from restate.sessions._object import SessionObject
 from restate.sessions._schema import Migration
-from restate.sessions._serve import app
 
 __all__ = [
     "CallFuture",
@@ -78,5 +77,4 @@ __all__ = [
     "SqlValue",
     "Transaction",
     "ViewContext",
-    "app",
 ]

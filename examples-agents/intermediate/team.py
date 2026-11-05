@@ -18,7 +18,6 @@ back to a task, and a crash anywhere resumes where it stopped::
 import asyncio
 
 import restate
-from restate import sessions
 from restate.agents import langgraph, openai, pydantic_ai, subagent
 
 researcher = langgraph.agent(
@@ -41,4 +40,4 @@ editor = openai.agent(
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(editor, researcher, writer)))
+    asyncio.run(restate.serve(restate.app([editor, researcher, writer])))

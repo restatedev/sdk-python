@@ -59,7 +59,7 @@ agent.chat(answer, items=ITEMS)
 @pytest.fixture(scope="module")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(echo, agent, slow), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([echo, agent, slow]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 

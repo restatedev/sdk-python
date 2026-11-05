@@ -199,7 +199,7 @@ trimmed = pydantic_ai.agent("pai_trimmed", trimmed_agent(), tools=[get_weather])
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(assistant, per_user, trimmed), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user, trimmed]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 

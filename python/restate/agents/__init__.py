@@ -29,7 +29,7 @@ nothing: each message is answered once, and each tool call is made once::
     assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
 
     if __name__ == "__main__":
-        asyncio.run(restate.serve(sessions.app(assistant)))
+        asyncio.run(restate.serve(restate.app([assistant])))
 
 This package holds what all frameworks share:
 

@@ -34,4 +34,4 @@ async def hello(ctx: sessions.SessionContext) -> str:
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(wallet)))
+    asyncio.run(restate.serve(restate.app([wallet])))

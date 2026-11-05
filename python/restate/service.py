@@ -75,6 +75,10 @@ class Service:
             see the handler option of the same name. NOTE: in preview, it might change without notice.
     """
 
+    def __restate_services__(self) -> typing.Tuple["Service", ...]:
+        """What ``restate.app`` serves for this (see ``restate.Servable``): itself."""
+        return (self,)
+
     def __init__(
         self,
         name: str,
