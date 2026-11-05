@@ -8,7 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""restate.serve: a program serves its app over HTTP/2, and stops on SIGTERM."""
+"""restate.serve and `python -m restate serve`: a program serves its app over HTTP/2, and stops on SIGTERM."""
 
 # pylint: disable=missing-function-docstring
 
@@ -49,8 +49,21 @@ def test_without_the_serve_extra_it_says_what_to_install():
     assert "install restate-sdk[serve]" in ran.stdout
 
 
-PROGRAM = """
-import asyncio
+CLI_WITHOUT_UVICORN = """
+import sys
+sys.modules["uvicorn"] = None
+from restate.__main__ import main
+sys.exit(main(["serve", "restate:app"]))
+"""
+
+
+def test_the_cli_without_the_serve_extra_says_what_to_install():
+    ran = subprocess.run([sys.executable, "-c", CLI_WITHOUT_UVICORN], capture_output=True, text=True, check=False)
+    assert ran.returncode == 1, ran.stderr
+    assert "install restate-sdk[serve]" in ran.stderr
+
+
+APP = """
 import restate
 
 greeter = restate.Service("greeter")
@@ -59,8 +72,17 @@ greeter = restate.Service("greeter")
 async def greet(ctx: restate.Context, name: str) -> str:
     return f"Hello {name}!"
 
-asyncio.run(restate.serve(restate.app([greeter])))
+app = restate.app([greeter])
 """
+
+PROGRAM = (
+    APP
+    + """
+import asyncio
+
+asyncio.run(restate.serve(app))
+"""
+)
 
 
 def serves_http2() -> bool:
@@ -69,16 +91,21 @@ def serves_http2() -> bool:
 
 @pytest.mark.anyio
 @pytest.mark.skipif(not serves_http2(), reason="needs the serve extra")
-async def test_a_program_serves_its_app_over_http2_and_stops_on_sigterm(tmp_path: pathlib.Path):
+@pytest.mark.parametrize("command", ["program", "cli"])
+async def test_a_program_serves_its_app_over_http2_and_stops_on_sigterm(tmp_path: pathlib.Path, command: str):
     # Restate first: Docker maps its ports to free host ports, which could otherwise take the program's.
     container = RestateContainer("ghcr.io/restatedev/restate:latest", always_replay=False, disable_retries=False)
     container.start()
     port = find_free_port()
     output = tmp_path / "program.log"
     with output.open("wb") as log:
-        program = subprocess.Popen(
-            [sys.executable, "-c", PROGRAM], env={**os.environ, "PORT": str(port)}, stdout=log, stderr=log
-        )
+        if command == "program":
+            argv = [sys.executable, "-c", PROGRAM]
+        else:  # python -m restate serve, which imports the app from the working directory
+            (tmp_path / "greeter_app.py").write_text(APP)
+            argv = [sys.executable, "-m", "restate", "serve", "greeter_app:app", "--port", str(port)]
+        env = {**os.environ, "PORT": str(port)} if command == "program" else os.environ
+        program = subprocess.Popen(argv, cwd=tmp_path, env=env, stdout=log, stderr=log)
     try:
         await listening(program, port, output)
         async with httpx2.AsyncClient(base_url=container.admin_url(), timeout=30) as admin:
