@@ -24,6 +24,9 @@ from restate.serde import Serde, DefaultSerde
 from restate.retry_policy import InvocationRetryPolicy
 from .handler import Handler, HandlerIO, ServiceTag, make_handler
 
+if typing.TYPE_CHECKING:
+    from restate.servable import Servable
+
 I = typing.TypeVar("I")
 O = typing.TypeVar("O")
 T = typing.TypeVar("T")
@@ -75,8 +78,11 @@ class Service:
             see the handler option of the same name. NOTE: in preview, it might change without notice.
     """
 
-    def __restate_services__(self) -> typing.Tuple["Service", ...]:
-        """What ``restate.app`` serves for this (see ``restate.Servable``): itself."""
+    def __restate_services__(self) -> typing.Iterable["Servable"]:
+        """What ``restate.app`` serves for this (see ``restate.Servable``): itself.
+
+        A subclass may return what it brings along too: ``(self, *needs)``.
+        """
         return (self,)
 
     def __init__(

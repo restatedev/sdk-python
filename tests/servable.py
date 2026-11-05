@@ -30,7 +30,7 @@ class Needing(restate.VirtualObject):
         super().__init__(name)
         self.needs = needs
 
-    def __restate_services__(self) -> tuple[restate.Servable, ...]:  # type: ignore[override]
+    def __restate_services__(self) -> tuple[restate.Servable, ...]:
         return (self, *self.needs)
 
 
