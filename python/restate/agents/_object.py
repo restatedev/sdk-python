@@ -122,6 +122,16 @@ class Synced(Messages):
     status: Status
 
 
+Nothing: typing.TypeAlias = None
+"""The input of the views that take none: an optional body, which they ignore.
+
+A handler with no input refuses a request with a body or a content type,
+and some clients send one with every call: Restate's TypeScript client, for
+one, sends ``content-type: application/json`` even without an argument. An
+optional input takes those requests and requests without a body alike.
+"""
+
+
 BUILT_IN = frozenset(
     {"signal", "pending", "status", "stop", "notifications", "watch", "chat", "messages", "clear", "sync", "erase"}
 )
@@ -248,19 +258,19 @@ class AgentObject(SessionObject):
             """Resolve a wait of the agent's tools with ``value``: the wait with ``id``, or the oldest one for ``name``."""
             return await _companion(ctx, _signals.resolve, "signal")(signal)
 
-        async def pending(ctx: ViewContext) -> list[Waiting]:
+        async def pending(ctx: ViewContext, _: Nothing = None) -> list[Waiting]:
             """List the signals the agent's tools are waiting for, oldest first."""
             return await _companion(ctx, _signals.pending)()
 
-        async def status(ctx: ViewContext) -> Status:
+        async def status(ctx: ViewContext, _: Nothing = None) -> Status:
             """Return what the agent is doing: the message it is answering, if any, and what its tools wait for."""
             return await _companion(ctx, _signals.status)()
 
-        async def stop(ctx: ViewContext) -> Stopped:
+        async def stop(ctx: ViewContext, _: Nothing = None) -> Stopped:
             """Cancel the invocation that is answering the current message, if there is one."""
             return await _stopped(ctx, "stop")
 
-        async def notifications(ctx: ViewContext) -> Notifications:
+        async def notifications(ctx: ViewContext, _: Nothing = None) -> Notifications:
             """Return the conversation's revision, which increases whenever ``messages`` or ``status`` change."""
             return await _companion(ctx, _signals.notifications)()
 
@@ -406,7 +416,7 @@ def _followed(agent: AgentObject, items: Items) -> None:
         await cleared(ctx)
         await ctx.call(_signals.reset, key=_signals.signals_of(ctx), idempotency_key=f"{ctx.request.id}:reset")
 
-    async def clear(ctx: ViewContext) -> Stopped:
+    async def clear(ctx: ViewContext, _: Nothing = None) -> Stopped:
         """Forget the conversation, and empty the key's database.
 
         It stops the message being answered, as ``stop`` does. Messages sent
