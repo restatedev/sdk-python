@@ -1,6 +1,6 @@
 [package]
 name = "restate-sdk-python-core"
-version = "1.4.1"
+version = "1.4.2"
 edition = "2021"
 
 [package.metadata.maturin]
