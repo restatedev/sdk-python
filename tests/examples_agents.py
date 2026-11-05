@@ -232,7 +232,7 @@ def serves_http2() -> bool:
     return importlib.util.find_spec("uvicorn") is not None and importlib.util.find_spec("zttp") is not None
 
 
-@pytest.mark.skipif(not serves_http2(), reason="restate.serve needs the serve extra (Python 3.11+)")
+@pytest.mark.skipif(not serves_http2(), reason="restate.serve needs the serve extra")
 async def test_an_example_as_a_program(tmp_path: pathlib.Path):
     """``uv run`` an example: it serves on PORT, Restate calls it over HTTP/2, and it stops on SIGTERM."""
     # Restate first: Docker maps its ports to free host ports, which could otherwise take the program's.

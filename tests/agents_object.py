@@ -265,7 +265,7 @@ async def test_the_agent_client_chats_reads_follows_and_resolves_waits(harness: 
         page = await alice.messages(limit=10)
         assert texts(page) == [(0, "user", "Hi"), (1, "assistant", "echo: Hi")]
 
-        following = alice.follow(timeout=10)
+        following = alice.follow(wait=10)
         first = await anext(following)
         assert [m["id"] for m in first.messages] == [0, 1] and first.status["answering"] is None
         invocation = await alice.send("refund o9")

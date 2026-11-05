@@ -1,6 +1,6 @@
 # The project's ruff settings, and more rules for this package, which is
 # written to them: annotations everywhere, likely bugs, modern syntax for
-# Python 3.10, sorted imports, simpler code, async pitfalls.
+# Python 3.11, sorted imports, simpler code, async pitfalls.
 extend = "../../../pyproject.toml"
 
 [lint]

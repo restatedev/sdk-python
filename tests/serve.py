@@ -68,7 +68,7 @@ def serves_http2() -> bool:
 
 
 @pytest.mark.anyio
-@pytest.mark.skipif(not serves_http2(), reason="needs the serve extra (Python 3.11+)")
+@pytest.mark.skipif(not serves_http2(), reason="needs the serve extra")
 async def test_a_program_serves_its_app_over_http2_and_stops_on_sigterm(tmp_path: pathlib.Path):
     # Restate first: Docker maps its ports to free host ports, which could otherwise take the program's.
     container = RestateContainer("ghcr.io/restatedev/restate:latest", always_replay=False, disable_retries=False)

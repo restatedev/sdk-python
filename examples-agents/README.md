@@ -7,9 +7,8 @@ top of it. Each example is a single file that runs on its own.
 
 ## Run an example
 
-The examples serve themselves with `restate.serve(sessions.app(...))`,
-which needs Python 3.11 or later. (The SDK itself supports Python 3.10; there,
-serve `sessions.app(...)` with any ASGI server, such as hypercorn.)
+The examples serve themselves with `restate.serve(sessions.app(...))`, on
+Python 3.11 or later.
 
 Install the SDK with the `serve` extra, which adds the HTTP/2 server that
 `restate.serve` runs on:

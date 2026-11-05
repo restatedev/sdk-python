@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import typing
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Unpack
 
 from pydantic import ConfigDict, TypeAdapter
 from pydantic_ai.capabilities import AbstractCapability
@@ -69,9 +69,6 @@ from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
-
-if typing.TYPE_CHECKING:
-    from typing_extensions import Unpack
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"<provider>/<model-id>"`` (or Pydantic AI's ``"<provider>:<model-id>"``), or a Pydantic AI model."""

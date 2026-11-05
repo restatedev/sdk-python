@@ -165,21 +165,21 @@ class AgentClient:
         """Forget the conversation (stopping the message being answered, whose id it returns)."""
         return cast("str | None", (await self._call("clear"))["stopped"])
 
-    async def follow(self, *, cursor: int = 0, timeout: float = 50) -> AsyncGenerator[Followed, None]:
+    async def follow(self, *, cursor: int = 0, wait: float = 50) -> AsyncGenerator[Followed, None]:
         """Follow the conversation: what the agent does and the messages so far, then each change, as it comes.
 
         Each change is one ``sync`` that waits in Restate (for at most
-        ``timeout`` seconds) for the next. A lost connection, or Restate
+        ``wait`` seconds) for the next. A lost connection, or Restate
         restarting, does not end it: it tries again a second later, with the
         same idempotency key, so the retry joins the sync already waiting.
 
         Args:
             cursor: Start after this cursor (a page's, or a change's); by default, from the start.
-            timeout: How long one wait for a change lasts at most, in seconds.
+            wait: How long one wait for a change lasts at most, in seconds.
         """
         revision: int | None = None
         while True:
-            request: SyncRequest = {"cursor": cursor, "timeoutSeconds": timeout}
+            request: SyncRequest = {"cursor": cursor, "timeoutSeconds": wait}
             if revision is not None:
                 request["revision"] = revision
             synced = await self._synced(request)

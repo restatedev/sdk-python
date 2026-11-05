@@ -43,7 +43,7 @@ import dataclasses
 import json
 import typing
 from collections.abc import Awaitable, Sequence
-from typing import Any
+from typing import Any, Unpack
 
 from agents import (
     Agent,
@@ -72,9 +72,6 @@ from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
-
-if typing.TYPE_CHECKING:
-    from typing_extensions import Unpack
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"openai/<model-id>"`` (or the model id alone), or a model of the SDK."""
