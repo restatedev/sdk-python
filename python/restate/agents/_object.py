@@ -91,21 +91,12 @@ class AgentOptions(TypedDict, total=False):
     invocation_retry_policy: InvocationRetryPolicy | None
 
 
-WAITS = timedelta(minutes=5)
-"""The inactivity timeout of ``clear``, which waits for the messages sent before it.
+WAITS = timedelta(seconds=15)
+"""The inactivity timeout of the views that wait (``watch``, ``sync`` and ``clear``).
 
-Restate suspends a view that waits longer than this, which restarts it, so the
-timeout is longer than its wait.
-"""
-
-WATCHING = timedelta(seconds=15)
-"""The inactivity timeout of the views that follow the conversation (``watch`` and ``sync``).
-
-They suspend after 15 seconds of waiting, rather than hold a process for the
-whole wait (up to 60 seconds). A suspended view restarts, and joins the same
-wait in the companion through its idempotency key. Their journals are not kept
-once they are done (``journal_retention=0``): a client follows with one after
-another.
+Restate suspends a view that waits longer than this, which frees its compute
+slot. The call it waits for resumes it: it runs again from the start, and
+joins the same calls through their idempotency keys.
 """
 
 
@@ -294,7 +285,8 @@ class AgentObject(SessionObject):
 
         for fn in (signal, pending, status, stop, notifications):
             self.view(fn)
-        self.view(inactivity_timeout=WATCHING, journal_retention=timedelta(0))(watch)
+        # A client follows with one watch (or sync) after another: their journals are not kept.
+        self.view(inactivity_timeout=WAITS, journal_retention=timedelta(0))(watch)
 
     @typing.overload
     def chat(
@@ -465,4 +457,4 @@ def _followed(agent: AgentObject, items: Items) -> None:
     agent.view(messages)
     agent.handler(ingress_private=True)(erase)
     agent.view(inactivity_timeout=WAITS)(clear)
-    agent.view(inactivity_timeout=WATCHING, journal_retention=timedelta(0))(sync)
+    agent.view(inactivity_timeout=WAITS, journal_retention=timedelta(0))(sync)
