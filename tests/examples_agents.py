@@ -325,6 +325,28 @@ async def test_intermediate_loop(monkeypatch: pytest.MonkeyPatch):
         assert shown[-1]["parts"] == [{"type": "text", "text": "Done: Refunded $30 for order 103."}]
 
 
+async def test_intermediate_loop_unwinds_the_other_tool_calls_before_failing():
+    """When a tool call fails, the loop cancels the others, and fails once they have unwound: before the turn closes."""
+    pytest.importorskip("pydantic")
+    all_of = load("intermediate/loop.py").all_of
+    unwound: list[str] = []
+
+    async def fails() -> None:
+        await asyncio.sleep(0)
+        raise ConnectionError("the tool failed")
+
+    async def runs_on() -> None:
+        try:
+            await asyncio.sleep(10)
+        finally:
+            await asyncio.sleep(0.01)  # it takes a moment to unwind: say, telling the clients the call ended
+            unwound.append("runs_on")
+
+    with pytest.raises(ConnectionError, match="the tool failed"):
+        await all_of([fails(), runs_on()])
+    assert unwound == ["runs_on"]
+
+
 def serves_http2() -> bool:
     """Whether ``restate.serve`` can run here: uvicorn 0.53+ with zttp."""
     return importlib.util.find_spec("uvicorn") is not None and importlib.util.find_spec("zttp") is not None
