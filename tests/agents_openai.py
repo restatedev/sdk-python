@@ -21,7 +21,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 pytest.importorskip("agents")
@@ -211,12 +211,12 @@ async def harness():
 TEXT = {"content-type": "text/plain"}
 
 
-async def post(harness: HarnessEnvironment, path: str, **kwargs: Any) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=60) as ingress:
+async def post(harness: HarnessEnvironment, path: str, **kwargs: Any) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         return await ingress.post(f"{harness.ingress_url}/{path}", **kwargs)
 
 
-async def chat(harness: HarnessEnvironment, key: str, text: str, service: str = "oai_assistant") -> httpx.Response:
+async def chat(harness: HarnessEnvironment, key: str, text: str, service: str = "oai_assistant") -> httpx2.Response:
     return await post(harness, f"{service}/{key}/chat", content=text, headers=TEXT)
 
 
@@ -294,7 +294,7 @@ async def test_a_refused_message_fails_with_424_and_the_next_is_answered(harness
 
 async def test_a_stopped_turn_ends_cancelled_and_the_next_message_starts_afresh(harness: HarnessEnvironment):
     k = key()
-    async with httpx.AsyncClient(timeout=60) as ingress:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
         sent = await ingress.post(
             f"{harness.ingress_url}/oai_assistant/{k}/chat/send", content=f"wait {k}", headers=TEXT
         )

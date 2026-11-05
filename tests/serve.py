@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 
-import httpx
+import httpx2
 import pytest
 
 from restate.harness import RestateContainer, find_free_port
@@ -81,13 +81,13 @@ async def test_a_program_serves_its_app_over_http2_and_stops_on_sigterm(tmp_path
         )
     try:
         await listening(program, port, output)
-        async with httpx.AsyncClient(base_url=container.admin_url(), timeout=30) as admin:
+        async with httpx2.AsyncClient(base_url=container.admin_url(), timeout=30) as admin:
             uri = f"http://host.docker.internal:{port}"
             registered = await admin.post("/deployments", json={"uri": uri, "force": True})
             assert registered.status_code < 300, registered.text
             deployment = (await admin.get(f"/deployments/{registered.json()['id']}")).json()
             assert deployment.get("http_version") == "HTTP/2.0", deployment
-        async with httpx.AsyncClient(timeout=30) as ingress:
+        async with httpx2.AsyncClient(timeout=30) as ingress:
             answer = await ingress.post(f"{container.ingress_url()}/greeter/greet", json="Alice")
         assert answer.json() == "Hello Alice!"
 

@@ -15,7 +15,7 @@
 import asyncio
 from datetime import timedelta
 
-import httpx
+import httpx2
 import pytest
 
 import restate
@@ -132,7 +132,7 @@ async def harness():
 
 
 async def cancel_once_running(harness: HarnessEnvironment, invocation_id: str) -> None:
-    async with httpx.AsyncClient() as admin:
+    async with httpx2.AsyncClient() as admin:
         for _ in range(100):
             status = await admin.post(
                 f"{harness.admin_api_url}/query",
@@ -146,8 +146,8 @@ async def cancel_once_running(harness: HarnessEnvironment, invocation_id: str) -
         (await admin.patch(f"{harness.admin_api_url}/invocations/{invocation_id}/cancel")).raise_for_status()
 
 
-async def result_of(harness: HarnessEnvironment, invocation_id: str) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=30) as ingress:
+async def result_of(harness: HarnessEnvironment, invocation_id: str) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=30) as ingress:
         return await ingress.get(f"{harness.ingress_url}/restate/invocation/{invocation_id}/attach")
 
 

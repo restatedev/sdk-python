@@ -25,7 +25,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from types import ModuleType
 
-import httpx
+import httpx2
 import pytest
 
 import restate
@@ -59,8 +59,8 @@ class Ingress:
     def __init__(self, url: str) -> None:
         self.url = url
 
-    async def post(self, path: str, body: object = None) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=60) as client:
+    async def post(self, path: str, body: object = None) -> httpx2.Response:
+        async with httpx2.AsyncClient(timeout=60) as client:
             return await client.post(f"{self.url}/{path}", json=body)
 
 
@@ -249,7 +249,7 @@ async def test_an_example_as_a_program(tmp_path: pathlib.Path):
         )
     try:
         await listening(program, port, output)
-        async with httpx.AsyncClient(base_url=container.admin_url(), timeout=30) as admin:
+        async with httpx2.AsyncClient(base_url=container.admin_url(), timeout=30) as admin:
             uri = f"http://host.docker.internal:{port}"
             registered = await admin.post("/deployments", json={"uri": uri, "force": True})
             assert registered.status_code < 300, registered.text

@@ -44,6 +44,16 @@ model's provider; the comment at the top of each agent's file says which. For
 example: `pip install "restate-sdk[serve,langgraph]" langchain-openai`, or
 `uv run --extra langgraph --with langchain-openai ...` from source.
 
+To talk with an agent from a terminal, as it works, run the agents' command
+line (it needs the `client` extra: `pip install "restate-sdk[client]"`):
+
+```sh
+python -m restate.agents chat assistant/alice    # what you type goes to the agent; /help for the commands
+```
+
+It shows the conversation so far, then each message, tool call and wait as it
+comes; `/signal approval approved` answers a wait, and Ctrl-D leaves.
+
 Most handlers take and return JSON, so their requests use `curl --json`. An
 agent's `chat` handler is the exception: it takes the message as plain text
 (`curl -d 'Hi'`; a JSON string such as `"Hi"` works too), so that chatting
