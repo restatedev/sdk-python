@@ -630,29 +630,6 @@ def test_a_scope_key_takes_the_context_of_a_session_object():
     assert internal.definition_of(FakeContext(db=FakeDatabase())) is None
 
 
-def test_served_adds_what_each_service_needs_once_and_serve_only_picks():
-    companion = restate.VirtualObject("companion")
-    helper = restate.Service("helper")
-    first = internal.needing(sessions.SessionObject("first"), lambda: [companion, helper])
-    second = internal.needing(sessions.SessionObject("second"), lambda: [companion])
-    internal.needing(companion, lambda: [helper])
-
-    assert [s.name for s in internal.served([first, second])] == ["first", "companion", "helper", "second"]
-    assert [s.name for s in internal.served([first, second], "second, helper")] == ["helper", "second"]
-    with pytest.raises(ValueError, match="RESTATE_SERVE_ONLY names nowhere"):
-        internal.served([first], "nowhere")
-
-
-def test_app_serves_what_restate_serve_only_names(monkeypatch):
-    companion = restate.VirtualObject("companion2")
-    first = internal.needing(sessions.SessionObject("first2"), lambda: [companion])
-    monkeypatch.setenv("RESTATE_SERVE_ONLY", "companion2")
-    assert callable(sessions.app(first))
-    monkeypatch.setenv("RESTATE_SERVE_ONLY", "unknown")
-    with pytest.raises(ValueError, match="RESTATE_SERVE_ONLY names unknown"):
-        sessions.app(first)
-
-
 async def test_an_attempt_is_freed_once_it_ends():
     import gc  # pylint: disable=import-outside-toplevel
     import weakref  # pylint: disable=import-outside-toplevel

@@ -42,6 +42,10 @@ async def greet(ctx: restate.Context, name: str) -> str:
 app = restate.app(services=[greeter])
 ```
 
+`restate.app` takes services, virtual objects and workflows, and anything else that is a
+`restate.Servable`: session objects, and agents, which bring along the `signals` object their tools
+wait on. Each is served once, however many things bring it along.
+
 Serve it with `restate.serve`, which needs the `serve` extra (`pip install "restate-sdk[serve]"`).
 It listens on `$PORT`, or 9080, with the HTTP/2 that Restate connects with, and
 stops on SIGINT or SIGTERM:

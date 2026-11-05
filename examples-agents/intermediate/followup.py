@@ -19,7 +19,6 @@ from datetime import timedelta
 from pydantic import BaseModel
 
 import restate
-from restate import sessions
 from restate.agents import pydantic_ai, send
 
 
@@ -52,4 +51,4 @@ concierge = pydantic_ai.agent(
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(checkins, concierge)))
+    asyncio.run(restate.serve(restate.app([checkins, concierge])))

@@ -124,7 +124,7 @@ def webhook(
             signature_header="linear-signature",
             idempotency_header="linear-delivery",
         )
-        asyncio.run(restate.serve(sessions.app(issues, triage)))
+        asyncio.run(restate.serve(restate.app([issues, triage])))
 
     The handler's metadata says what it is (its routes, its signature and its
     idempotency header), which Restate's admin API shows.

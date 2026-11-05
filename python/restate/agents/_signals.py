@@ -36,7 +36,7 @@ from restate import ObjectContext, ObjectSharedContext, TerminalError
 from restate.agents._api import Notifications, Resolved, Signal, Status, Turn, Waiting, Watch
 from restate.sessions import SessionContext, ViewContext
 from restate.sessions._link import Link
-from restate.sessions.internal import definition_of, needing
+from restate.sessions.internal import definition_of
 
 T = typing.TypeVar("T")
 D = typing.TypeVar("D")
@@ -44,7 +44,7 @@ D = typing.TypeVar("D")
 signals = restate.VirtualObject("signals")
 """The companion object of every agent, keyed ``<agent>:<key>`` (see ``signals_of``).
 
-``sessions.app`` serves it alongside the agents. Its ingress-private handlers
+``restate.app`` serves it alongside the agents: each agent lists it (``AgentObject.__restate_services__``). Its ingress-private handlers
 are called only by the agents' own handlers.
 """
 
@@ -370,10 +370,10 @@ _COMPANION: Link[Callable[[str], Companion]] = Link("restate-agents.companion")
 
 
 def with_companion(definition: D) -> D:
-    """Attach the companion to ``definition`` (an agent), so that ``sessions.app`` serves ``signals`` alongside it."""
+    """Attach the companion to ``definition`` (an agent): how it finds what each of its keys waits for."""
     name = typing.cast(str, getattr(definition, "name"))  # noqa: B009 (a definition of the SDK's)
     _COMPANION.on(definition, lambda key: Companion(key=key_of(name, key), agent=name, agent_key=key))
-    return needing(definition, lambda: [signals])
+    return definition
 
 
 def companion_of(agent: object, key: str) -> Companion:

@@ -203,7 +203,7 @@ triage = openai.agent("oai_desk", desk(model))
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(assistant, per_user, triage), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user, triage]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 

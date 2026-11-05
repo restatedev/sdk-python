@@ -21,8 +21,6 @@ it. It provides:
   declared with ``explicit_cancellation=True``.
 - ``ScopeKey`` and ``definition_of``: state a library keeps per attempt, and
   the object an attempt belongs to.
-- ``needing`` and ``served``: declare the services an object needs served
-  next to it, which ``restate.sessions.app`` then serves too.
 - ``invoke``, ``SqlHost`` and ``ObjectConfig``: run one attempt of a handler
   against a host of your own, without Restate, for tests.
 """
@@ -30,7 +28,6 @@ it. It provides:
 from restate.sessions._object import cancel_calls, cancelled, definition_of, invoke
 from restate.sessions._schema import Schema
 from restate.sessions._scope import ScopeKey
-from restate.sessions._serve import needing, served
 from restate.sessions._session import ObjectConfig, SqlHost, database, reset
 
 __all__ = [
@@ -43,7 +40,5 @@ __all__ = [
     "database",
     "definition_of",
     "invoke",
-    "needing",
     "reset",
-    "served",
 ]

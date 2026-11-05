@@ -49,4 +49,4 @@ async def route(ctx: sessions.SessionContext, message: str) -> str:
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(desk, billing, tech)))
+    asyncio.run(restate.serve(restate.app([desk, billing, tech])))

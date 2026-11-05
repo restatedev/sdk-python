@@ -109,7 +109,7 @@ def main() -> None:
     async def add(ctx: sessions.SessionContext, text: str) -> None:
         await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [text])
 
-    manifest = asyncio.run(discover(sessions.app(notes, restate.agents.AgentObject("assistant"))))
+    manifest = asyncio.run(discover(restate.app([notes, restate.agents.AgentObject("assistant")])))
     served = sorted(s["name"] for s in manifest["services"])
     check("sessions and agents serve", served == ["assistant", "notes", "signals"], served)
 
@@ -119,7 +119,7 @@ def main() -> None:
     refused("restate.agents.openai", lambda: __import__("restate.agents.openai"), "restate-sdk[openai]")
     refused("restate.agents.adk", lambda: __import__("restate.agents.adk"), "restate-sdk[adk]")
     refused("restate.agents.client", lambda: __import__("restate.agents.client"), "restate-sdk[client]")
-    refused("restate.serve", lambda: asyncio.run(restate.serve(sessions.app(notes))), "restate-sdk[serve]")
+    refused("restate.serve", lambda: asyncio.run(restate.serve(restate.app([notes]))), "restate-sdk[serve]")
 
 
 if __name__ == "__main__":

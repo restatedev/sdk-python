@@ -24,7 +24,7 @@ For example::
         return f"Sunny in {city}"
 
     assistant = openai.agent("assistant", system="Answer briefly.", tools=[get_weather])
-    asyncio.run(restate.serve(sessions.app(assistant)))
+    asyncio.run(restate.serve(restate.app([assistant])))
 
 ``agent`` creates an agent, and ``prompt`` answers a prompt from a handler of
 your own; either takes an ``Agent`` of your own, with handoffs and guardrails.

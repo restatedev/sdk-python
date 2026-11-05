@@ -24,6 +24,9 @@ from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import DefaultSerde, Serde
 from restate.handler import Handler, HandlerIO, ServiceTag, check_state_preload_options, make_handler
 
+if typing.TYPE_CHECKING:
+    from restate.servable import Servable
+
 I = typing.TypeVar("I")
 O = typing.TypeVar("O")
 T = typing.TypeVar("T")
@@ -88,6 +91,13 @@ class Workflow:
     """
 
     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
+
+    def __restate_services__(self) -> typing.Iterable["Servable"]:
+        """What ``restate.app`` serves for this (see ``restate.Servable``): itself.
+
+        A subclass may return what it brings along too: ``(self, *needs)``.
+        """
+        return (self,)
 
     def __init__(
         self,

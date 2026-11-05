@@ -24,7 +24,7 @@ For example::
         return f"Sunny in {city}"
 
     assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
-    asyncio.run(restate.serve(sessions.app(assistant)))
+    asyncio.run(restate.serve(restate.app([assistant])))
 
 ``agent`` creates an agent, ``prompt`` answers a prompt from a handler of your
 own, and ``SqlCheckpointSaver`` stores the checkpoints of a graph of your own

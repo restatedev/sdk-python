@@ -31,7 +31,6 @@ import httpx2
 import pytest
 
 import restate
-from restate import sessions
 from restate.harness import RestateContainer, find_free_port
 
 
@@ -77,7 +76,7 @@ async def serving(path: str, setup: Callable[[ModuleType], None] | None = None) 
         setup(module)
     objects = [value for value in vars(module).values() if isinstance(value, SERVABLE)]
     async with restate.create_test_harness(
-        sessions.app(*objects), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app(objects), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield Ingress(harness.ingress_url)
 

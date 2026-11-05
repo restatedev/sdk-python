@@ -158,7 +158,7 @@ async def stoppable(ctx: sessions.SessionContext, text: str) -> list[str]:
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(inbox, pricing, sleeper, notes), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([inbox, pricing, sleeper, notes]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 

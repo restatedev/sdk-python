@@ -172,7 +172,7 @@ per_user = langgraph.agent(
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        sessions.app(assistant, per_user), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 

@@ -57,4 +57,4 @@ async def history(ctx: sessions.ViewContext) -> list[sessions.Row]:
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(sessions.app(wallet)))
+    asyncio.run(restate.serve(restate.app([wallet])))
