@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import importlib
 import json
 import os
 import sys
@@ -191,6 +192,10 @@ def main(argv: list[str] | None = None) -> None:
         help="Restate's ingress URL (default: RESTATE_INGRESS_KEY's, else http://localhost:8080)",
     )
     arguments = parser.parse_args(argv)
+    try:
+        importlib.import_module("restate.agents.client")
+    except ImportError as error:  # the client extra is missing: say so, without a traceback
+        parser.exit(1, f"{error}\n")
     ingress = arguments.ingress or (None if os.environ.get("RESTATE_INGRESS_KEY") else "http://localhost:8080")
     with contextlib.suppress(KeyboardInterrupt):  # Ctrl-C leaves, as Ctrl-D does
         asyncio.run(chat(arguments.target, ingress))
