@@ -28,7 +28,9 @@ For example::
 
 ``agent`` creates an agent, ``prompt`` answers a prompt from a handler of your
 own, and ``SqlCheckpointSaver`` stores the checkpoints of a graph of your own
-in ``ctx.db``.
+in ``ctx.db``. ``nodes`` has prebuilt nodes for such a graph that are Restate
+steps: wait for a signal, run a workflow, call or send to a handler, ask another
+agent.
 
 This differs from the older ``restate.ext.langchain`` integration, whose
 middleware makes a LangChain ``create_agent`` agent durable inside any regular
@@ -56,5 +58,6 @@ except ImportError as error:
 
 from restate.agents.langgraph._agent import AnyTool, ChatModel, agent, prompt
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
+from restate.agents.langgraph._graph import AnyGraph
 
-__all__ = ["AnyTool", "ChatModel", "SqlCheckpointSaver", "agent", "prompt"]
+__all__ = ["AnyGraph", "AnyTool", "ChatModel", "SqlCheckpointSaver", "agent", "prompt"]

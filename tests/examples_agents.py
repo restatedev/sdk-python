@@ -233,6 +233,44 @@ async def test_intermediate_triage():
             assert (await ingress.post(f"{agent}/messages", {})).json()["messages"] == []
 
 
+async def test_intermediate_refund_graph():
+    """Chat runs the graph: it reads the request and asks about the policy (both agents scripted here), waits for the
+    approval, and pays; a rejection is answered without paying."""
+    pytest.importorskip("langgraph")
+
+    def setup(module: ModuleType) -> None:
+        # In place of the example's agents, which need a model: virtual objects of the same names.
+        clerk, policy = restate.VirtualObject("clerk"), restate.VirtualObject("policy")
+
+        @clerk.handler(name="chat")
+        async def read(_ctx: restate.ObjectContext, message: str) -> dict[str, Any]:
+            return {"order": message.split()[1], "amount": 30}
+
+        @policy.handler(name="chat")
+        async def check(_ctx: restate.ObjectContext, message: str) -> str:
+            return f"Fits the policy: {message}"
+
+        setattr(module, "clerk", clerk)
+        setattr(module, "policy", policy)
+
+    async with serving("intermediate/refund_graph.py", setup) as ingress:
+        cases = (("103", "approved", "Refunded $30 for order 103."), ("104", "no", None))
+        for order, approval, receipt in cases:
+            chat = asyncio.create_task(ingress.post("refunds/alice/chat", f"Order {order} arrived broken"))
+            waiting: list[dict[str, Any]] = []
+            for _ in range(100):
+                if waiting := (await ingress.post("refunds/alice/pending")).json():
+                    break
+                await asyncio.sleep(0.1)
+            about = f"A refund of $30 for order {order}."
+            refund = {"order": order, "amount": 30}
+            assert [(w["name"], w["input"]) for w in waiting] == [
+                ("approval", {"refund": refund, "policy": f"Fits the policy: {about}"})
+            ]
+            await ingress.post("refunds/alice/signal", {"name": "approval", "value": approval})
+            assert (await chat).json() == (receipt or f"The refund was not approved: {about}")
+
+
 async def test_intermediate_loop(monkeypatch: pytest.MonkeyPatch):
     """The loop, on a scripted model: it looks two orders up at once, waits for approval, and refunds; a crash
     after the refund ran retries the turn, which asks the model again without refunding again; and a crash after
