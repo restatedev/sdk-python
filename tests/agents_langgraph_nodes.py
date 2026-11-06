@@ -18,11 +18,12 @@ step is under way, re-runs the node: it joins the same step.
 # pylint: disable=missing-function-docstring,missing-class-docstring
 
 import asyncio
+import operator
 import collections
 import threading
 import typing
 import uuid
-from typing import Any, Required, TypedDict
+from typing import Annotated, Any, Required, TypedDict
 
 import httpx2
 import pytest
@@ -31,6 +32,7 @@ pytest.importorskip("langgraph")
 
 from langchain_core.runnables import RunnableConfig  # noqa: E402
 from langgraph.graph import END, START, StateGraph  # noqa: E402
+from langgraph.types import Send  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import restate  # noqa: E402
@@ -125,15 +127,20 @@ researcher = restate.VirtualObject("nodes_researcher")
 asked: collections.Counter[str] = collections.Counter()
 researching = threading.Event()
 crashed = threading.Event()
+deep_researching = threading.Event()
+deep_crashed = threading.Event()
 
 
 @researcher.handler()
 async def chat(ctx: restate.ObjectContext, question: str) -> str:
     asked[question] += 1
+    # Answer only once the graph's attempt has crashed, so the crash cuts the node's call short.
     if question.startswith("slow"):
-        # Answer only once the graph's attempt has crashed, so the crash cuts the node's call short.
         researching.set()
         await until(crashed)
+    if question.startswith("deep"):
+        deep_researching.set()
+        await until(deep_crashed)
     return f"found: {question}"
 
 
@@ -155,18 +162,54 @@ crashes: collections.Counter[str] = collections.Counter()
 go_crash = threading.Event()
 
 
-def crash_after(ready: threading.Event) -> Any:
+def crash_after(ready: threading.Event, done: threading.Event | None = None) -> Any:
     """A node that fails its first run once ``ready`` is set, while the node beside it is under way."""
 
     async def crash(state: State) -> dict[str, Any]:
         if crashes[state["refund"]] == 0:
             await until(ready)
             crashes[state["refund"]] += 1
-            crashed.set()
+            (done or crashed).set()
             raise RuntimeError("the process crashed")
         return {}
 
     return crash
+
+
+def in_a_subgraph() -> Any:
+    """A subagent node inside a subgraph, beside a node of the parent graph that crashes while it is under way."""
+    inner = StateGraph(State)
+    inner.add_node("research", nodes.subagent(researcher, message=lambda s: f"deep {s['refund']}", output="findings"))
+    inner.add_edge(START, "research")
+    inner.add_edge("research", END)
+    graph = StateGraph(State)
+    graph.add_node("inner", inner.compile())
+    graph.add_node("crash", typing.cast(Any, crash_after(deep_researching, deep_crashed)))
+    graph.add_edge(START, "inner")
+    graph.add_edge(START, "crash")
+    graph.add_edge(["inner", "crash"], END)
+    return graph
+
+
+class Fan(TypedDict, total=False):
+    refund: Required[str]
+    findings: Annotated[list[str], operator.add]
+
+
+def fanned_out() -> Any:
+    """The same subagent node, three times at once, with Send: each its own step."""
+    graph = StateGraph(Fan)
+
+    async def research(item: dict[str, str], *, runtime: Any) -> dict[str, Any]:
+        node = nodes.subagent(researcher, message=lambda s: s["question"], key=lambda s: s["question"], output="found")
+        found = await node(item, runtime=runtime)
+        return {"findings": [found["found"]]}
+
+    graph.add_node("research", typing.cast(Any, research))
+    questions = typing.cast(Any, lambda s: [Send("research", {"question": f"fan {s['refund']} {i}"}) for i in range(3)])
+    graph.add_conditional_edges(START, questions, ["research"])
+    graph.add_edge("research", END)
+    return graph
 
 
 def beside_a_crash(step: str) -> Any:
@@ -191,6 +234,8 @@ GRAPHS = {
     "invoice": billing_graph(12.5),
     "bad_invoice": billing_graph("a lot"),
     "call_send": call_then_send(),
+    "subgraph": in_a_subgraph(),
+    "fan": fanned_out(),
 }
 
 desk = AgentObject("nodes_desk")
@@ -333,6 +378,22 @@ def test_a_node_takes_a_handler_whose_input_pydantic_does_not_know():
         return parcel.weight
 
     nodes.workflow(weigh, input=lambda s: {"weight": 1})  # the handler's serde takes the value as it is
+
+
+async def test_a_node_in_a_subgraph_cut_off_by_a_crash_joins_its_step(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    state = (await post(harness, f"{key}/run", {"graph": "subgraph", "refund": key})).json()
+    assert crashes[key] == 1
+    assert state["findings"] == f"found: deep {key}"
+    assert asked[f"deep {key}"] == 1
+
+
+async def test_a_node_sent_to_at_once_makes_a_step_for_each(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    state = (await post(harness, f"{key}/run", {"graph": "fan", "refund": key})).json()
+    questions = [f"fan {key} {i}" for i in range(3)]
+    assert sorted(state["findings"]) == sorted(f"found: {q}" for q in questions)
+    assert [asked[q] for q in questions] == [1, 1, 1]
 
 
 def test_a_call_takes_a_key_exactly_when_its_handler_is_keyed():
