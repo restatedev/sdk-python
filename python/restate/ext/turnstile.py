@@ -22,12 +22,21 @@ class Turnstile:
             event.set()
 
     async def wait_for(self, id: str) -> None:
-        event = self.events[id]
+        event = self.events.get(id)
+        if event is None:
+            # Untracked ids (resumed deferred calls, nested calls with synthesized ids) are not part of
+            # this turn's ordering, so they proceed unless the turn was already canceled.
+            if self.canceled:
+                raise SdkInternalException() from None
+            return
         await event.wait()
         if self.canceled:
             raise SdkInternalException() from None
 
     def cancel_all_after(self, id: str) -> None:
+        if id not in self.events:
+            # A failing untracked call must not cancel the tracked calls of this turn.
+            return
         self.canceled = True
         next_id = self.turns.get(id)
         while next_id is not None:
