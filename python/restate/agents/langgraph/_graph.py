@@ -92,9 +92,12 @@ def _answer(messages: Sequence[BaseMessage]) -> str:
     return str(replies[-1].text) if replies else ""
 
 
-async def _copied(ctx: SessionContext, conversation: Conversation, run: Sequence[BaseMessage]) -> None:
-    """Copy the AI and tool messages of ``run`` that the conversation does not have yet, and publish them."""
-    known = {typing.cast(BaseMessage, entry.item).id for entry in conversation.entries}
+async def _copied(ctx: SessionContext, conversation: Conversation, running: Entry, run: Sequence[BaseMessage]) -> None:
+    """Copy the AI and tool messages of ``run`` (the prompt ``running``'s) that the conversation does not have yet.
+
+    Only the run's own entries (after its prompt) can hold them, so only those are looked at. Then publish.
+    """
+    known = {typing.cast(BaseMessage, e.item).id for e in conversation.entries if e.n > running.n}
     new = [m for m in run if isinstance(m, AIMessage | ToolMessage) and (m.id is None or m.id not in known)]
     for message in new:
         if isinstance(message, AIMessage):
@@ -151,7 +154,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
         asked = any(m.id == prompt_id for m in messages)
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
-            await _copied(ctx, conversation, _after(messages, prompt_id))
+            await _copied(ctx, conversation, running, _after(messages, prompt_id))
             return _answer(_after(messages, prompt_id))
         # A run cut off by a crash is resumed. A new message (or one after a stopped run) starts a run, after what
         # closed the previous run.
@@ -159,7 +162,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
         start = None if asked else {"messages": [*_closing(conversation, running, messages), prompt]}
         async for state in app.astream(start, THREAD, context=ctx, durability="sync", stream_mode="values"):
             messages = typing.cast(list[BaseMessage], typing.cast(dict[str, Any], state).get("messages", []))
-            await _copied(ctx, conversation, _after(messages, prompt_id))
+            await _copied(ctx, conversation, running, _after(messages, prompt_id))
         return _answer(_after(messages, prompt_id))
 
     return run

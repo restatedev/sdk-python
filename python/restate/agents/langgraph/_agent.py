@@ -258,6 +258,7 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
+    graph: AnyGraph | None = None,
     model: ChatModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
@@ -270,6 +271,7 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
+    graph: AnyGraph | None = None,
     model: ChatModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
@@ -281,6 +283,7 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
+    graph: AnyGraph | None = None,
     model: ChatModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
@@ -299,27 +302,40 @@ async def prompt(
     Args:
         ctx: The handler's context.
         text: The prompt.
+        graph: A graph of your own to run, as ``agent(graph=...)`` runs it
+            for ``chat``, instead of the built-in tool-calling loop. It takes
+            no ``model``, ``system`` or ``tools``.
         model: ``"openai/<model-id>"`` or ``"anthropic/<model-id>"``, or a
             LangChain chat model that calls tools. Defaults to ``$RESTATE_AGENT_MODEL``,
             else ``"openai/gpt-6-sol"``.
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.
         output: A Pydantic model, for an answer that is one rather than
-            text. The system prompt asks for its JSON.
+            text. The system prompt asks for its JSON; with ``graph``, the
+            graph's own prompts must, and its last AI message is validated.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
 
     Raises:
+        TypeError: If ``graph`` is given with ``model``, ``system`` or
+            ``tools``, or its state has no ``messages``.
         TerminalError: If the agent's reply is not a value of ``output``,
             twice.
     """
+    if graph is not None:
+        _check_graph(graph, model, system, tools)
+        run = run_of(ctx, graph)
 
-    # Without a way to ask for ``output`` natively with any provider's model, the system prompt asks for it.
-    asked = system if output is None else asking(system, output)
+        def ask(text: str) -> Awaitable[str]:
+            return answer_once(ctx, text, ITEMS, run)
 
-    def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, model, asked, tools))
+    else:
+        # Without a way to ask for ``output`` natively with any provider's model, the system prompt asks for it.
+        asked = system if output is None else asking(system, output)
+
+        def ask(text: str) -> Awaitable[str]:
+            return answer_once(ctx, text, ITEMS, _run(ctx, model, asked, tools))
 
     if output is None:
         return await ask(text)
@@ -372,7 +388,8 @@ def agent(
         tools: ``restate.agents`` tools, or LangChain tools.
         output: A Pydantic model, for answers that are one rather than
             text. The system prompt asks for its JSON, which ``chat``
-            returns.
+            returns; with ``graph``, the graph's own prompts must, and its
+            last AI message is validated.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -385,9 +402,7 @@ def agent(
         TerminalError: If ``model`` names a provider other than OpenAI or Anthropic.
     """
     if graph is not None:
-        if model is not None or system is not None or tools != ():
-            raise TypeError("a graph of your own has its own model and tools: pass no model, system or tools")
-        check(graph)
+        _check_graph(graph, model, system, tools)
         return _graph_agent(name, graph, output, **options)
     if model is None or isinstance(model, str):
         _provider_of_model(model_of(model))
@@ -407,6 +422,13 @@ def agent(
     return obj
 
 
+def _check_graph(graph: AnyGraph, model: object, system: object, tools: object) -> None:
+    """Raise ``TypeError`` if ``graph`` comes with a model, a system prompt or tools, or its state has no messages."""
+    if model is not None or system is not None or tools != ():
+        raise TypeError("a graph of your own has its own model and tools: pass no model, system or tools")
+    check(graph)
+
+
 def _graph_agent(
     name: str, graph: AnyGraph, output: type[BaseModel] | None, **options: Unpack[AgentOptions]
 ) -> AgentObject:
@@ -414,12 +436,7 @@ def _graph_agent(
     obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> Any:
-        def ask(text: str) -> Awaitable[str]:
-            return answer_once(ctx, text, ITEMS, run_of(ctx, graph))
-
-        if output is None:
-            return await ask(text)
-        return await answer_with(output, text, ask)
+        return await prompt(ctx, text, graph=graph, output=output)
 
     obj.chat(answer, items=ITEMS, output=output)
     return obj

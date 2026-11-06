@@ -34,7 +34,7 @@ from langgraph.prebuilt import ToolNode  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import restate  # noqa: E402
-from restate import HarnessEnvironment  # noqa: E402
+from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
@@ -132,6 +132,14 @@ class Plan(BaseModel):
 
 
 desk = langgraph.agent("graph_desk", graph=builder)
+
+
+@desk.handler()
+async def ask(ctx: sessions.SessionContext, text: str) -> str:
+    """A handler of your own that prompts the graph, as chat does."""
+    return await langgraph.prompt(ctx, text, graph=builder)
+
+
 compiled = langgraph.agent("graph_compiled", graph=builder.compile())
 planner = langgraph.agent("graph_planner", graph=builder, output=Plan)
 
@@ -241,6 +249,18 @@ async def test_a_tool_call_cut_off_by_a_stop_gets_a_result_in_the_graph(harness:
     assert (await chat(harness, "graph_desk", key, "history")).json() == expected
     # Carried once: the next run does not add them again.
     assert (await chat(harness, "graph_desk", key, "history")).json() == f"{expected} | ai:{expected}"
+
+
+async def test_a_handler_of_your_own_prompts_the_graph(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    assert (await post(harness, f"graph_desk/{key}/ask", json=f"hi {key}")).json() == f"hello {key}"
+    assert (await chat(harness, "graph_desk", key, "hi again")).json() == "hello again"
+    assert await messages(harness, "graph_desk", key) == [
+        ("user", f"hi {key}"),
+        ("assistant", f"hello {key}"),
+        ("user", "hi again"),
+        ("assistant", "hello again"),
+    ]
 
 
 async def test_output_validates_the_last_ai_message(harness: HarnessEnvironment):

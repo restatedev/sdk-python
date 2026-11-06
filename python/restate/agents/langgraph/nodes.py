@@ -20,8 +20,13 @@ it gets back to the state field ``output``::
     graph.add_node("approve", nodes.wait_for_signal("approval", input=lambda s: s["refund"], output="approved"))
     graph.add_node("ship", nodes.workflow(shipping.run, input=lambda s: s["order"], output="receipt"))
 
-Run the graph in a handler of an agent (an ``AgentObject``), with its context
-as LangGraph's run context, a checkpointer in its database, and
+The simplest is an agent whose ``chat`` runs the graph, built on LangGraph's
+``MessagesState``; it sets everything below up::
+
+    desk = langgraph.agent("desk", graph=graph)
+
+Or run the graph in a handler of an agent (an ``AgentObject``) yourself, with
+its context as LangGraph's run context, a checkpointer in its database, and
 ``durability="sync"`` (each step's checkpoint stored before the step runs)::
 
     desk = AgentObject("desk")
@@ -29,7 +34,7 @@ as LangGraph's run context, a checkpointer in its database, and
 
     @desk.handler()
     async def refund(ctx: sessions.SessionContext, refund: Refund) -> State:
-        app = graph.compile(checkpointer=SqlCheckpointSaver(ctx.db))
+        app: Any = graph.compile(checkpointer=SqlCheckpointSaver(ctx.db))  # Any: LangGraph types no Restate context
         config: RunnableConfig = {"configurable": {"thread_id": "refunds"}}
         resuming = (await app.aget_state(config)).next
         return await app.ainvoke(None if resuming else {"refund": refund}, config, context=ctx, durability="sync")
@@ -51,7 +56,8 @@ from typing import Any
 
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
-from pydantic import TypeAdapter, ValidationError
+from pydantic import PydanticSchemaGenerationError, TypeAdapter, ValidationError
+from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
 from restate.agents._tools import handler_of, input_type_of, inputs_of, keyed, untyped
@@ -113,7 +119,11 @@ def _validator(input_type: Any, name: str) -> Callable[[Any], Any]:
     """
     if input_type is None or input_type is Any:
         return lambda value: value
-    adapter: TypeAdapter[Any] = TypeAdapter(input_type)
+    try:
+        adapter: TypeAdapter[Any] = TypeAdapter(input_type)
+    except PydanticSchemaGenerationError:
+        # A type Pydantic does not know, such as a msgspec Struct: the handler's serde takes the value as it is.
+        return lambda value: value
 
     def validated(value: Any) -> Any:
         try:
@@ -188,7 +198,8 @@ def wait_for_signal(
         step = _step(runtime, "wait_for_signal")
         request: _signals.WaitRequest = {"id": step.idempotency_key, "name": signal}
         if input is not None:
-            request["input"] = input(state)
+            # As JSON, which the companion stores: the state may hold models (a workflow's result, say).
+            request["input"] = to_jsonable_python(input(state))
         value = await step.ctx.call(
             _signals.wait, request, key=_signals.signals_of(step.ctx), idempotency_key=step.idempotency_key
         )

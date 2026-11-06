@@ -112,6 +112,15 @@ def call_then_send() -> Any:
     return graph
 
 
+async def until(event: threading.Event) -> None:
+    """Wait until ``event`` is set, for at most 20 seconds, so that a broken test fails rather than hangs."""
+    for _ in range(2000):
+        if event.is_set():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the event never came")
+
+
 researcher = restate.VirtualObject("nodes_researcher")
 asked: collections.Counter[str] = collections.Counter()
 researching = threading.Event()
@@ -124,14 +133,15 @@ async def chat(ctx: restate.ObjectContext, question: str) -> str:
     if question.startswith("slow"):
         # Answer only once the graph's attempt has crashed, so the crash cuts the node's call short.
         researching.set()
-        while not crashed.is_set():
-            await asyncio.sleep(0.01)
+        await until(crashed)
     return f"found: {question}"
 
 
 def approval_then_shipping() -> Any:
     graph = StateGraph(State)
-    graph.add_node("approve", nodes.wait_for_signal("approval", input=lambda s: s["refund"], output="approved"))
+    # A model as what the graph waits for: pending shows it as JSON.
+    waiting_for = typing.cast(Any, lambda s: Invoice(order=s["refund"], amount=1))
+    graph.add_node("approve", nodes.wait_for_signal("approval", input=waiting_for, output="approved"))
     graph.add_node("ship", nodes.workflow(ship, input=lambda s: s["refund"], output="receipt"))
     graph.add_node("research", nodes.subagent(researcher, message=lambda s: f"why {s['refund']}", output="findings"))
     graph.add_edge(START, "approve")
@@ -150,8 +160,7 @@ def crash_after(ready: threading.Event) -> Any:
 
     async def crash(state: State) -> dict[str, Any]:
         if crashes[state["refund"]] == 0:
-            while not ready.is_set():
-                await asyncio.sleep(0.01)
+            await until(ready)
             crashes[state["refund"]] += 1
             crashed.set()
             raise RuntimeError("the process crashed")
@@ -239,7 +248,7 @@ async def test_a_graph_waits_for_a_signal_runs_a_workflow_and_asks_another_agent
     key = uuid.uuid4().hex
     running = asyncio.ensure_future(post(harness, f"{key}/run", {"graph": "approval", "refund": key}))
     waits = await until_waiting(harness, key)
-    assert [(w["name"], w.get("input")) for w in waits] == [("approval", key)]
+    assert [(w["name"], w.get("input")) for w in waits] == [("approval", {"order": key, "amount": 1.0})]
     resolved = await post(harness, f"{key}/signal", {"name": "approval", "value": {"by": "manager"}})
     assert resolved.json() == {"resolved": waits[0]["id"]}
     assert (await running).json() == {
@@ -309,6 +318,21 @@ async def test_a_graph_calls_an_object_and_sends_to_a_service(harness: HarnessEn
             break
         await asyncio.sleep(0.05)
     assert noticed[key] == 1
+
+
+def test_a_node_takes_a_handler_whose_input_pydantic_does_not_know():
+    import msgspec  # pylint: disable=import-outside-toplevel
+
+    class Parcel(msgspec.Struct):
+        weight: float
+
+    parcels = restate.Workflow("nodes_parcels")
+
+    @parcels.main()
+    async def weigh(_ctx: restate.WorkflowContext, parcel: Parcel) -> float:
+        return parcel.weight
+
+    nodes.workflow(weigh, input=lambda s: {"weight": 1})  # the handler's serde takes the value as it is
 
 
 def test_a_call_takes_a_key_exactly_when_its_handler_is_keyed():

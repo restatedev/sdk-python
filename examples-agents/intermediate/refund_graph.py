@@ -16,7 +16,7 @@ Then, in another terminal, see what the desk waits for, and approve it::
     curl localhost:8080/refunds/alice/signal --json '{"name": "approval", "value": "approved"}'
 
 Any other value rejects the refund. ``python -m restate.agents chat refunds/alice``
-shows each step of the graph as it comes.
+shows the wait for approval as it comes, and the answer.
 """
 
 import asyncio
