@@ -121,7 +121,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
             try:
                 from pydantic_ai.mcp import MCPToolset
 
-                from ._toolset import RestateMCPToolset
+                from ._mcp_toolset import RestateMCPToolset
             except ImportError:
                 pass
             else:
