@@ -239,10 +239,13 @@ async def _interrupts(app: Any, snapshot: StateSnapshot) -> list[tuple[Any, int]
 async def _resumed(ctx: SessionContext, app: Any) -> dict[str, Any] | None:
     """Wait for a signal for each of the graph's pending interrupts, and return their values by interrupt id.
 
-    Return ``None`` if no interrupt is pending. Each wait's id is the
-    interrupt's, and the number of resume values its task already has: a
-    node that interrupts twice has the same interrupt id both times, and
-    each time is a wait of its own. A retried attempt joins the same waits.
+    Return ``None`` if no interrupt is pending. Each wait's id is the turn's
+    invocation id (the same in each attempt), the interrupt's id, and the
+    number of resume values its task already has: a node that interrupts
+    twice has the same interrupt id both times, and each time is a wait of
+    its own. A retried attempt joins the same waits; a turn that ends without
+    them (killed, say) has its waits closed with it, as the companion closes
+    the waits whose ids start with the turn's.
     """
     pending = await _interrupts(app, typing.cast(StateSnapshot, await app.aget_state(THREAD, subgraphs=True)))
     if not pending:
@@ -251,7 +254,7 @@ async def _resumed(ctx: SessionContext, app: Any) -> dict[str, Any] | None:
     for interrupted, times in pending:
         if interrupted.id in waits:
             continue
-        wait_id = f"langgraph:{ctx.key}:{interrupted.id}:{times}"
+        wait_id = f"{ctx.request.id}:interrupt:{interrupted.id}:{times}"
         request: _signals.WaitRequest = {
             "id": wait_id,
             "name": INTERRUPT,

@@ -196,13 +196,15 @@ def wait_for_signal(
 
     async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
         step = _step(runtime, "wait_for_signal")
-        request: _signals.WaitRequest = {"id": step.idempotency_key, "name": signal}
+        # The wait's id starts with the invocation's (the same in each attempt), as the waits of tools do, so that a
+        # turn that ends without it (killed, say) has it closed: the companion closes the waits whose ids start
+        # with the turn's.
+        wait_id = f"{step.ctx.request.id}:{step.idempotency_key}"
+        request: _signals.WaitRequest = {"id": wait_id, "name": signal}
         if input is not None:
             # As JSON, which the companion stores: the state may hold models (a workflow's result, say).
             request["input"] = to_jsonable_python(input(state))
-        value = await step.ctx.call(
-            _signals.wait, request, key=_signals.signals_of(step.ctx), idempotency_key=step.idempotency_key
-        )
+        value = await step.ctx.call(_signals.wait, request, key=_signals.signals_of(step.ctx), idempotency_key=wait_id)
         return _update(output, value)
 
     return node

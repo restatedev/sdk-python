@@ -387,6 +387,24 @@ async def test_interrupts_of_branches_at_once_wait_at_once(harness: HarnessEnvir
     assert sorted(text for role, text in shown if role == "assistant") == ["asked: ok", "side: ok"]
 
 
+@pytest.mark.parametrize("word", ["ask", "refund"])
+async def test_a_killed_turn_leaves_no_wait_behind(harness: HarnessEnvironment, word: str):
+    """An interrupt's wait, and a wait_for_signal node's, end with their turn, as the companion closes them."""
+    key = uuid.uuid4().hex
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, f"{word} {key}"))
+    await until_waiting(harness, key)
+    turn = (await post(harness, f"graph_desk/{key}/status")).json()["answering"]["invocationId"]
+    async with httpx2.AsyncClient() as admin:
+        killed = await admin.patch(f"{harness.admin_api_url}/invocations/{turn}/kill")
+    assert killed.status_code < 300, killed.text
+    await answering
+    for _ in range(200):
+        if (await post(harness, f"graph_desk/{key}/pending")).json() == []:
+            break
+        await asyncio.sleep(0.05)
+    assert (await post(harness, f"graph_desk/{key}/pending")).json() == []
+
+
 async def test_a_turn_suspended_while_it_waits_resumes_on_the_same_wait(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     answering = asyncio.ensure_future(chat(harness, "graph_patient", key, f"ask {key}"))
