@@ -98,6 +98,12 @@ def _reply(prompts: list[str], mode: str, retried: bool = False) -> str:
     return as_json
 
 
+@tool
+async def get_weather(city: str) -> str:
+    """The current weather in a city."""
+    return f"sunny in {city}"
+
+
 # --- Pydantic AI: NativeOutput, or PromptedOutput for a model without a JSON schema mode ---
 
 
@@ -123,6 +129,17 @@ pai_prompted = pydantic_ai.agent(
     "pai_prompted",
     model=FunctionModel(pai_model, profile={"supports_json_schema_output": False}),
     system="Plan.",
+    output=Plan,
+)
+
+pai_gemini_2 = pydantic_ai.agent(
+    "pai_gemini_2",
+    # As Pydantic AI's profile of a Gemini model before Gemini 3: a JSON schema mode, but not with function tools.
+    model=FunctionModel(
+        pai_model, profile={"supports_json_schema_output": True, "google_supports_tool_combination": False}
+    ),
+    system="Plan.",
+    tools=[get_weather],
     output=Plan,
 )
 
@@ -210,12 +227,6 @@ oai_desk = openai.agent(
 # --- ADK: the root agent's output_schema, through ADK's set_model_response tool when there are tools too ---
 
 
-@tool
-async def get_weather(city: str) -> str:
-    """The current weather in a city."""
-    return f"sunny in {city}"
-
-
 class ADKScripted(BaseLlm):
     model: str = "scripted"
 
@@ -260,7 +271,7 @@ def anyio_backend():
 
 @pytest.fixture(scope="session")
 async def harness():
-    served = [pai_native, pai_prompted, lg, oai, oai_desk, adk_native, adk_tools]
+    served = [pai_native, pai_prompted, pai_gemini_2, lg, oai, oai_desk, adk_native, adk_tools]
     async with restate.create_test_harness(
         restate.app(served), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
@@ -292,6 +303,7 @@ async def user_messages(harness: HarnessEnvironment, agent: str, key: str) -> li
     [
         ("pai_native", "native"),
         ("pai_prompted", "prompted"),
+        ("pai_gemini_2", "prompted"),
         ("lg_planner", "system"),
         ("oai_planner", "native"),
         ("adk_native", "native"),

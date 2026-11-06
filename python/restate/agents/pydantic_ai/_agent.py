@@ -246,8 +246,12 @@ def _output_spec(output: type[BaseModel], model: Model) -> NativeOutput[Any] | P
 
     Both answer with the JSON as text, which the conversation keeps as the
     reply: an output tool's call would be a tool call that ends the run.
+    Gemini models before Gemini 3 have a JSON schema mode, but refuse it
+    with function tools (only Google's profiles have the key), so they are
+    asked in the instructions, with tools or without.
     """
-    if model.profile.get("supports_json_schema_output"):
+    profile = model.profile
+    if profile.get("supports_json_schema_output") and profile.get("google_supports_tool_combination", True):
         return NativeOutput(output)
     return PromptedOutput(output)
 
