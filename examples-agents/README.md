@@ -112,7 +112,7 @@ frameworks. A tool such as `call`, `send`, `workflow`, `subagent` or
 | [`team.py`](intermediate/team.py)               | A team on three frameworks: an editor (OpenAI) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI), with `subagent` |
 | [`router.py`](intermediate/router.py)           | A front desk of your own: a handler asks a model which team handles a message (`prompt`), then calls that team's agent |
 | [`triage.py`](intermediate/triage.py)           | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review         |
-| [`refund_graph.py`](intermediate/refund_graph.py) | A LangGraph graph of your own whose steps are Restate's: ask a policy agent, wait for a manager's approval, run the payout workflow (`langgraph.nodes`) |
+| [`refund_graph.py`](intermediate/refund_graph.py) | A refund desk you chat with, as a LangGraph graph of your own (`langgraph.agent(graph=...)`) whose steps are Restate's: ask a clerk and a policy agent, wait for a manager's approval, run the payout workflow (`langgraph.nodes`) |
 | [`loop.py`](intermediate/loop.py)               | An agent loop of your own, with no framework: ask the model, run its tool calls, repeat; durable on the agents' conversation |
 
 ## Tips

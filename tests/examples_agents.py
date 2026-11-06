@@ -234,34 +234,41 @@ async def test_intermediate_triage():
 
 
 async def test_intermediate_refund_graph():
-    """The graph asks the policy agent (scripted here), waits for the approval, and pays; a rejection ends it unpaid."""
+    """Chat runs the graph: it reads the request and asks about the policy (both agents scripted here), waits for the
+    approval, and pays; a rejection is answered without paying."""
     pytest.importorskip("langgraph")
 
     def setup(module: ModuleType) -> None:
-        policy = restate.VirtualObject("policy")  # in place of the example's agent, which needs a model
+        # In place of the example's agents, which need a model: virtual objects of the same names.
+        clerk, policy = restate.VirtualObject("clerk"), restate.VirtualObject("policy")
 
-        @policy.handler()
-        async def chat(_ctx: restate.ObjectContext, message: str) -> str:
+        @clerk.handler(name="chat")
+        async def read(_ctx: restate.ObjectContext, message: str) -> dict[str, Any]:
+            return {"order": message.split()[1], "amount": 30}
+
+        @policy.handler(name="chat")
+        async def check(_ctx: restate.ObjectContext, message: str) -> str:
             return f"Fits the policy: {message}"
 
+        setattr(module, "clerk", clerk)
         setattr(module, "policy", policy)
 
     async with serving("intermediate/refund_graph.py", setup) as ingress:
-        for order, answer, receipt in (("103", "approved", "Refunded $30 for order 103."), ("104", "no", None)):
-            requested = asyncio.create_task(ingress.post("refunds/alice/request", {"order": order, "amount": 30}))
+        cases = (("103", "approved", "Refunded $30 for order 103."), ("104", "no", None))
+        for order, approval, receipt in cases:
+            chat = asyncio.create_task(ingress.post("refunds/alice/chat", f"Order {order} arrived broken"))
             waiting: list[dict[str, Any]] = []
             for _ in range(100):
                 if waiting := (await ingress.post("refunds/alice/pending")).json():
                     break
                 await asyncio.sleep(0.1)
-            policy = f"Fits the policy: A refund of $30 for order {order}."
+            about = f"A refund of $30 for order {order}."
             refund = {"order": order, "amount": 30}
-            assert [(w["name"], w["input"]) for w in waiting] == [("approval", {"refund": refund, "policy": policy})]
-            await ingress.post("refunds/alice/signal", {"name": "approval", "value": answer})
-            state = (await requested).json()
-            assert state == {"refund": refund, "policy": policy, "approval": answer} | (
-                {"receipt": receipt} if receipt else {}
-            )
+            assert [(w["name"], w["input"]) for w in waiting] == [
+                ("approval", {"refund": refund, "policy": f"Fits the policy: {about}"})
+            ]
+            await ingress.post("refunds/alice/signal", {"name": "approval", "value": approval})
+            assert (await chat).json() == (receipt or f"The refund was not approved: {about}")
 
 
 async def test_intermediate_loop(monkeypatch: pytest.MonkeyPatch):

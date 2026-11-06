@@ -57,5 +57,6 @@ except ImportError as error:
 
 from restate.agents.langgraph._agent import AnyTool, ChatModel, agent, prompt
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
+from restate.agents.langgraph._graph import AnyGraph
 
-__all__ = ["AnyTool", "ChatModel", "SqlCheckpointSaver", "agent", "prompt"]
+__all__ = ["AnyGraph", "AnyTool", "ChatModel", "SqlCheckpointSaver", "agent", "prompt"]

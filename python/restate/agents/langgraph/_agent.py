@@ -64,6 +64,7 @@ from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with, asking
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import tool_call_ended, tool_call_started
+from restate.agents.langgraph._graph import AnyGraph, check, run_of
 from restate.sessions import SessionContext
 
 M = typing.TypeVar("M", bound=BaseModel)
@@ -328,6 +329,7 @@ async def prompt(
 def agent(
     name: str,
     *,
+    graph: AnyGraph | None = None,
     model: PerSession[ChatModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
@@ -347,8 +349,21 @@ def agent(
 
         assistant = langgraph.agent("assistant", system=lambda ctx: f"You help {ctx.key}.")
 
+    Or bring a graph of your own, built on LangGraph's ``MessagesState``:
+    ``chat`` then runs it, with the message as a new ``HumanMessage``, and
+    answers with its last AI message. Its checkpoints are in the key's
+    database, and its run's context is the handler's, so the prebuilt
+    ``nodes`` (a signal, a workflow, another agent) work in it::
+
+        desk = langgraph.agent("desk", graph=builder)
+
     Args:
         name: The object's name, as Restate serves it.
+        graph: A graph of your own, instead of the built-in tool-calling
+            loop: a ``StateGraph`` whose state has ``messages``, or a
+            compiled one (such as LangChain's ``create_agent`` makes). It has
+            its own model and tools, so it takes no ``model``, ``system`` or
+            ``tools``.
         model: ``"openai/<model-id>"`` (needs ``langchain-openai``) or
             ``"anthropic/<model-id>"`` (needs ``langchain-anthropic``), or a
             LangChain chat model that calls tools. Defaults to ``$RESTATE_AGENT_MODEL``,
@@ -365,8 +380,15 @@ def agent(
         The agent, to serve with ``restate.serve(restate.app([agent]))``, or any ASGI server.
 
     Raises:
+        TypeError: If ``graph`` is given with ``model``, ``system`` or
+            ``tools``, or its state has no ``messages``.
         TerminalError: If ``model`` names a provider other than OpenAI or Anthropic.
     """
+    if graph is not None:
+        if model is not None or system is not None or tools != ():
+            raise TypeError("a graph of your own has its own model and tools: pass no model, system or tools")
+        check(graph)
+        return _graph_agent(name, graph, output, **options)
     if model is None or isinstance(model, str):
         _provider_of_model(model_of(model))
     obj = AgentObject(name, **options)
@@ -380,6 +402,24 @@ def agent(
             tools=await configured(tools, ctx),
             output=output,
         )
+
+    obj.chat(answer, items=ITEMS, output=output)
+    return obj
+
+
+def _graph_agent(
+    name: str, graph: AnyGraph, output: type[BaseModel] | None, **options: Unpack[AgentOptions]
+) -> AgentObject:
+    """Create an agent whose ``chat`` runs ``graph`` (see ``_graph.py``)."""
+    obj = AgentObject(name, **options)
+
+    async def answer(ctx: SessionContext, text: str) -> Any:
+        def ask(text: str) -> Awaitable[str]:
+            return answer_once(ctx, text, ITEMS, run_of(ctx, graph))
+
+        if output is None:
+            return await ask(text)
+        return await answer_with(output, text, ask)
 
     obj.chat(answer, items=ITEMS, output=output)
     return obj
