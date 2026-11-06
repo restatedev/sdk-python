@@ -8,7 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""Prebuilt LangGraph nodes that are Restate steps: wait for a signal, run a workflow, ask another agent.
+"""Prebuilt LangGraph nodes that are Restate steps: wait for a signal, run a workflow, call, send, ask another agent.
 
 Add them to a graph of your own, as the tools of ``restate.agents`` are added
 to an agent. Each one reads its input from the graph's state, and writes what
@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import typing
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from typing import Any
 
 from langgraph.config import get_config
@@ -53,7 +54,7 @@ from langgraph.runtime import Runtime
 from pydantic import TypeAdapter, ValidationError
 
 from restate.agents import _signals
-from restate.agents._tools import handler_of, input_type_of, inputs_of, untyped
+from restate.agents._tools import handler_of, input_type_of, inputs_of, keyed, untyped
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 
@@ -121,6 +122,36 @@ def _validator(input_type: Any, name: str) -> Callable[[Any], Any]:
             raise TerminalError(f"the input of {name} is not valid: {error}") from error
 
     return validated
+
+
+class _Target(typing.NamedTuple):
+    """A handler a node calls: its definition, its name for errors, and what validates its input."""
+
+    handler: Any
+    name: str
+    validated: Callable[[Any], Any]
+
+
+def _target(target: Callable[..., Any], input: object, key: object, *, keys: bool) -> _Target:
+    """Check a node's ``target`` against its ``input`` and ``key``, and return it.
+
+    ``input`` must be given exactly when the handler takes one; with ``keys``,
+    ``key`` must be given exactly when the handler is keyed (a virtual
+    object's or a workflow's).
+    """
+    handler = handler_of(target)
+    input_type = input_type_of(handler)
+    name = f"{handler.service_tag.name}.{handler.name}"
+    takes_input = input_type is not None
+    if takes_input != (input is not None):
+        raise TypeError(
+            f"{name} {'takes' if takes_input else 'takes no'} input: {'pass' if takes_input else 'drop'} input="
+        )
+    if keys and keyed(handler) != (key is not None):
+        raise TypeError(
+            f"{name} {'is' if keyed(handler) else 'is not'} keyed: {'pass' if keyed(handler) else 'drop'} key="
+        )
+    return _Target(handler, name, _validator(input_type, name))
 
 
 def _update(output: str | None, value: object) -> dict[str, Any]:
@@ -197,24 +228,110 @@ def workflow(
     When it runs, the node fails with a terminal error if the input does not
     validate.
     """
-    handler = handler_of(target)
-    input_type = input_type_of(handler)
-    takes_input = input_type is not None
-    name = f"{handler.service_tag.name}.{handler.name}"
-    validated = _validator(input_type, name)
-    if takes_input != (input is not None):
-        raise TypeError(
-            f"{name} {'takes' if takes_input else 'takes no'} input: {'pass' if takes_input else 'drop'} input="
-        )
+    called = _target(target, input, key, keys=False)
 
     async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
         step = _step(runtime, "workflow")
         workflow_id = key(state) if key is not None else step.idempotency_key
-        value = validated(input(state)) if input is not None else None
+        value = called.validated(input(state)) if input is not None else None
         result = await untyped(step.ctx).call(
-            target, *inputs_of(handler, value), key=workflow_id, idempotency_key=step.idempotency_key
+            target, *inputs_of(called.handler, value), key=workflow_id, idempotency_key=step.idempotency_key
         )
         return _update(output, result)
+
+    return node
+
+
+def call(
+    target: Callable[..., Any],
+    *,
+    output: str | None = None,
+    input: Callable[[Any], Any] | None = None,
+    key: Callable[[Any], str] | None = None,
+) -> Node:
+    """Create a node that calls a handler, and writes its result to ``output``::
+
+        graph.add_node("status", nodes.call(orders.status, input=lambda s: s["order"], output="status"))
+
+    Args:
+        target: A handler of a service, a virtual object or a workflow.
+        output: The state field that gets the handler's result. None to
+            write nothing.
+        input: The handler's input, from the state. Required if the handler
+            takes one. Plain data (a dict, say) is validated into the
+            handler's input type, such as a Pydantic model.
+        key: The key to call, from the state. Required for a virtual
+            object's or a workflow's handler, and only for those.
+
+    Returns:
+        The node, for ``StateGraph.add_node``.
+
+    Raises:
+        TypeError: If ``target`` is not a handler, or ``input`` or ``key``
+            is given when the handler takes none (or the other way around).
+
+    When it runs, the node fails with a terminal error if the input does not
+    validate.
+    """
+    called = _target(target, input, key, keys=True)
+
+    async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
+        step = _step(runtime, "call")
+        value = called.validated(input(state)) if input is not None else None
+        result = await untyped(step.ctx).call(
+            target,
+            *inputs_of(called.handler, value),
+            key=key(state) if key is not None else None,
+            idempotency_key=step.idempotency_key,
+        )
+        return _update(output, result)
+
+    return node
+
+
+def send(
+    target: Callable[..., Any],
+    *,
+    input: Callable[[Any], Any] | None = None,
+    key: Callable[[Any], str] | None = None,
+    delay: timedelta | None = None,
+) -> Node:
+    """Create a node that sends to a handler, without waiting for it to run::
+
+        graph.add_node("remind", nodes.send(checkins.remind, input=lambda s: s["checkin"], delay=timedelta(days=1)))
+
+    Args:
+        target: A handler of a service, a virtual object or a workflow.
+        input: The handler's input, from the state. Required if the handler
+            takes one. Plain data (a dict, say) is validated into the
+            handler's input type, such as a Pydantic model.
+        key: The key to send to, from the state. Required for a virtual
+            object's or a workflow's handler, and only for those.
+        delay: How long to wait before the handler runs.
+
+    Returns:
+        The node, for ``StateGraph.add_node``. It writes nothing to the state.
+
+    Raises:
+        TypeError: If ``target`` is not a handler, or ``input`` or ``key``
+            is given when the handler takes none (or the other way around).
+
+    When it runs, the node fails with a terminal error if the input does not
+    validate.
+    """
+    called = _target(target, input, key, keys=True)
+
+    async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
+        step = _step(runtime, "send")
+        value = called.validated(input(state)) if input is not None else None
+        untyped(step.ctx).send(
+            target,
+            *inputs_of(called.handler, value),
+            key=key(state) if key is not None else None,
+            delay=delay,
+            idempotency_key=step.idempotency_key,
+        )
+        return {}
 
     return node
 
@@ -259,4 +376,4 @@ def subagent(
     return node
 
 
-__all__ = ["Node", "subagent", "wait_for_signal", "workflow"]
+__all__ = ["Node", "call", "send", "subagent", "wait_for_signal", "workflow"]

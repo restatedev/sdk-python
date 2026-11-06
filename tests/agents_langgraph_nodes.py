@@ -81,6 +81,37 @@ def billing_graph(amount: object) -> Any:
     return graph
 
 
+ledger = restate.VirtualObject("nodes_ledger")
+
+
+@ledger.handler()
+async def add(ctx: restate.ObjectContext, invoice: Invoice) -> str:
+    total = (await ctx.get("total", type_hint=float) or 0) + invoice.amount
+    ctx.set("total", total)
+    return f"{ctx.key()} owes ${total:g}"
+
+
+notices = restate.Service("nodes_notices")
+noticed: collections.Counter[str] = collections.Counter()
+
+
+@notices.handler()
+async def notice(_ctx: restate.Context, invoice: Invoice) -> None:
+    noticed[invoice.order] += 1
+
+
+def call_then_send() -> Any:
+    """A call to a virtual object, then a send to a service: both with a dict from the state as the input."""
+    graph = StateGraph(State)
+    invoice = typing.cast(Any, lambda s: {"order": s["refund"], "amount": 4})
+    graph.add_node("add", nodes.call(add, input=invoice, key=lambda s: s["refund"], output="receipt"))
+    graph.add_node("notice", nodes.send(notice, input=invoice))
+    graph.add_edge(START, "add")
+    graph.add_edge("add", "notice")
+    graph.add_edge("notice", END)
+    return graph
+
+
 researcher = restate.VirtualObject("nodes_researcher")
 asked: collections.Counter[str] = collections.Counter()
 researching = threading.Event()
@@ -150,6 +181,7 @@ GRAPHS = {
     "wait_crash": beside_a_crash("approve"),
     "invoice": billing_graph(12.5),
     "bad_invoice": billing_graph("a lot"),
+    "call_send": call_then_send(),
 }
 
 desk = AgentObject("nodes_desk")
@@ -177,7 +209,8 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([desk, shipping, billing, researcher]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([desk, shipping, billing, ledger, notices, researcher]),
+        restate_image="ghcr.io/restatedev/restate:latest",
     ) as harness:
         yield harness
 
@@ -265,6 +298,24 @@ async def test_input_that_does_not_validate_fails_the_node_for_good(harness: Har
     assert failed.status_code == 500
     assert "the input of nodes_billing.bill is not valid" in failed.text and "amount" in failed.text
     assert billed[key] == 0
+
+
+async def test_a_graph_calls_an_object_and_sends_to_a_service(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    state = (await post(harness, f"{key}/run", {"graph": "call_send", "refund": key})).json()
+    assert state["receipt"] == f"{key} owes $4"
+    for _ in range(100):
+        if noticed[key]:
+            break
+        await asyncio.sleep(0.05)
+    assert noticed[key] == 1
+
+
+def test_a_call_takes_a_key_exactly_when_its_handler_is_keyed():
+    with pytest.raises(TypeError, match="is keyed: pass key="):
+        nodes.call(add, input=lambda s: s)
+    with pytest.raises(TypeError, match="is not keyed: drop key="):
+        nodes.send(notice, input=lambda s: s, key=lambda s: "k")
 
 
 def test_a_workflow_node_takes_input_exactly_when_its_handler_does():

@@ -17,6 +17,7 @@ The graph is scripted: it routes on the first word of the message.
 
 import asyncio
 import collections
+import threading
 import typing
 import uuid
 from typing import Any, NotRequired, TypedDict
@@ -26,13 +27,16 @@ import pytest
 
 pytest.importorskip("langgraph")
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage  # noqa: E402
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage  # noqa: E402
+from langchain_core.tools import tool  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
+from langgraph.prebuilt import ToolNode  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import restate  # noqa: E402
 from restate import HarnessEnvironment  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
+from restate.agents.internal import CANCELLED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
 
 
@@ -49,7 +53,8 @@ def _asked(state: Desk) -> tuple[str, str]:
 
 def route(state: Desk) -> str:
     word, _ = _asked(state)
-    return {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan"}.get(word, "greet")
+    routes = {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan", "tool": "call_tool"}
+    return routes.get(word, "history" if word == "history" else "greet")
 
 
 def greet(state: Desk) -> dict[str, Any]:
@@ -78,18 +83,47 @@ def second(state: Desk) -> dict[str, Any]:
     return {"messages": [AIMessage(f"done {rest}")]}
 
 
+tool_started = threading.Event()
+
+
+@tool
+async def blocking() -> str:
+    """Runs until the turn is stopped."""
+    tool_started.set()
+    await asyncio.sleep(300)
+    return "never"
+
+
+def call_tool(state: Desk) -> dict[str, Any]:
+    call = {"id": f"call-{_asked(state)[1]}", "name": "blocking", "args": {}}
+    return {"messages": [AIMessage("", tool_calls=[call])]}
+
+
+def history(state: Desk) -> dict[str, Any]:
+    """What the graph's state holds besides the messages it was sent: AI messages and tool results."""
+    seen = [
+        f"tool:{m.tool_call_id}:{m.text}" if isinstance(m, ToolMessage) else f"ai:{m.text}"
+        for m in state["messages"]
+        if isinstance(m, AIMessage | ToolMessage) and (m.text or isinstance(m, ToolMessage))
+    ]
+    return {"messages": [AIMessage(" | ".join(seen))]}
+
+
 def plan(state: Desk) -> dict[str, Any]:
     return {"messages": [AIMessage(f'{{"title": "{_asked(state)[1]}"}}')]}
 
 
 builder = StateGraph(Desk)
-for name, node in {"greet": greet, "confirm": confirm, "first": first, "second": second, "plan": plan}.items():
+steps = {"greet": greet, "confirm": confirm, "first": first, "second": second, "plan": plan, "history": history}
+for name, node in {**steps, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
+builder.add_node("tools", ToolNode([blocking]))
 builder.add_node("approve", nodes.wait_for_signal("approval", output="approval"))
-builder.add_conditional_edges(START, route, ["approve", "first", "plan", "greet"])
+builder.add_conditional_edges(START, route, ["approve", "first", "plan", "greet", "history", "call_tool"])
+builder.add_edge("call_tool", "tools")
 builder.add_edge("approve", "confirm")
 builder.add_edge("first", "second")
-for last in ("greet", "confirm", "second", "plan"):
+for last in ("greet", "confirm", "second", "plan", "history", "tools"):
     builder.add_edge(last, END)
 
 
@@ -181,6 +215,32 @@ async def test_after_a_stopped_run_the_next_message_starts_a_run_of_its_own(harn
     assert (await answering).status_code == 409
     assert (await post(harness, f"graph_desk/{key}/pending")).json() == []
     assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
+
+
+async def test_the_graph_sees_how_a_stopped_run_ended(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, f"stop {key}"))
+    await until_waiting(harness, key)
+    await post(harness, f"graph_desk/{key}/stop")
+    assert (await answering).status_code == 409
+    assert (await chat(harness, "graph_desk", key, "history")).json() == f"ai:{CANCELLED}"
+
+
+async def test_a_tool_call_cut_off_by_a_stop_gets_a_result_in_the_graph(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    tool_started.clear()
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, f"tool {key}"))
+    for _ in range(200):
+        if tool_started.is_set():
+            break
+        await asyncio.sleep(0.05)
+    await post(harness, f"graph_desk/{key}/stop")
+    assert (await answering).status_code == 409
+    # The graph's history has no tool call without a result, which a model provider would refuse.
+    expected = f"tool:call-{key}:{CANCELLED} | ai:{CANCELLED}"
+    assert (await chat(harness, "graph_desk", key, "history")).json() == expected
+    # Carried once: the next run does not add them again.
+    assert (await chat(harness, "graph_desk", key, "history")).json() == f"{expected} | ai:{expected}"
 
 
 async def test_output_validates_the_last_ai_message(harness: HarnessEnvironment):

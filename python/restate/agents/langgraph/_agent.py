@@ -353,7 +353,7 @@ def agent(
     ``chat`` then runs it, with the message as a new ``HumanMessage``, and
     answers with its last AI message. Its checkpoints are in the key's
     database, and its run's context is the handler's, so the prebuilt
-    ``nodes`` (a signal, a workflow, another agent) work in it::
+    ``nodes`` (a signal, a workflow, a call, another agent) work in it::
 
         desk = langgraph.agent("desk", graph=builder)
 

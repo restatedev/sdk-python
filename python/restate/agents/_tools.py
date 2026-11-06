@@ -374,7 +374,7 @@ def _input_of(input_type: Any, model_keys: str | None) -> _Input:
     return _Input(schema=schema, validate=validate)
 
 
-def _keyed(handler: Handler[Any, Any]) -> bool:
+def keyed(handler: Handler[Any, Any]) -> bool:
     return handler.service_tag.kind != "service"
 
 
@@ -410,7 +410,7 @@ def call(
     """
     handler = handler_of(target)
     service = handler.service_tag.name
-    model_keys = service if _keyed(handler) and key is None else None
+    model_keys = service if keyed(handler) and key is None else None
     shape = _input_of(input_type_of(handler), model_keys)
 
     async def run(arguments: dict[str, Any], tool_call: ToolCall) -> Any:
@@ -418,7 +418,7 @@ def call(
 
         async def made(c: ToolCall) -> Any:
             target_key = chosen if key is None else await configured(key, c.ctx)
-            target_key = target_key if _keyed(handler) else None
+            target_key = target_key if keyed(handler) else None
             return await untyped(c.ctx).call(
                 target, *inputs_of(handler, value), key=target_key, idempotency_key=c.idempotency_key
             )
@@ -463,14 +463,14 @@ def send(
     """
     handler = handler_of(target)
     service = handler.service_tag.name
-    model_keys = service if _keyed(handler) and key is None else None
+    model_keys = service if keyed(handler) and key is None else None
     shape = _input_of(input_type_of(handler), model_keys)
 
     async def run(arguments: dict[str, Any], tool_call: ToolCall) -> Any:
         chosen, value = arguments["key"], arguments["value"]
 
         async def made(c: ToolCall) -> str:
-            target_key = (chosen if key is None else await configured(key, c.ctx)) if _keyed(handler) else None
+            target_key = (chosen if key is None else await configured(key, c.ctx)) if keyed(handler) else None
             untyped(c.ctx).send(
                 target, *inputs_of(handler, value), key=target_key, delay=delay, idempotency_key=c.idempotency_key
             )
