@@ -12,9 +12,11 @@
 
 # pylint: disable=missing-function-docstring,missing-class-docstring
 
+import asyncio
+import contextlib
 import operator
 import typing
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Annotated, Any, TypedDict
 
 import pytest
@@ -23,6 +25,7 @@ pytest.importorskip("langgraph")
 
 from langchain_core.runnables import RunnableConfig  # noqa: E402
 from langgraph.graph import END, START, StateGraph  # noqa: E402
+from langgraph.types import Command, interrupt  # noqa: E402
 
 from restate import sessions  # noqa: E402
 from restate.agents.langgraph import SqlCheckpointSaver  # noqa: E402
@@ -155,6 +158,143 @@ async def test_latest_history_keeps_one_checkpoint_and_only_its_values():
     assert counted["checkpoints"] == 1
     assert counted["channel_values"] == counted["versions"]
     assert sorted(counted["log"]) == sorted(["a", "b", "c", "d"] * 2)
+
+
+class Topic(State):
+    topic: str
+    """Written once, by the input: a subgraph's run stores it in its first checkpoint only."""
+
+
+def nested(ran: list[str], *, ask: bool = False, before: int = 0, own_history: bool = False) -> Any:
+    """A graph whose last node is a subgraph: ``p``, which records that it ran, then ``x``, which logs the topic.
+
+    ``x`` asks with ``interrupt()`` if ``ask``. ``before`` steps of the graph come first. With ``own_history``, the
+    subgraph runs inside one that keeps its own history (``checkpointer=True``), the node ``mid``.
+    """
+
+    def p(_: Topic) -> dict[str, list[str]]:
+        ran.append("p")
+        return {"log": ["p"]}
+
+    def x(state: Topic) -> dict[str, list[str]]:
+        return {"log": [f"x:{interrupt('go?') if ask else 'ran'}:{state['topic']}"]}
+
+    inner = StateGraph(Topic)
+    inner.add_node("p", typing.cast(Any, p))
+    inner.add_node("x", typing.cast(Any, x))
+    inner.add_edge(START, "p")
+    inner.add_edge("p", "x")
+    inner.add_edge("x", END)
+    last, node = "inner", typing.cast(Any, inner.compile())
+    if own_history:
+        mid = StateGraph(Topic)
+        mid.add_node("inner", node)
+        mid.add_edge(START, "inner")
+        mid.add_edge("inner", END)
+        last, node = "mid", mid.compile(checkpointer=True)
+    outer = StateGraph(Topic)
+    previous = START
+    for n in range(before):
+        outer.add_node(f"s{n}", typing.cast(Any, lambda _: {"log": []}))
+        outer.add_edge(previous, f"s{n}")
+        previous = f"s{n}"
+    outer.add_node(last, node)
+    outer.add_edge(previous, last)
+    outer.add_edge(last, END)
+    return outer
+
+
+class Slow:
+    """A database each of whose reads and transactions waits a little: LangGraph's async puts lag behind its steps."""
+
+    def __init__(self, db: sessions.Database) -> None:
+        self._db = db
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._db, name)
+
+    async def values(self, *args: Any) -> Any:
+        await asyncio.sleep(0.002)
+        return await self._db.values(*args)
+
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> AsyncIterator[Any]:
+        await asyncio.sleep(0.002)
+        async with self._db.transaction() as tx:
+            yield tx
+
+
+def saver(ctx: sessions.SessionContext) -> SqlCheckpointSaver:
+    return SqlCheckpointSaver(typing.cast(Any, Slow(ctx.db)), history="latest")
+
+
+async def namespaces(ctx: sessions.SessionContext) -> set[str]:
+    """The checkpoint namespaces that any of the saver's tables has rows of."""
+    found: set[str] = set()
+    for table in ("checkpoints", "channel_values", "writes"):
+        found |= {str(row[0]) for row in await ctx.db.values(f"SELECT checkpoint_ns FROM restate_langgraph_{table}")}
+    return found
+
+
+DURABILITIES = ["sync", "async", "exit"]
+
+
+@pytest.mark.parametrize("durability", DURABILITIES)
+async def test_latest_history_keeps_no_subgraph_runs_of_steps_that_are_done(durability: Any):
+    backend = Backend()
+    seen: dict[str, Any] = {}
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        app = nested([], before=3).compile(checkpointer=saver(ctx))
+        for _ in range(3):
+            seen["log"] = (await app.ainvoke({"log": [], "topic": "T"}, THREAD, durability=durability))["log"]
+        seen["namespaces"] = await namespaces(ctx)
+
+    await attempt(backend, go)
+    assert "x:ran:T" in seen["log"]
+    # Each subgraph run is a namespace of its own (node:task_id): none is left once its step is done.
+    assert seen["namespaces"] == {""}
+
+
+@pytest.mark.parametrize("durability", DURABILITIES)
+async def test_latest_history_keeps_a_paused_subgraph_until_its_step_is_done(durability: Any):
+    """With "async", the graph's checkpoints are stored after its later steps start; with "exit", once, as it pauses."""
+    backend = Backend()
+    ran: list[str] = []
+    seen: dict[str, Any] = {}
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        app = nested(ran, ask=True, before=6).compile(checkpointer=saver(ctx))
+        await app.ainvoke({"log": [], "topic": "T"}, THREAD, durability=durability)
+        seen["paused"] = await namespaces(ctx)
+        seen["log"] = (await app.ainvoke(Command(resume="yes"), THREAD, durability=durability))["log"]
+        seen["done"] = await namespaces(ctx)
+
+    await attempt(backend, go)
+    assert len(seen["paused"]) == 2  # the graph's, and the paused subgraph's
+    # The subgraph resumed from its checkpoints, whole: p, before the interrupt, ran once, and the topic is there.
+    assert ("x:yes:T" in seen["log"], ran) == (True, ["p"])
+    assert seen["done"] == {""}
+
+
+async def test_latest_history_keeps_a_paused_run_below_a_subgraph_with_its_own_history():
+    """Such a subgraph resumes its paused step after the graph above it moved on (here, by update_state)."""
+    backend = Backend()
+    ran: list[str] = []
+    seen: dict[str, Any] = {}
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        app = nested(ran, ask=True, before=1, own_history=True).compile(checkpointer=saver(ctx))
+        await app.ainvoke({"log": [], "topic": "T"}, THREAD, durability="sync")
+        await app.aupdate_state(THREAD, {"log": ["updated"]}, as_node="s0")
+        await app.ainvoke(None, THREAD, durability="sync")
+        seen["log"] = (await app.ainvoke(Command(resume="yes"), THREAD, durability="sync"))["log"]
+        seen["done"] = await namespaces(ctx)
+
+    await attempt(backend, go)
+    assert ("x:yes:T" in seen["log"], ran) == (True, ["p"])
+    # The run below it is deleted once that subgraph's step is done; the subgraph keeps its own history.
+    assert seen["done"] == {"", "mid"}
 
 
 async def test_a_fork_from_an_earlier_checkpoint_leaves_the_branch_it_forked_from():
