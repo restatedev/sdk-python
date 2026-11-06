@@ -47,6 +47,7 @@ from typing import Any, Unpack
 
 from agents import (
     Agent,
+    AgentOutputSchema,
     FunctionTool,
     Handoff,
     InputGuardrailTripwireTriggered,
@@ -69,7 +70,7 @@ from pydantic_core import to_json
 from restate.agents._common import PerSession, check_own, configured, from_tool, model_id_of, model_of
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
-from restate.agents._output import with_output
+from restate.agents._output import answer_with
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
@@ -268,10 +269,27 @@ async def _unwrapped(ctx: SessionContext, work: Awaitable[Any]) -> Any:
         raise TerminalError(str(error)) from error
 
 
+def _output_schema(output: type[BaseModel]) -> AgentOutputSchema:
+    """Return ``output`` as the SDK's output type: strict if its JSON schema can be, as OpenAI's models answer best."""
+    try:
+        return AgentOutputSchema(output, strict_json_schema=True)
+    except UserError:
+        return AgentOutputSchema(output, strict_json_schema=False)
+
+
 def _run(
-    ctx: SessionContext, own: Agent[Any] | None, model: AnyModel | None, system: str | None, given: Sequence[AnyTool]
+    ctx: SessionContext,
+    own: Agent[Any] | None,
+    model: AnyModel | None,
+    system: str | None,
+    given: Sequence[AnyTool],
+    output: type[BaseModel] | None = None,
 ) -> Run:
-    """Return the run of a prompt: the ``Runner``, from the conversation to the prompt's answer."""
+    """Return the run of a prompt: the ``Runner``, from the conversation to the prompt's answer (``output``'s JSON).
+
+    ``output`` is the output type of the agent the run starts with. An agent
+    it hands off to answers with its own output type, as text if it has none.
+    """
     if own is None:
         root: Agent[Any] = Agent(name="assistant", instructions=system, tools=tools(given))
         config = RunConfig(model=_model(model), nest_handoff_history=False)
@@ -279,6 +297,8 @@ def _run(
         root = own.clone(tools=[*own.tools, *tools(given)]) if given else own
         # A model given overrides each agent's own, as RunConfig does.
         config = RunConfig(model=_model(model) if model is not None else None, nest_handoff_history=False)
+    if output is not None:
+        root = root.clone(output_type=_output_schema(output))
     everyone = _agents(root)
 
     async def run(conversation: Conversation) -> str:
@@ -421,7 +441,9 @@ async def prompt(
         tools: ``restate.agents`` tools, or tools of the SDK, beside
             ``agent``'s own. For the agents it hands off to, see ``tools()``.
         output: A Pydantic model, for an answer that is one rather than
-            text. The agent then answers with its JSON.
+            text: the output type of ``agent`` (or the default agent). An
+            agent it hands off to that answers in text is asked again for
+            its JSON.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
@@ -433,12 +455,12 @@ async def prompt(
     """
     check_own(agent, system)
 
-    def ask(text: str, system: str | None) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
+    def ask(text: str) -> Awaitable[str]:
+        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output))
 
     if output is None:
-        return await ask(text, system)
-    return await with_output(output, text, system, ask, own=agent is not None)
+        return await ask(text)
+    return await answer_with(output, text, ask)
 
 
 def agent(
@@ -480,8 +502,9 @@ def agent(
         system: The instructions, when there is no ``openai_agent``.
         tools: ``restate.agents`` tools, or tools of the SDK.
         output: A Pydantic model, for answers that are one rather than
-            text. The agent then answers with its JSON, which ``chat``
-            returns.
+            text: the output type of ``openai_agent`` (or the default
+            agent). An agent it hands off to that answers in text is asked
+            again for its JSON. ``chat`` returns the JSON.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 

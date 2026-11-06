@@ -61,7 +61,7 @@ from pydantic import BaseModel, PrivateAttr
 from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
-from restate.agents._output import with_output
+from restate.agents._output import answer_with, asking
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.sessions import SessionContext
@@ -304,7 +304,7 @@ async def prompt(
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.
         output: A Pydantic model, for an answer that is one rather than
-            text. The agent then answers with its JSON.
+            text. The system prompt asks for its JSON.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
@@ -314,12 +314,15 @@ async def prompt(
             twice.
     """
 
-    def ask(text: str, system: str | None) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, model, system, tools))
+    # Without a way to ask for ``output`` natively with any provider's model, the system prompt asks for it.
+    asked = system if output is None else asking(system, output)
+
+    def ask(text: str) -> Awaitable[str]:
+        return answer_once(ctx, text, ITEMS, _run(ctx, model, asked, tools))
 
     if output is None:
-        return await ask(text, system)
-    return await with_output(output, text, system, ask)
+        return await ask(text)
+    return await answer_with(output, text, ask)
 
 
 def agent(
@@ -353,7 +356,7 @@ def agent(
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.
         output: A Pydantic model, for answers that are one rather than
-            text. The agent then answers with its JSON, which ``chat``
+            text. The system prompt asks for its JSON, which ``chat``
             returns.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.

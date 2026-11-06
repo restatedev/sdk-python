@@ -65,7 +65,7 @@ from restate.agents._common import (
 )
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
-from restate.agents._output import with_output
+from restate.agents._output import answer_with
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
@@ -274,14 +274,24 @@ def _app(
     model: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
+    output: type[BaseModel] | None = None,
 ) -> App:
-    """Return the app that runs the agent: resumable, with this package's plugin."""
+    """Return the app that runs the agent: resumable, with this package's plugin.
+
+    ``output`` is the ``output_schema`` of its root ``LlmAgent``. ADK answers
+    with its JSON, through a tool of its own when the model cannot combine a
+    schema with tools.
+    """
     if own is None:
-        root: BaseAgent = LlmAgent(name="assistant", model=_model(model), instruction=system or "", tools=tools(given))
+        root: BaseAgent = LlmAgent(
+            name="assistant", model=_model(model), instruction=system or "", tools=tools(given), output_schema=output
+        )
         app = App(name=_APP, root_agent=root)
     else:
         app = own if isinstance(own, App) else App(name=_APP, root_agent=own)
-        if given or model is not None:
+        # A workflow agent (a SequentialAgent, say) has no output schema: its answer is asked again for as JSON.
+        schema = output is not None and isinstance(app.root_agent, LlmAgent)
+        if given or model is not None or schema:
             if not isinstance(app.root_agent, LlmAgent):
                 raise TypeError("model and tools apply to an LlmAgent of your own, not to another agent")
             update: dict[str, Any] = {}
@@ -289,6 +299,8 @@ def _app(
                 update["tools"] = [*app.root_agent.tools, *tools(given)]
             if model is not None:
                 update["model"] = _model(model)
+            if schema:
+                update["output_schema"] = output
             # A clone, which also re-parents the sub-agents: those without a model of their own take the root's.
             app = app.model_copy(update={"root_agent": app.root_agent.clone(update=update)})
     resumable = ResumabilityConfig(is_resumable=True)
@@ -420,7 +432,8 @@ async def prompt(
         tools: ``restate.agents`` tools, or ADK's, beside ``agent``'s own.
             For its sub-agents, see ``tools()``.
         output: A Pydantic model, for an answer that is one rather than
-            text. The agent then answers with its JSON.
+            text: the ``output_schema`` of the root ``LlmAgent``. Another
+            root agent that answers in text is asked again for its JSON.
 
     Returns:
         The text of the agent's final response, or a value of ``output``.
@@ -432,13 +445,14 @@ async def prompt(
     """
     check_own(agent, system)
 
-    def ask(text: str, system: str | None) -> Awaitable[str]:
-        app = _app(ctx, agent, model, system, tools)
+    app = _app(ctx, agent, model, system, tools, output)
+
+    def ask(text: str) -> Awaitable[str]:
         return answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app))
 
     if output is None:
-        return await ask(text, system)
-    return await with_output(output, text, system, ask, own=agent is not None)
+        return await ask(text)
+    return await answer_with(output, text, ask)
 
 
 def agent(
@@ -477,8 +491,9 @@ def agent(
         system: The instruction, when there is no ``adk_agent``.
         tools: ``restate.agents`` tools, or ADK's.
         output: A Pydantic model, for answers that are one rather than
-            text. The agent then answers with its JSON, which ``chat``
-            returns.
+            text: the ``output_schema`` of the root ``LlmAgent``. Another
+            root agent that answers in text is asked again for its JSON.
+            ``chat`` returns the JSON.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 

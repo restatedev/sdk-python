@@ -8,23 +8,25 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""An agent's answer as data, with ``output=`` (every framework's option).
+"""An agent's answer as data, with ``output=`` (every framework's option): a Pydantic model.
 
-``output`` is a Pydantic model. The agent's reply is its answer, as JSON. The system prompt
-asks for it, with the type's JSON schema, and each prompt asks again at its
-end. The reply is then validated, and the prompt (and so ``chat``) answers
-with the value::
+The prompt (and so ``chat``) answers with a value of the model::
 
     planner = langgraph.agent("planner", output=Plan)  # chat answers with a Plan
 
-The JSON may be in a code fence, or come after a sentence. A reply that does
-not validate is answered once with what is wrong with it, so that the agent
-can answer again. If that reply does not validate either, the prompt fails
-with a terminal error. A retried attempt resumes the conversation, so it
-reads the same replies.
+A framework that can ask for the model natively does so, and its run returns
+the answer's JSON: Pydantic AI (``NativeOutput``, or its ``PromptedOutput``
+for a model without a JSON schema mode), the OpenAI Agents SDK
+(``output_type``) and ADK (``output_schema``). LangGraph asks for it in the
+system prompt (``asking``). Either way, the reply is read as JSON (in a code
+fence, or after a sentence, too) and validated. A reply that does not
+validate (an agent handed off to answered in text, say) is answered once with
+what is wrong with it and the schema, so that the agent can answer again. If
+that reply does not validate either, the prompt fails with a terminal error.
 
 The conversation stores the replies as the agent wrote them, and each
-attempt validates them again.
+attempt validates them again. Nothing is added to the user's message: only a
+re-ask is a message of its own.
 """
 
 from __future__ import annotations
@@ -42,14 +44,6 @@ if typing.TYPE_CHECKING:
 
 O = typing.TypeVar("O")
 
-REMINDER = "\n\nWhen you are done, reply with your answer as JSON only, of the schema you were given: no other text."
-"""What each prompt ends with, with ``output``.
-
-It repeats the system prompt's ask where the agent reads it last: after a
-long run of tool calls, an agent may drift from its system prompt and reply
-with a summary in prose.
-"""
-
 
 def _adapter(output: type[Any]) -> TypeAdapter[Any]:
     from pydantic import TypeAdapter  # pylint: disable=import-outside-toplevel
@@ -57,10 +51,20 @@ def _adapter(output: type[Any]) -> TypeAdapter[Any]:
     return TypeAdapter(output)
 
 
-def instructions(output: type[Any]) -> str:
-    """Return what the system prompt asks for with ``output``: JSON of its schema, and nothing else."""
-    schema = json.dumps(_adapter(output).json_schema())
-    return f"Your final reply is your answer, as JSON only (no other text): a value of this JSON schema.\n{schema}"
+def _schema(output: type[Any]) -> str:
+    return json.dumps(_adapter(output).json_schema())
+
+
+def asking(system: str | None, output: type[Any]) -> str:
+    """Return ``system`` with the ask for ``output``: the final reply as JSON of its schema, and nothing else.
+
+    For a framework that cannot ask for ``output`` natively.
+    """
+    asked = (
+        "Your final reply (after any tool calls) is your answer, as JSON only, with no other text: "
+        f"a value of this JSON schema.\n{_schema(output)}"
+    )
+    return f"{system}\n\n{asked}" if system else asked
 
 
 _FENCED = re.compile(r"```(?:json)?\s*\n(.*?)\n?```", re.DOTALL)
@@ -119,7 +123,7 @@ async def answer_with(output: type[O], text: str, prompt: Callable[[str], Awaita
     """Answer ``text`` with a value of ``output``: the reply of ``prompt``, validated.
 
     A reply that does not validate is answered once with what is wrong with
-    it, and the reply to that must validate.
+    it and the schema, and the reply to that must validate.
 
     Args:
         output: The type of the answer.
@@ -135,39 +139,11 @@ async def answer_with(output: type[O], text: str, prompt: Callable[[str], Awaita
     """
     answer = parsed(output, await prompt(text))
     if isinstance(answer, Wrong):
-        again = f"Your reply is not the answer asked for: {answer.reason}\nReply again, with the JSON only."
+        again = (
+            f"Your reply is not the answer asked for: {answer.reason}\n"
+            f"Reply again, with JSON only: a value of this JSON schema.\n{_schema(output)}"
+        )
         answer = parsed(output, await prompt(again))
     if isinstance(answer, Wrong):
         raise TerminalError(f"the agent's reply is not the answer asked for: {answer.reason}")
     return answer
-
-
-async def with_output(
-    output: type[O],
-    text: str,
-    system: str | None,
-    prompt: Callable[[str, str | None], Awaitable[str]],
-    *,
-    own: bool = False,
-) -> O:
-    """Answer ``text`` with a value of ``output``, asking for it with ``prompt(text, system)``.
-
-    The system prompt asks for the JSON, with its schema, and ``text`` ends
-    with ``REMINDER``. An agent of your own (``own``) keeps its instructions,
-    so ``text`` ends with the full ask instead.
-
-    Args:
-        output: The type of the answer.
-        text: The prompt.
-        system: The system prompt, or ``None``.
-        prompt: A framework's prompt, which takes the text and the system prompt.
-        own: Whether the agent is your own, with its own instructions.
-
-    Returns:
-        The answer.
-    """
-    asked = instructions(output)
-    if own:
-        return await answer_with(output, f"{text}\n\n{asked}", lambda t: prompt(t, system))
-    full = f"{system}\n\n{asked}" if system else asked
-    return await answer_with(output, text + REMINDER, lambda t: prompt(t, full))
