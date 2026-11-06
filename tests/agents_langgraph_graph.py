@@ -27,7 +27,7 @@ import pytest
 
 pytest.importorskip("langgraph")
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
@@ -54,7 +54,8 @@ def _asked(state: Desk) -> tuple[str, str]:
 def route(state: Desk) -> str:
     word, _ = _asked(state)
     routes = {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan", "tool": "call_tool"}
-    return routes.get(word, "history" if word == "history" else "greet")
+    routes |= {"history": "history", "trim": "trim", "humans": "humans"}
+    return routes.get(word, "greet")
 
 
 def greet(state: Desk) -> dict[str, Any]:
@@ -109,21 +110,36 @@ def history(state: Desk) -> dict[str, Any]:
     return {"messages": [AIMessage(" | ".join(seen))]}
 
 
+def trim(state: Desk) -> dict[str, Any]:
+    """Trim the history to the answer alone, as a summarizing graph does."""
+    removed = [RemoveMessage(id=m.id) for m in state["messages"] if m.id is not None]
+    return {"messages": [*removed, AIMessage("trimmed")]}
+
+
+def humans(state: Desk) -> dict[str, Any]:
+    """The messages the graph has from the user."""
+    said = [str(m.text) for m in state["messages"] if isinstance(m, HumanMessage)]
+    return {"messages": [AIMessage(" | ".join(said))]}
+
+
 def plan(state: Desk) -> dict[str, Any]:
     return {"messages": [AIMessage(f'{{"title": "{_asked(state)[1]}"}}')]}
 
 
 builder = StateGraph(Desk)
 steps = {"greet": greet, "confirm": confirm, "first": first, "second": second, "plan": plan, "history": history}
+steps |= {"trim": trim, "humans": humans}
 for name, node in {**steps, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
 builder.add_node("approve", nodes.wait_for_signal("approval", output="approval"))
-builder.add_conditional_edges(START, route, ["approve", "first", "plan", "greet", "history", "call_tool"])
+builder.add_conditional_edges(
+    START, route, ["approve", "first", "plan", "greet", "history", "call_tool", "trim", "humans"]
+)
 builder.add_edge("call_tool", "tools")
 builder.add_edge("approve", "confirm")
 builder.add_edge("first", "second")
-for last in ("greet", "confirm", "second", "plan", "history", "tools"):
+for last in ("greet", "confirm", "second", "plan", "history", "tools", "trim", "humans"):
     builder.add_edge(last, END)
 
 
@@ -261,6 +277,12 @@ async def test_a_handler_of_your_own_prompts_the_graph(harness: HarnessEnvironme
         ("user", "hi again"),
         ("assistant", "hello again"),
     ]
+
+
+async def test_a_message_the_graph_trimmed_is_not_brought_back(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    assert (await chat(harness, "graph_desk", key, f"trim {key}")).json() == "trimmed"
+    assert (await chat(harness, "graph_desk", key, "humans")).json() == "humans"
 
 
 async def test_output_validates_the_last_ai_message(harness: HarnessEnvironment):

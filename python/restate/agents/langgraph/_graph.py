@@ -34,6 +34,9 @@ message as a new ``HumanMessage``:
   conversation is a log: a message the graph removes or edits later stays as
   it was copied.
 - The answer is the text of the run's last AI message.
+- The graph may trim its history, its input and answer included (as a
+  summarizing graph does): a run is found by its checkpoints' metadata,
+  which name its prompt, and its answer is read from the conversation.
 - A stopped run is not resumed: the next message starts a run of its own,
   from the state the graph had stored. What closed the stopped (or refused,
   or failed) run in the conversation comes first in the new run's input: the
@@ -80,30 +83,55 @@ def _compiled(graph: AnyGraph, ctx: SessionContext) -> Any:
     return graph.copy(update={"checkpointer": saver})
 
 
-def _after(messages: Sequence[BaseMessage], prompt_id: str) -> list[BaseMessage]:
-    """Return the messages after the prompt ``prompt_id``: those of its run."""
-    at = next((i for i, m in enumerate(messages) if m.id == prompt_id), None)
-    return list(messages[at + 1 :]) if at is not None else []
+_PROMPT = "restate_prompt"
+"""The key, in each checkpoint's metadata, of the prompt whose run made it: the run's input may be trimmed away."""
+
+_CARRIED = ("prompt:", "closed:")
+"""The prefixes of the ids of the messages that the conversation gave the graph, rather than the graph made."""
 
 
-def _answer(messages: Sequence[BaseMessage]) -> str:
-    """Return the text of the last AI message of a run."""
-    replies = [m for m in messages if isinstance(m, AIMessage)]
-    return str(replies[-1].text) if replies else ""
+def _known(conversation: Conversation) -> set[str]:
+    """Return the ids of the graph's messages that the conversation has: those copied from it."""
+    return {i for e in conversation.entries if (i := typing.cast(BaseMessage, e.item).id) is not None}
 
 
-async def _copied(ctx: SessionContext, conversation: Conversation, running: Entry, run: Sequence[BaseMessage]) -> None:
-    """Copy the AI and tool messages of ``run`` (the prompt ``running``'s) that the conversation does not have yet.
+def _answer(conversation: Conversation, running: Entry) -> str:
+    """Return the run's answer: the text of the last AI message it copied.
 
-    Only the run's own entries (after its prompt) can hold them, so only those are looked at. Then publish.
+    Read from the conversation, which is a log, as the graph may have
+    trimmed its own history (the run's input and answer included).
     """
-    known = {typing.cast(BaseMessage, e.item).id for e in conversation.entries if e.n > running.n}
-    new = [m for m in run if isinstance(m, AIMessage | ToolMessage) and (m.id is None or m.id not in known)]
+    copied = [
+        item
+        for e in conversation.entries
+        if e.n > running.n and isinstance(item := typing.cast(BaseMessage, e.item), AIMessage) and item.id is not None
+    ]
+    return str(copied[-1].text) if copied else ""
+
+
+async def _copied(
+    ctx: SessionContext, conversation: Conversation, known: set[str], messages: Sequence[BaseMessage]
+) -> None:
+    """Copy the AI and tool messages of ``messages`` (the graph's state) that the conversation does not have yet.
+
+    ``known`` is the ids the conversation has, which this adds to; the
+    messages the conversation gave the graph are not copied back. Then
+    publish.
+    """
+    new = [
+        m
+        for m in messages
+        if isinstance(m, AIMessage | ToolMessage)
+        and m.id is not None
+        and m.id not in known
+        and not m.id.startswith(_CARRIED)
+    ]
     for message in new:
         if isinstance(message, AIMessage):
             await conversation.append_reply(message)
         else:
             await conversation.append(message)
+        known.add(typing.cast(str, message.id))
     if new:
         await stepped(ctx)
 
@@ -119,21 +147,24 @@ def _closing(conversation: Conversation, running: Entry, messages: Sequence[Base
     That is what closed the run, if it was stopped, refused or failed: the
     results of its cut-off tool calls and the note that ends it, which only
     the conversation has (copied messages have the graph's ids; these have
-    none). And the previous prompt itself, if the graph never stored it. Each
-    gets an id of its own, so that it is carried once.
+    none). And the previous prompt itself, if the graph never stored it: if
+    its run copied nothing (a run that copied a message had stored its
+    prompt). A prompt the graph stored and then removed (trimming its
+    history, say) is not brought back. Each gets an id of its own, so that
+    it is carried once.
     """
     earlier = [e for e in conversation.entries if e.prompt is not None and e.n < running.n]
     if not earlier:
         return []
     previous = earlier[-1]
     known = {m.id for m in messages}
+    between = [e for e in conversation.entries if previous.n <= e.n < running.n]
+    copied = any(e.prompt is None and typing.cast(BaseMessage, e.item).id is not None for e in between)
     carried: list[BaseMessage] = []
-    for entry in conversation.entries:
-        if not previous.n <= entry.n < running.n:
-            continue
+    for entry in between:
         item = typing.cast(BaseMessage, entry.item)
         if entry.prompt is not None:
-            if _prompt_id(entry) not in known:
+            if not copied and _prompt_id(entry) not in known:
                 carried.append(HumanMessage(str(item.text), id=_prompt_id(entry)))
         elif item.id is None and f"closed:{entry.n}" not in known:
             carried.append(item.model_copy(update={"id": f"closed:{entry.n}"}))
@@ -146,23 +177,25 @@ def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
     async def run(conversation: Conversation) -> str:
         running = conversation.running()
         assert running is not None and running.prompt is not None
-        # The prompt's id is the conversation's, so that a retried attempt finds it in the graph's state.
         prompt_id = _prompt_id(running)
         app = _compiled(graph, ctx)
+        # Each checkpoint of the run names its prompt, so that a retried attempt finds the run it cut off.
+        config: RunnableConfig = {**THREAD, "metadata": {_PROMPT: prompt_id}}
         snapshot = await app.aget_state(THREAD)
         messages = typing.cast(list[BaseMessage], (snapshot.values or {}).get("messages", []))
-        asked = any(m.id == prompt_id for m in messages)
+        known = _known(conversation)
+        asked: bool = typing.cast(dict[str, Any], snapshot.metadata or {}).get(_PROMPT) == prompt_id
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
-            await _copied(ctx, conversation, running, _after(messages, prompt_id))
-            return _answer(_after(messages, prompt_id))
+            await _copied(ctx, conversation, known, messages)
+            return _answer(conversation, running)
         # A run cut off by a crash is resumed. A new message (or one after a stopped run) starts a run, after what
         # closed the previous run.
         prompt = HumanMessage(str(typing.cast(BaseMessage, running.item).text), id=prompt_id)
         start = None if asked else {"messages": [*_closing(conversation, running, messages), prompt]}
-        async for state in app.astream(start, THREAD, context=ctx, durability="sync", stream_mode="values"):
+        async for state in app.astream(start, config, context=ctx, durability="sync", stream_mode="values"):
             messages = typing.cast(list[BaseMessage], typing.cast(dict[str, Any], state).get("messages", []))
-            await _copied(ctx, conversation, running, _after(messages, prompt_id))
-        return _answer(_after(messages, prompt_id))
+            await _copied(ctx, conversation, known, messages)
+        return _answer(conversation, running)
 
     return run
