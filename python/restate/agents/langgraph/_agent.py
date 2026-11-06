@@ -38,7 +38,7 @@ import importlib
 import json
 import os
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any, TypedDict, Unpack
 
 from langchain_core import messages as langchain_messages
@@ -56,14 +56,17 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
-from pydantic import PrivateAttr
+from pydantic import BaseModel, PrivateAttr
 
 from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
+from restate.agents._output import answer_with, asking
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.sessions import SessionContext
+
+M = typing.TypeVar("M", bound=BaseModel)
 
 
 class State(TypedDict):
@@ -249,6 +252,7 @@ def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given
     return run
 
 
+@typing.overload
 async def prompt(
     ctx: SessionContext,
     text: str,
@@ -256,7 +260,31 @@ async def prompt(
     model: ChatModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
-) -> str:
+    output: None = None,
+) -> str: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    model: ChatModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[M],
+) -> M: ...
+
+
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    model: ChatModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[BaseModel] | None = None,
+) -> Any:
     """Answer a prompt with a LangGraph agent, exactly once.
 
     For a handler of your own; the conversation is the object's key, shared
@@ -275,12 +303,26 @@ async def prompt(
             else ``"openai/gpt-6-sol"``.
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.
+        output: A Pydantic model, for an answer that is one rather than
+            text. The system prompt asks for its JSON.
 
     Returns:
-        The agent's answer.
+        The agent's answer: its text, or a value of ``output``.
+
+    Raises:
+        TerminalError: If the agent's reply is not a value of ``output``,
+            twice.
     """
 
-    return await answer_once(ctx, text, ITEMS, _run(ctx, model, system, tools))
+    # Without a way to ask for ``output`` natively with any provider's model, the system prompt asks for it.
+    asked = system if output is None else asking(system, output)
+
+    def ask(text: str) -> Awaitable[str]:
+        return answer_once(ctx, text, ITEMS, _run(ctx, model, asked, tools))
+
+    if output is None:
+        return await ask(text)
+    return await answer_with(output, text, ask)
 
 
 def agent(
@@ -289,6 +331,7 @@ def agent(
     model: PerSession[ChatModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
+    output: type[BaseModel] | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a LangGraph agent: a virtual object with one conversation per key.
@@ -312,6 +355,9 @@ def agent(
             else ``"openai/gpt-6-sol"``.
         system: The system prompt.
         tools: ``restate.agents`` tools, or LangChain tools.
+        output: A Pydantic model, for answers that are one rather than
+            text. The system prompt asks for its JSON, which ``chat``
+            returns.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -325,14 +371,15 @@ def agent(
         _provider_of_model(model_of(model))
     obj = AgentObject(name, **options)
 
-    async def answer(ctx: SessionContext, text: str) -> str:
+    async def answer(ctx: SessionContext, text: str) -> Any:
         return await prompt(
             ctx,
             text,
             model=await configured(model, ctx),
             system=await configured(system, ctx),
             tools=await configured(tools, ctx),
+            output=output,
         )
 
-    obj.chat(answer, items=ITEMS)
+    obj.chat(answer, items=ITEMS, output=output)
     return obj

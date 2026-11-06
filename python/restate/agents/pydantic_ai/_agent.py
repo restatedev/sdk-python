@@ -31,12 +31,12 @@ stored:
 from __future__ import annotations
 
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -50,8 +50,9 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model, ModelRequestContext, infer_model
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
+from pydantic_core import to_json
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, NativeOutput, PromptedOutput, RunContext
 from pydantic_ai import Tool as PydanticTool
 from restate.agents._common import (
     CANCELLATION,
@@ -65,10 +66,13 @@ from restate.agents._common import (
 )
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
+from restate.agents._output import answer_with
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
+
+M = typing.TypeVar("M", bound=BaseModel)
 
 AnyModel: typing.TypeAlias = str | Model
 """A model: ``"<provider>/<model-id>"`` (or Pydantic AI's ``"<provider>:<model-id>"``), or a Pydantic AI model."""
@@ -237,14 +241,30 @@ def _model(model: str | Model | None) -> Model:
         raise ModelError(f'the model "{named}": {error}') from error
 
 
+def _output_spec(output: type[BaseModel], model: Model) -> NativeOutput[Any] | PromptedOutput[Any]:
+    """Return how to ask ``model`` for ``output``: its JSON schema mode, else in the instructions.
+
+    Both answer with the JSON as text, which the conversation keeps as the
+    reply: an output tool's call would be a tool call that ends the run.
+    Gemini models before Gemini 3 have a JSON schema mode, but refuse it
+    with function tools (only Google's profiles have the key), so they are
+    asked in the instructions, with tools or without.
+    """
+    profile = model.profile
+    if profile.get("supports_json_schema_output") and profile.get("google_supports_tool_combination", True):
+        return NativeOutput(output)
+    return PromptedOutput(output)
+
+
 def _run(
     ctx: SessionContext,
     own: Agent[Any, str] | None,
     named: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
+    output: type[BaseModel] | None = None,
 ) -> Run:
-    """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer."""
+    """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer (``output``'s JSON)."""
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
     agent: Agent[Any, str] = own or Agent(instructions=system)
@@ -256,12 +276,48 @@ def _run(
             return final
         history = typing.cast(list[ModelMessage], [entry.item for entry in conversation.entries])
         restate = _Restate(ctx, conversation)
-        result = await agent.run(message_history=history, model=model, toolsets=toolsets, capabilities=[restate])
+        spec = _output_spec(output, model) if output is not None else None
+        try:
+            result = await agent.run(
+                message_history=history, model=model, toolsets=toolsets, capabilities=[restate], output_type=spec
+            )
+        except UnexpectedModelBehavior:
+            # Pydantic AI asked again for an answer that validates, and gave up: the reply is the answer for
+            # `answer_with`, which asks once more or fails for good, rather than an error that Restate retries.
+            if spec is None or (final := conversation.final_reply()) is None:
+                raise
+            return final
         # The messages that no model request stored: an output tool's return, say.
         await restate.store(result.all_messages())
-        return result.output
+        return result.output if isinstance(result.output, str) else to_json(result.output).decode()
 
     return run
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: Agent[Any, str] | None = None,
+    model: AnyModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: None = None,
+) -> str: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: Agent[Any, str] | None = None,
+    model: AnyModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[M],
+) -> M: ...
 
 
 async def prompt(
@@ -272,7 +328,8 @@ async def prompt(
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
-) -> str:
+    output: type[BaseModel] | None = None,
+) -> Any:
     """Answer a prompt with a Pydantic AI agent, exactly once.
 
     For a handler of your own; the conversation is the object's key, shared
@@ -294,16 +351,26 @@ async def prompt(
         system: The instructions, when there is no ``agent``.
         tools: ``restate.agents`` tools, Pydantic AI tools or tool functions,
             beside ``agent``'s own.
+        output: A Pydantic model, for an answer that is one rather than
+            text: asked for with ``NativeOutput`` if the model has a JSON
+            schema mode, else with ``PromptedOutput``.
 
     Returns:
-        The agent's answer.
+        The agent's answer: its text, or a value of ``output``.
 
     Raises:
         TypeError: If both ``agent`` and ``system`` are given.
+        TerminalError: If the agent's reply is not a value of ``output``,
+            twice.
     """
     check_own(agent, system)
 
-    return await answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools))
+    def ask(text: str) -> Awaitable[str]:
+        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output))
+
+    if output is None:
+        return await ask(text)
+    return await answer_with(output, text, ask)
 
 
 def agent(
@@ -314,6 +381,7 @@ def agent(
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
+    output: type[BaseModel] | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
@@ -343,6 +411,10 @@ def agent(
             ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
         system: The instructions, when there is no ``pydantic_agent``.
         tools: ``restate.agents`` tools, Pydantic AI tools or tool functions.
+        output: A Pydantic model, for answers that are one rather than
+            text: asked for with ``NativeOutput`` if the model has a JSON
+            schema mode, else with ``PromptedOutput``. ``chat`` returns its
+            JSON.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -355,7 +427,7 @@ def agent(
     check_own(pydantic_agent, system)
     obj = AgentObject(name, **options)
 
-    async def answer(ctx: SessionContext, text: str) -> str:
+    async def answer(ctx: SessionContext, text: str) -> Any:
         return await prompt(
             ctx,
             text,
@@ -363,7 +435,8 @@ def agent(
             model=await configured(model, ctx),
             system=await configured(system, ctx),
             tools=await configured(tools, ctx),
+            output=output,
         )
 
-    obj.chat(answer, items=ITEMS)
+    obj.chat(answer, items=ITEMS, output=output)
     return obj

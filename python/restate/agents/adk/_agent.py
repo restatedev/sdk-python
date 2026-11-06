@@ -36,7 +36,7 @@ from __future__ import annotations
 import json
 import time
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
 from google.adk.agents import BaseAgent, LlmAgent
@@ -51,6 +51,7 @@ from google.adk.sessions.base_session_service import GetSessionConfig, ListSessi
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
+from pydantic import BaseModel
 
 from restate.agents._common import (
     MODEL_ENV,
@@ -64,10 +65,14 @@ from restate.agents._common import (
 )
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
+from restate.agents._output import answer_with
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
+
+M = typing.TypeVar("M", bound=BaseModel)
+
 
 AnyModel = str | BaseLlm
 """A model: ``"google/<model-id>"`` (a Gemini model), or a model of ADK (``LiteLlm(...)`` for others)."""
@@ -269,14 +274,24 @@ def _app(
     model: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
+    output: type[BaseModel] | None = None,
 ) -> App:
-    """Return the app that runs the agent: resumable, with this package's plugin."""
+    """Return the app that runs the agent: resumable, with this package's plugin.
+
+    ``output`` is the ``output_schema`` of its root ``LlmAgent``. ADK answers
+    with its JSON, through a tool of its own when the model cannot combine a
+    schema with tools.
+    """
     if own is None:
-        root: BaseAgent = LlmAgent(name="assistant", model=_model(model), instruction=system or "", tools=tools(given))
+        root: BaseAgent = LlmAgent(
+            name="assistant", model=_model(model), instruction=system or "", tools=tools(given), output_schema=output
+        )
         app = App(name=_APP, root_agent=root)
     else:
         app = own if isinstance(own, App) else App(name=_APP, root_agent=own)
-        if given or model is not None:
+        # A workflow agent (a SequentialAgent, say) has no output schema: its answer is asked again for as JSON.
+        schema = output is not None and isinstance(app.root_agent, LlmAgent)
+        if given or model is not None or schema:
             if not isinstance(app.root_agent, LlmAgent):
                 raise TypeError("model and tools apply to an LlmAgent of your own, not to another agent")
             update: dict[str, Any] = {}
@@ -284,6 +299,8 @@ def _app(
                 update["tools"] = [*app.root_agent.tools, *tools(given)]
             if model is not None:
                 update["model"] = _model(model)
+            if schema:
+                update["output_schema"] = output
             # A clone, which also re-parents the sub-agents: those without a model of their own take the root's.
             app = app.model_copy(update={"root_agent": app.root_agent.clone(update=update)})
     resumable = ResumabilityConfig(is_resumable=True)
@@ -357,6 +374,7 @@ def _run(ctx: SessionContext, app: App) -> Run:
 # --- The API --------------------------------------------------------------------------------------
 
 
+@typing.overload
 async def prompt(
     ctx: SessionContext,
     text: str,
@@ -365,7 +383,33 @@ async def prompt(
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
-) -> str:
+    output: None = None,
+) -> str: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: BaseAgent | App | None = None,
+    model: AnyModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[M],
+) -> M: ...
+
+
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: BaseAgent | App | None = None,
+    model: AnyModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[BaseModel] | None = None,
+) -> Any:
     """Answer a prompt with an ADK agent, exactly once.
 
     For a handler of your own; the conversation is the object's key, shared
@@ -387,16 +431,28 @@ async def prompt(
         system: The instruction, when there is no ``agent``.
         tools: ``restate.agents`` tools, or ADK's, beside ``agent``'s own.
             For its sub-agents, see ``tools()``.
+        output: A Pydantic model, for an answer that is one rather than
+            text: the ``output_schema`` of the root ``LlmAgent``. Another
+            root agent that answers in text is asked again for its JSON.
 
     Returns:
-        The text of the agent's final response.
+        The text of the agent's final response, or a value of ``output``.
 
     Raises:
         TypeError: If both ``agent`` and ``system`` are given.
+        TerminalError: If the agent's reply is not a value of ``output``,
+            twice.
     """
     check_own(agent, system)
-    app = _app(ctx, agent, model, system, tools)
-    return await answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app))
+
+    app = _app(ctx, agent, model, system, tools, output)
+
+    def ask(text: str) -> Awaitable[str]:
+        return answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app))
+
+    if output is None:
+        return await ask(text)
+    return await answer_with(output, text, ask)
 
 
 def agent(
@@ -407,6 +463,7 @@ def agent(
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
+    output: type[BaseModel] | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create an ADK agent: a virtual object with one conversation per key.
@@ -433,6 +490,10 @@ def agent(
             ``$RESTATE_AGENT_MODEL`` if it is Google's.
         system: The instruction, when there is no ``adk_agent``.
         tools: ``restate.agents`` tools, or ADK's.
+        output: A Pydantic model, for answers that are one rather than
+            text: the ``output_schema`` of the root ``LlmAgent``. Another
+            root agent that answers in text is asked again for its JSON.
+            ``chat`` returns the JSON.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -448,7 +509,7 @@ def agent(
         _model(model)
     obj = AgentObject(name, **options)
 
-    async def answer(ctx: SessionContext, text: str) -> str:
+    async def answer(ctx: SessionContext, text: str) -> Any:
         return await prompt(
             ctx,
             text,
@@ -456,7 +517,8 @@ def agent(
             model=await configured(model, ctx),
             system=await configured(system, ctx),
             tools=await configured(tools, ctx),
+            output=output,
         )
 
-    obj.chat(answer, items=_Items())
+    obj.chat(answer, items=_Items(), output=output)
     return obj

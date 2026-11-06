@@ -31,6 +31,11 @@ nothing: each message is answered once, and each tool call is made once::
     if __name__ == "__main__":
         asyncio.run(restate.serve(restate.app([assistant])))
 
+An agent answers with text, or with data: give ``output`` a Pydantic model,
+and ``chat`` (and each framework's ``prompt``) answers with a value of it::
+
+    planner = langgraph.agent("planner", system="Plan the trip.", output=Plan)
+
 This package holds what all frameworks share:
 
 - ``AgentObject``, a session object set up for agents.

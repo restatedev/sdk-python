@@ -95,13 +95,13 @@ class AgentClient:
         )
         return json.loads(answer) if answer else None
 
-    async def chat(self, text: str, *, idempotency_key: str | None = None) -> str:
-        """Send ``text`` and wait for the answer.
+    async def chat(self, text: str, *, idempotency_key: str | None = None) -> Any:
+        """Send ``text`` and wait for the answer: its text, or the JSON of an agent's ``output`` (a ``dict``).
 
         With an ``idempotency_key``, sending it again (after a lost
         connection, say) returns the same answer instead of asking again.
         """
-        return cast(str, await self._call("chat", text, idempotency_key=idempotency_key))
+        return await self._call("chat", text, idempotency_key=idempotency_key)
 
     async def send(self, text: str, *, idempotency_key: str | None = None) -> str:
         """Send ``text`` without waiting for the answer, and return the invocation's id.
