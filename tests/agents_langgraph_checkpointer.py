@@ -102,8 +102,10 @@ async def test_a_retried_attempt_resumes_from_the_last_stored_step_and_its_tasks
     with pytest.raises(RuntimeError, match="c crashed"):
         await attempt(backend, go)
     await attempt(backend, go)
-    # a ran once; b's write, stored while c failed, is not made again; c runs again.
-    assert ran == ["a", "b", "c", "c", "d"] or ran == ["a", "c", "b", "c", "d"]
+    # a ran once; b ran once (its write, stored if it finished before c failed, is not made again; if c failed
+    # before b started, b runs in the retry); c runs again; d runs last.
+    assert (ran[0], ran[-1]) == ("a", "d")
+    assert {step: ran.count(step) for step in "abcd"} == {"a": 1, "b": 1, "c": 2, "d": 1}
     assert sorted(results[-1]["log"]) == ["a", "b", "c", "d"]
 
 
