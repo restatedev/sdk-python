@@ -40,6 +40,7 @@ from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
+from restate.agents.langgraph._graph import at_breakpoint  # noqa: E402
 
 
 class Desk(MessagesState):
@@ -57,7 +58,7 @@ def route(state: Desk) -> str | list[str]:
     word, _ = _asked(state)
     routes = {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan", "tool": "call_tool"}
     routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
-    routes |= {"deep": "deep"}
+    routes |= {"deep": "deep", "pause": "pause"}
     if word == "both":
         return ["ask", "side"]  # two branches at once
     return routes.get(word, "greet")
@@ -157,7 +158,11 @@ deep = StateGraph(Desk)  # a subgraph whose node interrupts twice
 deep.add_node("twice", typing.cast(Any, twice))
 deep.add_edge(START, "twice")
 deep.add_edge("twice", END)
-builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile()}
+paused = StateGraph(Desk)  # a subgraph that stops at a static breakpoint
+paused.add_node("greet", typing.cast(Any, greet))
+paused.add_edge(START, "greet")
+paused.add_edge("greet", END)
+builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile(), "pause": paused.compile(interrupt_before=["greet"])}
 for name, node in {**builder_nodes, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
@@ -175,6 +180,7 @@ branches = [
     "twice",
     "side",
     "deep",
+    "pause",
 ]
 builder.add_conditional_edges(START, route, branches)
 builder.add_edge("call_tool", "tools")
@@ -193,6 +199,7 @@ for last in (
     "twice",
     "side",
     "deep",
+    "pause",
 ):
     builder.add_edge(last, END)
 
@@ -423,6 +430,16 @@ async def test_a_turn_suspended_while_it_waits_resumes_on_the_same_wait(harness:
     assert (await answering).json() == "asked: later"
 
 
+async def test_a_static_breakpoint_in_a_subgraph_fails_the_turn_and_the_next_message_starts_afresh(
+    harness: HarnessEnvironment,
+):
+    """A static breakpoint pauses the run with nothing to wait for: the turn fails rather than answer half done."""
+    key = uuid.uuid4().hex
+    failed = await chat(harness, "graph_desk", key, f"pause {key}")
+    assert failed.status_code == 500 and "interrupt()" in failed.text, failed.text
+    assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
+
+
 async def test_output_validates_the_last_ai_message(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     assert (await chat(harness, "graph_planner", key, f"plan {key}")).json() == {"title": key}
@@ -456,3 +473,41 @@ def test_a_graph_has_its_own_model_and_its_state_has_messages():
 
     with pytest.raises(TypeError, match="MessagesState"):
         langgraph.agent("plain", graph=StateGraph(Plain))
+
+
+async def test_only_a_run_stopped_with_no_interrupt_is_at_a_breakpoint():
+    """A subgraph's static breakpoint stops a run with no interrupt; a node's second subgraph call that interrupts
+    does not, though its state is not where LangGraph's subgraph snapshots look (its namespace is node:task_id|1)."""
+    from langgraph.checkpoint.memory import InMemorySaver  # pylint: disable=import-outside-toplevel
+
+    asked = StateGraph(Desk)
+    asked.add_node("ask", typing.cast(Any, asking))
+    asked.add_edge(START, "ask")
+    asked.add_edge("ask", END)
+    plain: Any = paused.compile()  # Any: LangGraph types a compiled graph's input loosely
+    asking_app: Any = asked.compile()
+
+    async def both(state: Desk) -> dict[str, Any]:
+        await plain.ainvoke(state)
+        return await asking_app.ainvoke(state)
+
+    second = StateGraph(Desk)
+    second.add_node("both", typing.cast(Any, both))
+    second.add_edge(START, "both")
+    second.add_edge("both", END)
+    config: Any = {"configurable": {"thread_id": "t"}}
+    stopped: dict[str, bool] = {}
+    for word, graph in {"pause": builder, "second": second}.items():
+        app: Any = graph.compile(checkpointer=InMemorySaver())
+        await app.ainvoke({"messages": [HumanMessage(f"{word} x")]}, config, durability="sync")
+        snapshot = await app.aget_state(config, subgraphs=True)
+        assert snapshot.next
+        stopped[word] = at_breakpoint(snapshot)
+    assert stopped == {"pause": True, "second": False}
+
+
+@pytest.mark.parametrize("breakpoint", [{"interrupt_before": ["tools"]}, {"interrupt_after": ["call_tool"]}])
+def test_a_graph_with_static_breakpoints_is_refused(breakpoint: dict[str, Any]):
+    """A run stopped at one has nothing to wait for, and would leave its tool calls without results."""
+    with pytest.raises(TypeError, match=r"interrupt\(\)"):
+        langgraph.agent("stops", graph=builder.compile(**breakpoint))

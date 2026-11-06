@@ -359,7 +359,8 @@ async def prompt(
 
     Raises:
         TypeError: If ``graph`` is given with ``model``, ``system`` or
-            ``tools``, or its state has no ``messages``.
+            ``tools``, its state has no ``messages``, or it has static
+            breakpoints (``interrupt_before``, ``interrupt_after``).
         TerminalError: If the agent's reply is not a value of ``output``,
             twice.
     """
@@ -438,7 +439,8 @@ def agent(
 
     Raises:
         TypeError: If ``graph`` is given with ``model``, ``system`` or
-            ``tools``, or its state has no ``messages``.
+            ``tools``, its state has no ``messages``, or it has static
+            breakpoints (``interrupt_before``, ``interrupt_after``).
         TerminalError: If ``model`` names a provider other than OpenAI or Anthropic.
     """
     if graph is not None:
@@ -463,7 +465,7 @@ def agent(
 
 
 def _check_graph(graph: AnyGraph, model: object, system: object, tools: object) -> None:
-    """Raise ``TypeError`` if ``graph`` comes with a model, a system prompt or tools, or its state has no messages."""
+    """Raise ``TypeError`` if ``graph`` comes with a model, a system prompt or tools, or ``check`` refuses it."""
     if model is not None or system is not None or tools != ():
         raise TypeError("a graph of your own has its own model and tools: pass no model, system or tools")
     check(graph)

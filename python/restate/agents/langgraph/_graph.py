@@ -43,7 +43,10 @@ message as a new ``HumanMessage``:
   ``signal`` view resolves, by the wait's id or as the oldest
   ``"interrupt"``. The run then resumes with ``Command(resume=...)`` and the
   signal's value, as ``interrupt()``'s result. The turn waits without
-  holding a process; a retried attempt joins the same waits.
+  holding a process; a retried attempt joins the same waits. Static
+  breakpoints (``interrupt_before``, ``interrupt_after``) have nothing to
+  wait for: a graph that has them is refused, and a run that stops at a
+  subgraph's fails.
 - The graph may trim its history, its input and answer included (as a
   summarizing graph does): a run is found by its checkpoints' metadata,
   which name its prompt, and its answer is read from the conversation.
@@ -75,6 +78,7 @@ from restate.agents import _signals
 from restate.agents._conversation import Conversation, Entry, Run
 from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
+from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 
 AnyGraph: typing.TypeAlias = StateGraph[Any, Any, Any, Any] | Pregel[Any, Any, Any, Any]
@@ -84,10 +88,19 @@ THREAD: RunnableConfig = {"configurable": {"thread_id": "chat"}}
 """The graph's thread: there is one per key, as the key's database is its own."""
 
 
+BREAKPOINTS = (
+    "static breakpoints (interrupt_before, interrupt_after) stop a run with nothing to wait for, and leave its tool "
+    "calls without results: pause the graph with interrupt() instead, which waits for a signal"
+)
+"""Why a graph with static breakpoints is refused, and a run stopped at a subgraph's fails."""
+
+
 def check(graph: AnyGraph) -> None:
-    """Raise ``TypeError`` if ``graph`` has no ``messages`` in its state."""
+    """Raise ``TypeError`` if ``graph`` has no ``messages`` in its state, or has static breakpoints."""
     if "messages" not in graph.channels:
         raise TypeError("the graph's state has no messages: build it on LangGraph's MessagesState")
+    if isinstance(graph, Pregel) and (graph.interrupt_before_nodes or graph.interrupt_after_nodes):
+        raise TypeError(BREAKPOINTS)
 
 
 def _compiled(graph: AnyGraph, ctx: SessionContext) -> Any:
@@ -236,10 +249,11 @@ async def _interrupts(app: Any, snapshot: StateSnapshot) -> list[tuple[Any, int]
     return found
 
 
-async def _resumed(ctx: SessionContext, app: Any) -> dict[str, Any] | None:
-    """Wait for a signal for each of the graph's pending interrupts, and return their values by interrupt id.
+async def _resumed(ctx: SessionContext, app: Any, snapshot: StateSnapshot) -> dict[str, Any] | None:
+    """Wait for a signal for each pending interrupt of ``snapshot`` (the graph's, with its subgraphs').
 
-    Return ``None`` if no interrupt is pending. Each wait's id is the turn's
+    Return their values by interrupt id, or ``None`` if no interrupt is
+    pending. Each wait's id is the turn's
     invocation id (the same in each attempt), the interrupt's id, and the
     number of resume values its task already has: a node that interrupts
     twice has the same interrupt id both times, and each time is a wait of
@@ -247,7 +261,7 @@ async def _resumed(ctx: SessionContext, app: Any) -> dict[str, Any] | None:
     them (killed, say) has its waits closed with it, as the companion closes
     the waits whose ids start with the turn's.
     """
-    pending = await _interrupts(app, typing.cast(StateSnapshot, await app.aget_state(THREAD, subgraphs=True)))
+    pending = await _interrupts(app, snapshot)
     if not pending:
         return None
     waits: dict[str, Any] = {}
@@ -263,6 +277,21 @@ async def _resumed(ctx: SessionContext, app: Any) -> dict[str, Any] | None:
         waits[interrupted.id] = ctx.call(_signals.wait, request, key=_signals.signals_of(ctx), idempotency_key=wait_id)
     values = await asyncio.gather(*waits.values())
     return dict(zip(waits, values, strict=True))
+
+
+def at_breakpoint(paused: StateSnapshot) -> bool:
+    """Return whether a run stopped with steps to go and no interrupt: at a static breakpoint.
+
+    An ``interrupt()`` in a subgraph is on the task of the graph that ran
+    it, even where ``_interrupts`` cannot find the subgraph's own state
+    (a node's second subgraph call, say): that run stopped at an interrupt.
+    """
+    return bool(paused.next) and not any(task.interrupts for task in paused.tasks)
+
+
+async def _paused(app: Any) -> StateSnapshot:
+    """Return the state of the graph's thread, with its subgraphs': where it stopped, and why."""
+    return typing.cast(StateSnapshot, await app.aget_state(THREAD, subgraphs=True))
 
 
 def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
@@ -291,7 +320,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
         # message (or one after a stopped run) starts a run, after what closed the previous run.
         start: Any
         if asked:
-            resumes = await _resumed(ctx, app)
+            resumes = await _resumed(ctx, app, await _paused(app))
             start = Command(resume=resumes) if resumes is not None else None
         else:
             prompt = HumanMessage(str(typing.cast(BaseMessage, running.item).text), id=prompt_id)
@@ -301,8 +330,13 @@ def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
                 values = typing.cast(dict[str, Any], state)
                 await _copied(ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])))
             # The run stops at its interrupts: it goes on with the signals that answer them.
-            resumes = await _resumed(ctx, app)
+            paused = await _paused(app)
+            resumes = await _resumed(ctx, app, paused)
             if resumes is None:
+                if at_breakpoint(paused):
+                    # At a subgraph's static breakpoint (the graph's own are refused). Fail, rather than answer
+                    # with a run half done.
+                    raise TerminalError(BREAKPOINTS)
                 return await _answer(app, conversation, running, values, before)
             start = Command(resume=resumes)
 
