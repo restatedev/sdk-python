@@ -94,6 +94,7 @@ examples under [Basic](#basic) show each framework's agent, and those under
 | ----------------------------- | ----------------------------------------------- |
 | [`notes.py`](basic/notes.py)  | SQL in a virtual object, with `ctx.db`, and no agent |
 | [`langgraph_agent.py`](basic/langgraph_agent.py) | A LangGraph agent: its conversation in the key's database |
+| [`create_agent.py`](basic/create_agent.py) | LangChain's `create_agent` as a Restate agent, with a Restate tool (`langgraph.agent(graph=...)`, `langgraph.tools`) |
 | [`pydantic_ai_agent.py`](basic/pydantic_ai_agent.py) | A Pydantic AI agent: its conversation in the key's database |
 | [`openai_agent.py`](basic/openai_agent.py) | An OpenAI Agents SDK agent: its conversation in the key's database |
 | [`adk_agent.py`](basic/adk_agent.py) | A Google ADK agent: its session in the key's database |

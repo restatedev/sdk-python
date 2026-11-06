@@ -162,6 +162,37 @@ async def test_basic_langgraph_agent():
         assert (await ingress.post("assistant/alice/status")).json() == {"answering": None, "waiting": []}
 
 
+async def test_basic_create_agent(monkeypatch: pytest.MonkeyPatch):
+    """create_agent's model (scripted here) calls the orders service through the Restate tool, and answers."""
+    pytest.importorskip("langchain.agents")
+    import langchain.agents.factory  # pylint: disable=import-outside-toplevel
+    from langchain_core.language_models import BaseChatModel  # pylint: disable=import-outside-toplevel
+    from langchain_core.messages import AIMessage, BaseMessage, ToolMessage  # pylint: disable=import-outside-toplevel
+    from langchain_core.outputs import ChatGeneration, ChatResult  # pylint: disable=import-outside-toplevel
+
+    class Scripted(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "scripted"
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:  # pyright: ignore[reportIncompatibleMethodOverride]
+            return self
+
+        def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
+            last = messages[-1]
+            if isinstance(last, ToolMessage):
+                reply = AIMessage(str(last.text))
+            else:
+                reply = AIMessage("", tool_calls=[{"id": "c1", "name": "orders_status", "args": {"input": "103"}}])
+            return ChatResult(generations=[ChatGeneration(message=reply)])
+
+    # The example names an OpenAI model; the scripted one stands in for it, with no API key.
+    monkeypatch.setattr(langchain.agents.factory, "init_chat_model", lambda *args, **kwargs: Scripted())
+    async with serving("basic/create_agent.py") as ingress:
+        answer = await ingress.post("desk/alice/chat", "Where is my order 103?")
+        assert answer.json() == "Order 103 was delivered yesterday."
+
+
 async def test_basic_pydantic_ai_agent():
     """The agent serves, with its companion; a message needs a model's provider, and is left to a real run."""
     pytest.importorskip("pydantic_ai")
