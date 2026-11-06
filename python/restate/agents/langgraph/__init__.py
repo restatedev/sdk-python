@@ -32,6 +32,31 @@ in ``ctx.db``. ``nodes`` has prebuilt nodes for such a graph that are Restate
 steps: wait for a signal, run a workflow, call or send to a handler, ask another
 agent.
 
+Or bring a graph of your own, such as LangChain's ``create_agent`` makes, with
+this package's tools::
+
+    graph = create_agent(model, tools=langgraph.tools([call(order_status, description="An order's status.")]))
+    desk = langgraph.agent("desk", graph=graph)
+
+Its ``interrupt()`` calls wait for a signal (``"interrupt"``), which the
+agent's ``pending`` view lists and its ``signal`` view resolves.
+
+Good to know about a graph of your own:
+
+- A graph is durable a step at a time: a crash runs the step it cut off
+  again. That is fine for a model request, but a step's other side effects
+  (a payment, a plain LangChain tool) happen again. Make them Restate's: a
+  prebuilt node, or a tool from ``tools()``, does its step once.
+- A run that waits (for a signal, say) is checkpointed with the graph as it
+  was. Changing the graph meanwhile (renaming a node, or a state field) is a
+  migration: keep what waiting runs need until they are done, as with a
+  database's tables.
+- LangGraph stores a channel's whole value at each step that changes it, so a
+  long conversation stores its messages again at each step. Trim the history
+  (a summarizing node, say) in graphs that live long.
+- Clients see a run step by step, as each step is stored: there is no
+  token streaming.
+
 This differs from the older ``restate.ext.langchain`` integration, whose
 middleware makes a LangChain ``create_agent`` agent durable inside any regular
 Restate handler by journaling each model response, and leaves tool side
@@ -56,8 +81,8 @@ except ImportError as error:
         "restate.agents.langgraph needs LangGraph: install the langgraph extra, pip install restate-sdk[langgraph]"
     ) from error
 
-from restate.agents.langgraph._agent import AnyTool, ChatModel, agent, prompt
+from restate.agents.langgraph._agent import AnyTool, ChatModel, agent, prompt, tools
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
 from restate.agents.langgraph._graph import AnyGraph
 
-__all__ = ["AnyGraph", "AnyTool", "ChatModel", "SqlCheckpointSaver", "agent", "prompt"]
+__all__ = ["AnyGraph", "AnyTool", "ChatModel", "SqlCheckpointSaver", "agent", "prompt", "tools"]
