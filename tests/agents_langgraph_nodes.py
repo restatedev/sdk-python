@@ -215,6 +215,16 @@ async def test_a_node_cut_off_by_a_crash_waits_for_the_same_signal(harness: Harn
     assert (await running).json()["approved"] == "yes"
 
 
+async def test_a_node_refuses_to_run_unless_each_step_is_stored_before_it_runs():
+    from langgraph.checkpoint.memory import InMemorySaver  # pylint: disable=import-outside-toplevel
+
+    app = approval_then_shipping().compile(checkpointer=InMemorySaver())
+    config: RunnableConfig = {"configurable": {"thread_id": "t"}}
+    for durability in ({}, {"durability": "async"}, {"durability": "exit"}):
+        with pytest.raises(TypeError, match='durability="sync"'):
+            await app.ainvoke({"refund": "r"}, config, context=object(), **durability)
+
+
 def test_a_workflow_node_takes_input_exactly_when_its_handler_does():
     with pytest.raises(TypeError, match="takes input: pass input="):
         nodes.workflow(ship)

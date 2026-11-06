@@ -21,7 +21,8 @@ it gets back to the state field ``output``::
     graph.add_node("ship", nodes.workflow(shipping.run, input=lambda s: s["order"], output="receipt"))
 
 Run the graph in a handler of an agent (an ``AgentObject``), with its context
-as LangGraph's run context and a checkpointer in its database::
+as LangGraph's run context, a checkpointer in its database, and
+``durability="sync"`` (each step's checkpoint stored before the step runs)::
 
     desk = AgentObject("desk")
 
@@ -34,7 +35,8 @@ as LangGraph's run context and a checkpointer in its database::
         return await app.ainvoke(None if resuming else {"refund": refund}, config, context=ctx, durability="sync")
 
 Each node does its step once. A crash re-runs a node from the checkpoint it
-started from, and LangGraph gives it the same task id there, so the node
+started from, which ``durability="sync"`` stored before the node ran, and
+LangGraph gives it the same task id there, so the node
 joins the workflow, the agent's answer or the wait it started before rather
 than start another. A wait is listed by the agent's ``pending`` view, and its
 ``signal`` view resolves it.
@@ -62,6 +64,7 @@ class Node(typing.Protocol):
 
 _TASK_ID = "__pregel_task_id"
 _CHECKPOINTER = "__pregel_checkpointer"
+_DURABILITY = "__pregel_durability"
 
 
 class _Step(typing.NamedTuple):
@@ -82,6 +85,13 @@ def _step(runtime: Runtime[Any], kind: str) -> _Step:
         raise TypeError(
             f"nodes.{kind} runs in a graph with a checkpointer, so that a retried attempt resumes it: "
             "compile(checkpointer=SqlCheckpointSaver(ctx.db))"
+        )
+    # Only "sync" stores a step's checkpoint before its tasks run. Otherwise a crash before the save makes the
+    # resumed run create the checkpoint again, with a new id, and so new task ids: the step would be made twice.
+    if configurable.get(_DURABILITY) != "sync":
+        raise TypeError(
+            f"nodes.{kind} runs in a graph that stores each step's checkpoint before the step runs, so that a "
+            'retried attempt gets the same task ids: ainvoke(..., durability="sync")'
         )
     # The task's namespace holds its id, which LangGraph derives from the checkpoint the step started from:
     # a node re-run from that checkpoint gets the same one. It holds the subgraph's path too.
