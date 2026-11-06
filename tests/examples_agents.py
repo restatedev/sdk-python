@@ -233,6 +233,37 @@ async def test_intermediate_triage():
             assert (await ingress.post(f"{agent}/messages", {})).json()["messages"] == []
 
 
+async def test_intermediate_refund_graph():
+    """The graph asks the policy agent (scripted here), waits for the approval, and pays; a rejection ends it unpaid."""
+    pytest.importorskip("langgraph")
+
+    def setup(module: ModuleType) -> None:
+        policy = restate.VirtualObject("policy")  # in place of the example's agent, which needs a model
+
+        @policy.handler()
+        async def chat(_ctx: restate.ObjectContext, message: str) -> str:
+            return f"Fits the policy: {message}"
+
+        setattr(module, "policy", policy)
+
+    async with serving("intermediate/refund_graph.py", setup) as ingress:
+        for order, answer, receipt in (("103", "approved", "Refunded $30 for order 103."), ("104", "no", None)):
+            requested = asyncio.create_task(ingress.post("refunds/alice/request", {"order": order, "amount": 30}))
+            waiting: list[dict[str, Any]] = []
+            for _ in range(100):
+                if waiting := (await ingress.post("refunds/alice/pending")).json():
+                    break
+                await asyncio.sleep(0.1)
+            policy = f"Fits the policy: A refund of $30 for order {order}."
+            refund = {"order": order, "amount": 30}
+            assert [(w["name"], w["input"]) for w in waiting] == [("approval", {"refund": refund, "policy": policy})]
+            await ingress.post("refunds/alice/signal", {"name": "approval", "value": answer})
+            state = (await requested).json()
+            assert state == {"refund": refund, "policy": policy, "approval": answer} | (
+                {"receipt": receipt} if receipt else {}
+            )
+
+
 async def test_intermediate_loop(monkeypatch: pytest.MonkeyPatch):
     """The loop, on a scripted model: it looks two orders up at once, waits for approval, and refunds; a crash
     after the refund ran retries the turn, which asks the model again without refunding again; and a crash after
