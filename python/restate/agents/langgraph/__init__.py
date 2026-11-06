@@ -28,7 +28,8 @@ For example::
 
 ``agent`` creates an agent, ``prompt`` answers a prompt from a handler of your
 own, and ``SqlCheckpointSaver`` stores the checkpoints of a graph of your own
-in ``ctx.db``.
+in ``ctx.db``. ``nodes`` has prebuilt nodes for such a graph that are Restate
+steps: wait for a signal, run a workflow, ask another agent.
 
 This differs from the older ``restate.ext.langchain`` integration, whose
 middleware makes a LangChain ``create_agent`` agent durable inside any regular

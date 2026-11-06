@@ -1,0 +1,223 @@
+#
+#  Copyright (c) 2023-2026 - Restate Software, Inc., Restate GmbH
+#
+#  This file is part of the Restate SDK for Python,
+#  which is released under the MIT license.
+#
+#  You can find a copy of the license in file LICENSE in the root
+#  directory of this repository or package, or at
+#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
+#
+"""Prebuilt LangGraph nodes that are Restate steps: wait for a signal, run a workflow, ask another agent.
+
+Add them to a graph of your own, as the tools of ``restate.agents`` are added
+to an agent. Each one reads its input from the graph's state, and writes what
+it gets back to the state field ``output``::
+
+    from restate.agents.langgraph import SqlCheckpointSaver, nodes
+
+    graph = StateGraph(State)
+    graph.add_node("approve", nodes.wait_for_signal("approval", input=lambda s: s["refund"], output="approved"))
+    graph.add_node("ship", nodes.workflow(shipping.run, input=lambda s: s["order"], output="receipt"))
+
+Run the graph in a handler of an agent (an ``AgentObject``), with its context
+as LangGraph's run context and a checkpointer in its database::
+
+    desk = AgentObject("desk")
+
+
+    @desk.handler()
+    async def refund(ctx: sessions.SessionContext, refund: Refund) -> State:
+        app = graph.compile(checkpointer=SqlCheckpointSaver(ctx.db))
+        config: RunnableConfig = {"configurable": {"thread_id": "refunds"}}
+        resuming = (await app.aget_state(config)).next
+        return await app.ainvoke(None if resuming else {"refund": refund}, config, context=ctx, durability="sync")
+
+Each node does its step once. A crash re-runs a node from the checkpoint it
+started from, and LangGraph gives it the same task id there, so the node
+joins the workflow, the agent's answer or the wait it started before rather
+than start another. A wait is listed by the agent's ``pending`` view, and its
+``signal`` view resolves it.
+"""
+
+from __future__ import annotations
+
+import typing
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from langgraph.config import get_config
+from langgraph.runtime import Runtime
+
+from restate.agents import _signals
+from restate.agents._tools import handler_of, input_type_of, inputs_of, untyped
+from restate.sessions import SessionContext
+
+
+class Node(typing.Protocol):
+    """A LangGraph node: it takes the state and the run's runtime, and returns the state's update."""
+
+    def __call__(self, state: Any, *, runtime: Runtime[Any]) -> Awaitable[dict[str, Any]]: ...
+
+
+_TASK_ID = "__pregel_task_id"
+_CHECKPOINTER = "__pregel_checkpointer"
+
+
+class _Step(typing.NamedTuple):
+    """A node's run: the agent's context, the node's name, and the key that is the same each time it re-runs."""
+
+    ctx: SessionContext
+    node: str
+    idempotency_key: str
+
+
+def _step(runtime: Runtime[Any], kind: str) -> _Step:
+    """Return the run of a node of ``kind``, from LangGraph's runtime and config."""
+    ctx = typing.cast("SessionContext | None", runtime.context)
+    if ctx is None:
+        raise TypeError(f"nodes.{kind} runs in a graph invoked with the handler's context: ainvoke(..., context=ctx)")
+    configurable = get_config().get("configurable", {})
+    if configurable.get(_CHECKPOINTER) is None:
+        raise TypeError(
+            f"nodes.{kind} runs in a graph with a checkpointer, so that a retried attempt resumes it: "
+            "compile(checkpointer=SqlCheckpointSaver(ctx.db))"
+        )
+    # The task's namespace holds its id, which LangGraph derives from the checkpoint the step started from:
+    # a node re-run from that checkpoint gets the same one. It holds the subgraph's path too.
+    namespace = typing.cast(str, configurable.get("checkpoint_ns") or configurable[_TASK_ID])
+    node = namespace.rsplit("|", 1)[-1].split(":", 1)[0]
+    return _Step(ctx, node, f"langgraph:{ctx.key}:{namespace}")
+
+
+def _update(output: str | None, value: object) -> dict[str, Any]:
+    return {output: value} if output is not None else {}
+
+
+def wait_for_signal(
+    signal: str,
+    *,
+    output: str | None = None,
+    input: Callable[[Any], Any] | None = None,
+) -> Node:
+    """Create a node that waits for a signal to the agent, and writes its value to ``output``.
+
+    A person's approval, say, or another system's result. The graph waits
+    without holding a process, for as long as it takes. The agent's
+    ``pending`` view lists the wait, with ``input``'s value, and its
+    ``signal`` view resolves it::
+
+        graph.add_node("approve", nodes.wait_for_signal("approval", input=lambda s: s["refund"], output="approved"))
+
+    Args:
+        signal: The signal's name.
+        output: The state field that gets the signal's value. None to write
+            nothing.
+        input: What the graph waits for (such as the refund to approve), from
+            the state, for ``pending`` to show. None to show nothing.
+
+    Returns:
+        The node, for ``StateGraph.add_node``.
+    """
+
+    async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
+        step = _step(runtime, "wait_for_signal")
+        request: _signals.WaitRequest = {"id": step.idempotency_key, "name": signal}
+        if input is not None:
+            request["input"] = input(state)
+        value = await step.ctx.call(
+            _signals.wait, request, key=_signals.signals_of(step.ctx), idempotency_key=step.idempotency_key
+        )
+        return _update(output, value)
+
+    return node
+
+
+def workflow(
+    target: Callable[..., Any],
+    *,
+    output: str | None = None,
+    input: Callable[[Any], Any] | None = None,
+    key: Callable[[Any], str] | None = None,
+) -> Node:
+    """Create a node that runs a workflow to completion, and writes its result to ``output``::
+
+        graph.add_node("ship", nodes.workflow(shipping.run, input=lambda s: s["order"], output="receipt"))
+
+    Args:
+        target: The workflow's main handler.
+        output: The state field that gets the workflow's result. None to
+            write nothing.
+        input: The workflow's input, from the state. Required if the handler
+            takes one.
+        key: The workflow id, from the state. Defaults to one of the node's
+            own, made of the agent's key and the node's task.
+
+    Returns:
+        The node, for ``StateGraph.add_node``.
+
+    Raises:
+        TypeError: If ``target`` is not a handler, or it takes an input and
+            ``input`` is not given (or the other way around).
+    """
+    handler = handler_of(target)
+    takes_input = input_type_of(handler) is not None
+    if takes_input != (input is not None):
+        name = f"{handler.service_tag.name}.{handler.name}"
+        raise TypeError(
+            f"{name} {'takes' if takes_input else 'takes no'} input: {'pass' if takes_input else 'drop'} input="
+        )
+
+    async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
+        step = _step(runtime, "workflow")
+        workflow_id = key(state) if key is not None else step.idempotency_key
+        value = input(state) if input is not None else None
+        result = await untyped(step.ctx).call(
+            target, *inputs_of(handler, value), key=workflow_id, idempotency_key=step.idempotency_key
+        )
+        return _update(output, result)
+
+    return node
+
+
+def subagent(
+    agent: object,
+    *,
+    message: Callable[[Any], str],
+    output: str | None = None,
+    key: Callable[[Any], str] | None = None,
+    handler: str = "chat",
+) -> Node:
+    """Create a node that sends a message to another agent, and writes its answer to ``output``::
+
+        graph.add_node("research", nodes.subagent(researcher, message=lambda s: s["question"], output="findings"))
+
+    By default the message goes to the agent's key ``<this key>.<node name>``,
+    so each run of the graph continues the same conversation with it.
+
+    Args:
+        agent: An agent, or any virtual object with a handler that takes text.
+        message: The message, from the state.
+        output: The state field that gets the agent's answer. None to write
+            nothing.
+        key: The agent's key, from the state. Defaults to
+            ``<this key>.<node name>``.
+        handler: The handler that takes the message.
+
+    Returns:
+        The node, for ``StateGraph.add_node``.
+    """
+    agent_name = typing.cast(str, getattr(agent, "name"))  # noqa: B009 (an SDK's definition)
+
+    async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
+        step = _step(runtime, "subagent")
+        agent_key = key(state) if key is not None else f"{step.ctx.key}.{step.node}"
+        answer = await step.ctx.generic_call(
+            agent_name, handler, message(state), key=agent_key, idempotency_key=step.idempotency_key
+        )
+        return _update(output, answer)
+
+    return node
+
+
+__all__ = ["Node", "subagent", "wait_for_signal", "workflow"]

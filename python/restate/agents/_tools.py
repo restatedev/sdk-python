@@ -300,24 +300,24 @@ async def _once(name: str, input: object, call: ToolCall, body: Callable[[ToolCa
     return result
 
 
-def _untyped(ctx: SessionContext) -> Any:
+def untyped(ctx: SessionContext) -> Any:
     """Return ``ctx`` untyped, to call a handler whose input type is known only at run time."""
     return ctx
 
 
-def _inputs(handler: Handler[Any, Any], value: Any) -> tuple[Any, ...]:
+def inputs_of(handler: Handler[Any, Any], value: Any) -> tuple[Any, ...]:
     """Return the positional arguments for calling ``handler``: ``(value,)`` if it takes an input."""
     return (value,) if handler.arity >= 2 else ()
 
 
-def _handler(target: Callable[..., Any]) -> Handler[Any, Any]:
+def handler_of(target: Callable[..., Any]) -> Handler[Any, Any]:
     try:
         return handler_from_callable(target)
     except ValueError:
         raise TypeError(f"{target!r} is not a handler of a service, an object or a workflow") from None
 
 
-def _input_type(handler: Handler[Any, Any]) -> Any:
+def input_type_of(handler: Handler[Any, Any]) -> Any:
     """Return the type of a handler's input, or ``None`` if it takes none."""
     if handler.arity < 2:
         return None
@@ -408,10 +408,10 @@ def call(
     Raises:
         TypeError: If ``target`` is not a handler.
     """
-    handler = _handler(target)
+    handler = handler_of(target)
     service = handler.service_tag.name
     model_keys = service if _keyed(handler) and key is None else None
-    shape = _input_of(_input_type(handler), model_keys)
+    shape = _input_of(input_type_of(handler), model_keys)
 
     async def run(arguments: dict[str, Any], tool_call: ToolCall) -> Any:
         chosen, value = arguments["key"], arguments["value"]
@@ -419,8 +419,8 @@ def call(
         async def made(c: ToolCall) -> Any:
             target_key = chosen if key is None else await configured(key, c.ctx)
             target_key = target_key if _keyed(handler) else None
-            return await _untyped(c.ctx).call(
-                target, *_inputs(handler, value), key=target_key, idempotency_key=c.idempotency_key
+            return await untyped(c.ctx).call(
+                target, *inputs_of(handler, value), key=target_key, idempotency_key=c.idempotency_key
             )
 
         return await _once(f"{service}/{handler.name}", arguments["raw"], tool_call, made)
@@ -461,18 +461,18 @@ def send(
     Raises:
         TypeError: If ``target`` is not a handler.
     """
-    handler = _handler(target)
+    handler = handler_of(target)
     service = handler.service_tag.name
     model_keys = service if _keyed(handler) and key is None else None
-    shape = _input_of(_input_type(handler), model_keys)
+    shape = _input_of(input_type_of(handler), model_keys)
 
     async def run(arguments: dict[str, Any], tool_call: ToolCall) -> Any:
         chosen, value = arguments["key"], arguments["value"]
 
         async def made(c: ToolCall) -> str:
             target_key = (chosen if key is None else await configured(key, c.ctx)) if _keyed(handler) else None
-            _untyped(c.ctx).send(
-                target, *_inputs(handler, value), key=target_key, delay=delay, idempotency_key=c.idempotency_key
+            untyped(c.ctx).send(
+                target, *inputs_of(handler, value), key=target_key, delay=delay, idempotency_key=c.idempotency_key
             )
             return f"sent to {service}{'' if target_key is None else f'/{target_key}'}/{handler.name}"
 
@@ -511,17 +511,17 @@ def workflow(
     Raises:
         TypeError: If ``target`` is not a handler.
     """
-    handler = _handler(target)
+    handler = handler_of(target)
     service = handler.service_tag.name
-    shape = _input_of(_input_type(handler), None)
+    shape = _input_of(input_type_of(handler), None)
 
     async def run(arguments: dict[str, Any], tool_call: ToolCall) -> Any:
         value = arguments["value"]
 
         async def made(c: ToolCall) -> Any:
             workflow_id = f"{c.ctx.key}-{c.call_id}" if key is None else await configured(key, c.ctx)
-            return await _untyped(c.ctx).call(
-                target, *_inputs(handler, value), key=workflow_id, idempotency_key=c.idempotency_key
+            return await untyped(c.ctx).call(
+                target, *inputs_of(handler, value), key=workflow_id, idempotency_key=c.idempotency_key
             )
 
         return await _once(service, arguments["raw"], tool_call, made)
