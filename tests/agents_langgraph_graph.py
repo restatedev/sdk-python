@@ -57,6 +57,7 @@ def route(state: Desk) -> str | list[str]:
     word, _ = _asked(state)
     routes = {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan", "tool": "call_tool"}
     routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
+    routes |= {"deep": "deep"}
     if word == "both":
         return ["ask", "side"]  # two branches at once
     return routes.get(word, "greet")
@@ -152,16 +153,47 @@ def plan(state: Desk) -> dict[str, Any]:
 builder = StateGraph(Desk)
 steps = {"greet": greet, "confirm": confirm, "first": first, "second": second, "plan": plan, "history": history}
 steps |= {"trim": trim, "humans": humans, "ask": asking, "twice": twice, "side": side}
-for name, node in {**steps, "call_tool": call_tool}.items():
+deep = StateGraph(Desk)  # a subgraph whose node interrupts twice
+deep.add_node("twice", typing.cast(Any, twice))
+deep.add_edge(START, "twice")
+deep.add_edge("twice", END)
+builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile()}
+for name, node in {**builder_nodes, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
 builder.add_node("approve", nodes.wait_for_signal("approval", output="approval"))
-branches = ["approve", "first", "plan", "greet", "history", "call_tool", "trim", "humans", "ask", "twice", "side"]
+branches = [
+    "approve",
+    "first",
+    "plan",
+    "greet",
+    "history",
+    "call_tool",
+    "trim",
+    "humans",
+    "ask",
+    "twice",
+    "side",
+    "deep",
+]
 builder.add_conditional_edges(START, route, branches)
 builder.add_edge("call_tool", "tools")
 builder.add_edge("approve", "confirm")
 builder.add_edge("first", "second")
-for last in ("greet", "confirm", "second", "plan", "history", "tools", "trim", "humans", "ask", "twice", "side"):
+for last in (
+    "greet",
+    "confirm",
+    "second",
+    "plan",
+    "history",
+    "tools",
+    "trim",
+    "humans",
+    "ask",
+    "twice",
+    "side",
+    "deep",
+):
     builder.add_edge(last, END)
 
 
@@ -319,9 +351,11 @@ async def test_an_interrupt_waits_for_a_signal_and_resumes_with_its_value(harnes
     assert (await post(harness, f"graph_desk/{key}/pending")).json() == []
 
 
-async def test_a_node_that_interrupts_twice_waits_twice(harness: HarnessEnvironment):
+@pytest.mark.parametrize("word", ["twice", "deep"])
+async def test_a_node_that_interrupts_twice_waits_twice(harness: HarnessEnvironment, word: str):
+    """In the graph, and in a subgraph, whose resume values are in its own checkpoint."""
     key = uuid.uuid4().hex
-    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, "twice"))
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, word))
     [first] = await until_waiting(harness, key)
     assert first["input"] == "first?"
     await post(harness, f"graph_desk/{key}/signal", json={"id": first["id"], "value": "A"})

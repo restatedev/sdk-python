@@ -33,10 +33,10 @@ message as a new ``HumanMessage``:
   run, copies what was missed, as messages are copied by id. The
   conversation is a log: a message the graph removes or edits later stays as
   it was copied.
-- The answer is the text of the run's last AI message. A graph whose state
-  has a ``structured_response`` (LangChain's ``create_agent`` with a
+- The answer is the text of the run's last AI message. A graph that writes a
+  ``structured_response`` in the run (LangChain's ``create_agent`` with a
   ``response_format``) answers with it instead, as JSON, which ``output=``
-  validates.
+  validates; one left from an earlier run is not the answer.
 - LangGraph's ``interrupt()`` waits for a signal, as ``wait_for_signal``
   does: each pending interrupt is a wait named ``"interrupt"``, which the
   agent's ``pending`` view lists with the interrupt's value, and which its
@@ -68,7 +68,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 from langgraph.pregel import Pregel
-from langgraph.types import Command
+from langgraph.types import Command, StateSnapshot
 from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
@@ -101,6 +101,12 @@ def _compiled(graph: AnyGraph, ctx: SessionContext) -> Any:
 _PROMPT = "restate_prompt"
 """The key, in each checkpoint's metadata, of the prompt whose run made it: the run's input may be trimmed away."""
 
+_STRUCTURED = "structured_response"
+"""The state field of a structured answer, as LangChain's ``create_agent`` writes it."""
+
+_STRUCTURED_BEFORE = "restate_structured_version"
+"""The key, in each checkpoint's metadata, of the version the ``structured_response`` channel had as its run began."""
+
 _CARRIED = ("prompt:", "closed:")
 """The prefixes of the ids of the messages that the conversation gave the graph, rather than the graph made."""
 
@@ -110,13 +116,23 @@ def _known(conversation: Conversation) -> set[str]:
     return {i for e in conversation.entries if (i := typing.cast(BaseMessage, e.item).id) is not None}
 
 
-def _answer(conversation: Conversation, running: Entry, state: dict[str, Any]) -> str:
-    """Return the run's answer: the JSON of the graph's ``structured_response``, else the last AI message's text.
+async def _structured_version(app: Any) -> str:
+    """Return the version of the graph's ``structured_response`` channel, which changes each time it is written."""
+    stored = await app.checkpointer.aget_tuple(THREAD)
+    versions = typing.cast(dict[str, Any], stored.checkpoint["channel_versions"]) if stored is not None else {}
+    return str(versions.get(_STRUCTURED, ""))
 
-    The text is read from the conversation, which is a log, as the graph may
-    have trimmed its own history (the run's input and answer included).
+
+async def _answer(app: Any, conversation: Conversation, running: Entry, state: dict[str, Any], before: str) -> str:
+    """Return the run's answer: the JSON of the ``structured_response`` it wrote, else its last AI message's text.
+
+    A ``structured_response`` counts only if the run wrote it (its channel's
+    version is not ``before``): the state keeps an earlier run's. The text is
+    read from the conversation, which is a log, as the graph may have trimmed
+    its own history (the run's input and answer included).
     """
-    if (structured := state.get("structured_response")) is not None:
+    structured = state.get(_STRUCTURED)
+    if structured is not None and await _structured_version(app) != before:
         return json.dumps(to_jsonable_python(structured))
     copied = [
         item
@@ -195,7 +211,32 @@ _RESUME = "__resume__"
 """LangGraph's channel of a task's resume values, among a checkpoint's pending writes."""
 
 
-async def _resumed(ctx: SessionContext, app: Any, snapshot: Any) -> dict[str, Any] | None:
+async def _interrupts(app: Any, snapshot: StateSnapshot) -> list[tuple[Any, int]]:
+    """Return the pending interrupts of ``snapshot`` (a graph's or a subgraph's), with how often each was resumed.
+
+    An interrupt is counted at the task that raised it, inside subgraphs,
+    whose resume values are among the pending writes of its own graph's
+    checkpoint.
+    """
+    stored = await app.checkpointer.aget_tuple(snapshot.config)
+    writes = typing.cast(list[tuple[str, str, Any]], stored.pending_writes if stored is not None else [])
+    resumed: dict[str, int] = {}
+    for task_id, channel, values in writes:
+        if channel == _RESUME:
+            count = len(typing.cast(list[Any], values)) if isinstance(values, list) else 1
+            resumed[task_id] = max(resumed.get(task_id, 0), count)
+    found: list[tuple[Any, int]] = []
+    for task in snapshot.tasks:
+        if not task.interrupts:
+            continue
+        if isinstance(task.state, StateSnapshot):
+            found.extend(await _interrupts(app, task.state))
+        else:
+            found.extend((pending, resumed.get(task.id, 0)) for pending in task.interrupts)
+    return found
+
+
+async def _resumed(ctx: SessionContext, app: Any) -> dict[str, Any] | None:
     """Wait for a signal for each of the graph's pending interrupts, and return their values by interrupt id.
 
     Return ``None`` if no interrupt is pending. Each wait's id is the
@@ -203,27 +244,20 @@ async def _resumed(ctx: SessionContext, app: Any, snapshot: Any) -> dict[str, An
     node that interrupts twice has the same interrupt id both times, and
     each time is a wait of its own. A retried attempt joins the same waits.
     """
-    tasks = [task for task in snapshot.tasks if task.interrupts]
-    if not tasks:
+    pending = await _interrupts(app, typing.cast(StateSnapshot, await app.aget_state(THREAD, subgraphs=True)))
+    if not pending:
         return None
-    stored = await app.checkpointer.aget_tuple(THREAD)
-    writes = typing.cast(list[tuple[str, str, Any]], stored.pending_writes if stored is not None else [])
-    resumed: dict[str, int] = {}
-    for task_id, channel, values in writes:
-        if channel == _RESUME:
-            resumed[task_id] = max(
-                resumed.get(task_id, 0), len(typing.cast(list[Any], values)) if isinstance(values, list) else 1
-            )
     waits: dict[str, Any] = {}
-    for task in tasks:
-        for pending in task.interrupts:
-            wait_id = f"langgraph:{ctx.key}:{pending.id}:{resumed.get(task.id, 0)}"
-            request: _signals.WaitRequest = {
-                "id": wait_id,
-                "name": INTERRUPT,
-                "input": to_jsonable_python(pending.value),
-            }
-            waits[pending.id] = ctx.call(_signals.wait, request, key=_signals.signals_of(ctx), idempotency_key=wait_id)
+    for interrupted, times in pending:
+        if interrupted.id in waits:
+            continue
+        wait_id = f"langgraph:{ctx.key}:{interrupted.id}:{times}"
+        request: _signals.WaitRequest = {
+            "id": wait_id,
+            "name": INTERRUPT,
+            "input": to_jsonable_python(interrupted.value),
+        }
+        waits[interrupted.id] = ctx.call(_signals.wait, request, key=_signals.signals_of(ctx), idempotency_key=wait_id)
     values = await asyncio.gather(*waits.values())
     return dict(zip(waits, values, strict=True))
 
@@ -236,22 +270,25 @@ def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
         assert running is not None and running.prompt is not None
         prompt_id = _prompt_id(running)
         app = _compiled(graph, ctx)
-        # Each checkpoint of the run names its prompt, so that a retried attempt finds the run it cut off.
-        config: RunnableConfig = {**THREAD, "metadata": {_PROMPT: prompt_id}}
         snapshot = await app.aget_state(THREAD)
         values = typing.cast(dict[str, Any], snapshot.values or {})
         messages = typing.cast(list[BaseMessage], values.get("messages", []))
         known = _known(conversation)
-        asked: bool = typing.cast(dict[str, Any], snapshot.metadata or {}).get(_PROMPT) == prompt_id
+        metadata = typing.cast(dict[str, Any], snapshot.metadata or {})
+        asked = metadata.get(_PROMPT) == prompt_id
+        before = str(metadata.get(_STRUCTURED_BEFORE, "")) if asked else await _structured_version(app)
+        # Each checkpoint of the run names its prompt, so that a retried attempt finds the run it cut off, and the
+        # version its structured response had before it.
+        config: RunnableConfig = {**THREAD, "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before}}
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
             await _copied(ctx, conversation, known, messages)
-            return _answer(conversation, running, values)
+            return await _answer(app, conversation, running, values, before)
         # A run cut off by a crash is resumed: first by the signals its pending interrupts wait for, if any. A new
         # message (or one after a stopped run) starts a run, after what closed the previous run.
         start: Any
         if asked:
-            resumes = await _resumed(ctx, app, snapshot)
+            resumes = await _resumed(ctx, app)
             start = Command(resume=resumes) if resumes is not None else None
         else:
             prompt = HumanMessage(str(typing.cast(BaseMessage, running.item).text), id=prompt_id)
@@ -261,9 +298,9 @@ def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
                 values = typing.cast(dict[str, Any], state)
                 await _copied(ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])))
             # The run stops at its interrupts: it goes on with the signals that answer them.
-            resumes = await _resumed(ctx, app, await app.aget_state(THREAD))
+            resumes = await _resumed(ctx, app)
             if resumes is None:
-                return _answer(conversation, running, values)
+                return await _answer(app, conversation, running, values, before)
             start = Command(resume=resumes)
 
     return run

@@ -168,13 +168,14 @@ def tools(given: Sequence[AnyTool]) -> list[BaseTool]:
         graph = create_agent(model, tools=langgraph.tools([call(order_status, description="..."), get_weather]))
         desk = langgraph.agent("desk", graph=graph)
 
-    The ``restate.agents`` tools (``tool``, ``call``, ``send``, ``workflow``,
+    The tools that are Restate's (``call``, ``send``, ``workflow``,
     ``subagent``, ``wait_for_signal``) make their Restate calls once per tool
     call, even if a crash runs the tool call again: the model's reply, with
-    the tool call's id, is stored before the tools run. They take the
-    handler's context from the graph's run (``langgraph.agent(graph=...)``
-    passes it; a handler of your own passes ``context=ctx``). LangChain tools
-    are passed through, and run again after a crash.
+    the tool call's id, is stored before the tools run. A ``tool`` of your
+    own runs your function, again after a crash, as do LangChain tools,
+    which are passed through. They take the handler's context from the
+    graph's run (``langgraph.agent(graph=...)`` passes it; a handler of your
+    own passes ``context=ctx``).
 
     Args:
         given: ``restate.agents`` tools, and LangChain tools.

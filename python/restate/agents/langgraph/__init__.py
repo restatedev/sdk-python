@@ -46,7 +46,8 @@ Good to know about a graph of your own:
 - A graph is durable a step at a time: a crash runs the step it cut off
   again. That is fine for a model request, but a step's other side effects
   (a payment, a plain LangChain tool) happen again. Make them Restate's: a
-  prebuilt node, or a tool from ``tools()``, does its step once.
+  prebuilt node, or a Restate tool from ``tools()`` (``call``, ``send``,
+  ``workflow``, ``subagent``, ``wait_for_signal``), does its step once.
 - A run that waits (for a signal, say) is checkpointed with the graph as it
   was. Changing the graph meanwhile (renaming a node, or a state field) is a
   migration: keep what waiting runs need until they are done, as with a

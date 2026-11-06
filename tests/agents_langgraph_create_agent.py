@@ -82,6 +82,7 @@ class Scripted(BaseChatModel):
 tools = langgraph.tools([call(add, name="add", description="Add to the ledger.", key=lambda ctx: ctx.key)])
 desk = langgraph.agent("ca_desk", graph=create_agent(Scripted(), tools=tools))
 planner = langgraph.agent("ca_planner", graph=create_agent(Scripted(), response_format=ToolStrategy(Plan)), output=Plan)
+plain = langgraph.agent("ca_plain", graph=create_agent(Scripted(), response_format=ToolStrategy(Plan)))
 
 
 @pytest.fixture(scope="session")
@@ -92,7 +93,7 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([ledger, desk, planner]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([ledger, desk, planner, plain]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -117,3 +118,12 @@ async def test_create_agent_calls_restate_through_the_tools(harness: HarnessEnvi
 async def test_create_agent_answers_with_its_structured_response(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     assert (await chat(harness, "ca_planner", key, f"plan {key}")).json() == {"title": key}
+
+
+async def test_a_structured_response_is_the_answer_only_of_the_run_that_wrote_it(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    assert (await chat(harness, "ca_plain", key, "plan a")).json() == '{"title": "a"}'
+    # The same structured response again is the answer again: the run wrote it.
+    assert (await chat(harness, "ca_plain", key, "plan a")).json() == '{"title": "a"}'
+    # A run that writes none answers with its text, not with the one an earlier run left in the state.
+    assert (await chat(harness, "ca_plain", key, "hi")).json() == "echo: hi"
