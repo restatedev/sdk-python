@@ -52,6 +52,7 @@ from pydantic_ai.messages import (  # noqa: E402
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel  # noqa: E402
+from pydantic_ai.profiles.google import GoogleModelProfile  # noqa: E402
 
 import restate  # noqa: E402
 from restate import HarnessEnvironment, sessions  # noqa: E402
@@ -136,7 +137,7 @@ pai_gemini_2 = pydantic_ai.agent(
     "pai_gemini_2",
     # As Pydantic AI's profile of a Gemini model before Gemini 3: a JSON schema mode, but not with function tools.
     model=FunctionModel(
-        pai_model, profile={"supports_json_schema_output": True, "google_supports_tool_combination": False}
+        pai_model, profile=GoogleModelProfile(supports_json_schema_output=True, google_supports_tool_combination=False)
     ),
     system="Plan.",
     tools=[get_weather],
