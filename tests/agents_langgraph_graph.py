@@ -20,6 +20,7 @@ import collections
 import threading
 import typing
 import uuid
+from datetime import timedelta
 from typing import Any, NotRequired, TypedDict
 
 import httpx2
@@ -31,6 +32,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, Remove
 from langchain_core.tools import tool  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
+from langgraph.types import interrupt  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import restate  # noqa: E402
@@ -51,10 +53,13 @@ def _asked(state: Desk) -> tuple[str, str]:
     return word, rest
 
 
-def route(state: Desk) -> str:
+def route(state: Desk) -> str | list[str]:
     word, _ = _asked(state)
     routes = {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan", "tool": "call_tool"}
-    routes |= {"history": "history", "trim": "trim", "humans": "humans"}
+    routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
+    routes |= {"deep": "deep"}
+    if word == "both":
+        return ["ask", "side"]  # two branches at once
     return routes.get(word, "greet")
 
 
@@ -122,24 +127,73 @@ def humans(state: Desk) -> dict[str, Any]:
     return {"messages": [AIMessage(" | ".join(said))]}
 
 
+asks: collections.Counter[str] = collections.Counter()
+
+
+def asking(state: Desk) -> dict[str, Any]:
+    asks[_asked(state)[1]] += 1
+    answer = interrupt({"approve": _asked(state)[1]})
+    return {"messages": [AIMessage(f"asked: {answer}")]}
+
+
+def twice(state: Desk) -> dict[str, Any]:
+    first = interrupt("first?")
+    second = interrupt("second?")
+    return {"messages": [AIMessage(f"twice: {first} {second}")]}
+
+
+def side(state: Desk) -> dict[str, Any]:
+    return {"messages": [AIMessage(f"side: {interrupt('side?')}")]}
+
+
 def plan(state: Desk) -> dict[str, Any]:
     return {"messages": [AIMessage(f'{{"title": "{_asked(state)[1]}"}}')]}
 
 
 builder = StateGraph(Desk)
 steps = {"greet": greet, "confirm": confirm, "first": first, "second": second, "plan": plan, "history": history}
-steps |= {"trim": trim, "humans": humans}
-for name, node in {**steps, "call_tool": call_tool}.items():
+steps |= {"trim": trim, "humans": humans, "ask": asking, "twice": twice, "side": side}
+deep = StateGraph(Desk)  # a subgraph whose node interrupts twice
+deep.add_node("twice", typing.cast(Any, twice))
+deep.add_edge(START, "twice")
+deep.add_edge("twice", END)
+builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile()}
+for name, node in {**builder_nodes, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
 builder.add_node("approve", nodes.wait_for_signal("approval", output="approval"))
-builder.add_conditional_edges(
-    START, route, ["approve", "first", "plan", "greet", "history", "call_tool", "trim", "humans"]
-)
+branches = [
+    "approve",
+    "first",
+    "plan",
+    "greet",
+    "history",
+    "call_tool",
+    "trim",
+    "humans",
+    "ask",
+    "twice",
+    "side",
+    "deep",
+]
+builder.add_conditional_edges(START, route, branches)
 builder.add_edge("call_tool", "tools")
 builder.add_edge("approve", "confirm")
 builder.add_edge("first", "second")
-for last in ("greet", "confirm", "second", "plan", "history", "tools", "trim", "humans"):
+for last in (
+    "greet",
+    "confirm",
+    "second",
+    "plan",
+    "history",
+    "tools",
+    "trim",
+    "humans",
+    "ask",
+    "twice",
+    "side",
+    "deep",
+):
     builder.add_edge(last, END)
 
 
@@ -158,6 +212,8 @@ async def ask(ctx: sessions.SessionContext, text: str) -> str:
 
 compiled = langgraph.agent("graph_compiled", graph=builder.compile())
 planner = langgraph.agent("graph_planner", graph=builder, output=Plan)
+# Restate suspends its turns after a second of waiting.
+patient = langgraph.agent("graph_patient", graph=builder, inactivity_timeout=timedelta(seconds=1))
 
 
 @pytest.fixture(scope="session")
@@ -168,7 +224,7 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([desk, compiled, planner]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([desk, compiled, planner, patient]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -190,9 +246,9 @@ async def messages(harness: HarnessEnvironment, agent: str, key: str) -> list[tu
     return [(m["role"], " ".join(str(p.get("text", "")) for p in m["parts"])) for m in page["messages"]]
 
 
-async def until_waiting(harness: HarnessEnvironment, key: str) -> list[dict[str, Any]]:
+async def until_waiting(harness: HarnessEnvironment, key: str, agent: str = "graph_desk") -> list[dict[str, Any]]:
     for _ in range(200):
-        if waits := (await post(harness, f"graph_desk/{key}/pending")).json():
+        if waits := (await post(harness, f"{agent}/{key}/pending")).json():
             return typing.cast(list[dict[str, Any]], waits)
         await asyncio.sleep(0.05)
     raise AssertionError("nothing waits")
@@ -283,6 +339,88 @@ async def test_a_message_the_graph_trimmed_is_not_brought_back(harness: HarnessE
     key = uuid.uuid4().hex
     assert (await chat(harness, "graph_desk", key, f"trim {key}")).json() == "trimmed"
     assert (await chat(harness, "graph_desk", key, "humans")).json() == "humans"
+
+
+async def test_an_interrupt_waits_for_a_signal_and_resumes_with_its_value(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, f"ask {key}"))
+    [wait] = await until_waiting(harness, key)
+    assert (wait["name"], wait["input"]) == ("interrupt", {"approve": key})
+    await post(harness, f"graph_desk/{key}/signal", json={"name": "interrupt", "value": "yes"})
+    assert (await answering).json() == "asked: yes"
+    assert (await post(harness, f"graph_desk/{key}/pending")).json() == []
+
+
+@pytest.mark.parametrize("word", ["twice", "deep"])
+async def test_a_node_that_interrupts_twice_waits_twice(harness: HarnessEnvironment, word: str):
+    """In the graph, and in a subgraph, whose resume values are in its own checkpoint."""
+    key = uuid.uuid4().hex
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, word))
+    [first] = await until_waiting(harness, key)
+    assert first["input"] == "first?"
+    await post(harness, f"graph_desk/{key}/signal", json={"id": first["id"], "value": "A"})
+    second = first
+    for _ in range(200):
+        waits = (await post(harness, f"graph_desk/{key}/pending")).json()
+        if waits and waits[0]["id"] != first["id"]:
+            [second] = waits
+            break
+        await asyncio.sleep(0.05)
+    assert second["input"] == "second?"
+    await post(harness, f"graph_desk/{key}/signal", json={"id": second["id"], "value": "B"})
+    assert (await answering).json() == "twice: A B"
+
+
+async def test_interrupts_of_branches_at_once_wait_at_once(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, f"both {key}"))
+    waits: list[dict[str, Any]] = []
+    for _ in range(200):
+        if len(waits := (await post(harness, f"graph_desk/{key}/pending")).json()) == 2:
+            break
+        await asyncio.sleep(0.05)
+    assert sorted(str(w["input"]) for w in waits) == sorted([str({"approve": key}), "side?"])
+    for wait in waits:
+        await post(harness, f"graph_desk/{key}/signal", json={"id": wait["id"], "value": "ok"})
+    await answering
+    shown = await messages(harness, "graph_desk", key)
+    assert sorted(text for role, text in shown if role == "assistant") == ["asked: ok", "side: ok"]
+
+
+@pytest.mark.parametrize("word", ["ask", "refund"])
+async def test_a_killed_turn_leaves_no_wait_behind(harness: HarnessEnvironment, word: str):
+    """An interrupt's wait, and a wait_for_signal node's, end with their turn, as the companion closes them."""
+    key = uuid.uuid4().hex
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, f"{word} {key}"))
+    await until_waiting(harness, key)
+    turn = (await post(harness, f"graph_desk/{key}/status")).json()["answering"]["invocationId"]
+    async with httpx2.AsyncClient() as admin:
+        killed = await admin.patch(f"{harness.admin_api_url}/invocations/{turn}/kill")
+    assert killed.status_code < 300, killed.text
+    await answering
+    for _ in range(200):
+        if (await post(harness, f"graph_desk/{key}/pending")).json() == []:
+            break
+        await asyncio.sleep(0.05)
+    assert (await post(harness, f"graph_desk/{key}/pending")).json() == []
+
+
+async def test_a_turn_suspended_while_it_waits_resumes_on_the_same_wait(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    answering = asyncio.ensure_future(chat(harness, "graph_patient", key, f"ask {key}"))
+    [wait] = await until_waiting(harness, key, "graph_patient")
+    await asyncio.sleep(2.5)  # Restate suspends the turn
+    query = (
+        "SELECT status FROM sys_invocation WHERE target_service_name = 'graph_patient' AND target_handler_name = 'chat'"
+    )
+    async with httpx2.AsyncClient() as admin:
+        found = await admin.post(
+            f"{harness.admin_api_url}/query", json={"query": query}, headers={"accept": "application/json"}
+        )
+    assert [row["status"] for row in found.json()["rows"]] == ["suspended"]
+    assert (await post(harness, f"graph_patient/{key}/pending")).json() == [wait]
+    await post(harness, f"graph_patient/{key}/signal", json={"id": wait["id"], "value": "later"})
+    assert (await answering).json() == "asked: later"
 
 
 async def test_output_validates_the_last_ai_message(harness: HarnessEnvironment):

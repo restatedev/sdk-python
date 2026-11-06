@@ -31,7 +31,7 @@ adk = ["google-adk>=1.20.0"]
 openai = ["openai-agents>=0.6.1"]
 pydantic_ai = ["pydantic-ai-slim>=2.0,<3", "pydantic>=2"]
 langchain = ["langchain>=1.0.0", "langgraph>=1.0.0", "langchain-core>=1.0.0"]
-langgraph = ["langgraph>=1.0.0", "langchain-core>=1.0.0", "pydantic>=2"]
+langgraph = ["langgraph>=1.0.0,<2", "langchain-core>=1.0.0,<2", "pydantic>=2"]
 tracing = ["opentelemetry-api>=1.36.0"]
 zstd = [
     "backports.zstd ; python_version < '3.14'",

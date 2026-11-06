@@ -56,6 +56,7 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.runtime import get_runtime
 from pydantic import BaseModel, PrivateAttr
 
 from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
@@ -125,7 +126,7 @@ class _RestateTool(BaseTool):
     """A ``restate.agents`` tool as a LangChain tool; it receives its tool call id and validates its own arguments."""
 
     _tool: Tool = PrivateAttr()
-    _ctx: SessionContext = PrivateAttr()
+    _ctx: SessionContext | None = PrivateAttr(default=None)
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError(f"{self.name} runs asynchronously only")
@@ -135,15 +136,54 @@ class _RestateTool(BaseTool):
         call_id = call.get("id") if isinstance(input, dict) else None
         if not call_id:
             raise ValueError(f"{self.name}: a tool call without an id")
-        text = await self._tool.run(call.get("args", {}), ToolCall(self._ctx, str(call_id)))
+        ctx = self._ctx if self._ctx is not None else _run_context(self.name)
+        text = await self._tool.run(call.get("args", {}), ToolCall(ctx, str(call_id)))
         return ToolMessage(content=text, tool_call_id=str(call_id), name=self.name)
 
 
-def _native(tool: Tool, ctx: SessionContext) -> BaseTool:
+def _run_context(tool: str) -> SessionContext:
+    """Return the handler's context of the graph run in progress: LangGraph's run context (``context=ctx``)."""
+    try:
+        ctx = typing.cast("SessionContext | None", get_runtime().context)
+    except RuntimeError:
+        ctx = None
+    if ctx is None:
+        raise TypeError(
+            f"the tool {tool} runs in a graph that langgraph.agent(graph=...) runs, or that is invoked with the "
+            "handler's context: ainvoke(..., context=ctx)"
+        )
+    return ctx
+
+
+def _native(tool: Tool, ctx: SessionContext | None) -> BaseTool:
     native = _RestateTool(name=tool.name, description=tool.description, args_schema=tool.input_schema)
     native._tool = tool  # pyright: ignore[reportPrivateUsage]
     native._ctx = ctx  # pyright: ignore[reportPrivateUsage]
     return native
+
+
+def tools(given: Sequence[AnyTool]) -> list[BaseTool]:
+    """Return ``given`` as LangChain tools, for a graph of your own or LangChain's ``create_agent``::
+
+        graph = create_agent(model, tools=langgraph.tools([call(order_status, description="..."), get_weather]))
+        desk = langgraph.agent("desk", graph=graph)
+
+    The tools that are Restate's (``call``, ``send``, ``workflow``,
+    ``subagent``, ``wait_for_signal``) make their Restate calls once per tool
+    call, even if a crash runs the tool call again: the model's reply, with
+    the tool call's id, is stored before the tools run. A ``tool`` of your
+    own runs your function, again after a crash, as do LangChain tools,
+    which are passed through. They take the handler's context from the
+    graph's run (``langgraph.agent(graph=...)`` passes it; a handler of your
+    own passes ``context=ctx``).
+
+    Args:
+        given: ``restate.agents`` tools, and LangChain tools.
+
+    Returns:
+        The tools, as LangChain takes them.
+    """
+    return [_native(t, None) if isinstance(t, Tool) else t for t in given]
 
 
 # LangChain's own (de)serialization of messages, whose dicts it leaves untyped.
