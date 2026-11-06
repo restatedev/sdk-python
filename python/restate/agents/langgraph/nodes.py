@@ -50,9 +50,11 @@ from typing import Any
 
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
+from pydantic import TypeAdapter, ValidationError
 
 from restate.agents import _signals
 from restate.agents._tools import handler_of, input_type_of, inputs_of, untyped
+from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 
 
@@ -98,6 +100,27 @@ def _step(runtime: Runtime[Any], kind: str) -> _Step:
     namespace = typing.cast(str, configurable.get("checkpoint_ns") or configurable[_TASK_ID])
     node = namespace.rsplit("|", 1)[-1].split(":", 1)[0]
     return _Step(ctx, node, f"langgraph:{ctx.key}:{namespace}")
+
+
+def _validator(input_type: Any, name: str) -> Callable[[Any], Any]:
+    """Return what makes a value from the state (a dict, say) a value of a handler's ``input_type``.
+
+    Graph state is plain data, while a handler may take a Pydantic model, a
+    dataclass or a ``TypedDict``: the value is validated into it, and one of
+    that type already is passed through. A value that does not validate fails
+    the node with a terminal error, as a retry would read the same state.
+    """
+    if input_type is None or input_type is Any:
+        return lambda value: value
+    adapter: TypeAdapter[Any] = TypeAdapter(input_type)
+
+    def validated(value: Any) -> Any:
+        try:
+            return adapter.validate_python(value)
+        except ValidationError as error:
+            raise TerminalError(f"the input of {name} is not valid: {error}") from error
+
+    return validated
 
 
 def _update(output: str | None, value: object) -> dict[str, Any]:
@@ -159,7 +182,8 @@ def workflow(
         output: The state field that gets the workflow's result. None to
             write nothing.
         input: The workflow's input, from the state. Required if the handler
-            takes one.
+            takes one. Plain data (a dict, say) is validated into the
+            handler's input type, such as a Pydantic model.
         key: The workflow id, from the state. Defaults to one of the node's
             own, made of the agent's key and the node's task.
 
@@ -169,11 +193,16 @@ def workflow(
     Raises:
         TypeError: If ``target`` is not a handler, or it takes an input and
             ``input`` is not given (or the other way around).
+
+    When it runs, the node fails with a terminal error if the input does not
+    validate.
     """
     handler = handler_of(target)
-    takes_input = input_type_of(handler) is not None
+    input_type = input_type_of(handler)
+    takes_input = input_type is not None
+    name = f"{handler.service_tag.name}.{handler.name}"
+    validated = _validator(input_type, name)
     if takes_input != (input is not None):
-        name = f"{handler.service_tag.name}.{handler.name}"
         raise TypeError(
             f"{name} {'takes' if takes_input else 'takes no'} input: {'pass' if takes_input else 'drop'} input="
         )
@@ -181,7 +210,7 @@ def workflow(
     async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
         step = _step(runtime, "workflow")
         workflow_id = key(state) if key is not None else step.idempotency_key
-        value = input(state) if input is not None else None
+        value = validated(input(state)) if input is not None else None
         result = await untyped(step.ctx).call(
             target, *inputs_of(handler, value), key=workflow_id, idempotency_key=step.idempotency_key
         )

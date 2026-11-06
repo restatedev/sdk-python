@@ -31,6 +31,7 @@ pytest.importorskip("langgraph")
 
 from langchain_core.runnables import RunnableConfig  # noqa: E402
 from langgraph.graph import END, START, StateGraph  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 import restate  # noqa: E402
 from restate import HarnessEnvironment, sessions  # noqa: E402
@@ -53,6 +54,31 @@ shipped: collections.Counter[str] = collections.Counter()
 async def ship(ctx: restate.WorkflowContext, order: str) -> str:
     shipped[order] += 1
     return f"shipped {order}"
+
+
+class Invoice(BaseModel):
+    order: str
+    amount: float
+
+
+billing = restate.Workflow("nodes_billing")
+billed: collections.Counter[str] = collections.Counter()
+
+
+@billing.main()
+async def bill(ctx: restate.WorkflowContext, invoice: Invoice) -> str:
+    billed[invoice.order] += 1
+    return f"billed ${invoice.amount:g} for {invoice.order}"
+
+
+def billing_graph(amount: object) -> Any:
+    """A workflow node whose input, from the state, is a dict: the workflow takes an ``Invoice``."""
+    graph = StateGraph(State)
+    node = nodes.workflow(bill, input=lambda s: {"order": s["refund"], "amount": amount}, output="receipt")
+    graph.add_node("bill", node)
+    graph.add_edge(START, "bill")
+    graph.add_edge("bill", END)
+    return graph
 
 
 researcher = restate.VirtualObject("nodes_researcher")
@@ -122,6 +148,8 @@ GRAPHS = {
     "approval": approval_then_shipping(),
     "research_crash": beside_a_crash("research"),
     "wait_crash": beside_a_crash("approve"),
+    "invoice": billing_graph(12.5),
+    "bad_invoice": billing_graph("a lot"),
 }
 
 desk = AgentObject("nodes_desk")
@@ -149,7 +177,7 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([desk, shipping, researcher]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([desk, shipping, billing, researcher]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -223,6 +251,20 @@ async def test_a_node_refuses_to_run_unless_each_step_is_stored_before_it_runs()
     for durability in ({}, {"durability": "async"}, {"durability": "exit"}):
         with pytest.raises(TypeError, match='durability="sync"'):
             await app.ainvoke({"refund": "r"}, config, context=object(), **durability)
+
+
+async def test_a_workflow_node_validates_plain_data_from_the_state_into_the_handlers_input(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    state = (await post(harness, f"{key}/run", {"graph": "invoice", "refund": key})).json()
+    assert state["receipt"] == f"billed $12.5 for {key}"
+
+
+async def test_input_that_does_not_validate_fails_the_node_for_good(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    failed = await post(harness, f"{key}/run", {"graph": "bad_invoice", "refund": key})
+    assert failed.status_code == 500
+    assert "the input of nodes_billing.bill is not valid" in failed.text and "amount" in failed.text
+    assert billed[key] == 0
 
 
 def test_a_workflow_node_takes_input_exactly_when_its_handler_does():

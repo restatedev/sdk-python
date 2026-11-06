@@ -92,9 +92,7 @@ graph.add_node(
 )
 graph.add_node(
     "pay",
-    nodes.workflow(
-        pay, input=lambda s: Refund.model_validate(s["refund"]), key=lambda s: s["refund"]["order"], output="receipt"
-    ),
+    nodes.workflow(pay, input=lambda s: s["refund"], key=lambda s: s["refund"]["order"], output="receipt"),
 )
 graph.add_node("answer", answer)
 graph.add_edge(START, "read")
