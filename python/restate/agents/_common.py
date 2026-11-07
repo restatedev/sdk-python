@@ -22,7 +22,6 @@ import json
 import os
 import re
 import typing
-import weakref
 from collections.abc import Awaitable, Callable
 
 from restate.exceptions import TerminalError
@@ -192,7 +191,26 @@ class ToolError(Exception):
         self.__cause__ = cause
 
 
-_TOOL_ERRORS: ScopeKey[weakref.WeakSet[BaseException]] = ScopeKey("from_tool")
+class ErrorSet:
+    """A set of errors, by identity, that holds them for as long as it lives (an attempt, or a run).
+
+    Not a ``WeakSet``: an error of a built-in type (``KeyError``,
+    ``TypeError``, ...) cannot be weakly referenced, and adding one would
+    raise in its place. Not a ``set``: an error type may define equality.
+    """
+
+    def __init__(self) -> None:
+        self._errors: dict[int, BaseException] = {}
+
+    def add(self, error: BaseException) -> None:
+        """Add ``error``."""
+        self._errors[id(error)] = error
+
+    def __contains__(self, error: object) -> bool:
+        return self._errors.get(id(error)) is error
+
+
+_TOOL_ERRORS: ScopeKey[ErrorSet] = ScopeKey("from_tool")
 """The errors that framework tools (not those made by ``tool()``) raised in the attempt; see ``from_tool``."""
 
 
@@ -203,7 +221,7 @@ def from_tool(ctx: SessionContext, error: BaseException) -> None:
     even if it looks like one (a tool that calls a model API can fail the same
     way).
     """
-    _TOOL_ERRORS.of(ctx, weakref.WeakSet[BaseException]).add(error)
+    _TOOL_ERRORS.of(ctx, ErrorSet).add(error)
 
 
 _FOR_GOOD = frozenset({"AuthenticationError", "PermissionDeniedError", "NotFoundError", "BadRequestError"})

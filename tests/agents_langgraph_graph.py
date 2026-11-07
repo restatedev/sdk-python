@@ -64,7 +64,8 @@ def route(state: Desk) -> str | list[str]:
     routes = {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan", "tool": "call_tool"}
     routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
     routes |= {"deep": "deep", "pause": "pause", "again": "again", "lookup": "call_lookup", "fetch": "fetch"}
-    routes |= {"refuse": "refuse", "refuse_sync": "refuse_sync", "consult": "call_lookup"}
+    routes |= {"refuse": "refuse", "refuse_sync": "refuse_sync", "refuse_builtin": "refuse_builtin"}
+    routes |= {"consult": "call_lookup", "count": "call_lookup"}
     if word == "both":
         return ["ask", "side"]  # two branches at once
     return routes.get(word, "greet")
@@ -219,8 +220,20 @@ async def consult(order: str) -> str:
     return f"order {order} looks fine"
 
 
+counts: collections.Counter[str] = collections.Counter()
+
+
+@tool
+async def count(order: str) -> str:
+    """How many items an order has, from a cache whose first lookup misses: a KeyError, of a built-in type."""
+    counts[order] += 1
+    if counts[order] == 1:
+        raise KeyError(order)
+    return f"order {order} has 3 items"
+
+
 def call_lookup(state: Desk) -> dict[str, Any]:
-    """Call the tool the message names (lookup or consult) for the order it names."""
+    """Call the tool the message names (lookup, consult or count) for the order it names."""
     name, order = _asked(state)
     return {"messages": [AIMessage("", tool_calls=[{"id": f"{name}-{order}", "name": name, "args": {"order": order}}])]}
 
@@ -240,7 +253,9 @@ def fetch(state: Desk) -> dict[str, Any]:
 
 
 class Refusing(BaseChatModel):
-    """A model whose provider refuses every request."""
+    """A model whose provider refuses every request: for a wrong key, or (``builtin``) as Anthropic's does for none."""
+
+    builtin: bool = False
 
     @property
     def _llm_type(self) -> str:
@@ -253,11 +268,18 @@ class Refusing(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
+        if self.builtin:
+            # A TypeError, of a built-in type, which has no weak reference.
+            raise TypeError("Could not resolve authentication method. Expected either api_key or auth_token to be set.")
         raise AuthenticationError("invalid x-api-key")
 
 
 async def refuse(state: Desk) -> dict[str, Any]:
     return {"messages": [await Refusing().ainvoke(state["messages"])]}
+
+
+async def refuse_builtin(state: Desk) -> dict[str, Any]:
+    return {"messages": [await Refusing(builtin=True).ainvoke(state["messages"])]}
 
 
 def refuse_sync(state: Desk) -> dict[str, Any]:
@@ -267,11 +289,11 @@ def refuse_sync(state: Desk) -> dict[str, Any]:
 
 builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile(), "pause": pause, "again": again}
 builder_nodes |= {"call_lookup": call_lookup, "found": found, "fetch": fetch, "refuse": refuse}
-builder_nodes |= {"refuse_sync": refuse_sync}
+builder_nodes |= {"refuse_sync": refuse_sync, "refuse_builtin": refuse_builtin}
 for name, node in {**builder_nodes, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
-builder.add_node("lookup_tools", ToolNode([lookup, consult]))
+builder.add_node("lookup_tools", ToolNode([lookup, consult, count]))
 builder.add_node("approve", nodes.wait_for_signal("approval", output="approval"))
 branches = [
     "approve",
@@ -292,6 +314,7 @@ branches = [
     "fetch",
     "refuse",
     "refuse_sync",
+    "refuse_builtin",
 ]
 builder.add_conditional_edges(START, route, branches)
 builder.add_edge("call_tool", "tools")
@@ -318,6 +341,7 @@ for last in (
     "fetch",
     "refuse",
     "refuse_sync",
+    "refuse_builtin",
 ):
     builder.add_edge(last, END)
 
@@ -583,10 +607,12 @@ async def test_a_static_breakpoint_in_a_subgraph_fails_the_turn_and_the_next_mes
     assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
 
 
-@pytest.mark.parametrize("word", ["lookup", "fetch", "consult"])
-async def test_an_error_of_a_tool_or_a_node_is_retried_whatever_its_name(harness: HarnessEnvironment, word: str):
+@pytest.mark.parametrize("word", ["lookup", "fetch", "consult", "count"])
+async def test_an_error_of_a_tool_or_a_node_is_retried_whatever_its_name(
+    harness: HarnessEnvironment, word: str, caplog: pytest.LogCaptureFixture
+):
     """Named as a model provider's refusal, it is not one: only the error of the agent's own models is, and a model
-    that a tool calls is the tool's."""
+    that a tool calls is the tool's. An error of a built-in type (count's KeyError) logs no callback error."""
     key = uuid.uuid4().hex
     answered = await chat(harness, "graph_desk", key, f"{word} {key}")
     assert answered.status_code == 200, answered.text
@@ -594,21 +620,24 @@ async def test_an_error_of_a_tool_or_a_node_is_retried_whatever_its_name(harness
         "lookup": f"found: order {key} shipped",
         "fetch": f"fetched {key}",
         "consult": f"found: order {key} looks fine",
+        "count": f"found: order {key} has 3 items",
     }
     assert answered.json() == expected[word]
-    assert {"lookup": lookups, "fetch": fetches, "consult": consults}[word][key] == 2
+    assert {"lookup": lookups, "fetch": fetches, "consult": consults, "count": counts}[word][key] == 2
+    assert [r.getMessage() for r in caplog.records if "Error in" in r.getMessage()] == []
 
 
-@pytest.mark.parametrize("word", ["refuse", "refuse_sync"])
+@pytest.mark.parametrize("word", ["refuse", "refuse_sync", "refuse_builtin"])
 async def test_a_models_refusal_in_a_graph_fails_with_424_and_the_next_is_answered(
     harness: HarnessEnvironment, word: str, caplog: pytest.LogCaptureFixture
 ):
-    """From an async node and a sync one; telling the model's error apart logs no callback errors on the way."""
+    """From an async node, a sync one, and as Anthropic's missing key (a TypeError, of a built-in type); telling the
+    model's error apart logs no callback errors on the way."""
     key = uuid.uuid4().hex
     refused = await chat(harness, "graph_desk", key, f"{word} {key}")
     assert refused.status_code == 424, refused.text
     assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
-    assert [r.getMessage() for r in caplog.records if "Error in callback" in r.getMessage()] == []
+    assert [r.getMessage() for r in caplog.records if "Error in" in r.getMessage()] == []
 
 
 async def test_a_graph_has_its_own_context_and_the_prebuilt_nodes_still_work(harness: HarnessEnvironment):

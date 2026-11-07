@@ -80,7 +80,7 @@ from langgraph.types import Command, StateSnapshot
 from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
-from restate.agents._common import from_tool
+from restate.agents._common import ErrorSet, from_tool
 from restate.agents._conversation import Conversation, Entry, Run
 from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
@@ -321,9 +321,9 @@ class _Errors(BaseCallbackHandler):
     def __init__(self, ctx: SessionContext) -> None:
         super().__init__()
         self.ctx = ctx
-        self.models: weakref.WeakSet[BaseException] = weakref.WeakSet()
+        self.models = ErrorSet()
         """The errors that the run's chat models raised."""
-        self.tools: weakref.WeakSet[BaseException] = weakref.WeakSet()
+        self.tools = ErrorSet()
         """The errors that the run's tools raised."""
 
     def on_llm_error(
