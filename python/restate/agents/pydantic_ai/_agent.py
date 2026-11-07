@@ -23,6 +23,20 @@ stored:
   ``restate.TerminalError``, which a retry would only repeat, is instead
   returned to the model as the tool's answer, and so are arguments that do not
   validate (Pydantic AI asks the model again).
+- Only an error of a model request can be its provider refusing (a wrong
+  API key, say), which ends the turn unanswered: Pydantic AI tells them apart
+  (``on_model_request_error``). Any other error fails the attempt, and
+  Restate retries it, such as one of an instructions function's.
+- Pydantic AI's errors that a retry would meet again end the turn for good:
+  a usage limit (by default, 50 model requests a run: a retry would carry on
+  with a fresh limit), retries that ran out (a tool's, or the answer's), a
+  content filter, and a setup error (``UserError``).
+- An ``Agent`` of your own keeps its system prompt (``system_prompt``),
+  which Pydantic AI adds to a conversation's first request only, and keeps in
+  the message history: the conversation's first prompt is stored as Pydantic
+  AI sent it, system prompt included. (``instructions`` apply to every
+  request instead.) A system prompt given once a conversation has begun
+  applies from its next ``clear``.
 - Each message is answered once per invocation, by the shared conversation of
   ``restate.agents`` (``_conversation.py``), which also closes a stopped,
   refused or failed run.
@@ -36,12 +50,13 @@ from typing import Any, Unpack
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UnexpectedModelBehavior, UserError
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
+    SystemPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -56,6 +71,7 @@ from pydantic_ai import Agent, NativeOutput, PromptedOutput, RunContext
 from pydantic_ai import Tool as PydanticTool
 from restate.agents._common import (
     CANCELLATION,
+    ErrorSet,
     ModelError,
     PerSession,
     check_own,
@@ -64,7 +80,7 @@ from restate.agents._common import (
     model_of,
     provider_of,
 )
-from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
+from restate.agents._conversation import Call, Conversation, Entry, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._tools import Tool, ToolCall
@@ -167,12 +183,17 @@ class _Restate(AbstractCapability[Any]):
     It stores the requests before each model request and each response as it
     arrives, and publishes each tool call as it starts and ends for clients
     that follow the conversation. A tool's ``restate.TerminalError`` becomes its
-    answer to the model; any other error fails the attempt.
+    answer to the model; any other error fails the attempt. It records the
+    errors of model requests, the only ones that can be a refusal.
     """
 
-    def __init__(self, ctx: SessionContext, conversation: Conversation) -> None:
+    def __init__(self, ctx: SessionContext, conversation: Conversation, prompt: Entry | None = None) -> None:
         self.ctx = ctx
         self.conversation = conversation
+        self.prompt = prompt
+        """The conversation's first prompt, if Pydantic AI makes its request (with the system prompt) in this run."""
+        self.model_errors = ErrorSet()
+        """The errors that the run's model requests failed with."""
 
     async def store(self, messages: Sequence[ModelMessage]) -> None:
         """Store the tools' results in ``messages`` (the run's) that the conversation does not have yet.
@@ -189,8 +210,22 @@ class _Restate(AbstractCapability[Any]):
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
     ) -> ModelRequestContext:
+        if self.prompt is not None:
+            # The conversation's first request, as Pydantic AI made it: with the system prompt, which it keeps in
+            # the history, and adds to no later request. Stored in place of the prompt, without the instructions,
+            # which each request has its own of.
+            first = next(m for m in ctx.messages if isinstance(m, ModelRequest))
+            if any(isinstance(part, SystemPromptPart) for part in first.parts):
+                await self.conversation.rewrite(self.prompt, ModelRequest(parts=list(first.parts)))
+            self.prompt = None
         await self.store(ctx.messages)
         return request_context
+
+    async def on_model_request_error(
+        self, ctx: RunContext[Any], *, request_context: ModelRequestContext, error: Exception
+    ) -> ModelResponse:
+        self.model_errors.add(error)
+        raise error
 
     async def after_model_request(
         self, ctx: RunContext[Any], *, request_context: ModelRequestContext, response: ModelResponse
@@ -237,7 +272,9 @@ def _model(model: str | Model | None) -> Model:
     try:
         provider, model_id = provider_of(named)
         return infer_model(f"{provider}:{model_id}" if provider else named)
-    except (ImportError, UserError, ValueError) as error:
+    except Exception as error:
+        # Making the model makes no request: whatever fails is how it is set up, such as a provider's SDK whose
+        # API key is not set (raising its own error before Pydantic AI 2.15 checks it first).
         raise ModelError(f'the model "{named}": {error}') from error
 
 
@@ -254,6 +291,27 @@ def _output_spec(output: type[BaseModel], model: Model) -> NativeOutput[Any] | P
     if profile.get("supports_json_schema_output") and profile.get("google_supports_tool_combination", True):
         return NativeOutput(output)
     return PromptedOutput(output)
+
+
+def _first_prompt(conversation: Conversation) -> Entry | None:
+    """Return the prompt the conversation begins with, if it is all there is and has no system prompt yet."""
+    if len(conversation.entries) != 1 or conversation.entries[0].prompt is None:
+        return None
+    entry = conversation.entries[0]
+    message = typing.cast(ModelMessage, entry.item)
+    if not isinstance(message, ModelRequest) or any(isinstance(part, SystemPromptPart) for part in message.parts):
+        return None
+    return entry
+
+
+def _prompted(entry: Entry) -> Any:
+    """Return what the prompt of ``entry`` asks: its text, or the content of its parts."""
+    parts = [part for part in typing.cast(ModelRequest, entry.item).parts if isinstance(part, UserPromptPart)]
+    if len(parts) == 1:
+        return parts[0].content
+    return [
+        content for part in parts for content in ([part.content] if isinstance(part.content, str) else part.content)
+    ]
 
 
 def _run(
@@ -275,18 +333,41 @@ def _run(
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
         history = typing.cast(list[ModelMessage], [entry.item for entry in conversation.entries])
-        restate = _Restate(ctx, conversation)
+        user_prompt: Any = None
+        first = _first_prompt(conversation)
+        if first is not None:
+            # The conversation's first prompt: Pydantic AI makes its request, with the agent's system prompt, which
+            # it adds to a run with no history only. `_Restate` stores the request in place of the prompt.
+            user_prompt, history = _prompted(first), []
+        restate = _Restate(ctx, conversation, first)
         spec = _output_spec(output, model) if output is not None else None
         try:
             result = await agent.run(
-                message_history=history, model=model, toolsets=toolsets, capabilities=[restate], output_type=spec
+                user_prompt,
+                message_history=history,
+                model=model,
+                toolsets=toolsets,
+                capabilities=[restate],
+                output_type=spec,
             )
-        except UnexpectedModelBehavior:
+        except UnexpectedModelBehavior as error:
             # Pydantic AI asked again for an answer that validates, and gave up: the reply is the answer for
             # `answer_with`, which asks once more or fails for good, rather than an error that Restate retries.
-            if spec is None or (final := conversation.final_reply()) is None:
-                raise
-            return final
+            if spec is not None and (final := conversation.final_reply()) is not None:
+                return final
+            # Retries that ran out (a tool's, the answer's), a content filter, a token limit: a retry would carry on
+            # with fresh retries, and meet it again.
+            raise TerminalError(f"the agent gave up: {error}") from error
+        except UsageLimitExceeded as error:
+            # A retry would carry on with a fresh limit, and so would never end an agent that keeps calling tools.
+            raise TerminalError(f"the run reached its usage limit: {error}") from error
+        except UserError as error:
+            raise TerminalError(f"the agent is not set up right: {error}") from error
+        except Exception as error:
+            if error not in restate.model_errors:
+                # Not a model request's: no refusal, whatever its name (an instructions function's, say).
+                from_tool(ctx, error)
+            raise
         # The messages that no model request stored: an output tool's return, say.
         await restate.store(result.all_messages())
         return result.output if isinstance(result.output, str) else to_json(result.output).decode()

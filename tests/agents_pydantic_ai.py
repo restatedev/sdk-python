@@ -24,11 +24,13 @@ import pytest
 
 pytest.importorskip("pydantic_ai")
 
+from pydantic_ai import Agent, ModelRetry, RunContext  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
+    SystemPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -85,6 +87,19 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart(f"system: {info.instructions}")])
     if word == "refuse":
         raise AuthenticationError("invalid x-api-key")
+    if word == "sysprompt":
+        system = [
+            p.content
+            for m in messages
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+            if isinstance(p, SystemPromptPart)
+        ]
+        return ModelResponse(parts=[TextPart(f"system prompt: {', '.join(system)}")])
+    if word in ("loop", "picky"):
+        # A model that keeps calling a tool, never answering.
+        name = "get_weather" if word == "loop" else "picky"
+        return ModelResponse(parts=[ToolCallPart(name, {"city": rest}, tool_call_id=f"call-{rest}-{len(messages)}")])
     names = {"weather": "get_weather", "crash": "flaky", "wait": "blocking", "wrong": "get_weather"}
     names |= {"unknown": "nonexistent", "forbidden": "forbidden"}
     if word in names and not results:
@@ -134,11 +149,16 @@ async def forbidden(city: str) -> str:
     raise restate.TerminalError(f"no access to {city}")
 
 
+async def picky(city: str) -> str:
+    """A Pydantic AI tool function that asks the model to call it again, every time."""
+    raise ModelRetry(f"not like that, for {city}")
+
+
 assistant = pydantic_ai.agent(
     "pai_assistant",
     model=FunctionModel(reply),
     system="Answer briefly.",
-    tools=[get_weather, flaky, blocking, forbidden],
+    tools=[get_weather, flaky, blocking, forbidden, picky],
 )
 
 
@@ -169,6 +189,48 @@ async def own(ctx: sessions.SessionContext, text: str) -> str:
 
     mine: Agent[None, str] = Agent(FunctionModel(reply), instructions="Mine.")
     return await pydantic_ai.prompt(ctx, text, agent=mine, tools=[get_weather])
+
+
+@assistant.handler
+async def own_system(ctx: sessions.SessionContext, text: str) -> str:
+    """An Agent of your own with a system prompt, which Pydantic AI keeps in the message history."""
+    mine: Agent[None, str] = Agent(FunctionModel(reply), system_prompt="Mine.")
+    return await pydantic_ai.prompt(ctx, text, agent=mine)
+
+
+@assistant.handler
+async def clash(ctx: sessions.SessionContext, text: str) -> str:
+    """An Agent of your own whose tool has the name of one of this package's tools beside it: a setup error."""
+    mine: Agent[None, str] = Agent(FunctionModel(reply))
+
+    @mine.tool_plain(name="get_weather")
+    def weather(city: str) -> str:
+        return f"rainy in {city}"
+
+    return await pydantic_ai.prompt(ctx, text, agent=mine, tools=[get_weather])
+
+
+class NotFoundError(Exception):
+    """As an SDK, or a database's client, names a missing resource: the model's provider refusing, if a model's."""
+
+
+lookups: collections.Counter[str] = collections.Counter()
+
+
+@assistant.handler
+async def profiled(ctx: sessions.SessionContext, text: str) -> str:
+    """An Agent of your own whose instructions look up a profile, which is missing the first time."""
+    mine: Any = Agent(FunctionModel(reply))  # Any: pyright matches no overload of the decorator to a RunContext[None]
+
+    @mine.instructions
+    def profile(run: RunContext[None]) -> str:
+        asked_for = str(run.prompt)
+        lookups[asked_for] += 1
+        if lookups[asked_for] == 1:
+            raise NotFoundError(f"no profile yet for {asked_for}")
+        return "Be kind."
+
+    return await pydantic_ai.prompt(ctx, text, agent=mine)
 
 
 def weather_then_answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -323,6 +385,23 @@ def test_a_model_whose_provider_cannot_run_is_refused_with_what_to_install(monke
         _agent._model("nope/x")  # pyright: ignore[reportPrivateUsage]
 
 
+def test_a_model_that_cannot_be_made_is_refused_whatever_its_error(monkeypatch: pytest.MonkeyPatch):
+    """Making a model makes no request: before Pydantic AI 2.15, a provider's SDK raised its own error for a missing
+    key, which is refused as any other."""
+    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
+
+    class OpenAIError(Exception):
+        """As the OpenAI SDK names the error of a client it cannot make."""
+
+    def missing_key(name: str) -> Any:
+        raise OpenAIError("Missing credentials. Please pass an `api_key`, or set the `OPENAI_API_KEY` variable.")
+
+    monkeypatch.setattr(_agent, "infer_model", missing_key)
+    with pytest.raises(restate.TerminalError, match="OPENAI_API_KEY") as refused:
+        _agent._model("openai/gpt-6-sol")  # pyright: ignore[reportPrivateUsage]
+    assert refused.value.status_code == 424
+
+
 def test_an_agent_of_your_own_takes_no_system():
     from pydantic_ai import Agent  # pylint: disable=import-outside-toplevel
 
@@ -368,6 +447,64 @@ async def test_options_may_be_functions_of_the_context(harness: HarnessEnvironme
         url = f"{harness.ingress_url}/pai_per_user/{k}/chat"
         assert (await ingress.post(url, content=f"system {k}", headers=TEXT)).json() == f"system: You help {k}."
         assert (await ingress.post(url, content=f"weather {k}", headers=TEXT)).json() == f"tool said: sunny in {k}"
+
+
+async def test_an_agent_of_your_own_keeps_its_system_prompt_in_each_turn(harness: HarnessEnvironment):
+    """Pydantic AI adds it to a conversation's first request only: that request is stored, system prompt included."""
+    k = key()
+    for _ in range(2):
+        assert (await post(harness, f"{k}/own_system", json=f"sysprompt {k}")).json() == "system prompt: Mine."
+    # The conversation reads as before: the system prompt is not a message of its own.
+    assert await messages(harness, k) == [
+        ("user", f"sysprompt {k}"),
+        ("assistant", "system prompt: Mine."),
+        ("user", f"sysprompt {k}"),
+        ("assistant", "system prompt: Mine."),
+    ]
+
+
+async def test_an_agent_that_keeps_calling_tools_ends_the_turn_at_its_usage_limit(harness: HarnessEnvironment):
+    """A retry would carry on with a fresh limit (50 model requests): the turn ends for good, after one attempt."""
+    k = key()
+    failed = await chat(harness, k, f"loop {k}")
+    assert failed.status_code == 500 and "usage limit" in failed.text, failed.text
+    assert asked[k] == 50
+    assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+
+
+async def test_a_tool_whose_retries_run_out_ends_the_turn(harness: HarnessEnvironment):
+    k = key()
+    failed = await chat(harness, k, f"picky {k}")
+    assert failed.status_code == 500 and "exceeded max retries" in failed.text, failed.text
+    assert asked[k] == 2  # one attempt: the call, and the call again after its retry
+    assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+
+
+async def test_a_setup_error_of_pydantic_ai_ends_the_turn(harness: HarnessEnvironment):
+    k = key()
+    failed = await post(harness, f"{k}/clash", json=f"weather {k}")
+    assert failed.status_code == 500 and "not set up right" in failed.text, failed.text
+
+
+async def test_an_error_of_the_agents_own_code_is_retried_whatever_its_name(harness: HarnessEnvironment):
+    """Only a model request's error can be its provider refusing: an instructions function's is retried."""
+    k = key()
+    answered = await post(harness, f"{k}/profiled", json=f"hi {k}")
+    assert answered.status_code == 200, answered.text
+    assert answered.json() == f"echo: hi {k}"
+    assert lookups[f"hi {k}"] == 2
+
+
+def test_the_openai_sdks_error_for_a_missing_key_is_a_refusal(monkeypatch: pytest.MonkeyPatch):
+    """As the SDK words it now: a provider's SDK may raise it, before Pydantic AI 2.15 checks the key itself."""
+    openai = pytest.importorskip("openai")
+    from restate.agents.internal import refusal  # pylint: disable=import-outside-toplevel
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(openai.OpenAIError) as missing:
+        openai.AsyncOpenAI()
+    refused = refusal(missing.value)
+    assert refused is not None and refused.status_code == 424
 
 
 async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatch: pytest.MonkeyPatch):
