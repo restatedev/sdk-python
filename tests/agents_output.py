@@ -220,7 +220,7 @@ refunds = Agent(name="refunds", instructions="You handle refunds.", model=OpenAI
 oai = openai.agent("oai_planner", model=OpenAIScripted(), system="Plan.", output=Plan)
 oai_desk = openai.agent(
     "oai_desk_planner",
-    Agent(name="triage", instructions="You triage.", model=OpenAIScripted(), handoffs=[refunds]),
+    agent=Agent(name="triage", instructions="You triage.", model=OpenAIScripted(), handoffs=[refunds]),
     output=Plan,
 )
 

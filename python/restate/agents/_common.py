@@ -72,10 +72,22 @@ DEFAULT_MODEL = "openai/gpt-6-sol"
 """The default model of the frameworks that accept any provider; it needs ``OPENAI_API_KEY``."""
 
 
-def check_own(own: object, system: object) -> None:
-    """Raise ``TypeError`` if an agent of the framework's own (``own``) and ``system`` are both given."""
-    if own is not None and system is not None:
-        raise TypeError("an agent of your own has its own instructions: pass no system")
+def check_own(own: object, kind: str, **built_in: object) -> None:
+    """Raise ``TypeError`` if a framework's own configured ``kind`` (``own``) is given with options of the built-in agent.
+
+    An agent takes either the common options of the built-in agent
+    (``model``, ``system``, ``tools``) or a ``kind`` of your own (an
+    ``agent``, a ``graph``), configured as the framework does: its model,
+    instructions and tools are its own.
+    """
+    if own is None:
+        return
+    given = [name for name, value in built_in.items() if value is not None and value != ()]
+    if given:
+        raise TypeError(
+            f"your own {kind} is configured with its own model, instructions and tools: "
+            f"pass no {', '.join(given)} with it"
+        )
 
 
 def model_of(model: str | None, fallback: str = DEFAULT_MODEL) -> str:

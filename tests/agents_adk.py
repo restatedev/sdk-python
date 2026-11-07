@@ -25,7 +25,7 @@ import pytest
 
 pytest.importorskip("google.adk")
 
-from google.adk.agents import LlmAgent  # noqa: E402
+from google.adk.agents import LlmAgent, RunConfig  # noqa: E402
 from google.adk.models import BaseLlm  # noqa: E402
 from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.models.llm_response import LlmResponse  # noqa: E402
@@ -162,7 +162,7 @@ def desk() -> LlmAgent:
     return LlmAgent(name="triage", model=Scripted(), instruction="You triage.", sub_agents=[refunds])
 
 
-triage = adk.agent("adk_desk", desk())
+triage = adk.agent("adk_desk", agent=desk())
 
 
 @pytest.fixture(scope="session")
@@ -309,9 +309,16 @@ def test_an_agent_needs_a_google_model_or_one_of_adk(monkeypatch: pytest.MonkeyP
     adk.agent("gemini", model="google/gemini-x")
 
 
-def test_an_agent_of_your_own_takes_no_system():
-    with pytest.raises(TypeError, match="pass no system"):
-        adk.agent("mine", LlmAgent(name="mine", model=Scripted()), system="theirs")
+def test_an_agent_of_your_own_takes_none_of_the_built_in_agents_options():
+    # Any: no overload takes both, as the type checker says.
+    make: Any = adk.agent
+    with pytest.raises(TypeError, match="your own agent is configured .*: pass no system with it"):
+        make("mine", agent=LlmAgent(name="mine", model=Scripted()), system="theirs")
+    with pytest.raises(TypeError, match="pass no model, tools with it"):
+        make("mine", agent=LlmAgent(name="mine", model=Scripted()), model=Scripted(), tools=[get_weather])
+    ask: Any = adk.prompt
+    with pytest.raises(TypeError, match="pass no tools with it"):
+        asyncio.run(ask(None, "hi", agent=LlmAgent(name="mine", model=Scripted()), tools=[get_weather]))
 
 
 # --- In process -----------------------------------------------------------------------------------
@@ -390,14 +397,14 @@ async def test_an_app_of_your_own_keeps_its_plugins_and_gets_this_packages_tools
 
     mine = App(
         name="mine",
-        root_agent=LlmAgent(name="mine", model=Scripted(), instruction="Mine."),
+        root_agent=LlmAgent(name="mine", model=Scripted(), instruction="Mine.", tools=adk.tools([get_weather])),
         plugins=[Counting("counting")],
     )
     asker = sessions.SessionObject("asker")
 
     @asker.handler
     async def ask(ctx: sessions.SessionContext, text: str) -> str:
-        return await adk.prompt(ctx, text, agent=mine, tools=[get_weather])
+        return await adk.prompt(ctx, text, agent=mine)
 
     backend = Backend()
 
@@ -419,9 +426,12 @@ def asking(agent: Any = None, **options: Any) -> Callable[..., Awaitable[Any]]:
 
     asker = sessions.SessionObject("asker")
 
+    if agent is not None:
+        options["agent"] = agent
+
     @asker.handler
     async def ask(ctx: sessions.SessionContext, text: str) -> str:
-        return await adk.prompt(ctx, text, agent=agent, **options)
+        return await adk.prompt(ctx, text, **options)
 
     backend = Backend()
 
@@ -430,6 +440,16 @@ def asking(agent: Any = None, **options: Any) -> Callable[..., Awaitable[Any]]:
         return await invoke(asker, "ask", host, invocation or request(), text)
 
     return asked
+
+
+async def test_a_run_of_more_model_calls_than_its_run_config_allows_fails_its_prompt():
+    mine = LlmAgent(name="mine", model=Scripted(), tools=adk.tools([get_weather]))
+    asked = asking(mine, run_config=RunConfig(max_llm_calls=1))
+    with pytest.raises(restate.TerminalError, match="limit of model calls"):
+        await asked("weather Rome")
+    assert await asked("hi there") == "echo: hi there"
+    asked = asking(mine, run_config=RunConfig(max_llm_calls=2))
+    assert await asked("weather Rome") == "tool said: sunny in Rome"
 
 
 class Blocked(BaseLlm):
@@ -449,9 +469,9 @@ async def test_a_response_the_model_blocks_fails_the_prompt_for_good():
         await asyncio.wait_for(ask("hi there"), timeout=10)
 
 
-async def test_a_model_given_reaches_the_sub_agents_without_one():
+async def test_an_agent_of_your_own_runs_as_configured_its_sub_agents_with_its_model():
     refunds = LlmAgent(name="refunds", instruction="You handle refunds.")
-    ask = asking(LlmAgent(name="triage", instruction="You triage.", sub_agents=[refunds]), model=Scripted())
+    ask = asking(LlmAgent(name="triage", model=Scripted(), instruction="You triage.", sub_agents=[refunds]))
     await ask("handoff x")
     assert await ask("system x") == "system: You handle refunds."
 

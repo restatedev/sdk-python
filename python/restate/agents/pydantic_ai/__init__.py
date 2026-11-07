@@ -27,7 +27,17 @@ For example::
     asyncio.run(restate.serve(restate.app([assistant])))
 
 ``agent`` creates an agent, and ``prompt`` answers a prompt from a handler of
-your own. The conversation is stored one step at a time.
+your own. Either takes the common options of a built-in agent (``model``,
+``system``, ``tools``), which compacts a long conversation with its
+provider's compaction, or an ``Agent`` of your own, configured as Pydantic
+AI does (capabilities, instructions functions, history processors...), with
+its runs' ``deps`` and ``usage_limits``::
+
+    mine = Agent("openai:gpt-6-sol", capabilities=[...], toolsets=[pydantic_ai.toolset([get_weather])])
+    desk = pydantic_ai.agent("desk", agent=mine)
+
+``toolset`` gives an ``Agent`` of your own this package's tools. The
+conversation is stored one step at a time.
 
 This differs from the older ``restate.ext.pydantic`` integration, whose
 ``RestateAgent`` wraps a Pydantic AI ``Agent`` so that it runs durably inside
@@ -51,6 +61,6 @@ except ImportError as error:
         "restate.agents.pydantic_ai needs Pydantic AI: install the pydantic_ai extra, pip install restate-sdk[pydantic_ai]"
     ) from error
 
-from restate.agents.pydantic_ai._agent import AnyModel, AnyTool, agent, prompt
+from restate.agents.pydantic_ai._agent import AnyModel, AnyTool, agent, prompt, toolset
 
-__all__ = ["AnyModel", "AnyTool", "agent", "prompt"]
+__all__ = ["AnyModel", "AnyTool", "agent", "prompt", "toolset"]

@@ -27,8 +27,15 @@ For example::
     asyncio.run(restate.serve(restate.app([assistant])))
 
 ``agent`` creates an agent, and ``prompt`` answers a prompt from a handler of
-your own; either takes an ``Agent`` of your own, with handoffs and guardrails.
-``tools`` gives the agents it hands off to this package's tools. The
+your own. Either takes the common options of a built-in agent (``model``,
+``system``, ``tools``), or an ``Agent`` of your own, configured as the SDK
+does (handoffs, guardrails...), with its run's ``context``, ``max_turns``
+and ``RunConfig``::
+
+    triage = Agent(name="triage", handoffs=[refunds], tools=openai.tools([get_weather]))
+    desk = openai.agent("desk", agent=triage)
+
+``tools`` gives an ``Agent`` of your own this package's tools. The
 conversation is stored one step at a time.
 
 This differs from the older ``restate.ext.openai`` integration, whose

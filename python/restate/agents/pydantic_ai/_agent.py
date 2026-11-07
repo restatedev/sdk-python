@@ -101,7 +101,7 @@ from restate.agents._common import (
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
-from restate.agents._tools import Tool, ToolCall
+from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
@@ -117,17 +117,25 @@ AnyTool: typing.TypeAlias = Tool | PydanticTool[Any] | Callable[..., Any]
 _Capability: typing.TypeAlias = AbstractCapability[Any]
 
 
-def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[Any]:
-    """Return ``given`` as a Pydantic AI toolset for a run in ``ctx``.
+def toolset(given: Sequence[AnyTool]) -> FunctionToolset[Any]:
+    """Return ``given`` as a Pydantic AI toolset, for an ``Agent`` of your own::
 
-    ``restate.agents`` tools are wrapped so that they receive their tool call id
-    (they validate their own arguments); Pydantic AI tools and tool functions are
-    passed through unchanged.
+        desk = Agent(model, toolsets=[pydantic_ai.toolset([call(refund)])])
+
+    ``restate.agents`` tools get their tool call (and the handler's context)
+    from the run of ``agent`` or ``prompt`` in progress, and validate their own
+    arguments; Pydantic AI tools and tool functions are passed through.
+
+    Args:
+        given: ``restate.agents`` tools, and Pydantic AI tools and tool functions.
+
+    Returns:
+        The tools, as a toolset of Pydantic AI.
     """
 
     def native(tool: Tool) -> PydanticTool[Any]:
         async def run(run_ctx: RunContext[Any], **args: Any) -> str:
-            return await tool.run(args, ToolCall(ctx, run_ctx.tool_call_id or ""))
+            return await tool.run(args, current_call(run_ctx.tool_call_id or ""))
 
         return PydanticTool.from_schema(run, tool.name, tool.description, tool.input_schema, takes_ctx=True)
 
@@ -331,7 +339,7 @@ def _compaction(model: Model) -> _Capability | None:
     return None
 
 
-def _capabilities(own: Agent[Any, str] | None, model: Model) -> list[_Capability]:
+def _capabilities(own: Agent[Any, Any] | None, model: Model) -> list[_Capability]:
     """Return the capabilities that a run gets beside the agent's own.
 
     The built-in agent (``own`` is ``None``) gets the compaction of its
@@ -349,7 +357,7 @@ def _capabilities(own: Agent[Any, str] | None, model: Model) -> list[_Capability
 
 def _run(
     ctx: SessionContext,
-    own: Agent[Any, str] | None,
+    own: Agent[Any, Any] | None,
     named: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
@@ -364,8 +372,8 @@ def _run(
     """
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
-    agent: Agent[Any, str] = own or Agent(instructions=system)
-    toolsets = [_toolset(given, ctx)] if given else []
+    agent: Agent[Any, Any] = own or Agent(instructions=system)
+    toolsets = [toolset(given)] if given else []
     chosen = _capabilities(own, model)
 
     async def run(conversation: Conversation) -> str:
@@ -376,15 +384,17 @@ def _run(
         restate = _Restate(ctx, conversation)
         spec = _output_spec(output, model) if output is not None else None
         try:
-            result = await agent.run(
-                message_history=history,
-                model=model,
-                toolsets=toolsets,
-                capabilities=[restate, *chosen],
-                output_type=spec,
-                deps=deps,
-                usage_limits=usage_limits,
-            )
+            # The tools of ``toolset`` find their call and the handler's context in the run.
+            with tools_in(ctx):
+                result = await agent.run(
+                    message_history=history,
+                    model=model,
+                    toolsets=toolsets,
+                    capabilities=[restate, *chosen],
+                    output_type=spec,
+                    deps=deps,
+                    usage_limits=usage_limits,
+                )
         except UnexpectedModelBehavior as error:
             if error in restate.model_errors and not isinstance(error, ContentFilterError):
                 # A model request's one response that its model could not read (a body that is not JSON, say): a
@@ -423,10 +433,33 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
-    agent: Agent[Any, str] | None = None,
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
+    output: None = None,
+    usage_limits: UsageLimits | None = None,
+) -> str: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    model: AnyModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[M],
+    usage_limits: UsageLimits | None = None,
+) -> M: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: Agent[Any, Any],
     output: None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
@@ -438,10 +471,7 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
-    agent: Agent[Any, str] | None = None,
-    model: AnyModel | None = None,
-    system: str | None = None,
-    tools: Sequence[AnyTool] = (),
+    agent: Agent[Any, Any],
     output: type[M],
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
@@ -452,7 +482,7 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
-    agent: Agent[Any, str] | None = None,
+    agent: Agent[Any, Any] | None = None,
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
@@ -470,17 +500,24 @@ async def prompt(
         async def summarize(ctx: sessions.SessionContext, topic: str) -> str:
             return await pydantic_ai.prompt(ctx, f"Summarize what we said about {topic}")
 
+    As ``agent`` does, it takes the common options of the built-in agent, or
+    an ``Agent`` of your own, configured::
+
+        return await pydantic_ai.prompt(ctx, text, agent=desk)
+
     Args:
         ctx: The handler's context.
         text: The prompt.
-        agent: A Pydantic AI ``Agent`` of your own, whose output is text.
-            Defaults to one with ``system`` as its instructions.
-        model: ``"<provider>/<model-id>"`` of any of Pydantic AI's providers,
-            or a Pydantic AI model. Defaults to ``agent``'s own, else
+        agent: A Pydantic AI ``Agent`` of your own, configured with its
+            model, instructions, tools (``toolset`` for this package's) and
+            capabilities, instead of ``model``, ``system`` and ``tools``.
+            One with no model gets the built-in agent's default.
+        model: The built-in agent's model: ``"<provider>/<model-id>"`` of any
+            of Pydantic AI's providers, or a Pydantic AI model. Defaults to
             ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
-        system: The instructions, when there is no ``agent``.
-        tools: ``restate.agents`` tools, Pydantic AI tools or tool functions,
-            beside ``agent``'s own.
+        system: The built-in agent's instructions.
+        tools: The built-in agent's tools: ``restate.agents`` tools,
+            Pydantic AI tools or tool functions.
         output: A Pydantic model, for an answer that is one rather than
             text: asked for with ``NativeOutput`` if the model has a JSON
             schema mode, else with ``PromptedOutput``.
@@ -494,25 +531,65 @@ async def prompt(
         The agent's answer: its text, or a value of ``output``.
 
     Raises:
-        TypeError: If both ``agent`` and ``system`` are given.
+        TypeError: If ``agent`` is given with ``model``, ``system`` or
+            ``tools``.
         TerminalError: If the agent's reply is not a value of ``output``,
             twice.
     """
-    check_own(agent, system)
+    check_own(agent, "agent", model=model, system=system, tools=tools)
+    return await _prompt(ctx, text, agent, model, system, tools, output, deps, usage_limits)
+
+
+async def _prompt(
+    ctx: SessionContext,
+    text: str,
+    own: Agent[Any, Any] | None,
+    model: AnyModel | None,
+    system: str | None,
+    tools: Sequence[AnyTool],
+    output: type[BaseModel] | None,
+    deps: Any,
+    usage_limits: UsageLimits | None,
+) -> Any:
+    """Answer ``text`` as ``prompt`` does, with its options checked."""
 
     def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output, deps, usage_limits))
+        return answer_once(ctx, text, ITEMS, _run(ctx, own, model, system, tools, output, deps, usage_limits))
 
     if output is None:
         return await ask(text)
     return await answer_with(output, text, ask)
 
 
+@typing.overload
 def agent(
     name: str,
-    pydantic_agent: Agent[Any, str] | None = None,
-    /,
     *,
+    model: PerSession[AnyModel | None] = None,
+    system: PerSession[str | None] = None,
+    tools: PerSession[Sequence[AnyTool]] = (),
+    output: type[BaseModel] | None = None,
+    usage_limits: UsageLimits | None = None,
+    **options: Unpack[AgentOptions],
+) -> AgentObject: ...
+
+
+@typing.overload
+def agent(
+    name: str,
+    *,
+    agent: Agent[Any, Any],
+    output: type[BaseModel] | None = None,
+    deps: PerSession[Any] = None,
+    usage_limits: UsageLimits | None = None,
+    **options: Unpack[AgentOptions],
+) -> AgentObject: ...
+
+
+def agent(
+    name: str,
+    *,
+    agent: Agent[Any, Any] | None = None,
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
@@ -525,41 +602,44 @@ def agent(
 
     Its ``chat`` handler answers each message with Pydantic AI; the
     conversation is kept in the key's database, a step at a time. Add
-    handlers of your own with ``@assistant.handler``::
+    handlers of your own with ``@assistant.handler``.
+
+    The built-in agent takes the common options, and gets Pydantic AI's
+    compaction for a conversation that lives long::
 
         assistant = pydantic_ai.agent("assistant", system="Answer briefly.", tools=[get_weather])
-
-    Or bring an ``Agent`` of your own, with this package's tools beside its own::
-
-        assistant = pydantic_ai.agent("assistant", Agent("anthropic:claude-sonnet-5-5"), tools=[refund])
 
     ``model``, ``system`` and ``tools`` may each be a function of the
     invocation's context, sync or async, for values that differ per user::
 
         assistant = pydantic_ai.agent("assistant", system=lambda ctx: f"You help {ctx.key}.")
 
-    An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
-    ``deps``, a value or a function of the invocation's context::
+    For anything more, pass an ``Agent`` of your own, configured as Pydantic
+    AI does: its model, instructions or system prompt, tools (``toolset`` for
+    this package's), capabilities. It runs as you configured it::
 
-        assistant = pydantic_ai.agent("assistant", shop, deps=lambda ctx: Customer(ctx.key))
+        desk = Agent(model, system_prompt="...", toolsets=[pydantic_ai.toolset([call(refund)])])
+        assistant = pydantic_ai.agent("assistant", agent=desk, deps=lambda ctx: Customer(ctx.key))
 
     Args:
         name: The object's name, as Restate serves it.
-        pydantic_agent: A Pydantic AI ``Agent`` of your own, whose output is
-            text. Defaults to one with ``system`` as its instructions.
-        model: ``"<provider>/<model-id>"`` of any of Pydantic AI's providers
-            (each needs its extra, such as ``pydantic-ai-slim[openai]``), or a
-            Pydantic AI model. Defaults to ``pydantic_agent``'s own, else
+        agent: A Pydantic AI ``Agent`` of your own, configured, instead of
+            ``model``, ``system`` and ``tools``. One with no model gets the
+            built-in agent's default.
+        model: The built-in agent's model: ``"<provider>/<model-id>"`` of any
+            of Pydantic AI's providers (each needs its extra, such as
+            ``pydantic-ai-slim[openai]``), or a Pydantic AI model. Defaults to
             ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
-        system: The instructions, when there is no ``pydantic_agent``.
-        tools: ``restate.agents`` tools, Pydantic AI tools or tool functions.
+        system: The built-in agent's instructions.
+        tools: The built-in agent's tools: ``restate.agents`` tools,
+            Pydantic AI tools or tool functions.
         output: A Pydantic model, for answers that are one rather than
             text: asked for with ``NativeOutput`` if the model has a JSON
             schema mode, else with ``PromptedOutput``. ``chat`` returns its
             JSON.
-        deps: The runs' dependencies (Pydantic AI's ``deps``), for a
-            ``pydantic_agent`` with a ``deps_type``: a value, or a function of
-            the invocation's context.
+        deps: The runs' dependencies (Pydantic AI's ``deps``), for an
+            ``agent`` with a ``deps_type``: a value, or a function of the
+            invocation's context.
         usage_limits: Each run's limits (Pydantic AI's ``UsageLimits``),
             past which its turn fails. Defaults to Pydantic AI's: 50 model
             requests.
@@ -570,22 +650,24 @@ def agent(
         The agent, to serve with ``restate.serve(restate.app([agent]))``, or any ASGI server.
 
     Raises:
-        TypeError: If both ``pydantic_agent`` and ``system`` are given.
+        TypeError: If ``agent`` is given with ``model``, ``system`` or
+            ``tools``.
     """
-    check_own(pydantic_agent, system)
+    check_own(agent, "agent", model=model, system=system, tools=tools)
+    own = agent
     obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> Any:
-        return await prompt(
+        return await _prompt(
             ctx,
             text,
-            agent=pydantic_agent,
-            model=await configured(model, ctx),
-            system=await configured(system, ctx),
-            tools=await configured(tools, ctx),
-            output=output,
-            deps=await configured(deps, ctx),
-            usage_limits=usage_limits,
+            own,
+            await configured(model, ctx),
+            await configured(system, ctx),
+            await configured(tools, ctx),
+            output,
+            await configured(deps, ctx),
+            usage_limits,
         )
 
     obj.chat(answer, items=ITEMS, output=output)

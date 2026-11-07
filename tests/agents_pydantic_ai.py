@@ -217,30 +217,36 @@ per_user = pydantic_ai.agent(
 
 @assistant.handler
 async def own(ctx: sessions.SessionContext, text: str) -> str:
-    """An Agent of your own, with its instructions and model, and this package's tools beside its own."""
+    """An Agent of your own, with its instructions and model, and this package's tools as a toolset of its own."""
     from pydantic_ai import Agent  # pylint: disable=import-outside-toplevel
 
-    mine: Agent[None, str] = Agent(FunctionModel(reply), instructions="Mine.")
-    return await pydantic_ai.prompt(ctx, text, agent=mine, tools=[get_weather])
+    mine: Agent[None, str] = Agent(
+        FunctionModel(reply), instructions="Mine.", toolsets=[pydantic_ai.toolset([get_weather])]
+    )
+    return await pydantic_ai.prompt(ctx, text, agent=mine)
 
 
 @assistant.handler
 async def own_system(ctx: sessions.SessionContext, text: str) -> str:
     """An Agent of your own with a system prompt, which Pydantic AI keeps in the message history."""
-    mine: Agent[None, str] = Agent(FunctionModel(reply), system_prompt="Mine.")
-    return await pydantic_ai.prompt(ctx, text, agent=mine, tools=[get_weather])
+    mine: Agent[None, str] = Agent(
+        FunctionModel(reply), system_prompt="Mine.", toolsets=[pydantic_ai.toolset([get_weather])]
+    )
+    return await pydantic_ai.prompt(ctx, text, agent=mine)
 
 
 @assistant.handler
 async def clash(ctx: sessions.SessionContext, text: str) -> str:
     """An Agent of your own whose tool has the name of one of this package's tools beside it: a setup error."""
-    mine: Agent[None, str] = Agent(FunctionModel(reply), system_prompt="Mine.")
+    mine: Agent[None, str] = Agent(
+        FunctionModel(reply), system_prompt="Mine.", toolsets=[pydantic_ai.toolset([get_weather])]
+    )
 
     @mine.tool_plain(name="get_weather")
     def weather(city: str) -> str:
         return f"rainy in {city}"
 
-    return await pydantic_ai.prompt(ctx, text, agent=mine, tools=[get_weather])
+    return await pydantic_ai.prompt(ctx, text, agent=mine)
 
 
 @assistant.handler
@@ -300,7 +306,7 @@ def shop_agent() -> Any:
     return shop
 
 
-shop = pydantic_ai.agent("pai_shop", shop_agent(), deps=lambda ctx: Shop(ctx.key))
+shop = pydantic_ai.agent("pai_shop", agent=shop_agent(), deps=lambda ctx: Shop(ctx.key))
 
 
 class NotFoundError(Exception):
@@ -345,10 +351,14 @@ def trimmed_agent() -> Any:
     from pydantic_ai import Agent  # pylint: disable=import-outside-toplevel
     from pydantic_ai.capabilities import ProcessHistory  # pylint: disable=import-outside-toplevel
 
-    return Agent(FunctionModel(weather_then_answer), capabilities=[ProcessHistory(keep_last_two)])
+    return Agent(
+        FunctionModel(weather_then_answer),
+        capabilities=[ProcessHistory(keep_last_two)],
+        toolsets=[pydantic_ai.toolset([get_weather])],
+    )
 
 
-trimmed = pydantic_ai.agent("pai_trimmed", trimmed_agent(), tools=[get_weather])
+trimmed = pydantic_ai.agent("pai_trimmed", agent=trimmed_agent())
 
 
 @pytest.fixture(scope="session")
@@ -495,11 +505,18 @@ def test_a_model_that_cannot_be_made_is_refused_whatever_its_error(monkeypatch: 
     assert refused.value.status_code == 424
 
 
-def test_an_agent_of_your_own_takes_no_system():
+def test_an_agent_of_your_own_takes_none_of_the_built_in_agents_options():
     from pydantic_ai import Agent  # pylint: disable=import-outside-toplevel
 
-    with pytest.raises(TypeError, match="pass no system"):
-        pydantic_ai.agent("mine", Agent(instructions="mine"), system="theirs")
+    # Any: no overload takes both, as the type checker says.
+    make: Any = pydantic_ai.agent
+    with pytest.raises(TypeError, match="your own agent is configured .*: pass no system with it"):
+        make("mine", agent=Agent(instructions="mine"), system="theirs")
+    with pytest.raises(TypeError, match="pass no model, tools with it"):
+        make("mine", agent=Agent(instructions="mine"), model="openai/gpt-6-sol", tools=[get_weather])
+    ask: Any = pydantic_ai.prompt
+    with pytest.raises(TypeError, match="pass no tools with it"):
+        asyncio.run(ask(None, "hi", agent=Agent(instructions="mine"), tools=[get_weather]))
 
 
 def test_a_providers_http_refusal_is_terminal_and_a_rate_limit_is_retried():

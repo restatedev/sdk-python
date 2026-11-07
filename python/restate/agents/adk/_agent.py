@@ -29,6 +29,10 @@ its stored events:
   tool's answer to the model, and so is a call to a tool the agent does not
   have (which ADK fails the run for).
 - A transfer to a sub-agent holds for the next messages, as ADK's sessions do.
+- A run of more model calls than its ``RunConfig``'s ``max_llm_calls`` (500 by
+  default) fails its prompt for good: a retry would carry on with a fresh count.
+- An agent or ``App`` of your own runs as you configured it, with the
+  ``run_config`` you give.
 """
 
 from __future__ import annotations
@@ -39,8 +43,8 @@ import typing
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
-from google.adk.agents import BaseAgent, LlmAgent
-from google.adk.agents.invocation_context import new_invocation_context_id
+from google.adk.agents import BaseAgent, LlmAgent, RunConfig
+from google.adk.agents.invocation_context import LlmCallsLimitExceededError, new_invocation_context_id
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events import Event
 from google.adk.models import BaseLlm
@@ -274,7 +278,7 @@ def _app(
     model: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
-    output: type[BaseModel] | None = None,
+    output: type[BaseModel] | None,
 ) -> App:
     """Return the app that runs the agent: resumable, with this package's plugin.
 
@@ -290,19 +294,10 @@ def _app(
     else:
         app = own if isinstance(own, App) else App(name=_APP, root_agent=own)
         # A workflow agent (a SequentialAgent, say) has no output schema: its answer is asked again for as JSON.
-        schema = output is not None and isinstance(app.root_agent, LlmAgent)
-        if given or model is not None or schema:
-            if not isinstance(app.root_agent, LlmAgent):
-                raise TypeError("model and tools apply to an LlmAgent of your own, not to another agent")
-            update: dict[str, Any] = {}
-            if given:
-                update["tools"] = [*app.root_agent.tools, *tools(given)]
-            if model is not None:
-                update["model"] = _model(model)
-            if schema:
-                update["output_schema"] = output
-            # A clone, which also re-parents the sub-agents: those without a model of their own take the root's.
-            app = app.model_copy(update={"root_agent": app.root_agent.clone(update=update)})
+        if output is not None and isinstance(app.root_agent, LlmAgent):
+            # A clone, which also re-parents the sub-agents.
+            schema = app.root_agent.clone(update={"output_schema": output})
+            app = app.model_copy(update={"root_agent": schema})
     resumable = ResumabilityConfig(is_resumable=True)
     return app.model_copy(
         update={"name": _APP, "plugins": [*app.plugins, _Restate(ctx)], "resumability_config": resumable}
@@ -348,8 +343,8 @@ def _answers(root: BaseAgent, name: str) -> bool:
     return True
 
 
-def _run(ctx: SessionContext, app: App) -> Run:
-    """Return the run of a prompt: ADK's runner, resuming the prompt's invocation."""
+def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
+    """Return the run of a prompt: ADK's runner, resuming the prompt's invocation, with ``config`` (its ``RunConfig``)."""
 
     async def run(conversation: Conversation) -> str:
         if (final := _final(conversation, app.root_agent)) is not None:
@@ -359,13 +354,18 @@ def _run(ctx: SessionContext, app: App) -> Run:
         invocation = typing.cast(Event, running.item).invocation_id if running is not None else None
         runner = Runner(app=app, session_service=_Sessions(conversation))
         answer = ""
-        with tools_in(ctx):
-            async for event in runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation):
-                if event.error_code:
-                    # The model would not answer (a safety block, say), as it would not again: the prompt fails.
-                    raise TerminalError(f"the model returned {event.error_code}: {event.error_message or ''}")
-                if _is_final(event) and (text := _text(event)):
-                    answer = text
+        events = runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation, run_config=config)
+        try:
+            with tools_in(ctx):
+                async for event in events:
+                    if event.error_code:
+                        # The model would not answer (a safety block, say), as it would not again: the prompt fails.
+                        raise TerminalError(f"the model returned {event.error_code}: {event.error_message or ''}")
+                    if _is_final(event) and (text := _text(event)):
+                        answer = text
+        except LlmCallsLimitExceededError as error:
+            # A retry would carry on with a fresh count, and so would never end an agent that keeps calling tools.
+            raise TerminalError(f"the run reached its limit of model calls: {error}") from error
         return answer
 
     return run
@@ -379,7 +379,6 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
-    agent: BaseAgent | App | None = None,
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
@@ -392,11 +391,32 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
-    agent: BaseAgent | App | None = None,
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[M],
+) -> M: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: BaseAgent | App,
+    output: None = None,
+    run_config: RunConfig | None = None,
+) -> str: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: BaseAgent | App,
+    output: type[M],
+    run_config: RunConfig | None = None,
 ) -> M: ...
 
 
@@ -409,6 +429,7 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[BaseModel] | None = None,
+    run_config: RunConfig | None = None,
 ) -> Any:
     """Answer a prompt with an ADK agent, exactly once.
 
@@ -420,80 +441,133 @@ async def prompt(
         async def summarize(ctx: sessions.SessionContext, topic: str) -> str:
             return await adk.prompt(ctx, f"Summarize what we said about {topic}")
 
+    As ``agent`` does, it takes the common options of the built-in agent, or
+    an agent of your own, configured::
+
+        return await adk.prompt(ctx, text, agent=triage)
+
     Args:
         ctx: The handler's context.
         text: The prompt.
         agent: An agent of your own (with sub-agents, callbacks...), or an
-            ``App`` (with plugins). Defaults to an ``LlmAgent`` with ``system``
-            as its instruction.
-        model: ``"google/<model-id>"``, or a model of ADK. Defaults to
-            ``agent``'s own, else ``$RESTATE_AGENT_MODEL`` if it is Google's.
-        system: The instruction, when there is no ``agent``.
-        tools: ``restate.agents`` tools, or ADK's, beside ``agent``'s own.
-            For its sub-agents, see ``tools()``.
+            ``App`` (with plugins), configured with its model, instruction
+            and tools (``tools()`` for this package's), instead of
+            ``model``, ``system`` and ``tools``.
+        model: The built-in agent's model: ``"google/<model-id>"``, or a
+            model of ADK (``LiteLlm(...)`` for other providers). Defaults to
+            ``$RESTATE_AGENT_MODEL`` if it is Google's.
+        system: The built-in agent's instruction.
+        tools: The built-in agent's tools: ``restate.agents`` tools, or ADK's.
         output: A Pydantic model, for an answer that is one rather than
             text: the ``output_schema`` of the root ``LlmAgent``. Another
             root agent that answers in text is asked again for its JSON.
+        run_config: The ``RunConfig`` of ``agent``'s run, such as its
+            ``max_llm_calls``.
 
     Returns:
         The text of the agent's final response, or a value of ``output``.
 
     Raises:
-        TypeError: If both ``agent`` and ``system`` are given.
+        TypeError: If ``agent`` is given with ``model``, ``system`` or
+            ``tools``.
         TerminalError: If the agent's reply is not a value of ``output``,
             twice.
     """
-    check_own(agent, system)
+    check_own(agent, "agent", model=model, system=system, tools=tools)
+    return await _prompt(ctx, text, agent, model, system, tools, output, run_config)
 
-    app = _app(ctx, agent, model, system, tools, output)
+
+async def _prompt(
+    ctx: SessionContext,
+    text: str,
+    own: BaseAgent | App | None,
+    model: AnyModel | None,
+    system: str | None,
+    tools: Sequence[AnyTool],
+    output: type[BaseModel] | None,
+    config: RunConfig | None,
+) -> Any:
+    """Answer ``text`` as ``prompt`` does, with its options checked."""
+    app = _app(ctx, own, model, system, tools, output)
 
     def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app))
+        return answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app, config))
 
     if output is None:
         return await ask(text)
     return await answer_with(output, text, ask)
 
 
+@typing.overload
 def agent(
     name: str,
-    adk_agent: BaseAgent | App | None = None,
-    /,
     *,
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
     output: type[BaseModel] | None = None,
     **options: Unpack[AgentOptions],
+) -> AgentObject: ...
+
+
+@typing.overload
+def agent(
+    name: str,
+    *,
+    agent: BaseAgent | App,
+    output: type[BaseModel] | None = None,
+    run_config: RunConfig | None = None,
+    **options: Unpack[AgentOptions],
+) -> AgentObject: ...
+
+
+def agent(
+    name: str,
+    *,
+    agent: BaseAgent | App | None = None,
+    model: PerSession[AnyModel | None] = None,
+    system: PerSession[str | None] = None,
+    tools: PerSession[Sequence[AnyTool]] = (),
+    output: type[BaseModel] | None = None,
+    run_config: RunConfig | None = None,
+    **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create an ADK agent: a virtual object with one conversation per key.
 
     Its ``chat`` handler answers each message with ADK's ``Runner``; the
     session is kept in the key's database, an event at a time. Add handlers
-    of your own with ``@assistant.handler``::
+    of your own with ``@assistant.handler``.
+
+    The built-in agent takes the common options::
 
         assistant = adk.agent("assistant", model="google/<model-id>", system="Answer briefly.", tools=[get_weather])
-
-    Or bring an agent of your own, or an ``App``::
-
-        assistant = adk.agent("desk", LlmAgent(name="triage", model="...", sub_agents=[refunds]))
 
     ``model``, ``system`` and ``tools`` may each be a function of the
     invocation's context, sync or async, for values that differ per user.
 
+    For anything more, pass an agent of your own, or an ``App``, configured
+    as ADK does: sub-agents, callbacks, plugins, tools (``tools()`` for this
+    package's), and a ``RunConfig`` for its runs. It runs as you configured
+    it::
+
+        triage = LlmAgent(name="triage", model="...", sub_agents=[refunds], tools=adk.tools([call(lookup)]))
+        assistant = adk.agent("desk", agent=triage, run_config=RunConfig(max_llm_calls=50))
+
     Args:
         name: The object's name, as Restate serves it.
-        adk_agent: An agent of your own, or an ``App``. Defaults to an
-            ``LlmAgent`` with ``system`` as its instruction.
-        model: ``"google/<model-id>"``, or a model of ADK (``LiteLlm(...)``
-            for other providers). Defaults to ``adk_agent``'s own, else
+        agent: An agent of your own, or an ``App``, configured, instead of
+            ``model``, ``system`` and ``tools``.
+        model: The built-in agent's model: ``"google/<model-id>"``, or a
+            model of ADK (``LiteLlm(...)`` for other providers). Defaults to
             ``$RESTATE_AGENT_MODEL`` if it is Google's.
-        system: The instruction, when there is no ``adk_agent``.
-        tools: ``restate.agents`` tools, or ADK's.
+        system: The built-in agent's instruction.
+        tools: The built-in agent's tools: ``restate.agents`` tools, or ADK's.
         output: A Pydantic model, for answers that are one rather than
             text: the ``output_schema`` of the root ``LlmAgent``. Another
             root agent that answers in text is asked again for its JSON.
             ``chat`` returns the JSON.
+        run_config: The ``RunConfig`` of ``agent``'s runs, such as their
+            ``max_llm_calls``.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -501,23 +575,26 @@ def agent(
         The agent, to serve with ``restate.serve(restate.app([agent]))``, or any ASGI server.
 
     Raises:
-        TypeError: If both ``adk_agent`` and ``system`` are given.
+        TypeError: If ``agent`` is given with ``model``, ``system`` or
+            ``tools``.
         TerminalError: If there is no model, or ``model`` names a provider other than Google.
     """
-    check_own(adk_agent, system)
-    if adk_agent is None and (model is None or isinstance(model, str)):
+    check_own(agent, "agent", model=model, system=system, tools=tools)
+    if agent is None and (model is None or isinstance(model, str)):
         _model(model)
+    own = agent
     obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> Any:
-        return await prompt(
+        return await _prompt(
             ctx,
             text,
-            agent=adk_agent,
-            model=await configured(model, ctx),
-            system=await configured(system, ctx),
-            tools=await configured(tools, ctx),
-            output=output,
+            own,
+            await configured(model, ctx),
+            await configured(system, ctx),
+            await configured(tools, ctx),
+            output,
+            run_config,
         )
 
     obj.chat(answer, items=_Items(), output=output)
