@@ -664,20 +664,48 @@ async def test_a_call_that_needs_an_approval_fails_the_turn_and_never_runs():
     assert len(closed) == 1 and str(closed[0]["output"]).startswith("Error: ")
 
 
-async def test_a_call_cut_off_by_a_crash_that_needs_an_approval_is_asked_for_again_not_run(
+async def test_a_call_cut_off_by_a_crash_that_needs_an_approval_fails_the_turn_without_asking_again(
     monkeypatch: pytest.MonkeyPatch,
 ):
     ran: list[str] = []
     crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
-    ask = invoker(
-        asker(agent=Agent(name="guarded", model=Scripted(reply), tools=[weather_tool(ran, needs_approval=True)]))
-    )
+    scripted = Scripted(reply)
+    ask = invoker(asker(agent=Agent(name="guarded", model=scripted, tools=[weather_tool(ran, needs_approval=True)])))
     invocation = request_of()
     with pytest.raises(RuntimeError, match="crashed"):
         await ask("weather Rome", invocation)
+    asked = len(scripted.requests)
     with pytest.raises(restate.TerminalError, match="needs_approval"):
         await ask("weather Rome", invocation)
+    # Neither run nor asked again (which would run the reply's other tools again, with new call ids).
     assert ran == []
+    assert len(scripted.requests) == asked
+
+
+async def test_a_call_cut_off_by_a_crash_to_a_tool_with_a_timeout_is_resumed_with_its_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started: list[str] = []
+
+    @function_tool(name_override="get_weather", timeout=0.2)
+    async def slow_weather(city: str) -> str:
+        """The weather in a city, too slowly."""
+        started.append(city)
+        await asyncio.sleep(5)
+        return f"weather in {city}"
+
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
+    scripted = Scripted(reply)
+    ask = invoker(asker(agent=Agent(name="timed", model=scripted, tools=[slow_weather])))
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("weather Rome", invocation)
+    asked = len(scripted.requests)
+    answer = await ask("weather Rome", invocation)
+    # Resumed, with its call id, rather than asked again; and the SDK's timeout applied to it.
+    assert started == ["Rome"]
+    assert len(scripted.requests) == asked + 1
+    assert answer.startswith("tool said: ") and "timed out" in answer
 
 
 @tool_input_guardrail

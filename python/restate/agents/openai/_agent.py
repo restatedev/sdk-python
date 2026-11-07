@@ -23,15 +23,16 @@ start, and the run resumes from the last step stored:
   stay idempotent. (The SDK's own ``Session`` stores a step only once its
   tools have run.)
 - A reply that cannot be resumed that way is dropped, and its agent is asked
-  again: one with a call that only the SDK's runner can make (a handoff, a
-  hosted tool), or a call to a function tool that the runner wraps (in an
-  approval, guardrails or a timeout), which a resumed call would bypass. A
-  call to a tool the agent does not have (which the SDK fails the run for) is
-  reported back to the model to fix, on the retry.
+  again (with new call ids): one with a call that only the SDK's runner can
+  make (a handoff, a hosted tool, a function tool with guardrails, which a
+  resumed call would bypass). A function tool's timeout applies to a resumed
+  call too. A call to a tool the agent does not have (which the SDK fails the
+  run for) is reported back to the model to fix, on the retry.
 - A run that stops for tool calls that need an approval (``needs_approval``)
   fails its turn, rather than answer without them, as nothing gives the
   approval: pause for a person with ``restate.agents``' ``wait_for_signal``
-  tool instead. The turn closes the calls, which never run.
+  tool instead. The turn closes the calls, which never run. A cut-off reply
+  with such a call fails its turn the same way, without asking again.
 - The agent a handoff gave the conversation to answers the next messages too.
   The stored conversation is the full transcript: a handoff passes it on as it
   is, rather than collapsed into one message (``nest_handoff_history`` is off),
@@ -63,6 +64,7 @@ start, and the run resumes from the last step stored:
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import inspect
 import json
 import typing
@@ -279,9 +281,13 @@ async def _resume(
     agent = everyone.get(cut.agent or "", agent)
     found = {tool.name: tool for tool in await agent.get_all_tools(RunContextWrapper(context))}
     known = {*found, *_handoffs(agent)}
+    if any(getattr(found.get(call.name), "needs_approval", False) for call in calls):
+        # A call that waits for an approval, which nothing gives: fail as the run would have, rather than run it, or
+        # ask again (which would run the reply's other tools again, with new call ids). The conversation closes them.
+        raise TerminalError(APPROVALS)
     if any(call.name in known and _runner_only(found.get(call.name)) for call in calls):
-        # A call that only the SDK's runner can make (a handoff, a hosted tool), or that it wraps (in an approval,
-        # say): ask the agent again instead.
+        # A call that only the SDK's runner can make (a handoff, a hosted tool, a tool with guardrails): ask the agent
+        # again instead.
         if cut.reply is not None:
             await conversation.drop(cut.reply)
         return agent
@@ -295,7 +301,7 @@ async def _resume(
             given = ToolContext(context, tool_name=tool.name, tool_call_id=call.id, tool_arguments=arguments)
             await tool_call_started(ctx)
             try:
-                output = _output(await tool.on_invoke_tool(given, arguments))
+                output = _output(await _invoke(tool, given, arguments))
             except Exception as error:
                 # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
                 from_tool(ctx, error)
@@ -310,14 +316,24 @@ def _runner_only(tool: SdkTool | None) -> bool:
     """Return whether only the SDK's runner can make a call to ``tool``.
 
     That is so for any tool but a function tool (a handoff has none), and for
-    a function tool that the runner wraps: in an approval, guardrails or a
-    timeout, which calling the tool itself would bypass. (Older versions of
-    the SDK have none of these.)
+    a function tool with guardrails, which the runner applies around it, and
+    calling the tool itself would bypass. (Older versions of the SDK have no
+    tool guardrails.)
     """
     if not isinstance(tool, FunctionTool):
         return True
-    wrapped = ("needs_approval", "tool_input_guardrails", "tool_output_guardrails", "timeout_seconds")
-    return any(getattr(tool, name, None) for name in wrapped)
+    return any(getattr(tool, name, None) for name in ("tool_input_guardrails", "tool_output_guardrails"))
+
+
+_INVOKE: Any = getattr(importlib.import_module("agents.tool"), "invoke_function_tool", None)
+"""The SDK's invocation of a function tool, which applies its timeout (versions of the SDK with tool timeouts)."""
+
+
+async def _invoke(tool: FunctionTool, context: ToolContext[Any], arguments: str) -> Any:
+    """Run a call to ``tool`` as the SDK's runner does, with its timeout, though not its guardrails or approval."""
+    if _INVOKE is None:
+        return await tool.on_invoke_tool(context, arguments)
+    return await _INVOKE(function_tool=tool, context=context, arguments=arguments)
 
 
 SETUP = "the agent is not set up right"
