@@ -236,8 +236,8 @@ class Conversation:
         """The last ``seq`` given."""
         self._results: dict[str, Result] = {}
         """The tool calls' results, by their calls' ids."""
-        self._open: dict[str, Call] = {}
-        """The tool calls that have no result, by id, in the order they were made."""
+        self._open: list[Call] = []
+        """The tool calls that have no result, in the order they were made: each of them, even if ids repeat."""
         self._called: set[str] = set()
         """The ids of the tool calls made."""
         self._prompts: dict[str, Entry] = {}
@@ -266,10 +266,11 @@ class Conversation:
                 )
             self._called.add(call.id)
             if call.id not in self._results:
-                self._open[call.id] = call
+                self._open.append(call)
         for result in entry.results:
             self._results[result.id] = result
-            self._open.pop(result.id, None)
+            if any(call.id == result.id for call in self._open):
+                self._open = [call for call in self._open if call.id != result.id]
         if entry.prompt is not None:
             self._prompts[entry.prompt] = entry
 
@@ -355,7 +356,7 @@ class Conversation:
 
     def unanswered(self) -> list[Call]:
         """Return the tool calls of the conversation that have no result, in the order they were made."""
-        return list(self._open.values())
+        return list(self._open)
 
     def new_results(self, items: Sequence[Item]) -> list[Item]:
         """Return the items of ``items`` (a framework's run) that hold a tool call's result the conversation lacks.

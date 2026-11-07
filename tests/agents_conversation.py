@@ -346,3 +346,11 @@ async def test_a_call_id_used_twice_is_logged_once(caplog: pytest.LogCaptureFixt
         await conversation.append_reply(_calling("c1", "c1"))
     assert len(caplog.records) == 1
     assert "'c1'" in caplog.records[0].getMessage()
+
+
+async def test_calls_that_share_an_id_are_each_unanswered_until_a_result_has_it():
+    # Calls without an id are read with the id "": each still needs a result of its own when the run is closed.
+    conversation = _conversation({"role": "user", "text": "hi"}, _calling("", ""))
+    assert [c.id for c in conversation.unanswered()] == ["", ""]
+    await conversation.append({"result": "", "output": "done"})
+    assert conversation.unanswered() == []
