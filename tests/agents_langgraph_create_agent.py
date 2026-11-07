@@ -93,6 +93,18 @@ desk = langgraph.agent("ca_desk", graph=create_agent(Scripted(), tools=tools))
 planner = langgraph.agent("ca_planner", graph=create_agent(Scripted(), response_format=ToolStrategy(Plan)), output=Plan)
 plain = langgraph.agent("ca_plain", graph=create_agent(Scripted(), response_format=ToolStrategy(Plan)))
 
+asked: list[list[BaseMessage]] = []
+"""What the model of ``ca_seen`` was asked with, request by request."""
+
+
+class Seen(Scripted):
+    def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
+        asked.append(list(messages))
+        return super()._generate(messages, *args, **kwargs)
+
+
+seen = langgraph.agent("ca_seen", graph=create_agent(Seen(), response_format=ToolStrategy(Plan)))
+
 
 @dataclass
 class Account:
@@ -122,7 +134,7 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([ledger, desk, planner, plain, accounts]), restate_image=RESTATE_IMAGE
+        restate.app([ledger, desk, planner, plain, seen, accounts]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -162,3 +174,14 @@ async def test_create_agent_has_its_own_context_and_calls_restate_through_the_to
     key = uuid.uuid4().hex
     assert (await chat(harness, "ca_accounts", key, "system")).json() == "system: Amounts are in EUR."
     assert (await chat(harness, "ca_accounts", key, "refund 7")).json() == f"done: {key} owes $7"
+
+
+async def test_a_turn_answered_with_a_structured_response_gives_the_graph_nothing_more_next(
+    harness: HarnessEnvironment,
+):
+    key = uuid.uuid4().hex
+    assert (await chat(harness, "ca_seen", key, f"plan {key}")).json() == f'{{"title": "{key}"}}'
+    assert (await chat(harness, "ca_seen", key, "hi there")).json() == "echo: hi there"
+    # The graph ended its run with a tool's message, and the conversation the turn with its answer: that answer
+    # is the conversation's, not the graph's, which has its own messages of the turn.
+    assert not [m for m in asked[-1] if str(m.id or "").startswith("closed:")]

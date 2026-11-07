@@ -615,10 +615,10 @@ class Turn:
     async def answered(self, answer: str, status: Status = "answered") -> None:
         """Store the turn's ``answer``, how it ended (``status``) and what it carries, in one update of its row.
 
-        The answer's message is the turn's last message of the assistant, whose
-        id the ``messages`` view's summary gives it. A turn that has none gets
-        ``answer`` as its reply first, from the agent the turn is with; an
-        empty answer gets none, and has no message.
+        The answer's message is the message of the assistant that the turn
+        ends with, whose id the ``messages`` view's summary gives it. A turn
+        that ends otherwise gets ``answer`` as its reply first, from the agent
+        the turn is with; an empty answer gets none, and has no message.
         """
         at = self._answer_message()
         if at is None and answer.strip():
@@ -641,8 +641,19 @@ class Turn:
             prompt.answered_at, prompt.answered_seq = at, seq
 
     def _answer_message(self) -> int | None:
-        """Return the position of the turn's last message of the assistant, if it has one."""
-        return next((e.n for e in reversed(self.items) if e.said is not None and e.said[0] == "assistant"), None)
+        """Return the position of the message of the assistant that the turn ends with, if it ends with one.
+
+        That is a message with no tool calls, with no call nor result after it: items that are neither (a
+        reasoning item, say) do not count. A turn that ends otherwise (with a tool's output that is the
+        answer, say) has none.
+        """
+        for entry in reversed(self.items):
+            if entry.said is None and not entry.calls and not entry.results:
+                continue
+            if entry.said is not None and entry.said[0] == "assistant" and not entry.calls:
+                return entry.n
+            return None
+        return None
 
     def _agent(self) -> str | None:
         """Return the agent the turn is with: the one it carries, else its latest reply's, else the previous turn's."""

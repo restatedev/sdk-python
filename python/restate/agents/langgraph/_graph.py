@@ -235,13 +235,17 @@ def _closing(conversation: Conversation, turn: Turn, messages: Sequence[BaseMess
     previous = turns[at - 1]
     known = {m.id for m in messages}
     copied = any(typing.cast(BaseMessage, e.item).id is not None for e in previous.items)
+    # Only a turn closed by the conversation (stopped, refused, failed, ended) has messages the graph lacks: its
+    # closing record. An answered turn's own are the graph's; the answer it ends with, if the conversation added it
+    # (the graph ended with a tool's message, say), is the conversation's.
+    closed = previous.status not in (None, "answered")
     carried: list[BaseMessage] = []
     for entry in previous.entries:
         item = typing.cast(BaseMessage, entry.item)
         if entry.prompt is not None:
             if not copied and _prompt_id(previous) not in known:
                 carried.append(HumanMessage(str(item.text), id=_prompt_id(previous)))
-        elif not isinstance(item, HumanMessage) and item.id is None and f"closed:{entry.n}" not in known:
+        elif closed and not isinstance(item, HumanMessage) and item.id is None and f"closed:{entry.n}" not in known:
             carried.append(item.model_copy(update={"id": f"closed:{entry.n}"}))
     return carried
 

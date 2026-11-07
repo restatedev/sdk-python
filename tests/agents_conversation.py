@@ -607,8 +607,9 @@ async def test_a_window_of_all_loads_every_turn_whole():
     backend = Backend()
     for n in range(4):
         await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), f"q{n}")
-    # Every turn is whole: its prompt, its call and its result (the last turn's too, appended since).
-    assert len(seen[-1].entries) == 3 * 4 and len(seen[-1].history()) == len(seen[-1].entries)
+    # Every turn is whole: its prompt, its call, its result and its answer, which it ends with (the last turn's too,
+    # appended since).
+    assert len(seen[-1].entries) == 4 * 4 and len(seen[-1].history()) == len(seen[-1].entries)
 
 
 def test_a_turn_another_invocation_ended_stays_in_the_window_as_an_unanswered_one_does():
@@ -705,3 +706,17 @@ async def test_a_turn_asks_again_within_itself_once_across_attempts():
         {"role": "assistant", "text": "still prose"},
     ]
     assert turn.latest_ask().item == {"role": "user", "text": "Reply again, with JSON only."}
+
+
+async def test_a_turn_that_ends_with_a_tool_after_a_message_ends_with_its_answer():
+    conversation = _conversation({"role": "user", "text": "book Rome"})
+    turn = conversation.turn
+    # The model says something, then calls a tool, whose output is the answer (a tool that ends the turn).
+    reply = {"role": "assistant", "text": "Let me book that.", "calls": [{"id": "b1", "name": "book", "input": {}}]}
+    await turn.append_reply(reply, agent="booker")
+    await turn.append({"result": "b1", "output": "booked Rome"})
+    await turn.answered("booked Rome")
+    # The turn ends with its answer, as a message of the assistant: the summary's, and what the next model sees.
+    last = turn.items[-1]
+    assert last.item == {"role": "assistant", "text": "booked Rome"} and last.agent == "booker"
+    assert turn.prompt.answered_at == last.n

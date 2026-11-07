@@ -396,10 +396,13 @@ Turn                              one prompt, and what answers it
   answered(answer), close(ctx, status, note)                        its end: once
 ```
 
-A turn always ends with a message of the assistant: its last reply, the
-note that closed it, or, for a run that answered with no reply left (a tool
-that ends the turn, say), its answer, stored as its reply. That message is
-the answer's in the summary, under the same id.
+A turn always ends with a message of the assistant: its last reply (with no
+tool calls, and no call or result after it), the note that closed it, or
+else its answer, stored as its reply, from the agent the turn is with (a
+turn that ended with a tool's output that is the answer, say). That message
+is the answer's in the summary, under the same id. Only an empty answer gets
+no message. A LangGraph graph, which keeps its own messages, is given only a
+closed turn's closing record, never an answer the conversation stored.
 
 **Asking again within a turn.** A turn can ask the model again before it
 answers, once: `answer_once`'s `check` reads the run's answer, and if it
