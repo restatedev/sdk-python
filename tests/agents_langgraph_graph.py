@@ -34,6 +34,7 @@ from langchain_core.language_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
+from langgraph.errors import InvalidUpdateError  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
 from langgraph.runtime import Runtime  # noqa: E402
@@ -45,6 +46,7 @@ from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
+from restate.agents.langgraph._errors import terminal_of  # noqa: E402
 from restate.agents.langgraph._graph import at_breakpoint  # noqa: E402
 from restate.exceptions import TerminalError  # noqa: E402
 
@@ -66,9 +68,11 @@ def route(state: Desk) -> str | list[str]:
     routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
     routes |= {"deep": "deep", "pause": "pause", "again": "again", "lookup": "call_lookup", "fetch": "fetch"}
     routes |= {"consult": "call_lookup", "count": "call_lookup", "refuse": "refuse", "nested": "nested"}
-    routes |= {"give_up": "give_up", "stops": "stops"}
+    routes |= {"give_up": "give_up", "stops": "stops", "loop": "loop"}
     if word == "both":
         return ["ask", "side"]  # two branches at once
+    if word == "clash":
+        return ["clash_a", "clash_b"]  # two branches at once, each writing the approval
     return routes.get(word, "greet")
 
 
@@ -295,11 +299,30 @@ def give_up(state: Desk) -> dict[str, Any]:
     raise TerminalError(f"no refunds for {_asked(state)[1]}")
 
 
+loops: collections.Counter[str] = collections.Counter()
+
+
+def loop(state: Desk) -> dict[str, Any]:
+    """A node that runs again and again, as a model that keeps calling tools does, until the recursion limit."""
+    loops[_asked(state)[1]] += 1
+    return {}
+
+
+def clash_a(state: Desk) -> dict[str, Any]:
+    return {"approval": "a"}
+
+
+def clash_b(state: Desk) -> dict[str, Any]:
+    """Writes the approval in the same step as clash_a: a field that takes one value per step."""
+    return {"approval": "b"}
+
+
 builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile(), "pause": pause, "again": again}
 builder_nodes |= {"call_lookup": call_lookup, "found": found, "fetch": fetch, "refuse": refuse}
 # A subgraph node compiled with a static breakpoint: LangGraph's public API does not list subgraphs, so it is
 # found when it stops a run.
 builder_nodes |= {"nested": nested, "give_up": give_up, "stops": paused.compile(interrupt_before=["greet"])}
+builder_nodes |= {"loop": loop, "clash_a": clash_a, "clash_b": clash_b}
 for name, node in {**builder_nodes, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
@@ -326,6 +349,9 @@ branches = [
     "nested",
     "give_up",
     "stops",
+    "loop",
+    "clash_a",
+    "clash_b",
 ]
 builder.add_conditional_edges(START, route, branches)
 builder.add_edge("call_tool", "tools")
@@ -354,8 +380,11 @@ for last in (
     "nested",
     "give_up",
     "stops",
+    "clash_a",
+    "clash_b",
 ):
     builder.add_edge(last, END)
+builder.add_edge("loop", "loop")
 
 
 class Plan(BaseModel):
@@ -381,6 +410,7 @@ async def checkpoints(ctx: sessions.SessionContext) -> dict[str, int]:
 
 
 compiled = langgraph.agent("graph_compiled", graph=builder.compile())
+limited = langgraph.agent("graph_limited", graph=builder.compile().with_config(recursion_limit=10))
 planner = langgraph.agent("graph_planner", graph=builder, output=Plan)
 # Restate suspends its turns after a second of waiting.
 patient = langgraph.agent("graph_patient", graph=builder, inactivity_timeout=timedelta(seconds=1))
@@ -418,7 +448,8 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([desk, compiled, planner, patient, caller]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([desk, compiled, limited, planner, patient, caller]),
+        restate_image="ghcr.io/restatedev/restate:latest",
     ) as harness:
         yield harness
 
@@ -676,6 +707,59 @@ async def test_a_terminal_error_of_a_node_ends_the_turn_and_the_next_is_answered
     failed = await chat(harness, "graph_desk", key, f"give_up {key}")
     assert failed.status_code == 500 and f"no refunds for {key}" in failed.text, failed.text
     assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
+
+
+async def test_a_graph_past_its_recursion_limit_ends_the_turn_and_runs_no_further(harness: HarnessEnvironment):
+    """A retry would resume the run with a fresh limit, and run on: the turn ends for good, after one attempt."""
+    key = uuid.uuid4().hex
+    failed = await chat(harness, "graph_limited", key, f"loop {key}")
+    assert failed.status_code == 500 and "recursion limit" in failed.text, failed.text
+    assert loops[key] == 10  # the graph's recursion_limit: one attempt's steps
+    # The next message starts a run of its own: the loop does not go on.
+    assert (await chat(harness, "graph_limited", key, f"hi {key}")).json() == f"hello {key}"
+    assert loops[key] == 10
+
+
+async def test_an_invalid_update_of_the_graph_ends_the_turn(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    failed = await chat(harness, "graph_desk", key, f"clash {key}")
+    assert failed.status_code == 500 and "invalid state update" in failed.text, failed.text
+    # The writes that do not fit stay in the checkpoint, where LangGraph cannot show its state with them: the next
+    # message starts a run of its own all the same.
+    assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
+
+
+async def test_a_run_resumed_after_an_invalid_update_ends_its_turn(
+    harness: HarnessEnvironment, monkeypatch: pytest.MonkeyPatch
+):
+    """As after a crash before the turn ended, or on a key that an earlier version retried: the update's writes are
+    stored, the retried attempt resumes the run that made them, and LangGraph cannot show its state with them."""
+    from restate.agents.langgraph import _graph  # pylint: disable=import-outside-toplevel
+
+    key = uuid.uuid4().hex
+    retried: list[str] = []
+
+    def retried_once(error: BaseException) -> TerminalError | None:
+        if key not in retried and isinstance(error, InvalidUpdateError):
+            retried.append(key)
+            return None  # the attempt fails, as a crash would, and Restate retries it
+        return terminal_of(error)
+
+    monkeypatch.setattr(_graph, "terminal_of", retried_once)
+    failed = await chat(harness, "graph_desk", key, f"clash {key}")
+    assert failed.status_code == 500 and "invalid state update" in failed.text, failed.text
+    assert retried == [key]
+    assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
+
+
+def test_only_langgraphs_own_errors_end_a_turn():
+    """Python's RecursionError, which user code may raise, is retried as any other error."""
+    from langgraph.errors import EmptyInputError, GraphRecursionError  # pylint: disable=import-outside-toplevel
+
+    langgraphs: list[Exception] = [GraphRecursionError("limit"), InvalidUpdateError("update"), EmptyInputError("input")]
+    assert all(isinstance(terminal_of(error), TerminalError) for error in langgraphs)
+    others: list[Exception] = [RecursionError("deep"), ValueError("value"), NotFoundError("missing")]
+    assert all(terminal_of(error) is None for error in others)
 
 
 async def test_a_finished_turn_keeps_the_latest_checkpoint_of_each_namespace(harness: HarnessEnvironment):

@@ -27,6 +27,11 @@ start, and the run resumes from the last step stored:
   ``ToolNode`` would otherwise hand the error to the model as the tool's
   result.) A call to a tool the agent does not have, or with arguments that do
   not validate, is reported back to the model to fix.
+- An attempt runs at most LangGraph's default ``recursion_limit`` of steps
+  (about ten thousand: a model request is one step, its tools another). A
+  turn that reaches it ends for good, with a terminal error: a retry would
+  carry on from where it stopped, with a fresh limit, and so would never end
+  a model that keeps calling tools.
 
 For a graph of your own, ``SqlCheckpointSaver`` stores LangGraph's checkpoints
 in the object's database instead.
@@ -66,6 +71,7 @@ from restate.agents._output import answer_with, asking
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.agents.langgraph._context import handler_context
+from restate.agents.langgraph._errors import terminal_of
 from restate.agents.langgraph._graph import AnyGraph, check, run_of
 from restate.sessions import SessionContext
 
@@ -289,7 +295,13 @@ def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given
             return final
         messages = typing.cast(list[BaseMessage], [entry.item for entry in conversation.entries])
         graph = _graph(ctx, conversation, chat_model, tools, system)
-        state = typing.cast(State, await graph.ainvoke({"messages": messages}))
+        try:
+            state = typing.cast(State, await graph.ainvoke({"messages": messages}))
+        except Exception as error:
+            if (terminal := terminal_of(error)) is not None:
+                # LangGraph's own error, which a retry would meet again: its recursion limit, say.
+                raise terminal from error
+            raise
         return _text(state["messages"][-1])
 
     return run

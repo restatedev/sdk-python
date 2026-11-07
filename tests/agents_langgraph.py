@@ -71,6 +71,11 @@ def reply(messages: Sequence[BaseMessage]) -> AIMessage:
         return AIMessage(f"system: {system.content if system else None}")
     if word == "refuse":
         raise AuthenticationError("invalid x-api-key")
+    if word == "loop":
+        # A model that keeps calling tools, never answering.
+        return AIMessage(
+            "", tool_calls=[{"id": f"call-{rest}-{len(results)}", "name": "get_weather", "args": {"city": rest}}]
+        )
     if word in ("weather", "crash", "wait", "wrong", "unknown", "forbidden") and not results:
         name = {
             "weather": "get_weather",
@@ -319,6 +324,19 @@ async def test_a_langchain_tools_terminal_error_ends_the_turn_and_the_next_messa
     assert failed.status_code == 500 and f"no access to {k}" in failed.text
     assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
     assert ("assistant", f"Error: no access to {k}") in await messages(harness, k)
+
+
+async def test_a_model_that_keeps_calling_tools_ends_the_turn_at_the_recursion_limit(
+    harness: HarnessEnvironment, monkeypatch: pytest.MonkeyPatch
+):
+    """A retry would carry on with a fresh limit, and ask the model again: the turn ends for good after one attempt."""
+    # LangGraph's default limit is about ten thousand steps; the test lowers it, where LangGraph reads it.
+    monkeypatch.setattr("langgraph._internal._config.DEFAULT_RECURSION_LIMIT", 25)
+    k = key()
+    failed = await chat(harness, k, f"loop {k}")
+    assert failed.status_code == 500 and "recursion limit" in failed.text, failed.text
+    assert asked[k] == 13  # one attempt's 25 steps: the model, then its tools, and so on
+    assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
 
 
 async def test_options_may_be_functions_of_the_context(harness: HarnessEnvironment):

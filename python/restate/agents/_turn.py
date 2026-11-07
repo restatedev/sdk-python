@@ -257,6 +257,13 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     cancellation. If the attempt ends first, the turn stops with
     ``AttemptEnded`` and the next attempt carries on. The turn publishes when
     it starts and when it ends.
+
+    An error ends the turn for good if it is a ``TerminalError``, or a model
+    provider's refusal (``refusal_of``), as a 424. Any other error fails the
+    attempt, and Restate retries the turn. So each integration raises a
+    ``TerminalError`` for its framework's errors that a retry would meet
+    again: OpenAI's ``MaxTurnsExceeded`` and guardrail tripwires, ADK's model
+    error codes, LangGraph's recursion limit and invalid updates.
     """
     invocation_id = ctx.request.id
     companion = _signals.signals_of(ctx)
