@@ -33,10 +33,13 @@ from agents import (  # noqa: E402
     ModelResponse,
     RunConfig,
     RunContextWrapper,
+    ToolGuardrailFunctionOutput,
     Usage,
+    function_tool,
     handoff,
     output_guardrail,
     set_tracing_disabled,
+    tool_input_guardrail,
 )
 from agents.extensions import handoff_filters  # noqa: E402
 from agents.run import CallModelData, ModelInputData  # noqa: E402
@@ -630,3 +633,128 @@ def test_a_tool_output_of_any_kind_is_stored_once():
     # The SDK hands the stored outputs back with the next request: none of them is new.
     new = {"type": "computer_call_output", "call_id": "c1", "output": "ok"}
     assert stored.new_results([shell, function, new]) == [new]
+
+
+# --- In process: errors, approvals and the SDK's tool pipeline -------------------------------------
+
+
+def weather_tool(ran: list[str], **wrapped: Any) -> Any:
+    """A function tool of the SDK's named get_weather (as the scripted model calls), which ``wrapped`` configures."""
+
+    @function_tool(name_override="get_weather", **wrapped)
+    def weather(city: str) -> str:
+        """The weather in a city."""
+        ran.append(city)
+        return f"weather in {city}"
+
+    return weather
+
+
+async def test_a_call_that_needs_an_approval_fails_the_turn_and_never_runs():
+    ran: list[str] = []
+    scripted = Scripted(reply)
+    ask = invoker(asker(agent=Agent(name="guarded", model=scripted, tools=[weather_tool(ran, needs_approval=True)])))
+    with pytest.raises(restate.TerminalError, match="needs_approval"):
+        await ask("weather Rome")
+    # The next message is answered, with the call closed: it never runs.
+    assert await ask("hi there") == "echo: hi there"
+    assert ran == []
+    _, items = scripted.requests[-1]
+    closed = [item for item in items if item.get("type") == "function_call_output"]
+    assert len(closed) == 1 and str(closed[0]["output"]).startswith("Error: ")
+
+
+async def test_a_call_cut_off_by_a_crash_that_needs_an_approval_is_asked_for_again_not_run(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ran: list[str] = []
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
+    ask = invoker(
+        asker(agent=Agent(name="guarded", model=Scripted(reply), tools=[weather_tool(ran, needs_approval=True)]))
+    )
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("weather Rome", invocation)
+    with pytest.raises(restate.TerminalError, match="needs_approval"):
+        await ask("weather Rome", invocation)
+    assert ran == []
+
+
+@tool_input_guardrail
+def not_in_rome(data: Any) -> ToolGuardrailFunctionOutput:
+    return ToolGuardrailFunctionOutput.reject_content("not in Rome")
+
+
+async def test_a_call_cut_off_by_a_crash_to_a_guarded_tool_is_asked_for_again_through_its_guardrail(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ran: list[str] = []
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
+    guarded = weather_tool(ran, tool_input_guardrails=[not_in_rome])
+    ask = invoker(asker(agent=Agent(name="guarded", model=Scripted(reply), tools=[guarded])))
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("weather Rome", invocation)
+    assert await ask("weather Rome", invocation) == "tool said: not in Rome"
+    assert ran == []
+
+
+class NotFoundError(Exception):
+    """As a database's client names a missing row: the model's provider refusing, if a model's."""
+
+
+async def test_an_error_of_the_agents_own_code_is_retried_and_a_models_refusal_is_not():
+    asked: list[str] = []
+
+    def instructions(run: Any, agent: Any) -> str:
+        asked.append("profile")
+        if len(asked) == 1:
+            raise NotFoundError("no profile yet")
+        return "Be kind."
+
+    ask = invoker(asker(agent=Agent(name="profiled", model=Scripted(reply), instructions=instructions)))
+    invocation = request_of()
+    with pytest.raises(NotFoundError):
+        await ask("hi there", invocation)
+    assert await ask("hi there", invocation) == "echo: hi there"
+    # The model request's own error (an invalid key) is its provider refusing.
+    with pytest.raises(restate.TerminalError) as refused:
+        await ask("refuse now")
+    assert refused.value.status_code == 424
+
+
+async def test_a_setup_error_of_the_sdk_ends_the_turn():
+    ask = invoker(asker(agent=Agent(name="prefixed", model="nosuchprefix/x")))
+    with pytest.raises(restate.TerminalError, match="not set up right: Unknown prefix"):
+        await ask("hi there")
+
+    def no_model_input(data: Any) -> Any:
+        return data.model_data.input
+
+    filtered = RunConfig(call_model_input_filter=no_model_input)
+    ask = invoker(asker(agent=Agent(name="filtered", model=Scripted(reply)), run_config=filtered))
+    with pytest.raises(restate.TerminalError, match="not set up right: .*ModelInputData"):
+        await ask("hi there")
+
+
+async def test_a_missing_package_ends_the_turn_but_a_tools_import_error_is_retried():
+    import importlib.util  # pylint: disable=import-outside-toplevel
+
+    if importlib.util.find_spec("litellm") is None:
+        ask = invoker(asker(agent=Agent(name="lite", model="litellm/anthropic/claude-x")))
+        with pytest.raises(restate.TerminalError, match="not set up right: .*litellm"):
+            await ask("hi there")
+
+    # A function tool of the SDK's whose errors fail the run (rather than go to the model).
+    @function_tool(name_override="get_weather", failure_error_function=None)
+    def get_weather(city: str) -> str:
+        """The weather in a city, from a package that is not installed yet."""
+        raise ImportError("No module named 'weather_api'")
+
+    ask = invoker(asker(agent=Agent(name="weather", model=Scripted(reply), tools=[get_weather])))
+    invocation = request_of()
+    with pytest.raises(ImportError):
+        await ask("weather Rome", invocation)
+    # Also on the retry, which runs the stored call again itself.
+    with pytest.raises(ImportError):
+        await ask("weather Rome", invocation)
