@@ -52,11 +52,28 @@ Good to know about a graph of your own:
   was. Changing the graph meanwhile (renaming a node, or a state field) is a
   migration: keep what waiting runs need until they are done, as with a
   database's tables.
-- LangGraph stores a channel's whole value at each step that changes it, so a
-  long conversation stores its messages again at each step. Trim the history
-  (a summarizing node, say) in graphs that live long.
+- Between turns, the key's database keeps the graph's latest checkpoint,
+  and the latest of each subgraph run (LangGraph's ``aprune``): a graph that
+  calls a subgraph at each turn keeps a checkpoint of each call. Within a
+  turn, LangGraph stores a channel's whole value at each step that changes
+  it, the messages included. Trim the history (a summarizing node, say) in
+  graphs that live long.
 - Clients see a run step by step, as each step is stored: there is no
   token streaming.
+- Pause a graph with ``interrupt()``, not static breakpoints
+  (``interrupt_before``, ``interrupt_after``), which have nothing to wait
+  for: a compiled graph with them is refused, and a run that stops at a
+  subgraph's fails its turn.
+- A graph with a ``context_schema`` (LangGraph's run context) gets it from
+  ``langgraph.agent(..., context=...)``, a value or a function of the
+  handler's context. The prebuilt nodes and Restate tools get the handler's
+  context either way.
+- Any error of the graph fails the attempt, and Restate retries it, within
+  the agent's retry policy (``invocation_retry_policy``): a model's, a
+  tool's or a node's. That includes a model provider refusing (a wrong API
+  key, say), which ends the built-in agent's turn: the agent cannot tell a
+  graph's own model from a model that its tools or nodes call. Raise
+  ``TerminalError`` in a node to end a turn for good.
 
 This differs from the older ``restate.ext.langchain`` integration, whose
 middleware makes a LangChain ``create_agent`` agent durable inside any regular

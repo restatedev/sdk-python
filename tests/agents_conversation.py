@@ -24,7 +24,7 @@ from sessions_object import Host, request
 import restate
 from restate import sessions
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, answer_once
-from restate.agents.internal import CANCELLED
+from restate.agents.internal import CANCELLED, from_tool, refusal_of
 from restate.sessions.internal import invoke
 
 
@@ -205,3 +205,24 @@ async def test_a_dropped_reply_takes_what_followed_it_and_each_item_is_read_once
         {"role": "assistant", "text": "", "calls": [{"id": "c1", "name": "lookup", "input": {}}]},
         {"result": "c1", "output": "found"},
     ]
+
+
+ANTHROPIC_NO_KEY = "Could not resolve authentication method. Expected either api_key or auth_token to be set."
+"""How Anthropic's SDK says that its API key is missing: with a TypeError, of a built-in type."""
+
+
+async def test_a_tools_error_of_a_built_in_type_is_marked_and_is_no_refusal():
+    """from_tool holds the errors it marks: one of a built-in type has no weak reference. A model's is a refusal."""
+    obj = sessions.SessionObject("marker")
+    seen: dict[str, Any] = {}
+
+    @obj.handler
+    async def mark(ctx: sessions.SessionContext, text: str) -> None:
+        tools = TypeError(ANTHROPIC_NO_KEY)
+        from_tool(ctx, tools)
+        seen["tool"] = refusal_of(ctx, tools)
+        seen["model"] = refusal_of(ctx, TypeError(ANTHROPIC_NO_KEY))
+
+    await invoke(obj, "mark", Host(Backend(), service="marker"), request(), "go")
+    assert seen["tool"] is None
+    assert seen["model"] is not None and seen["model"].status_code == 424

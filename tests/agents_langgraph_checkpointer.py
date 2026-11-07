@@ -23,6 +23,7 @@ pytest.importorskip("langgraph")
 
 from langchain_core.runnables import RunnableConfig  # noqa: E402
 from langgraph.graph import END, START, StateGraph  # noqa: E402
+from langgraph.types import Command, interrupt  # noqa: E402
 
 from restate import sessions  # noqa: E402
 from restate.agents.langgraph import SqlCheckpointSaver  # noqa: E402
@@ -134,27 +135,193 @@ async def test_history_lists_the_checkpoints_newest_first_by_limit_filter_and_be
     assert listed["all"][0].parent_config == listed["all"][1].config
 
 
-async def test_latest_history_keeps_one_checkpoint_and_only_its_values():
+async def test_prune_keeps_the_latest_checkpoint_and_only_its_values_and_the_thread_goes_on():
     backend = Backend()
     counted: dict[str, Any] = {}
 
     async def go(ctx: sessions.SessionContext) -> None:
-        saver = SqlCheckpointSaver(ctx.db, history="latest")
+        saver = SqlCheckpointSaver(ctx.db)
         app = steps([]).compile(checkpointer=saver)
+        other: RunnableConfig = {"configurable": {"thread_id": "other"}}
         await app.ainvoke({"log": []}, THREAD, durability="sync")
+        await app.ainvoke({"log": []}, other, durability="sync")
         await app.ainvoke({"log": []}, THREAD, durability="sync")
+        await saver.aprune(["t"])
         for table in ("checkpoints", "channel_values", "writes"):
-            row = await ctx.db.get(f"SELECT count(*) AS n FROM restate_langgraph_{table}")
+            row = await ctx.db.get(f"SELECT count(*) AS n FROM restate_langgraph_{table} WHERE thread_id = 't'")
             counted[table] = row["n"] if row else None
         latest = await saver.aget_tuple(THREAD)
         assert latest is not None
         counted["versions"] = len(latest.checkpoint["channel_versions"])
-        counted["log"] = latest.checkpoint["channel_values"]["log"]
+        counted["other"] = len([c async for c in saver.alist(other)])
+        counted["log"] = (await app.ainvoke({"log": []}, THREAD, durability="sync"))["log"]
 
     await attempt(backend, go)
-    assert counted["checkpoints"] == 1
+    assert (counted["checkpoints"], counted["writes"]) == (1, 0)
     assert counted["channel_values"] == counted["versions"]
-    assert sorted(counted["log"]) == sorted(["a", "b", "c", "d"] * 2)
+    assert counted["other"] == 5  # another thread keeps its own
+    assert sorted(counted["log"]) == sorted(["a", "b", "c", "d"] * 3)
+
+
+async def test_prune_deletes_threads_and_knows_no_other_strategy():
+    backend = Backend()
+    seen: dict[str, Any] = {}
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        saver = SqlCheckpointSaver(ctx.db)
+        await steps([]).compile(checkpointer=saver).ainvoke({"log": []}, THREAD, durability="sync")
+        with pytest.raises(ValueError, match="strategy"):
+            await saver.aprune(["t"], strategy="keep_some")
+        await saver.aprune(["t"], strategy="delete")
+        seen["t"] = await saver.aget_tuple(THREAD)
+
+    await attempt(backend, go)
+    assert seen["t"] is None
+
+
+class Topic(State):
+    topic: str
+    """Written once, by the input: a subgraph's run stores it in its first checkpoint only."""
+
+
+def nested(ran: list[str], *, ask: bool = False, before: int = 0, own_history: bool = False) -> Any:
+    """A graph whose last node is a subgraph: ``p``, which records that it ran, then ``x``, which logs the topic.
+
+    ``x`` asks with ``interrupt()`` if ``ask``. ``before`` steps of the graph come first. With ``own_history``, the
+    subgraph runs inside one that keeps its own history (``checkpointer=True``), the node ``mid``.
+    """
+
+    def p(_: Topic) -> dict[str, list[str]]:
+        ran.append("p")
+        return {"log": ["p"]}
+
+    def x(state: Topic) -> dict[str, list[str]]:
+        return {"log": [f"x:{interrupt('go?') if ask else 'ran'}:{state['topic']}"]}
+
+    inner = StateGraph(Topic)
+    inner.add_node("p", typing.cast(Any, p))
+    inner.add_node("x", typing.cast(Any, x))
+    inner.add_edge(START, "p")
+    inner.add_edge("p", "x")
+    inner.add_edge("x", END)
+    last, node = "inner", typing.cast(Any, inner.compile())
+    if own_history:
+        mid = StateGraph(Topic)
+        mid.add_node("inner", node)
+        mid.add_edge(START, "inner")
+        mid.add_edge("inner", END)
+        last, node = "mid", mid.compile(checkpointer=True)
+    outer = StateGraph(Topic)
+    previous = START
+    for n in range(before):
+        outer.add_node(f"s{n}", typing.cast(Any, lambda _: {"log": []}))
+        outer.add_edge(previous, f"s{n}")
+        previous = f"s{n}"
+    outer.add_node(last, node)
+    outer.add_edge(previous, last)
+    outer.add_edge(last, END)
+    return outer
+
+
+async def checkpoints(ctx: sessions.SessionContext) -> dict[str, int]:
+    """How many checkpoints each namespace has."""
+    rows = await ctx.db.values(
+        "SELECT checkpoint_ns, count(*) FROM restate_langgraph_checkpoints GROUP BY checkpoint_ns"
+    )
+    return {str(ns): int(typing.cast(int, n)) for ns, n in rows}
+
+
+@pytest.mark.parametrize("durability", ["sync", "async", "exit"])
+async def test_a_subgraph_paused_and_pruned_resumes_whole_and_each_namespace_keeps_its_latest(durability: Any):
+    backend = Backend()
+    ran: list[str] = []
+    seen: dict[str, Any] = {}
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        saver = SqlCheckpointSaver(ctx.db)
+        app = nested(ran, ask=True, before=3).compile(checkpointer=saver)
+        await app.ainvoke({"log": [], "topic": "T"}, THREAD, durability=durability)
+        await saver.aprune(["t"])
+        seen["paused"] = await checkpoints(ctx)
+        seen["log"] = (await app.ainvoke(Command(resume="yes"), THREAD, durability=durability))["log"]
+        await saver.aprune(["t"])
+        seen["done"] = await checkpoints(ctx)
+
+    await attempt(backend, go)
+    assert sorted(seen["paused"].values()) == [1, 1]  # the graph's, and the paused subgraph run's
+    # The subgraph resumed from its checkpoint, whole: p, before the interrupt, ran once, and the topic (which only
+    # its first checkpoint wrote) is there.
+    assert ("x:yes:T" in seen["log"], ran) == (True, ["p"])
+    assert set(seen["done"].values()) == {1}
+
+
+async def test_a_run_paused_below_a_subgraph_with_its_own_history_resumes_after_a_prune():
+    """Such a subgraph resumes its paused step after the graph above it moved on (here, by update_state)."""
+    backend = Backend()
+    ran: list[str] = []
+    seen: dict[str, Any] = {}
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        saver = SqlCheckpointSaver(ctx.db)
+        app = nested(ran, ask=True, before=1, own_history=True).compile(checkpointer=saver)
+        await app.ainvoke({"log": [], "topic": "T"}, THREAD, durability="sync")
+        await app.aupdate_state(THREAD, {"log": ["updated"]}, as_node="s0")
+        await app.ainvoke(None, THREAD, durability="sync")
+        await saver.aprune(["t"])
+        seen["log"] = (await app.ainvoke(Command(resume="yes"), THREAD, durability="sync"))["log"]
+
+    await attempt(backend, go)
+    assert ("x:yes:T" in seen["log"], ran) == (True, ["p"])
+
+
+def twice(_: State) -> dict[str, list[str]]:
+    return {"log": [f"{interrupt('one')},{interrupt('two')}"]}
+
+
+async def test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_raised_it():
+    """What the waits of ``interrupt()`` count on (``SqlCheckpointSaver._resumes``).
+
+    A node that interrupts again raises an interrupt of the same id, so its
+    waits are told apart by how many resume values its task has. LangGraph
+    stores those on the task that raised the interrupt, in the namespace of
+    the graph that ran it (here, a subgraph that a node calls). That node
+    lists the interrupt again, with its own resume values: the count is the
+    raiser's.
+    """
+    inner = StateGraph(State)
+    inner.add_node("twice", typing.cast(Any, twice))
+    inner.add_edge(START, "twice")
+    inner.add_edge("twice", END)
+    asking: Any = inner.compile()
+
+    async def approve(_: State) -> dict[str, list[str]]:
+        approved = interrupt("approve?")
+        return {"log": [f"{approved}:{(await asking.ainvoke({'log': []}))['log'][-1]}"]}
+
+    outer = StateGraph(State)
+    outer.add_node("approve", typing.cast(Any, approve))
+    outer.add_edge(START, "approve")
+    outer.add_edge("approve", END)
+    backend = Backend()
+    seen: list[tuple[str, Any, int]] = []
+    final: dict[str, Any] = {}
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        saver = SqlCheckpointSaver(ctx.db)
+        app: Any = outer.compile(checkpointer=saver)
+        await app.ainvoke({"log": []}, THREAD, durability="sync")
+        for value in ("yes", "1", "2"):
+            snapshot = await app.aget_state(THREAD)
+            [pending] = [found for task in snapshot.tasks for found in task.interrupts]
+            resumes = await saver._resumes("t")  # pyright: ignore[reportPrivateUsage]
+            seen.append((pending.id, pending.value, resumes[pending.id]))
+            await app.ainvoke(Command(resume={pending.id: value}), THREAD, durability="sync")
+        final["log"] = (await app.aget_state(THREAD)).values["log"]
+
+    await attempt(backend, go)
+    assert [(value, count) for _, value, count in seen] == [("approve?", 0), ("one", 0), ("two", 1)]
+    assert seen[0][0] != seen[1][0] == seen[2][0]
+    assert final["log"] == ["yes:1,2"]
 
 
 async def test_a_fork_from_an_earlier_checkpoint_leaves_the_branch_it_forked_from():
