@@ -33,7 +33,7 @@ from typing import Any, TypedDict
 
 import restate
 from restate import ObjectContext, ObjectSharedContext, TerminalError
-from restate.agents._api import Notifications, Resolved, Signal, Status, Turn, Waiting, Watch
+from restate.agents._api import Answering, Notifications, Resolved, Signal, Status, Waiting, Watch
 from restate.sessions import SessionContext, ViewContext
 from restate.sessions._link import Link
 from restate.sessions.internal import definition_of
@@ -87,7 +87,7 @@ class _Watching(TypedDict):
 Context = ObjectContext | ObjectSharedContext
 
 
-class Started(Turn, total=False):
+class Started(Answering, total=False):
     """A turn as its agent starts it: and whether the agent closes it itself once its invocation is gone."""
 
     settles: bool
@@ -96,7 +96,7 @@ class Started(Turn, total=False):
     not say so, and is sent nothing: its next message closes such a turn."""
 
 
-def _shown(turn: Started | None) -> Turn | None:
+def _shown(turn: Started | None) -> Answering | None:
     """Return ``turn`` as ``status`` shows it: without what only the companion reads."""
     return None if turn is None else {"invocationId": turn["invocationId"], "since": turn["since"]}
 
@@ -269,7 +269,7 @@ async def await_turn(ctx: ObjectSharedContext, turn: str) -> None:
         except TerminalError:
             ctx.object_send(ended, ctx.key(), turn)
         return
-    answering = await _get(ctx, "turn", typing.cast(Turn | None, None))
+    answering = await _get(ctx, "turn", typing.cast(Answering | None, None))
     if answering is not None and answering["invocationId"] == turn:
         ctx.object_send(await_turn, ctx.key(), turn)
 

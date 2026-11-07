@@ -37,6 +37,7 @@ import typing
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from restate.agents._common import Check
 from restate.exceptions import TerminalError
 
 if typing.TYPE_CHECKING:
@@ -119,31 +120,41 @@ def parsed(output: type[O], reply: str) -> O | Wrong:
         )
 
 
-async def answer_with(output: type[O], text: str, prompt: Callable[[str], Awaitable[str]]) -> O:
+def recheck(output: type[O]) -> Check:
+    """Return the check of an answer that must be a value of ``output``: what asks again for one, if it is not."""
+
+    def check(reply: str) -> str | None:
+        answer = parsed(output, reply)
+        if not isinstance(answer, Wrong):
+            return None
+        return (
+            f"Your reply is not the answer asked for: {answer.reason}\n"
+            f"Reply again, with JSON only: a value of this JSON schema.\n{_schema(output)}"
+        )
+
+    return check
+
+
+async def answer_with(output: type[O], text: str, prompt: Callable[[str, Check], Awaitable[str]]) -> O:
     """Answer ``text`` with a value of ``output``: the reply of ``prompt``, validated.
 
-    A reply that does not validate is answered once with what is wrong with
-    it and the schema, and the reply to that must validate.
+    A reply that does not validate is asked again within its turn, once, with
+    what is wrong with it and the schema (``prompt``'s check, see
+    ``answer_once``), and the reply to that must validate.
 
     Args:
         output: The type of the answer.
         text: The prompt.
-        prompt: Asks the agent a prompt, exactly once, and returns its reply,
-            such as a framework's ``prompt``.
+        prompt: Asks the agent a prompt, exactly once, with a check of its reply, and returns the answer, such as
+            a framework's ``prompt`` (with ``answer_once``'s ``check``).
 
     Returns:
         The answer.
 
     Raises:
-        TerminalError: If the second reply does not validate either.
+        TerminalError: If the reply to the second ask does not validate either.
     """
-    answer = parsed(output, await prompt(text))
-    if isinstance(answer, Wrong):
-        again = (
-            f"Your reply is not the answer asked for: {answer.reason}\n"
-            f"Reply again, with JSON only: a value of this JSON schema.\n{_schema(output)}"
-        )
-        answer = parsed(output, await prompt(again))
+    answer = parsed(output, await prompt(text, recheck(output)))
     if isinstance(answer, Wrong):
         raise TerminalError(f"the agent's reply is not the answer asked for: {answer.reason}")
     return answer

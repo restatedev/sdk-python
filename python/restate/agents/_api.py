@@ -116,8 +116,12 @@ class Messages(_Messages, total=False):
     """The id of the first message after the conversation was cleared; a client drops the messages it kept from before."""
 
 
-class Turn(TypedDict):
-    """The message a ``chat`` handler is answering: its invocation and when it started."""
+class Answering(TypedDict):
+    """The message a ``chat`` handler is answering: its invocation and when it started.
+
+    Its wire format is shared with Restate's other SDKs. The conversation's turns (one per prompt) are
+    ``restate.agents.internal.Turn``; an invocation of a handler of your own can hold several.
+    """
 
     invocationId: str
     """The invocation's id; ``/restate/invocation/<id>/attach`` waits for its answer."""
@@ -191,7 +195,7 @@ class Watch(_Watch, total=False):
 class Status(TypedDict):
     """What an agent is doing: the message it is answering, if any, and what its tools wait for, oldest first."""
 
-    answering: Turn | None
+    answering: Answering | None
     waiting: list[Waiting]
 
 

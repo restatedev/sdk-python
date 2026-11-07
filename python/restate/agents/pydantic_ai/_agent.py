@@ -93,6 +93,7 @@ from pydantic_ai import Agent, DeferredToolRequests, NativeOutput, PromptedOutpu
 from pydantic_ai import Tool as PydanticTool
 from restate.agents._common import (
     CANCELLATION,
+    Check,
     ErrorSet,
     ModelError,
     PerSession,
@@ -560,8 +561,10 @@ async def _prompt(
 ) -> Any:
     """Answer ``text`` as ``prompt`` does, with its options checked."""
 
-    def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, own, model, system, tools, output, deps, usage_limits))
+    def ask(text: str, check: Check | None = None) -> Awaitable[str]:
+        return answer_once(
+            ctx, text, ITEMS, _run(ctx, own, model, system, tools, output, deps, usage_limits), check=check
+        )
 
     if output is None:
         return await ask(text)

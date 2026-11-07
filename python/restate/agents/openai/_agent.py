@@ -113,6 +113,7 @@ from pydantic import BaseModel
 from pydantic_core import to_json
 
 from restate.agents._common import (
+    Check,
     PerSession,
     Summarize,
     check_built_in,
@@ -724,8 +725,8 @@ async def _prompt(
 ) -> Any:
     """Answer ``text`` as ``prompt`` does, with its options checked."""
 
-    def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, own, model, system, tools, output, options))
+    def ask(text: str, check: Check | None = None) -> Awaitable[str]:
+        return answer_once(ctx, text, ITEMS, _run(ctx, own, model, system, tools, output, options), check=check)
 
     if output is None:
         return await ask(text)

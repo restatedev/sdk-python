@@ -80,6 +80,7 @@ from pydantic import BaseModel, PrivateAttr
 
 from restate.agents._common import (
     MODEL_ENV,
+    Check,
     ModelError,
     PerSession,
     Summarize,
@@ -479,16 +480,16 @@ async def prompt(
         window = settings_of(ctx).window
         whole = window if window == "all" else max(window, 1)
 
-        def ask(text: str) -> Awaitable[str]:
-            return answer_once(ctx, text, ITEMS, run, whole)
+        def ask(text: str, check: Check | None = None) -> Awaitable[str]:
+            return answer_once(ctx, text, ITEMS, run, whole, check=check)
 
     else:
         check_built_in(graph, "graph", context=context)
         # Without a way to ask for ``output`` natively with any provider's model, the system prompt asks for it.
         asked = system if output is None else asking(system, output)
 
-        def ask(text: str) -> Awaitable[str]:
-            return answer_once(ctx, text, ITEMS, _run(ctx, model, asked, tools))
+        def ask(text: str, check: Check | None = None) -> Awaitable[str]:
+            return answer_once(ctx, text, ITEMS, _run(ctx, model, asked, tools), check=check)
 
     if output is None:
         return await ask(text)

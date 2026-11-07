@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from restate.agents import _signals
-from restate.agents._api import Turn
+from restate.agents._api import Answering
 from restate.agents._calls import settle
 from restate.agents._common import BUDGET, WINDOW, Summarize, Window, refusal_of
 from restate.exceptions import TerminalError
@@ -279,7 +279,7 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     """
     invocation_id = ctx.request.id
     companion = _signals.signals_of(ctx)
-    turn: Turn = {"invocationId": invocation_id, "since": _now()}
+    turn: Answering = {"invocationId": invocation_id, "since": _now()}
     # From here until the turn closes, the companion knows about it: `status` and `stop` ask it.
     # The agent has ``settle`` (``chat()`` adds it), so the companion may send it this turn once it is gone.
     started: _signals.Started = {**turn, "settles": True}

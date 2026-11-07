@@ -391,7 +391,8 @@ Turn                              one prompt, and what answers it
   id, n, status, answer, prompt   its row
   entries, items                  its prompt and steps
   open_calls(), replies(), last_reply(), final_reply(), stored()   its own state, never another turn's
-  append(), append_reply(), drop(), carry()                         its run's writes
+  latest_ask()                                                      its latest message of the user
+  append(), append_reply(), drop(), carry(), ask_again(text)        its run's writes
   answered(answer), close(ctx, status, note)                        its end: once
 ```
 
@@ -400,15 +401,22 @@ note that closed it, or, for a run that answered with no reply left (a tool
 that ends the turn, say), its answer, stored as its reply. That message is
 the answer's in the summary, under the same id.
 
-Decisions still open:
+**Asking again within a turn.** A turn can ask the model again before it
+answers, once: `answer_once`'s `check` reads the run's answer, and if it
+returns a message, the turn stores that message as a step of its own (a
+message of the user, `Turn.ask_again`) and runs again. The turn's answer is
+the reply to it. `output=` asks so for an answer that does not validate
+("Reply again, with JSON only: ..."). It is not a turn: the summary shows
+the person's message and the answer, and the full view shows the ask as a
+step of the turn. A framework that runs from a message of its own (ADK's
+invocation, a LangGraph graph's input) runs from the turn's latest message of
+the user (`latest_ask`). A retried attempt that finds the ask stored does
+not ask again.
 
-- The `output=` re-ask ("Reply again, with JSON only: ...") is a turn of its
-  own today, a user's message the person did not type. It could be a step
-  of the turn it re-asks instead.
-- `restate.agents.Turn`, the wire type of `status`'s `answering`, is the
-  invocation being answered; `restate.agents.internal.Turn` is the
-  conversation's turn. The wire type could be renamed (it is shared with the
-  TypeScript SDK).
+**Names.** A turn is the conversation's (`restate.agents.internal.Turn`).
+What `status` reports, `answering`, is the invocation being answered
+(`restate.agents.Answering`: its wire format, `invocationId` and `since`, is
+shared with Restate's other SDKs).
 
 ## The conversation
 

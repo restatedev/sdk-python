@@ -178,6 +178,24 @@ class LangGraphModel(BaseChatModel):
 lg = langgraph.agent("lg_planner", model=LangGraphModel(), system="Plan.", output=Plan)
 
 
+def _planning_graph() -> Any:
+    """A graph of your own: one node, which asks the scripted model with the graph's messages."""
+    from langgraph.graph import START, MessagesState, StateGraph  # pylint: disable=import-outside-toplevel
+
+    model = LangGraphModel()
+
+    async def plan(state: MessagesState) -> dict[str, Any]:
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("plan", plan)
+    builder.add_edge(START, "plan")
+    return builder
+
+
+lg_graph = langgraph.agent("lg_graph_planner", graph=_planning_graph(), output=Plan)
+
+
 # --- The OpenAI Agents SDK: the output type of the agent the run starts with ---
 
 
@@ -273,7 +291,7 @@ def anyio_backend():
 
 @pytest.fixture(scope="session")
 async def harness():
-    served = [pai_native, pai_prompted, pai_gemini_2, lg, oai, oai_desk, adk_native, adk_tools]
+    served = [pai_native, pai_prompted, pai_gemini_2, lg, lg_graph, oai, oai_desk, adk_native, adk_tools]
     async with restate.create_test_harness(restate.app(served), restate_image=RESTATE_IMAGE) as harness:
         yield harness
 
@@ -340,6 +358,33 @@ async def test_langgraph_asks_again_for_a_reply_in_prose_with_the_schema(harness
     first, again = await user_messages(harness, "lg_planner", key)
     assert first == f"prose {key}"
     assert again.startswith(f"{AGAIN}: it is not JSON") and '"title"' in again
+
+
+async def summary_of(harness: HarnessEnvironment, agent: str, key: str) -> list[tuple[str, str]]:
+    page = typing.cast(Messages, (await post(harness, f"{agent}/{key}/messages", json={"view": "summary"})).json())
+    return [
+        (message["role"], " ".join(str(part.get("text", "")) for part in message["parts"]))
+        for message in page["messages"]
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("agent", "mode"), [("lg_planner", "system"), ("lg_graph_planner", "none"), ("adk_native", "native")]
+)
+async def test_a_reply_that_is_not_the_answer_is_asked_again_within_its_turn(
+    harness: HarnessEnvironment, agent: str, mode: str
+):
+    key = uuid.uuid4().hex
+    assert (await chat(harness, agent, f"prose {key}", key)).json() == {"title": key, "mode": mode}
+    # One turn: the person's message and the answer. The ask again is a step of it, which the full view shows.
+    [(asked, said), (answering, answer)] = await summary_of(harness, agent, key)
+    assert (asked, said, answering) == ("user", f"prose {key}", "assistant")
+    assert json.loads(answer) == {"title": key, "mode": mode}
+    first, again = await user_messages(harness, agent, key)
+    assert first == f"prose {key}" and again.startswith(f"{AGAIN}: it is not JSON")
+    # The next message is a turn of its own, answered from its own prompt.
+    assert (await chat(harness, agent, f"plan {key}2", key)).json() == {"title": f"{key}2", "mode": mode}
 
 
 @pytest.mark.anyio

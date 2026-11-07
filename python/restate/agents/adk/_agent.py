@@ -67,6 +67,7 @@ from pydantic import BaseModel
 
 from restate.agents._common import (
     MODEL_ENV,
+    Check,
     ModelError,
     PerSession,
     Summarize,
@@ -348,7 +349,8 @@ def _final(conversation: Conversation, root: BaseAgent) -> str | None:
     turn = conversation.running()
     if turn is None:
         return None
-    invocation = typing.cast(Event, turn.prompt.item).invocation_id
+    # The invocation of the turn's latest message of the user: its prompt's, or the one that asked again's.
+    invocation = typing.cast(Event, turn.latest_ask().item).invocation_id
     events = [typing.cast(Event, e.item) for e in turn.items]
     events = [event for event in events if event.invocation_id == invocation]
     responses = [event for event in events if _is_final(event)]
@@ -383,7 +385,7 @@ def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
             # The run had stored its answer's events, but not its answer: that is the answer, rather than ask again.
             return final
         turn = conversation.running()
-        invocation = typing.cast(Event, turn.prompt.item).invocation_id if turn is not None else None
+        invocation = typing.cast(Event, turn.latest_ask().item).invocation_id if turn is not None else None
         runner = Runner(app=app, session_service=_Sessions(conversation))
         answer = ""
         events = runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation, run_config=config)
@@ -523,8 +525,8 @@ async def _prompt(
     """Answer ``text`` as ``prompt`` does, with its options checked."""
     app = _app(ctx, own, model, system, tools, output)
 
-    def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app, config))
+    def ask(text: str, check: Check | None = None) -> Awaitable[str]:
+        return answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app, config), check=check)
 
     if output is None:
         return await ask(text)

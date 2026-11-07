@@ -241,7 +241,7 @@ def _closing(conversation: Conversation, turn: Turn, messages: Sequence[BaseMess
         if entry.prompt is not None:
             if not copied and _prompt_id(previous) not in known:
                 carried.append(HumanMessage(str(item.text), id=_prompt_id(previous)))
-        elif item.id is None and f"closed:{entry.n}" not in known:
+        elif not isinstance(item, HumanMessage) and item.id is None and f"closed:{entry.n}" not in known:
             carried.append(item.model_copy(update={"id": f"closed:{entry.n}"}))
     return carried
 
@@ -334,7 +334,9 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
 
     async def _run(conversation: Conversation) -> str:
         turn = conversation.turn
-        prompt_id = _prompt_id(turn)
+        # The run's input: the turn's prompt, or the message that asked again within the turn (an id of its own).
+        step = turn.latest_ask()
+        prompt_id = _prompt_id(turn) if step is turn.prompt else f"{_prompt_id(turn)}:{step.n}"
         saver = SqlCheckpointSaver(ctx.db)
         app = _compiled(graph, saver)
         snapshot = await _stored(app)
@@ -359,8 +361,9 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
             resumes = await _resumed(ctx, saver, await _stored(app))
             start = Command(resume=resumes) if resumes is not None else None
         else:
-            prompt = HumanMessage(str(typing.cast(BaseMessage, turn.prompt.item).text), id=prompt_id)
-            start = {"messages": [*_closing(conversation, turn, messages), prompt]}
+            prompt = HumanMessage(str(typing.cast(BaseMessage, step.item).text), id=prompt_id)
+            closing = _closing(conversation, turn, messages) if step is turn.prompt else []
+            start = {"messages": [*closing, prompt]}
         while True:
             states = app.astream(start, config, context=run_context, durability="sync", stream_mode="values")
             try:

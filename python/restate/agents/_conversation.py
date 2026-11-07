@@ -92,6 +92,7 @@ from restate.agents._common import (
     ENDED,
     SUMMARIZE,
     UNANSWERED,
+    Check,
     Window,
     check_window,
     cut_off_result,
@@ -524,6 +525,17 @@ class Turn:
         """Return the turn's tool calls that have no result, in the order they were made."""
         return list(self._open)
 
+    def latest_ask(self) -> Entry:
+        """Return the turn's latest message of the user: its prompt, or the message that asked again (``ask_again``).
+
+        A framework that runs from a message of its own (ADK's invocation, a
+        LangGraph graph's input) runs from this one.
+        """
+        return next(
+            (e for e in reversed(self.items) if e.said is not None and e.said[0] == "user"),
+            self.prompt,
+        )
+
     def has_result(self, call_id: str) -> bool:
         """Return whether the turn's tool call ``call_id`` has a result."""
         return call_id in self._results
@@ -546,6 +558,15 @@ class Turn:
     async def append_reply(self, *items: Item, agent: str | None = None) -> int:
         """Append the model's reply, of ``items`` (given by ``agent``), to the turn, and return its id."""
         return await self._insert(lambda n: [Entry(n + i, item, reply=n, agent=agent) for i, item in enumerate(items)])
+
+    async def ask_again(self, text: str) -> None:
+        """Ask the model again within the turn, with ``text``: a message of the user that is a step of the turn.
+
+        It is the turn's, not a turn of its own: the transcript (and the
+        ``messages`` view's summary) has the turn's prompt and its answer, as
+        the user asked it.
+        """
+        await self.append(self._ledger.items.prompt(text))
 
     def carry(self, *, agent: str | None = None, state: str | None = None) -> None:
         """Keep what the turn carries to the turns after it: it is stored with its answer.
@@ -1043,7 +1064,14 @@ def invocation_of(prompt_id: str) -> str:
 
 
 async def answer_once(
-    ctx: SessionContext, text: str, items: Items, run: Run, window: Window | None = None, budget: int | None = None
+    ctx: SessionContext,
+    text: str,
+    items: Items,
+    run: Run,
+    window: Window | None = None,
+    budget: int | None = None,
+    *,
+    check: Check | None = None,
 ) -> str:
     """Answer the prompt ``text`` with a framework's ``run``, exactly once.
 
@@ -1061,6 +1089,8 @@ async def answer_once(
             Defaults to the agent's (``AgentObject``'s ``window``).
         budget: How many tokens of the turns before the window the model sees, as their messages and answers.
             Defaults to the agent's.
+        check: Checks the answer: if it returns a message, the turn asks the model again with it, once, as a
+            step of the turn (``Turn.ask_again``), and the turn's answer is the reply to that.
     """
     settings = settings_of(ctx)
     window = check_window(settings.window if window is None else window)
@@ -1072,7 +1102,7 @@ async def answer_once(
     conversation = await Conversation.load(ctx.db, items, window, budget)
 
     async def work() -> str:
-        return await _answer(ctx, conversation, prompt_id, text, run)
+        return await _answer(ctx, conversation, prompt_id, text, run, check)
 
     def stored(call_id: str, failed: str | None) -> bool:
         # The Restate calls of this invocation are its turn's.
@@ -1087,15 +1117,26 @@ async def answer_once(
     return answered
 
 
-async def _answer(ctx: SessionContext, conversation: Conversation, prompt_id: str, text: str, run: Run) -> str:
+async def _answer(
+    ctx: SessionContext, conversation: Conversation, prompt_id: str, text: str, run: Run, check: Check | None
+) -> str:
     running = conversation.running()
     if running is not None and running.id != prompt_id:
         # Turns never overlap, so the invocation of this one is gone: it ends unanswered.
         await running.close(ctx, "ended", ENDED)
         running = None
     turn = running or await conversation.ask(prompt_id, text)
+
+    async def answering() -> str:
+        answer = await run(conversation)
+        # Once at most: a turn that asked again (in an earlier attempt, say) answers with the reply to that.
+        while check is not None and (again := check(answer)) is not None and turn.latest_ask() is turn.prompt:
+            await turn.ask_again(again)
+            answer = await run(conversation)
+        return answer
+
     stop = stop_signal_of(ctx)
-    going = run(conversation)
+    going = answering()
     try:
         answer = await (stop.guard(going) if stop is not None else going)
     except AttemptEnded:

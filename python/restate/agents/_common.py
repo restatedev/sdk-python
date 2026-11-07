@@ -199,6 +199,11 @@ SUMMARIZE = (
 """What a request to summarize earlier turns starts with, before the turns themselves."""
 
 
+Check: typing.TypeAlias = Callable[[str], "str | None"]
+"""What a turn checks its answer with: ``None`` if the answer is what was asked for, else the message that asks
+the model again, once, within the turn (``answer_once``'s ``check``)."""
+
+
 def check_window(window: Window) -> Window:
     """Return ``window`` if it is one: a number of turns (0 or more), or ``"all"``."""
     given = typing.cast(object, window)

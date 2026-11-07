@@ -667,3 +667,41 @@ async def test_a_turn_answered_with_nothing_to_say_is_answered_once():
     await turn.answered("")
     assert (turn.status, turn.answer, turn.prompt.answered_at) == ("answered", "", None)
     assert turn.items == []
+
+
+async def test_a_turn_asks_again_within_itself_once_across_attempts():
+    replies = iter(["prose", "crash", "still prose"])
+    seen: list[Conversation] = []
+
+    async def run(conversation: Conversation) -> str:
+        seen.append(conversation)
+        reply = next(replies)
+        if reply == "crash":
+            raise RuntimeError("the process crashed after asking again")
+        await conversation.turn.append_reply({"role": "assistant", "text": reply})
+        return reply
+
+    def check(answer: str) -> str | None:
+        return None if answer.startswith("{") else "Reply again, with JSON only."
+
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run, check=check)
+
+    backend, invocation = Backend(), request()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), invocation, "plan")
+    # The retry finds the ask again stored: it does not ask again a second time, and answers with the reply to it.
+    assert (
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), invocation, "plan") == "still prose"
+    )
+    turn = seen[-1].turn
+    assert len(seen[-1].transcript) == 1 and turn.answer == "still prose"
+    assert [e.item for e in turn.items] == [
+        {"role": "assistant", "text": "prose"},
+        {"role": "user", "text": "Reply again, with JSON only."},
+        {"role": "assistant", "text": "still prose"},
+    ]
+    assert turn.latest_ask().item == {"role": "user", "text": "Reply again, with JSON only."}
