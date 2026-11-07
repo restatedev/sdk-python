@@ -361,10 +361,24 @@ def trimmed_agent() -> Any:
 trimmed = pydantic_ai.agent("pai_trimmed", agent=trimmed_agent())
 
 
+summarized_prompts: list[list[str]] = []
+"""The prompts of each request of the agent with a small budget."""
+
+
+def remembering(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    summarized_prompts.append(_prompts(messages))
+    return reply(messages, info)
+
+
+summarizing = pydantic_ai.agent("pai_summarizing", model=FunctionModel(remembering), budget=10)
+"""An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
+
+
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, trimmed, shop]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user, trimmed, shop, summarizing]),
+        restate_image="ghcr.io/restatedev/restate:latest",
     ) as harness:
         yield harness
 
@@ -783,3 +797,17 @@ def test_a_tool_result_of_bytes_is_stored_as_pydantic_ai_stores_it():
     [expected] = ModelMessagesTypeAdapter.validate_json(ModelMessagesTypeAdapter.dump_json([message]))
     assert isinstance(read, ModelRequest) and isinstance(expected, ModelRequest)
     assert read.parts[0].content == expected.parts[0].content  # type: ignore[union-attr]
+
+
+async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
+    k = key()
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        for word in ("one", "two", "three", "four", "five"):
+            answer = await ingress.post(
+                f"{harness.ingress_url}/pai_summarizing/{k}/chat", content=f"hi {word}", headers=TEXT
+            )
+            assert answer.json() == f"echo: hi {word}"
+    summaries = [prompts[-1] for prompts in summarized_prompts if prompts[-1].startswith("Summarize")]
+    assert len(summaries) == 1 and "User: hi one" in summaries[0] and "hi four" not in summaries[0]
+    latest = summarized_prompts[-1]
+    assert latest[0].startswith("A summary of our conversation so far:") and latest[1:] == ["hi four", "hi five"]

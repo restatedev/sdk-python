@@ -134,7 +134,6 @@ SCHEMA = Schema(
             reply INTEGER,
             agent TEXT
         )""",
-        f"CREATE INDEX {STEPS}_turn ON {STEPS} (turn, n)",
         f"CREATE INDEX {STEPS}_seq ON {STEPS} (seq)",
         f"""CREATE TABLE {START} (
             row INTEGER PRIMARY KEY CHECK (row = 0),

@@ -523,3 +523,73 @@ async def test_a_turn_left_without_an_answer_gets_the_outcomes_of_its_calls():
     await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), "second")
     results = {r.id: r.output for e in seen[1].entries for r in e.results}
     assert results["c1"] == RETURNED_UNRECORDED and results["c2"] != RETURNED_UNRECORDED
+
+
+async def test_settle_closes_only_the_turn_its_gone_invocation_left_and_only_once():
+    from restate.agents._calls import call_of  # pylint: disable=import-outside-toplevel
+    from restate.agents._common import ENDED, RETURNED_UNRECORDED  # pylint: disable=import-outside-toplevel
+    from restate.agents._conversation import settle  # pylint: disable=import-outside-toplevel
+
+    obj = sessions.SessionObject("asker")
+
+    async def dying(conversation: Conversation) -> str:
+        await conversation.append_reply(_calling("c1", "c2"))
+        # c1's Restate call returned, but the invocation was gone before its result was stored; c2's never did.
+        await (await call_of(typing.cast(Any, conversation).ctx, "lookup", {}, "c1")).answered()
+        raise RuntimeError("the invocation is gone")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        async def run(conversation: Conversation) -> str:
+            typing.cast(Any, conversation).ctx = ctx
+            return await dying(conversation)
+
+        return await answer_once(ctx, text, ITEMS, run)
+
+    @obj.handler(name="settle")
+    async def settling(ctx: sessions.SessionContext, invocation_id: str) -> bool:
+        return await settle(ctx, ITEMS, invocation_id)
+
+    @obj.handler
+    async def read(ctx: sessions.SessionContext) -> list[Any]:
+        conversation = await Conversation.load(ctx.db, ITEMS)
+        return [(e.prompt, e.answer, [(r.id, r.output) for r in e.results]) for e in conversation.entries]
+
+    backend = Backend()
+
+    def host() -> Host:
+        return Host(backend, service="asker", answers=PUBLISHED)
+
+    gone = request()
+    with pytest.raises(RuntimeError):
+        await invoke(obj, "ask", host(), gone, "first")
+    # Another invocation's id closes nothing; the gone one's closes its turn, with its calls' outcomes, once.
+    assert await invoke(obj, "settle", host(), request(), "inv_other") is False
+    assert await invoke(obj, "settle", host(), request(), gone.id) is True
+    assert await invoke(obj, "settle", host(), request(), gone.id) is False
+    entries = await invoke(obj, "read", host(), request())
+    assert tuple(entries[0][:2]) == (gone.id, ENDED)
+    results = dict(output for e in entries for output in e[2])
+    assert results == {"c1": RETURNED_UNRECORDED, "c2": ENDED}
+
+
+async def test_a_window_of_all_loads_every_turn_whole():
+    seen: list[Conversation] = []
+
+    async def run(conversation: Conversation) -> str:
+        seen.append(conversation)
+        await conversation.append_reply(_calling(f"c{len(seen)}"))
+        await conversation.append({"result": f"c{len(seen)}", "output": "done"})
+        return "fine"
+
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run, window="all")
+
+    backend = Backend()
+    for n in range(4):
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), f"q{n}")
+    # Every turn is whole: its prompt, its call and its result (the last turn's too, appended since).
+    assert len(seen[-1].entries) == 3 * 4 and len(seen[-1].history()) == len(seen[-1].entries)

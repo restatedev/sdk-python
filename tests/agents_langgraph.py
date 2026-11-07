@@ -174,10 +174,30 @@ per_user = langgraph.agent(
 )
 
 
+summarized_prompts: list[list[str]] = []
+"""The prompts of each request of the agent with a small budget."""
+
+
+class Remembering(Scripted):
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        summarized_prompts.append([str(m.content) for m in messages if isinstance(m, HumanMessage)])
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+summarizing = langgraph.agent("lg_summarizing", model=Remembering(), budget=10)
+"""An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
+
+
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user, summarizing]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -412,3 +432,17 @@ def test_a_prompt_longer_than_the_window_is_sent_whole():
     latest = _agent._latest(messages, 10)  # pyright: ignore[reportPrivateUsage]
     assert latest == messages[-1:]
     assert _agent._latest(messages, None) == messages  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
+    k = key()
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        for word in ("one", "two", "three", "four", "five"):
+            answer = await ingress.post(
+                f"{harness.ingress_url}/lg_summarizing/{k}/chat", content=f"hi {word}", headers=TEXT
+            )
+            assert answer.json() == f"echo: hi {word}"
+    summaries = [prompts[-1] for prompts in summarized_prompts if prompts[-1].startswith("Summarize")]
+    assert len(summaries) == 1 and "User: hi one" in summaries[0] and "hi four" not in summaries[0]
+    latest = summarized_prompts[-1]
+    assert latest[0].startswith("A summary of our conversation so far:") and latest[1:] == ["hi four", "hi five"]
