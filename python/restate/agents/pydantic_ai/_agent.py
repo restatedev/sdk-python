@@ -39,7 +39,8 @@ stored:
   pause for a person with ``restate.agents``' ``wait_for_signal`` tool
   instead. The turn closes the calls.
 - An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
-  ``deps``, a value or a function of the handler's context.
+  ``deps``: a value, or for ``agent`` also a function of the handler's
+  context.
 - An ``Agent`` of your own keeps its system prompt (``system_prompt``),
   which Pydantic AI adds to a conversation's first request only, and keeps in
   the message history: it is stored with the conversation's first prompt,
