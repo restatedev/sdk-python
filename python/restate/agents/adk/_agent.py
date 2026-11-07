@@ -33,11 +33,20 @@ its stored events:
   default) fails its prompt for good: a retry would carry on with a fresh count.
 - An agent or ``App`` of your own runs as you configured it, with the
   ``run_config`` you give.
+- The built-in agent gets ADK's events compaction, for a conversation that
+  lives long (``EventsCompactionConfig``): every ``COMPACT_EVERY``
+  invocations, its model summarizes them (with the ``COMPACT_OVERLAP`` before
+  them), and its requests have the summaries in place of the events they
+  cover. A summary is an event like any other, stored in the session, which
+  the conversation's messages do not show. ADK compacts after the run's
+  answer: a summary that fails (its model request, say) leaves the turn
+  answered, and is tried again after the next one.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import time
 import typing
 from collections.abc import Awaitable, Callable, Sequence
@@ -46,6 +55,8 @@ from typing import Any, Unpack
 from google.adk.agents import BaseAgent, LlmAgent, RunConfig
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError, new_invocation_context_id
 from google.adk.apps import App, ResumabilityConfig
+from google.adk.apps.app import EventsCompactionConfig
+from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
 from google.adk.events import Event
 from google.adk.models import BaseLlm
 from google.adk.plugins import BasePlugin
@@ -78,6 +89,8 @@ from restate.sessions import SessionContext
 
 M = typing.TypeVar("M", bound=BaseModel)
 
+
+logger = logging.getLogger(__name__)
 
 AnyModel = str | BaseLlm
 """A model: ``"google/<model-id>"`` (a Gemini model), or a model of ADK (``LiteLlm(...)`` for others)."""
@@ -273,6 +286,30 @@ def _model(model: AnyModel | None) -> str | BaseLlm:
 # --- A run ----------------------------------------------------------------------------------------
 
 
+COMPACT_EVERY = 10
+"""How many invocations of the built-in agent ADK's events compaction summarizes at a time."""
+
+COMPACT_OVERLAP = 2
+"""How many invocations before them each summary covers again, for continuity."""
+
+
+class _Summarizer(LlmEventSummarizer):
+    """ADK's summarizer of events, whose failure leaves the turn answered.
+
+    ADK compacts after the run's answer, which an error would fail (as a
+    refusal, if its model request's looks like one). A summarizer that
+    returns ``None`` (ADK's contract for one that failed) leaves the events
+    as they are, and they are summarized again after the next turn.
+    """
+
+    async def maybe_summarize_events(self, *, events: list[Event]) -> Event | None:
+        try:
+            return await super().maybe_summarize_events(events=events)
+        except Exception as error:
+            logger.warning("ADK's events compaction failed, and runs again after the next turn: %s", error)
+            return None
+
+
 def _app(
     ctx: SessionContext,
     own: BaseAgent | App | None,
@@ -288,10 +325,16 @@ def _app(
     schema with tools.
     """
     if own is None:
-        root: BaseAgent = LlmAgent(
+        root = LlmAgent(
             name="assistant", model=_model(model), instruction=system or "", tools=tools(given), output_schema=output
         )
-        app = App(name=_APP, root_agent=root)
+        # For a conversation that lives long, which would otherwise outgrow the model's context window.
+        compaction = EventsCompactionConfig(
+            summarizer=_Summarizer(llm=root.canonical_model),
+            compaction_interval=COMPACT_EVERY,
+            overlap_size=COMPACT_OVERLAP,
+        )
+        app = App(name=_APP, root_agent=root, events_compaction_config=compaction)
     else:
         app = own if isinstance(own, App) else App(name=_APP, root_agent=own)
         # A workflow agent (a SequentialAgent, say) has no output schema: its answer is asked again for as JSON.

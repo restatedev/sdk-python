@@ -15,6 +15,7 @@
 import asyncio
 import collections
 import copy
+import dataclasses
 import json
 import typing
 import uuid
@@ -31,15 +32,21 @@ from agents import (  # noqa: E402
     GuardrailFunctionOutput,
     Model,
     ModelResponse,
+    OpenAIChatCompletionsModel,
+    OpenAIResponsesModel,
     RunConfig,
     RunContextWrapper,
+    ToolGuardrailFunctionOutput,
     Usage,
+    function_tool,
     handoff,
     output_guardrail,
     set_tracing_disabled,
+    tool_input_guardrail,
 )
 from agents.extensions import handoff_filters  # noqa: E402
 from agents.run import CallModelData, ModelInputData  # noqa: E402
+from openai import AsyncOpenAI  # noqa: E402
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText  # noqa: E402
 
 import restate  # noqa: E402
@@ -630,3 +637,280 @@ def test_a_tool_output_of_any_kind_is_stored_once():
     # The SDK hands the stored outputs back with the next request: none of them is new.
     new = {"type": "computer_call_output", "call_id": "c1", "output": "ok"}
     assert stored.new_results([shell, function, new]) == [new]
+
+
+# --- In process: a conversation that lives long --------------------------------------------------
+
+
+class ResponsesScripted(OpenAIResponsesModel):
+    """A model of the Responses API (as the SDK's default provider makes of a model id), scripted: it keeps the settings."""
+
+    def __init__(self, settings: list[Any]) -> None:
+        super().__init__(model="scripted", openai_client=AsyncOpenAI(api_key="no requests"))
+        self.scripted = Scripted(reply)
+        self.settings = settings
+
+    async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:  # pyright: ignore[reportIncompatibleMethodOverride]
+        self.settings.append(kwargs["model_settings"])
+        return await self.scripted.get_response(*args, **kwargs)
+
+
+async def test_the_built_in_agent_has_openais_compaction_and_an_agent_of_your_own_runs_as_configured():
+    settings: list[Any] = []
+    ask = invoker(asker(model=ResponsesScripted(settings)))
+    assert await ask("hi there") == "echo: hi there"
+    assert settings[-1].context_management == [{"type": "compaction"}]
+    ask = invoker(asker(agent=Agent(name="mine", model=ResponsesScripted(settings))))
+    assert await ask("hi there") == "echo: hi there"
+    assert settings[-1].context_management is None
+
+
+def test_only_a_model_of_the_responses_api_gets_compaction():
+    from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
+
+    def compaction(model: Any) -> Any:
+        return _agent._long_lived(model).context_management  # pyright: ignore[reportPrivateUsage]
+
+    client = AsyncOpenAI(api_key="no requests")
+    assert compaction("gpt-6-sol") == [{"type": "compaction"}]
+    assert compaction(OpenAIResponsesModel(model="gpt-6-sol", openai_client=client)) == [{"type": "compaction"}]
+    assert compaction(OpenAIChatCompletionsModel(model="gpt-6-sol", openai_client=client)) is None
+    assert compaction(Scripted(reply)) is None
+
+
+async def test_a_request_starts_with_the_latest_compaction_item(monkeypatch: pytest.MonkeyPatch):
+    from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
+
+    compacted = {"type": "compaction", "id": "cmp_1", "encrypted_content": "the summary"}
+    original = _agent._Hooks.on_llm_end  # pyright: ignore[reportPrivateUsage]
+
+    async def compacting(self: Any, context: Any, agent: Any, response: ModelResponse) -> None:
+        # As OpenAI's server-side compaction does, at the second turn: its reply starts with a compaction item.
+        if any("compact" in json.dumps(item) for item in response.to_input_items()):
+            response = dataclasses.replace(response, output=[typing.cast(Any, compacted), *response.output])
+        await original(self, context, agent, response)
+
+    monkeypatch.setattr(_agent._Hooks, "on_llm_end", compacting)  # pyright: ignore[reportPrivateUsage]
+    scripted = Scripted(reply)
+    ask = invoker(asker(model=scripted))
+    assert await ask("hi there") == "echo: hi there"
+    assert await ask("compact now") == "echo: compact now"
+    assert await ask("hi again") == "echo: hi again"
+    _, items = scripted.requests[-1]
+    # The request starts with the compaction item, which stands for the conversation before it.
+    assert items[0] == compacted
+    assert [i.get("content") for i in items if i.get("role") == "user"] == ["hi again"]
+
+
+# --- In process: errors, approvals and the SDK's tool pipeline -------------------------------------
+
+
+def weather_tool(ran: list[str], **wrapped: Any) -> Any:
+    """A function tool of the SDK's named get_weather (as the scripted model calls), which ``wrapped`` configures."""
+
+    @function_tool(name_override="get_weather", **wrapped)
+    def weather(city: str) -> str:
+        """The weather in a city."""
+        ran.append(city)
+        return f"weather in {city}"
+
+    return weather
+
+
+async def test_a_call_that_needs_an_approval_fails_the_turn_and_never_runs():
+    ran: list[str] = []
+    scripted = Scripted(reply)
+    ask = invoker(asker(agent=Agent(name="guarded", model=scripted, tools=[weather_tool(ran, needs_approval=True)])))
+    with pytest.raises(restate.TerminalError, match="needs_approval"):
+        await ask("weather Rome")
+    # The next message is answered, with the call closed: it never runs.
+    assert await ask("hi there") == "echo: hi there"
+    assert ran == []
+    _, items = scripted.requests[-1]
+    closed = [item for item in items if item.get("type") == "function_call_output"]
+    assert len(closed) == 1 and str(closed[0]["output"]).startswith("Error: ")
+
+
+async def test_a_call_cut_off_by_a_crash_that_needs_an_approval_fails_the_turn_without_asking_again(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ran: list[str] = []
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
+    scripted = Scripted(reply)
+    ask = invoker(asker(agent=Agent(name="guarded", model=scripted, tools=[weather_tool(ran, needs_approval=True)])))
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("weather Rome", invocation)
+    asked = len(scripted.requests)
+    with pytest.raises(restate.TerminalError, match="needs_approval"):
+        await ask("weather Rome", invocation)
+    # Neither run nor asked again (which would run the reply's other tools again, with new call ids).
+    assert ran == []
+    assert len(scripted.requests) == asked
+
+
+@pytest.mark.parametrize("needed", [False, True])
+async def test_a_call_cut_off_by_a_crash_asks_the_tools_approval_function(
+    monkeypatch: pytest.MonkeyPatch, needed: bool
+):
+    asked_for: list[tuple[dict[str, Any], str]] = []
+
+    async def approval(run: Any, arguments: dict[str, Any], call_id: str) -> bool:
+        asked_for.append((arguments, call_id))
+        return needed
+
+    ran: list[str] = []
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
+    scripted = Scripted(reply)
+    ask = invoker(
+        asker(agent=Agent(name="guarded", model=scripted, tools=[weather_tool(ran, needs_approval=approval)]))
+    )
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("weather Rome", invocation)
+    asked = len(scripted.requests)
+    if needed:
+        with pytest.raises(restate.TerminalError, match="needs_approval"):
+            await ask("weather Rome", invocation)
+        assert ran == []
+        assert len(scripted.requests) == asked
+    else:
+        # It needs none: resumed with its call id, rather than asked again.
+        assert await ask("weather Rome", invocation) == "tool said: weather in Rome"
+        assert ran == ["Rome"]
+        assert len(scripted.requests) == asked + 1
+    assert asked_for[-1] == ({"city": "Rome"}, "call-Rome")
+
+
+async def test_a_call_cut_off_by_a_crash_to_a_tool_with_a_timeout_is_resumed_with_its_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started: list[str] = []
+
+    @function_tool(name_override="get_weather", timeout=0.2)
+    async def slow_weather(city: str) -> str:
+        """The weather in a city, too slowly."""
+        started.append(city)
+        await asyncio.sleep(5)
+        return f"weather in {city}"
+
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
+    scripted = Scripted(reply)
+    ask = invoker(asker(agent=Agent(name="timed", model=scripted, tools=[slow_weather])))
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("weather Rome", invocation)
+    asked = len(scripted.requests)
+    answer = await ask("weather Rome", invocation)
+    # Resumed, with its call id, rather than asked again; and the SDK's timeout applied to it.
+    assert started == ["Rome"]
+    assert len(scripted.requests) == asked + 1
+    assert answer.startswith("tool said: ") and "timed out" in answer
+
+
+@tool_input_guardrail
+def not_in_rome(data: Any) -> ToolGuardrailFunctionOutput:
+    return ToolGuardrailFunctionOutput.reject_content("not in Rome")
+
+
+async def test_a_call_cut_off_by_a_crash_to_a_guarded_tool_is_asked_for_again_through_its_guardrail(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ran: list[str] = []
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
+    guarded = weather_tool(ran, tool_input_guardrails=[not_in_rome])
+    ask = invoker(asker(agent=Agent(name="guarded", model=Scripted(reply), tools=[guarded])))
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("weather Rome", invocation)
+    assert await ask("weather Rome", invocation) == "tool said: not in Rome"
+    assert ran == []
+
+
+class NotFoundError(Exception):
+    """As a database's client names a missing row: the model's provider refusing, if a model's."""
+
+
+async def test_an_error_of_the_agents_own_code_is_retried_and_a_models_refusal_is_not():
+    asked: list[str] = []
+
+    def instructions(run: Any, agent: Any) -> str:
+        asked.append("profile")
+        if len(asked) == 1:
+            raise NotFoundError("no profile yet")
+        return "Be kind."
+
+    ask = invoker(asker(agent=Agent(name="profiled", model=Scripted(reply), instructions=instructions)))
+    invocation = request_of()
+    with pytest.raises(NotFoundError):
+        await ask("hi there", invocation)
+    assert await ask("hi there", invocation) == "echo: hi there"
+    # The model request's own error (an invalid key) is its provider refusing.
+    with pytest.raises(restate.TerminalError) as refused:
+        await ask("refuse now")
+    assert refused.value.status_code == 424
+
+    # An error of the run's own input filter (which runs before the model is made) is retried too.
+    filtered: list[str] = []
+
+    def profile_filter(data: Any) -> Any:
+        filtered.append("profile")
+        if len(filtered) == 1:
+            raise NotFoundError("no profile yet")
+        return data.model_data
+
+    config = RunConfig(call_model_input_filter=profile_filter)
+    ask = invoker(asker(agent=Agent(name="filtered", model=Scripted(reply)), run_config=config))
+    invocation = request_of()
+    with pytest.raises(NotFoundError):
+        await ask("hi there", invocation)
+    assert await ask("hi there", invocation) == "echo: hi there"
+
+
+async def test_a_missing_api_key_is_a_refusal_for_the_built_in_agent_and_one_of_your_own(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The SDK makes the model's client (which needs the key) before the model request: still a refusal.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    for options in ({"model": "openai/gpt-6-sol"}, {"agent": Agent(name="mine", model="gpt-6-sol")}):
+        ask = invoker(asker(**options))
+        with pytest.raises(restate.TerminalError) as refused:
+            await ask("hi there")
+        assert refused.value.status_code == 424, refused.value.message
+
+
+async def test_a_setup_error_of_the_sdk_ends_the_turn():
+    ask = invoker(asker(agent=Agent(name="prefixed", model="nosuchprefix/x")))
+    with pytest.raises(restate.TerminalError, match="not set up right: Unknown prefix"):
+        await ask("hi there")
+
+    def no_model_input(data: Any) -> Any:
+        return data.model_data.input
+
+    filtered = RunConfig(call_model_input_filter=no_model_input)
+    ask = invoker(asker(agent=Agent(name="filtered", model=Scripted(reply)), run_config=filtered))
+    with pytest.raises(restate.TerminalError, match="not set up right: .*ModelInputData"):
+        await ask("hi there")
+
+
+async def test_a_missing_package_ends_the_turn_but_a_tools_import_error_is_retried():
+    import importlib.util  # pylint: disable=import-outside-toplevel
+
+    if importlib.util.find_spec("litellm") is None:
+        ask = invoker(asker(agent=Agent(name="lite", model="litellm/anthropic/claude-x")))
+        with pytest.raises(restate.TerminalError, match="not set up right: .*litellm"):
+            await ask("hi there")
+
+    # A function tool of the SDK's whose errors fail the run (rather than go to the model).
+    @function_tool(name_override="get_weather", failure_error_function=None)
+    def get_weather(city: str) -> str:
+        """The weather in a city, from a package that is not installed yet."""
+        raise ImportError("No module named 'weather_api'")
+
+    ask = invoker(asker(agent=Agent(name="weather", model=Scripted(reply), tools=[get_weather])))
+    invocation = request_of()
+    with pytest.raises(ImportError):
+        await ask("weather Rome", invocation)
+    # Also on the retry, which runs the stored call again itself.
+    with pytest.raises(ImportError):
+        await ask("weather Rome", invocation)

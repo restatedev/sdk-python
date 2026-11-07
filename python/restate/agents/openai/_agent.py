@@ -22,9 +22,18 @@ start, and the run resumes from the last step stored:
   running runs them again with the same call ids, which a tool can pass on to
   stay idempotent. (The SDK's own ``Session`` stores a step only once its
   tools have run.)
-- A reply that cannot be resumed that way (a handoff, say) is dropped, and its
-  agent is asked again. A call to a tool the agent does not have (which the
-  SDK fails the run for) is reported back to the model to fix, on the retry.
+- A reply that cannot be resumed that way is dropped, and its agent is asked
+  again (with new call ids): one with a call that only the SDK's runner can
+  make (a handoff, a hosted tool, a function tool with guardrails, which a
+  resumed call would bypass). A function tool's timeout applies to a resumed
+  call too. A call to a tool the agent does not have (which the SDK fails the
+  run for) is reported back to the model to fix, on the retry.
+- A run that stops for tool calls that need an approval (``needs_approval``)
+  fails its turn, rather than answer without them, as nothing gives the
+  approval: pause for a person with ``restate.agents``' ``wait_for_signal``
+  tool instead. The turn closes the calls, which never run. A cut-off reply
+  with such a call fails its turn the same way, without asking again (a
+  function tool's ``needs_approval`` function decides, as in the run).
 - The agent a handoff gave the conversation to answers the next messages too.
   The stored conversation is the full transcript: a handoff passes it on as it
   is, rather than collapsed into one message (``nest_handoff_history`` is off),
@@ -35,17 +44,40 @@ start, and the run resumes from the last step stored:
 - A guardrail's tripwire fails the prompt for good, and the reply it blocked is
   dropped from the conversation. A stored reply becomes the answer without
   asking again only if its agent has no output guardrails.
+- Only an error of a model request can be its provider refusing (a wrong API
+  key, say), which ends the turn unanswered: the run's hooks mark each
+  request, from the input filter's end (when the SDK has run the
+  instructions and the run's own filter, and goes on to make the model and
+  its client, which needs the key) to ``on_llm_end``. Any other error fails
+  the attempt, and Restate retries it, such as one of an instructions
+  function's.
+- The SDK's setup errors (its ``UserError``: an unknown model prefix, say) and
+  a package the agent needs that is not installed (``litellm``, say) end the
+  turn for good: a retry would meet them again.
 - A run of more turns than ``max_turns`` (the SDK's default is 10) fails its
   prompt for good: a retry would carry on with a fresh count.
 - An ``Agent`` of your own runs as you configured it, with the ``context``
   (the SDK's run context) and the ``run_config`` you give: its
   ``call_model_input_filter`` runs after this package's, which stores the
   tools' outputs.
+- The built-in agent gets OpenAI's server-side compaction, for a conversation
+  that lives long (``ModelSettings.context_management``, on versions of the
+  SDK that have it): the Responses API summarizes the history as it nears the
+  model's context window, which a long conversation would otherwise outgrow,
+  failing each turn. Its compaction item is stored like any reply, and a
+  request starts with the latest one: it stands for the items before it,
+  which OpenAI's guide says need not be sent again (as the SDK's own
+  compacting session drops them), so that requests stop growing with the
+  conversation, which is stored whole. A model of the Chat Completions API,
+  or of another provider, gets
+  none, and a model that OpenAI does not compact refuses such requests: run
+  it as an ``Agent`` of your own, configured as you need.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import inspect
 import json
 import typing
@@ -61,6 +93,8 @@ from agents import (
     MaxTurnsExceeded,
     Model,
     ModelResponse,
+    ModelSettings,
+    OpenAIResponsesModel,
     OutputGuardrailTripwireTriggered,
     RunConfig,
     RunContextWrapper,
@@ -82,6 +116,7 @@ from restate.agents._common import (
     from_tool,
     model_id_of,
     model_of,
+    raised_by_tool,
 )
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
@@ -212,6 +247,9 @@ class _Hooks(RunHooks[Any]):
         self.conversation = conversation
         self.then = config.call_model_input_filter
         """The run's own ``call_model_input_filter``, if it has one."""
+        self.requesting = False
+        """Whether a model request is in progress, with the making of its model and client: the only time an error
+        can be its provider refusing."""
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
         """The run's ``call_model_input_filter``: store the tools' outputs before the next request.
@@ -220,12 +258,17 @@ class _Hooks(RunHooks[Any]):
         """
         if outputs := self.conversation.new_results(data.model_data.input):
             await self.conversation.append(*outputs)
-        if self.then is None:
-            return data.model_data
-        filtered = self.then(data)
-        return await filtered if inspect.isawaitable(filtered) else filtered
+        filtered = data.model_data
+        if self.then is not None:
+            given = self.then(data)
+            filtered = await given if inspect.isawaitable(given) else given
+        # The SDK goes on to make the model and its client (which needs the API key: a refusal if it is missing), and
+        # to request it. (The instructions have run already.)
+        self.requesting = True
+        return filtered
 
     async def on_llm_end(self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse) -> None:
+        self.requesting = False
         reply = typing.cast(list[Item], response.to_input_items())
         await self.conversation.append_reply(*reply, agent=agent.name)
 
@@ -253,8 +296,15 @@ async def _resume(
     agent = everyone.get(cut.agent or "", agent)
     found = {tool.name: tool for tool in await agent.get_all_tools(RunContextWrapper(context))}
     known = {*found, *_handoffs(agent)}
-    if any(call.name in known and not isinstance(found.get(call.name), FunctionTool) for call in calls):
-        # A call that only the SDK can make (a handoff, a hosted tool): ask the agent again instead.
+    approvals = [await _approval(found.get(call.name), call, context) for call in calls]
+    if any(approval is True for approval in approvals):
+        # A call that waits for an approval, which nothing gives: fail as the run would have, rather than run it, or
+        # ask again (which would run the reply's other tools again, with new call ids). The conversation closes them.
+        raise TerminalError(APPROVALS)
+    undecided = any(approval is None for approval in approvals)
+    if undecided or any(call.name in known and _runner_only(found.get(call.name)) for call in calls):
+        # A call that only the SDK's runner can make (a handoff, a hosted tool, a tool with guardrails), or decide on
+        # (another tool's approval function): ask the agent again instead.
         if cut.reply is not None:
             await conversation.drop(cut.reply)
         return agent
@@ -267,27 +317,92 @@ async def _resume(
             arguments = call.input if isinstance(call.input, str) else json.dumps(call.input)
             given = ToolContext(context, tool_name=tool.name, tool_call_id=call.id, tool_arguments=arguments)
             await tool_call_started(ctx)
-            output = _output(await _unwrapped(ctx, tool.on_invoke_tool(given, arguments)))
+            try:
+                output = _output(await _invoke(tool, given, arguments))
+            except Exception as error:
+                # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
+                from_tool(ctx, error)
+                raise
             await tool_call_ended(ctx)
         outputs.extend(ITEMS.results([(call, output)]))
     await conversation.append(*outputs)
     return agent
 
 
+async def _approval(tool: SdkTool | None, call: Call, context: Any) -> bool | None:
+    """Return whether ``call`` (to ``tool``) needs an approval, or ``None`` if only the SDK's runner can tell.
+
+    A function tool's ``needs_approval`` function is asked, with the call's
+    arguments and id, as the runner asks it. Another tool's (a shell's, say)
+    takes other arguments.
+    """
+    needs = getattr(tool, "needs_approval", False)
+    if not callable(needs):
+        return bool(needs)
+    arguments: object = call.input
+    if not isinstance(tool, FunctionTool) or not isinstance(arguments, dict):
+        return None
+    decided = needs(RunContextWrapper(context), typing.cast(dict[str, Any], arguments), call.id)
+    return bool(await decided if inspect.isawaitable(decided) else decided)
+
+
+def _runner_only(tool: SdkTool | None) -> bool:
+    """Return whether only the SDK's runner can make a call to ``tool``.
+
+    That is so for any tool but a function tool (a handoff has none), and for
+    a function tool with guardrails, which the runner applies around it, and
+    calling the tool itself would bypass. (Older versions of the SDK have no
+    tool guardrails.)
+    """
+    if not isinstance(tool, FunctionTool):
+        return True
+    return any(getattr(tool, name, None) for name in ("tool_input_guardrails", "tool_output_guardrails"))
+
+
+_INVOKE: Any = getattr(importlib.import_module("agents.tool"), "invoke_function_tool", None)
+"""The SDK's invocation of a function tool, which applies its timeout (versions of the SDK with tool timeouts)."""
+
+
+async def _invoke(tool: FunctionTool, context: ToolContext[Any], arguments: str) -> Any:
+    """Run a call to ``tool`` as the SDK's runner does, with its timeout, though not its guardrails or approval."""
+    if _INVOKE is None:
+        return await tool.on_invoke_tool(context, arguments)
+    return await _INVOKE(function_tool=tool, context=context, arguments=arguments)
+
+
+SETUP = "the agent is not set up right"
+"""Why a run fails its turn for the SDK's setup error, which a retry would meet again."""
+
+APPROVALS = (
+    "the run stopped for tool calls that need an approval (the SDK's needs_approval), which nothing gives here: "
+    "pause for a person with restate.agents' wait_for_signal tool instead"
+)
+"""Why a run that stops for approvals (the SDK's interruptions) fails its turn."""
+
+
 async def _unwrapped(ctx: SessionContext, work: Awaitable[Any]) -> Any:
     """Await ``work``, raising a tool's error as the tool raised it rather than as the SDK wraps it.
 
-    Too many turns, which a retry would only repeat, become terminal.
+    Errors that a retry would meet again become terminal: too many turns, the
+    SDK's setup errors, and a package that is not installed (but for a
+    tool's, which may be passing).
     """
     try:
         return await work
     except UserError as error:
         cause = error.__cause__
         if isinstance(cause, Exception):
-            # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
+            # A tool's error, which the SDK wraps: raise it as the tool raised it, marked as the tool's, so that it is
+            # never mistaken for the model provider refusing.
             from_tool(ctx, cause)
             raise cause from None
-        raise
+        # The SDK's own (an unknown model prefix, an input filter that returns no ModelInputData...).
+        raise TerminalError(f"{SETUP}: {error}") from error
+    except ImportError as error:
+        if raised_by_tool(ctx, error):
+            raise
+        # A package that the agent needs (its model provider's, say).
+        raise TerminalError(f"{SETUP}: {error}") from error
     except MaxTurnsExceeded as error:
         raise TerminalError(str(error)) from error
 
@@ -327,8 +442,10 @@ def _run(
     it hands off to answers with its own output type, as text if it has none.
     """
     if own is None:
-        root: Agent[Any] = Agent(name="assistant", instructions=system, tools=tools(given))
-        config = RunConfig(model=_model(model), nest_handoff_history=False)
+        chosen = _model(model)
+        settings = _long_lived(chosen)
+        root: Agent[Any] = Agent(name="assistant", instructions=system, tools=tools(given), model_settings=settings)
+        config = RunConfig(model=chosen, nest_handoff_history=False)
     else:
         root = own
         # The conversation is the full transcript, which a handoff passes on as it is.
@@ -361,13 +478,13 @@ async def _go(
     options: _Options,
 ) -> str:
     """Run the ``Runner`` on from the conversation, with the agent it is with, and return the answer."""
-    agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
     hooks = _Hooks(ctx, conversation, config)
     filtered = dataclasses.replace(config, call_model_input_filter=hooks.model_input)
-    items = typing.cast(Any, conversation.history())
     # The SDK's default, unless given: older versions take no None.
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:
+        agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
+        items = typing.cast(Any, _since_compaction(conversation.history()))
         run = Runner.run(agent, items, context=options.context, hooks=hooks, run_config=filtered, **limit)
         result = await _unwrapped(ctx, run)
     except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:
@@ -375,10 +492,27 @@ async def _go(
         if (blocked := conversation.last_reply()) is not None:
             await conversation.drop(blocked)
         raise TerminalError(str(error)) from error
+    except TerminalError:
+        raise
+    except Exception as error:
+        if not hooks.requesting:
+            # Not a model request's: no refusal, whatever its name (an instructions function's, say).
+            from_tool(ctx, error)
+        raise
     # The outputs that no model request stored: those of a tool that ends the turn, say.
     if outputs := conversation.new_results(result.to_input_list()):
         await conversation.append(*outputs)
+    if getattr(result, "interruptions", None):
+        # Calls that wait for an approval, which nothing gives: fail rather than answer without them. The
+        # conversation closes them, so that they never run.
+        raise TerminalError(APPROVALS)
     return _output(result.final_output)
+
+
+def _since_compaction(items: list[Item]) -> list[Item]:
+    """Return ``items`` from the latest compaction item on (OpenAI's), which stands for those before it."""
+    latest = max((i for i, item in enumerate(items) if item.get("type") == "compaction"), default=0)
+    return items[latest:]
 
 
 def tools(given: Sequence[AnyTool]) -> list[SdkTool]:
@@ -412,6 +546,24 @@ def _function_tool(tool: Tool) -> FunctionTool:
         on_invoke_tool=invoke,
         strict_json_schema=False,
     )
+
+
+COMPACTION: list[Any] = [{"type": "compaction"}]
+"""OpenAI's server-side compaction, at its default threshold, as Pydantic AI's ``OpenAICompaction`` asks for it."""
+
+
+def _long_lived(model: str | Model) -> ModelSettings:
+    """Return the built-in agent's model settings, for a conversation that lives long.
+
+    A model of the Responses API (a model id, which the SDK's default
+    provider makes one of, or such a model) gets OpenAI's server-side
+    compaction, on versions of the SDK that have it (``context_management``);
+    any other model, none.
+    """
+    has_it = "context_management" in {field.name for field in dataclasses.fields(ModelSettings)}
+    if has_it and isinstance(model, str | OpenAIResponsesModel):
+        return ModelSettings(context_management=COMPACTION)
+    return ModelSettings()
 
 
 def _model(model: AnyModel | None) -> str | Model:
