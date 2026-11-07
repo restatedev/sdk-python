@@ -254,6 +254,16 @@ async def approval(ctx: sessions.SessionContext, text: str) -> str:
     return await pydantic_ai.prompt(ctx, text, agent=mine)
 
 
+@assistant.handler
+async def limited(ctx: sessions.SessionContext, text: str) -> str:
+    """A prompt whose runs have a lower limit than Pydantic AI's default."""
+    from pydantic_ai.usage import UsageLimits  # pylint: disable=import-outside-toplevel
+
+    return await pydantic_ai.prompt(
+        ctx, text, model=FunctionModel(reply), tools=[get_weather], usage_limits=UsageLimits(request_limit=5)
+    )
+
+
 @dataclass
 class Shop:
     """The dependencies of an Agent of your own: who it serves."""
@@ -548,6 +558,13 @@ async def test_an_agent_that_keeps_calling_tools_ends_the_turn_at_its_usage_limi
     assert failed.status_code == 500 and "usage limit" in failed.text, failed.text
     assert asked[k] == 50
     assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+
+
+async def test_usage_limits_set_a_runs_limit(harness: HarnessEnvironment):
+    k = key()
+    failed = await post(harness, f"{k}/limited", json=f"loop {k}")
+    assert failed.status_code == 500 and "request_limit of 5" in failed.text, failed.text
+    assert asked[k] == 5
 
 
 async def test_a_tool_whose_retries_run_out_ends_the_turn(harness: HarnessEnvironment):

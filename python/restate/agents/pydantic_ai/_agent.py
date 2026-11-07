@@ -28,8 +28,9 @@ stored:
   (``on_model_request_error``). Any other error fails the attempt, and
   Restate retries it, such as one of an instructions function's.
 - Pydantic AI's errors that a retry would meet again end the turn for good:
-  a usage limit (by default, 50 model requests a run: a retry would carry on
-  with a fresh limit), retries that ran out (a tool's, or the answer's), a
+  a usage limit (Pydantic AI's default is 50 model requests a run, which
+  ``usage_limits`` raises: a retry would carry on with a fresh limit),
+  retries that ran out (a tool's, or the answer's), a
   content filter, and a setup error (``UserError``). A response that a model
   could not read (a body that is not JSON, say) is retried.
 - A run that stops for tool calls it cannot make itself (Pydantic AI's
@@ -75,6 +76,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model, ModelRequestContext, infer_model
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.usage import UsageLimits
 from pydantic_core import to_json
 
 from pydantic_ai import Agent, DeferredToolRequests, NativeOutput, PromptedOutput, RunContext
@@ -124,14 +126,14 @@ def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[A
     return FunctionToolset([native(t) if isinstance(t, Tool) else t for t in given])
 
 
-# ModelMessage is an Annotated union (discriminated), which TypeAdapter takes though its type says otherwise.
-# Bytes (a tool's binary result, say) as base64, as pydantic-ai's own ModelMessagesTypeAdapter stores them.
 DEFERRED = (
     "the run stopped for tool calls that need an approval or a result from outside it (Pydantic AI's deferred tools), "
     "which nothing gives here: pause for a person with restate.agents' wait_for_signal tool instead"
 )
 """Why a run that ends with Pydantic AI's ``DeferredToolRequests`` fails its turn."""
 
+# ModelMessage is an Annotated union (discriminated), which TypeAdapter takes though its type says otherwise.
+# Bytes (a tool's binary result, say) as base64, as pydantic-ai's own ModelMessagesTypeAdapter stores them.
 _MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(
     typing.cast(Any, ModelMessage), config=ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
 )
@@ -362,10 +364,11 @@ def _run(
     given: Sequence[AnyTool],
     output: type[BaseModel] | None = None,
     deps: Any = None,
+    usage_limits: UsageLimits | None = None,
 ) -> Run:
     """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer (``output``'s JSON).
 
-    ``deps`` is the run's dependencies (Pydantic AI's ``deps``).
+    ``deps`` is the run's dependencies (Pydantic AI's ``deps``), and ``usage_limits`` its limits.
     """
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
@@ -394,6 +397,7 @@ def _run(
                 capabilities=[restate],
                 output_type=spec,
                 deps=deps,
+                usage_limits=usage_limits,
             )
         except UnexpectedModelBehavior as error:
             if error in restate.model_errors and not isinstance(error, ContentFilterError):
@@ -439,6 +443,7 @@ async def prompt(
     tools: Sequence[AnyTool] = (),
     output: None = None,
     deps: Any = None,
+    usage_limits: UsageLimits | None = None,
 ) -> str: ...
 
 
@@ -453,6 +458,7 @@ async def prompt(
     tools: Sequence[AnyTool] = (),
     output: type[M],
     deps: Any = None,
+    usage_limits: UsageLimits | None = None,
 ) -> M: ...
 
 
@@ -466,6 +472,7 @@ async def prompt(
     tools: Sequence[AnyTool] = (),
     output: type[BaseModel] | None = None,
     deps: Any = None,
+    usage_limits: UsageLimits | None = None,
 ) -> Any:
     """Answer a prompt with a Pydantic AI agent, exactly once.
 
@@ -493,6 +500,9 @@ async def prompt(
             schema mode, else with ``PromptedOutput``.
         deps: The run's dependencies (Pydantic AI's ``deps``), for an
             ``agent`` with a ``deps_type``.
+        usage_limits: The run's limits (Pydantic AI's ``UsageLimits``),
+            past which the turn fails. Defaults to Pydantic AI's: 50 model
+            requests.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
@@ -505,7 +515,7 @@ async def prompt(
     check_own(agent, system)
 
     def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output, deps))
+        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output, deps, usage_limits))
 
     if output is None:
         return await ask(text)
@@ -522,6 +532,7 @@ def agent(
     tools: PerSession[Sequence[AnyTool]] = (),
     output: type[BaseModel] | None = None,
     deps: PerSession[Any] = None,
+    usage_limits: UsageLimits | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
@@ -563,6 +574,9 @@ def agent(
         deps: The runs' dependencies (Pydantic AI's ``deps``), for a
             ``pydantic_agent`` with a ``deps_type``: a value, or a function of
             the invocation's context.
+        usage_limits: Each run's limits (Pydantic AI's ``UsageLimits``),
+            past which its turn fails. Defaults to Pydantic AI's: 50 model
+            requests.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -585,6 +599,7 @@ def agent(
             tools=await configured(tools, ctx),
             output=output,
             deps=await configured(deps, ctx),
+            usage_limits=usage_limits,
         )
 
     obj.chat(answer, items=ITEMS, output=output)
