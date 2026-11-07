@@ -45,7 +45,7 @@ from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
-from restate.agents.langgraph._graph import at_breakpoint  # noqa: E402
+from restate.agents.langgraph._graph import at_breakpoint, check  # noqa: E402
 
 
 class Desk(MessagesState):
@@ -64,7 +64,7 @@ def route(state: Desk) -> str | list[str]:
     routes = {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan", "tool": "call_tool"}
     routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
     routes |= {"deep": "deep", "pause": "pause", "again": "again", "lookup": "call_lookup", "fetch": "fetch"}
-    routes |= {"refuse": "refuse", "consult": "call_lookup"}
+    routes |= {"refuse": "refuse", "refuse_sync": "refuse_sync", "consult": "call_lookup"}
     if word == "both":
         return ["ask", "side"]  # two branches at once
     return routes.get(word, "greet")
@@ -260,8 +260,14 @@ async def refuse(state: Desk) -> dict[str, Any]:
     return {"messages": [await Refusing().ainvoke(state["messages"])]}
 
 
+def refuse_sync(state: Desk) -> dict[str, Any]:
+    """As refuse, from a sync node, whose model reports to the agent's callbacks through a sync callback manager."""
+    return {"messages": [Refusing().invoke(state["messages"])]}
+
+
 builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile(), "pause": pause, "again": again}
 builder_nodes |= {"call_lookup": call_lookup, "found": found, "fetch": fetch, "refuse": refuse}
+builder_nodes |= {"refuse_sync": refuse_sync}
 for name, node in {**builder_nodes, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
@@ -285,6 +291,7 @@ branches = [
     "call_lookup",
     "fetch",
     "refuse",
+    "refuse_sync",
 ]
 builder.add_conditional_edges(START, route, branches)
 builder.add_edge("call_tool", "tools")
@@ -310,6 +317,7 @@ for last in (
     "found",
     "fetch",
     "refuse",
+    "refuse_sync",
 ):
     builder.add_edge(last, END)
 
@@ -591,11 +599,16 @@ async def test_an_error_of_a_tool_or_a_node_is_retried_whatever_its_name(harness
     assert {"lookup": lookups, "fetch": fetches, "consult": consults}[word][key] == 2
 
 
-async def test_a_models_refusal_in_a_graph_fails_with_424_and_the_next_is_answered(harness: HarnessEnvironment):
+@pytest.mark.parametrize("word", ["refuse", "refuse_sync"])
+async def test_a_models_refusal_in_a_graph_fails_with_424_and_the_next_is_answered(
+    harness: HarnessEnvironment, word: str, caplog: pytest.LogCaptureFixture
+):
+    """From an async node and a sync one; telling the model's error apart logs no callback errors on the way."""
     key = uuid.uuid4().hex
-    refused = await chat(harness, "graph_desk", key, f"refuse {key}")
+    refused = await chat(harness, "graph_desk", key, f"{word} {key}")
     assert refused.status_code == 424, refused.text
     assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
+    assert [r.getMessage() for r in caplog.records if "Error in callback" in r.getMessage()] == []
 
 
 async def test_a_graph_has_its_own_context_and_the_prebuilt_nodes_still_work(harness: HarnessEnvironment):
@@ -674,6 +687,23 @@ def test_a_graph_whose_subgraph_has_static_breakpoints_is_refused(compiled: bool
     outer.add_edge("pause", END)
     with pytest.raises(TypeError, match=r"interrupt\(\)"):
         langgraph.agent("stops", graph=outer.compile() if compiled else outer)
+
+
+def test_a_graph_is_checked_once(monkeypatch: pytest.MonkeyPatch):
+    """chat checks its graph at each message, as prompt(graph=...) does: one checked before is not compiled again."""
+    monkeypatch.setattr(builder, "compile", lambda *args, **kwargs: pytest.fail("compiled again"))
+    check(builder)
+
+
+def test_a_graph_may_still_be_built_after_its_agent(caplog: pytest.LogCaptureFixture):
+    """As each run compiles it: checking it neither refuses a graph with nodes still to add, nor marks it compiled."""
+    later = StateGraph(Desk)
+    later.add_edge(START, "greet")  # to a node not added yet
+    langgraph.agent("later", graph=later)
+    later.add_node("greet", typing.cast(Any, greet))
+    later.add_edge("greet", END)
+    assert [r.getMessage() for r in caplog.records if "already been compiled" in r.getMessage()] == []
+    langgraph.agent("later_again", graph=later)
 
 
 def test_context_is_for_a_graph_of_your_own():

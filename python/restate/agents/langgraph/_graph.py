@@ -71,7 +71,7 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
-from langchain_core.callbacks import AsyncCallbackHandler
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
@@ -104,22 +104,43 @@ BREAKPOINTS = (
 """Why a graph with static breakpoints is refused, and a run stopped at a subgraph's fails."""
 
 
+_CHECKED: weakref.WeakSet[Any] = weakref.WeakSet()
+"""The graphs that ``check`` passed, which it does not check again (and so does not compile again)."""
+
+
 def check(graph: AnyGraph) -> None:
     """Raise ``TypeError`` if ``graph`` has no ``messages`` in its state, or it or a subgraph has static breakpoints.
 
     The subgraphs are those LangGraph finds: its nodes that are graphs, and
     a graph that a node calls, if the node names it. One that a node makes
     or calls otherwise is found only when its breakpoint stops a run, which
-    then fails (see ``at_breakpoint``).
+    then fails (see ``at_breakpoint``). A graph checked once is not checked
+    again: ``chat`` checks its graph at each message, as ``prompt`` does.
     """
+    if graph in _CHECKED:
+        return
     if "messages" not in graph.channels:
         raise TypeError("the graph's state has no messages: build it on LangGraph's MessagesState")
-    compiled: Pregel[Any, Any, Any, Any] = graph.compile() if isinstance(graph, StateGraph) else graph
+    compiled: Pregel[Any, Any, Any, Any]
+    if isinstance(graph, StateGraph):
+        # Each run compiles the graph, so it may still get nodes after this. LangGraph marks a builder it compiled,
+        # and would warn that such nodes do not count: the mark is undone. A graph that does not compile yet is
+        # not checked here; each run compiles it, and fails if it still does not.
+        built = graph.compiled
+        try:
+            compiled = graph.compile()
+        except ValueError:
+            return
+        finally:
+            graph.compiled = built
+    else:
+        compiled = graph
     # Untyped: LangGraph types a subgraph as a PregelProtocol of unknown parameters.
     subgraphs: list[tuple[str, object]] = list(typing.cast(Any, compiled).get_subgraphs(recurse=True))
     for each in [compiled, *(found for _, found in subgraphs)]:
         if isinstance(each, Pregel) and (each.interrupt_before_nodes or each.interrupt_after_nodes):
             raise TypeError(BREAKPOINTS)
+    _CHECKED.add(graph)
 
 
 def _compiled(graph: AnyGraph, saver: SqlCheckpointSaver) -> Any:
@@ -281,22 +302,31 @@ async def _resumed(ctx: SessionContext, saver: SqlCheckpointSaver, snapshot: Sta
     return dict(zip(waits, values, strict=True))
 
 
-class _Errors(AsyncCallbackHandler):
+class _Errors(BaseCallbackHandler):
     """Tell, in a graph's run, the errors that its chat models raised from those that its tools raised.
 
     Only a model's error can be its provider refusing the request (a wrong
     API key, say): any other is a tool's or a node's own, and a retry may
     get past it, whatever its name (a ``NotFoundError`` of another API,
     say). A model that a tool calls is the tool's.
+
+    It is a sync handler, run inline where the model or the tool runs: an
+    async one has no fallback for ``on_chat_model_start`` under the sync
+    callback manager of a sync node, and LangChain would log an error at
+    each of its model calls.
     """
+
+    run_inline = True
 
     def __init__(self, ctx: SessionContext) -> None:
         super().__init__()
         self.ctx = ctx
         self.models: weakref.WeakSet[BaseException] = weakref.WeakSet()
         """The errors that the run's chat models raised."""
+        self.tools: weakref.WeakSet[BaseException] = weakref.WeakSet()
+        """The errors that the run's tools raised."""
 
-    async def on_llm_error(
+    def on_llm_error(
         self,
         error: BaseException,
         *,
@@ -307,20 +337,19 @@ class _Errors(AsyncCallbackHandler):
     ) -> None:
         self.models.add(error)
 
-    async def on_tool_error(
+    def on_tool_error(
         self,
         error: BaseException,
         *,
         run_id: UUID,
         parent_run_id: UUID | None = None,
-        tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        from_tool(self.ctx, error)
+        self.tools.add(error)
 
     def mark(self, error: BaseException) -> None:
-        """Mark ``error``, which the run failed with, as no refusal unless a chat model raised it."""
-        if error not in self.models:
+        """Mark ``error``, which the run failed with, as no refusal unless the graph's own chat model raised it."""
+        if error in self.tools or error not in self.models:
             from_tool(self.ctx, error)
 
 
