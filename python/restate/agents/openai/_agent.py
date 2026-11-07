@@ -32,7 +32,8 @@ start, and the run resumes from the last step stored:
   fails its turn, rather than answer without them, as nothing gives the
   approval: pause for a person with ``restate.agents``' ``wait_for_signal``
   tool instead. The turn closes the calls, which never run. A cut-off reply
-  with such a call fails its turn the same way, without asking again.
+  with such a call fails its turn the same way, without asking again (a
+  function tool's ``needs_approval`` function decides, as in the run).
 - The agent a handoff gave the conversation to answers the next messages too.
   The stored conversation is the full transcript: a handoff passes it on as it
   is, rather than collapsed into one message (``nest_handoff_history`` is off),
@@ -281,13 +282,15 @@ async def _resume(
     agent = everyone.get(cut.agent or "", agent)
     found = {tool.name: tool for tool in await agent.get_all_tools(RunContextWrapper(context))}
     known = {*found, *_handoffs(agent)}
-    if any(getattr(found.get(call.name), "needs_approval", False) for call in calls):
+    approvals = [await _approval(found.get(call.name), call, context) for call in calls]
+    if any(approval is True for approval in approvals):
         # A call that waits for an approval, which nothing gives: fail as the run would have, rather than run it, or
         # ask again (which would run the reply's other tools again, with new call ids). The conversation closes them.
         raise TerminalError(APPROVALS)
-    if any(call.name in known and _runner_only(found.get(call.name)) for call in calls):
-        # A call that only the SDK's runner can make (a handoff, a hosted tool, a tool with guardrails): ask the agent
-        # again instead.
+    undecided = any(approval is None for approval in approvals)
+    if undecided or any(call.name in known and _runner_only(found.get(call.name)) for call in calls):
+        # A call that only the SDK's runner can make (a handoff, a hosted tool, a tool with guardrails), or decide on
+        # (another tool's approval function): ask the agent again instead.
         if cut.reply is not None:
             await conversation.drop(cut.reply)
         return agent
@@ -310,6 +313,23 @@ async def _resume(
         outputs.extend(ITEMS.results([(call, output)]))
     await conversation.append(*outputs)
     return agent
+
+
+async def _approval(tool: SdkTool | None, call: Call, context: Any) -> bool | None:
+    """Return whether ``call`` (to ``tool``) needs an approval, or ``None`` if only the SDK's runner can tell.
+
+    A function tool's ``needs_approval`` function is asked, with the call's
+    arguments and id, as the runner asks it. Another tool's (a shell's, say)
+    takes other arguments.
+    """
+    needs = getattr(tool, "needs_approval", False)
+    if not callable(needs):
+        return bool(needs)
+    arguments: object = call.input
+    if not isinstance(tool, FunctionTool) or not isinstance(arguments, dict):
+        return None
+    decided = needs(RunContextWrapper(context), typing.cast(dict[str, Any], arguments), call.id)
+    return bool(await decided if inspect.isawaitable(decided) else decided)
 
 
 def _runner_only(tool: SdkTool | None) -> bool:

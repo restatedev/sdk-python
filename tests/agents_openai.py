@@ -682,6 +682,39 @@ async def test_a_call_cut_off_by_a_crash_that_needs_an_approval_fails_the_turn_w
     assert len(scripted.requests) == asked
 
 
+@pytest.mark.parametrize("needed", [False, True])
+async def test_a_call_cut_off_by_a_crash_asks_the_tools_approval_function(
+    monkeypatch: pytest.MonkeyPatch, needed: bool
+):
+    asked_for: list[tuple[dict[str, Any], str]] = []
+
+    async def approval(run: Any, arguments: dict[str, Any], call_id: str) -> bool:
+        asked_for.append((arguments, call_id))
+        return needed
+
+    ran: list[str] = []
+    crash_once_after(monkeypatch, "on_llm_end", lambda context, agent, response: True)
+    scripted = Scripted(reply)
+    ask = invoker(
+        asker(agent=Agent(name="guarded", model=scripted, tools=[weather_tool(ran, needs_approval=approval)]))
+    )
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await ask("weather Rome", invocation)
+    asked = len(scripted.requests)
+    if needed:
+        with pytest.raises(restate.TerminalError, match="needs_approval"):
+            await ask("weather Rome", invocation)
+        assert ran == []
+        assert len(scripted.requests) == asked
+    else:
+        # It needs none: resumed with its call id, rather than asked again.
+        assert await ask("weather Rome", invocation) == "tool said: weather in Rome"
+        assert ran == ["Rome"]
+        assert len(scripted.requests) == asked + 1
+    assert asked_for[-1] == ({"city": "Rome"}, "call-Rome")
+
+
 async def test_a_call_cut_off_by_a_crash_to_a_tool_with_a_timeout_is_resumed_with_its_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ):
