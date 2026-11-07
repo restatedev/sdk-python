@@ -215,7 +215,7 @@ _TOOL_ERRORS: ScopeKey[ErrorSet] = ScopeKey("from_tool")
 
 
 def from_tool(ctx: SessionContext, error: BaseException) -> None:
-    """Record that a framework's own tool raised ``error`` in the attempt of ``ctx``.
+    """Record that a framework's own tool, or a graph of one's own, raised ``error`` in the attempt of ``ctx``.
 
     Such an error is never mistaken for a refusal by the model's provider,
     even if it looks like one (a tool that calls a model API can fail the same

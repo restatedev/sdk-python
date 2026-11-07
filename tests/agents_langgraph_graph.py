@@ -29,10 +29,10 @@ import pytest
 
 pytest.importorskip("langgraph")
 
-from langchain_core.callbacks import BaseCallbackHandler, CallbackManagerForLLMRun  # noqa: E402
+from langchain_core.callbacks import CallbackManagerForLLMRun  # noqa: E402
 from langchain_core.language_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage  # noqa: E402
-from langchain_core.outputs import ChatResult  # noqa: E402
+from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
@@ -45,7 +45,8 @@ from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
-from restate.agents.langgraph._graph import at_breakpoint, check  # noqa: E402
+from restate.agents.langgraph._graph import at_breakpoint  # noqa: E402
+from restate.exceptions import TerminalError  # noqa: E402
 
 
 class Desk(MessagesState):
@@ -64,8 +65,8 @@ def route(state: Desk) -> str | list[str]:
     routes = {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan", "tool": "call_tool"}
     routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
     routes |= {"deep": "deep", "pause": "pause", "again": "again", "lookup": "call_lookup", "fetch": "fetch"}
-    routes |= {"refuse": "refuse", "refuse_sync": "refuse_sync", "refuse_builtin": "refuse_builtin"}
-    routes |= {"consult": "call_lookup", "count": "call_lookup", "refuse_traced": "refuse_traced", "nested": "nested"}
+    routes |= {"consult": "call_lookup", "count": "call_lookup", "refuse": "refuse", "nested": "nested"}
+    routes |= {"give_up": "give_up", "stops": "stops"}
     if word == "both":
         return ["ask", "side"]  # two branches at once
     return routes.get(word, "greet")
@@ -172,7 +173,7 @@ paused.add_edge("greet", END)
 
 
 async def pause(state: Desk) -> dict[str, Any]:
-    """Run a subgraph compiled here, which stops at a static breakpoint: check() cannot see it."""
+    """Run a subgraph compiled here, which stops at a static breakpoint."""
     subgraph: Any = paused.compile(interrupt_before=["greet"])
     return await subgraph.ainvoke(state)
 
@@ -260,10 +261,11 @@ def fetch(state: Desk) -> dict[str, Any]:
     return {"messages": [AIMessage(f"fetched {rest}")]}
 
 
-class Refusing(BaseChatModel):
-    """A model whose provider refuses every request: for a wrong key, or (``builtin``) as Anthropic's does for none."""
+refusals: collections.Counter[str] = collections.Counter()
 
-    builtin: bool = False
+
+class Refusing(BaseChatModel):
+    """A model whose provider refuses the first request of each text, as for a wrong key, and then answers."""
 
     @property
     def _llm_type(self) -> str:
@@ -276,37 +278,28 @@ class Refusing(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        if self.builtin:
-            # A TypeError, of a built-in type, which has no weak reference.
-            raise TypeError("Could not resolve authentication method. Expected either api_key or auth_token to be set.")
-        raise AuthenticationError("invalid x-api-key")
+        text = str(messages[-1].text)
+        refusals[text] += 1
+        if refusals[text] == 1:
+            raise AuthenticationError("invalid x-api-key")
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(f"answered {text}"))])
 
 
 async def refuse(state: Desk) -> dict[str, Any]:
+    """The graph's own model, whose provider refuses its first request."""
     return {"messages": [await Refusing().ainvoke(state["messages"])]}
 
 
-async def refuse_builtin(state: Desk) -> dict[str, Any]:
-    return {"messages": [await Refusing(builtin=True).ainvoke(state["messages"])]}
-
-
-class Tracer(BaseCallbackHandler):
-    """A tracing handler of one's own, as Langfuse's: set on a call, it replaces the callbacks that the call inherits."""
-
-
-async def refuse_traced(state: Desk) -> dict[str, Any]:
-    return {"messages": [await Refusing().with_config(callbacks=[Tracer()]).ainvoke(state["messages"])]}
-
-
-def refuse_sync(state: Desk) -> dict[str, Any]:
-    """As refuse, from a sync node, whose model reports to the agent's callbacks through a sync callback manager."""
-    return {"messages": [Refusing().invoke(state["messages"])]}
+def give_up(state: Desk) -> dict[str, Any]:
+    """A node that ends the turn for good."""
+    raise TerminalError(f"no refunds for {_asked(state)[1]}")
 
 
 builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile(), "pause": pause, "again": again}
 builder_nodes |= {"call_lookup": call_lookup, "found": found, "fetch": fetch, "refuse": refuse}
-builder_nodes |= {"refuse_sync": refuse_sync, "refuse_builtin": refuse_builtin, "refuse_traced": refuse_traced}
-builder_nodes |= {"nested": nested}
+# A subgraph node compiled with a static breakpoint: LangGraph's public API does not list subgraphs, so it is
+# found when it stops a run.
+builder_nodes |= {"nested": nested, "give_up": give_up, "stops": paused.compile(interrupt_before=["greet"])}
 for name, node in {**builder_nodes, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
@@ -330,10 +323,9 @@ branches = [
     "call_lookup",
     "fetch",
     "refuse",
-    "refuse_sync",
-    "refuse_builtin",
-    "refuse_traced",
     "nested",
+    "give_up",
+    "stops",
 ]
 builder.add_conditional_edges(START, route, branches)
 builder.add_edge("call_tool", "tools")
@@ -359,10 +351,9 @@ for last in (
     "found",
     "fetch",
     "refuse",
-    "refuse_sync",
-    "refuse_builtin",
-    "refuse_traced",
     "nested",
+    "give_up",
+    "stops",
 ):
     builder.add_edge(last, END)
 
@@ -378,6 +369,15 @@ desk = langgraph.agent("graph_desk", graph=builder)
 async def ask(ctx: sessions.SessionContext, text: str) -> str:
     """A handler of your own that prompts the graph, as chat does."""
     return await langgraph.prompt(ctx, text, graph=builder)
+
+
+@desk.handler()
+async def checkpoints(ctx: sessions.SessionContext) -> dict[str, int]:
+    """How many checkpoints the key's database has, by namespace."""
+    rows = await ctx.db.values(
+        "SELECT checkpoint_ns, count(*) FROM restate_langgraph_checkpoints GROUP BY checkpoint_ns"
+    )
+    return {str(ns): int(typing.cast(int, n)) for ns, n in rows}
 
 
 compiled = langgraph.agent("graph_compiled", graph=builder.compile())
@@ -640,22 +640,22 @@ async def test_a_turn_suspended_while_it_waits_resumes_on_the_same_wait(harness:
     assert (await answering).json() == "asked: later"
 
 
+@pytest.mark.parametrize("word", ["pause", "stops"])
 async def test_a_static_breakpoint_in_a_subgraph_fails_the_turn_and_the_next_message_starts_afresh(
-    harness: HarnessEnvironment,
+    harness: HarnessEnvironment, word: str
 ):
-    """A static breakpoint pauses the run with nothing to wait for: the turn fails rather than answer half done."""
+    """A static breakpoint pauses the run with nothing to wait for: the turn fails rather than answer half done. The
+    subgraph is one that a node calls, or a node itself."""
     key = uuid.uuid4().hex
-    failed = await chat(harness, "graph_desk", key, f"pause {key}")
+    failed = await chat(harness, "graph_desk", key, f"{word} {key}")
     assert failed.status_code == 500 and "interrupt()" in failed.text, failed.text
     assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
 
 
-@pytest.mark.parametrize("word", ["lookup", "fetch", "consult", "count"])
-async def test_an_error_of_a_tool_or_a_node_is_retried_whatever_its_name(
-    harness: HarnessEnvironment, word: str, caplog: pytest.LogCaptureFixture
-):
-    """Named as a model provider's refusal, it is not one: only the error of the agent's own models is, and a model
-    that a tool calls is the tool's. An error of a built-in type (count's KeyError) logs no callback error."""
+@pytest.mark.parametrize("word", ["lookup", "fetch", "consult", "count", "refuse"])
+async def test_any_error_of_the_graph_is_retried_whatever_its_name(harness: HarnessEnvironment, word: str):
+    """Named as a model provider's refusal, it is no refusal: a tool's, a node's, a model's that a tool calls, an
+    error of a built-in type (count's KeyError), or the graph's own model's."""
     key = uuid.uuid4().hex
     answered = await chat(harness, "graph_desk", key, f"{word} {key}")
     assert answered.status_code == 200, answered.text
@@ -664,23 +664,40 @@ async def test_an_error_of_a_tool_or_a_node_is_retried_whatever_its_name(
         "fetch": f"fetched {key}",
         "consult": f"found: order {key} looks fine",
         "count": f"found: order {key} has 3 items",
+        "refuse": f"answered refuse {key}",
     }
     assert answered.json() == expected[word]
-    assert {"lookup": lookups, "fetch": fetches, "consult": consults, "count": counts}[word][key] == 2
-    assert [r.getMessage() for r in caplog.records if "Error in" in r.getMessage()] == []
+    tries = {"lookup": lookups, "fetch": fetches, "consult": consults, "count": counts, "refuse": refusals}[word]
+    assert tries[f"refuse {key}" if word == "refuse" else key] == 2
 
 
-@pytest.mark.parametrize("word", ["refuse", "refuse_sync", "refuse_builtin", "refuse_traced"])
-async def test_a_models_refusal_in_a_graph_fails_with_424_and_the_next_is_answered(
-    harness: HarnessEnvironment, word: str, caplog: pytest.LogCaptureFixture
-):
-    """From an async node, a sync one, as Anthropic's missing key (a TypeError, of a built-in type), and from a
-    model with callbacks of its own on the call; telling the model's error apart logs no callback errors."""
+async def test_a_terminal_error_of_a_node_ends_the_turn_and_the_next_is_answered(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
-    refused = await chat(harness, "graph_desk", key, f"{word} {key}")
-    assert refused.status_code == 424, refused.text
+    failed = await chat(harness, "graph_desk", key, f"give_up {key}")
+    assert failed.status_code == 500 and f"no refunds for {key}" in failed.text, failed.text
     assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
-    assert [r.getMessage() for r in caplog.records if "Error in" in r.getMessage()] == []
+
+
+async def test_a_finished_turn_keeps_the_latest_checkpoint_of_each_namespace(harness: HarnessEnvironment):
+    """A run of several steps, then one whose subgraph interrupts twice (a namespace of its own)."""
+    key = uuid.uuid4().hex
+    assert (await chat(harness, "graph_desk", key, f"crash {key}")).json() == f"done {key}"
+    assert (await post(harness, f"graph_desk/{key}/checkpoints")).json() == {"": 1}
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, "deep"))
+    answered: set[str] = set()
+    for value in ("A", "B"):
+        waits: list[dict[str, Any]] = []
+        for _ in range(200):
+            waits = [w for w in (await post(harness, f"graph_desk/{key}/pending")).json() if w["id"] not in answered]
+            if waits:
+                break
+            await asyncio.sleep(0.05)
+        [wait] = waits
+        answered.add(wait["id"])
+        await post(harness, f"graph_desk/{key}/signal", json={"id": wait["id"], "value": value})
+    assert (await answering).json() == "twice: A B"
+    stored = (await post(harness, f"graph_desk/{key}/checkpoints")).json()
+    assert len(stored) == 2 and set(stored.values()) == {1}, stored
 
 
 async def test_a_graph_has_its_own_context_and_the_prebuilt_nodes_still_work(harness: HarnessEnvironment):
@@ -735,13 +752,13 @@ async def test_only_a_run_stopped_with_no_interrupt_is_at_a_breakpoint():
 
     config: Any = {"configurable": {"thread_id": "t"}}
     stopped: dict[str, bool] = {}
-    for word in ("pause", "again"):
+    for word in ("pause", "stops", "again"):
         app: Any = builder.compile(checkpointer=InMemorySaver())
         await app.ainvoke({"messages": [HumanMessage(f"{word} x")]}, config, durability="sync")
         snapshot = await app.aget_state(config)
         assert snapshot.next
         stopped[word] = at_breakpoint(snapshot)
-    assert stopped == {"pause": True, "again": False}
+    assert stopped == {"pause": True, "stops": True, "again": False}
 
 
 @pytest.mark.parametrize("breakpoint", [{"interrupt_before": ["tools"]}, {"interrupt_after": ["call_tool"]}])
@@ -749,22 +766,6 @@ def test_a_graph_with_static_breakpoints_is_refused(breakpoint: dict[str, Any]):
     """A run stopped at one has nothing to wait for, and would leave its tool calls without results."""
     with pytest.raises(TypeError, match=r"interrupt\(\)"):
         langgraph.agent("stops", graph=builder.compile(**breakpoint))
-
-
-@pytest.mark.parametrize("compiled", [False, True])
-def test_a_graph_whose_subgraph_has_static_breakpoints_is_refused(compiled: bool):
-    outer = StateGraph(Desk)
-    outer.add_node("pause", paused.compile(interrupt_before=["greet"]))
-    outer.add_edge(START, "pause")
-    outer.add_edge("pause", END)
-    with pytest.raises(TypeError, match=r"interrupt\(\)"):
-        langgraph.agent("stops", graph=outer.compile() if compiled else outer)
-
-
-def test_a_graph_is_checked_once(monkeypatch: pytest.MonkeyPatch):
-    """chat checks its graph at each message, as prompt(graph=...) does: one checked before is not compiled again."""
-    monkeypatch.setattr(builder, "compile", lambda *args, **kwargs: pytest.fail("compiled again"))
-    check(builder)
 
 
 def test_a_graph_may_still_be_built_after_its_agent(caplog: pytest.LogCaptureFixture):

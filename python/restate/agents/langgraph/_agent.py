@@ -368,8 +368,8 @@ async def prompt(
 
     Raises:
         TypeError: If ``graph`` is given with ``model``, ``system`` or
-            ``tools``, its state has no ``messages``, or it or a subgraph
-            of it has static breakpoints (``interrupt_before``,
+            ``tools``, its state has no ``messages``, or it is compiled
+            with static breakpoints (``interrupt_before``,
             ``interrupt_after``); or if ``context`` is given without
             ``graph``.
         TerminalError: If the agent's reply is not a value of ``output``,
@@ -462,8 +462,8 @@ def agent(
 
     Raises:
         TypeError: If ``graph`` is given with ``model``, ``system`` or
-            ``tools``, its state has no ``messages``, or it or a subgraph
-            of it has static breakpoints (``interrupt_before``,
+            ``tools``, its state has no ``messages``, or it is compiled
+            with static breakpoints (``interrupt_before``,
             ``interrupt_after``); or if ``context`` is given without
             ``graph``.
         TerminalError: If ``model`` names a provider other than OpenAI or Anthropic.

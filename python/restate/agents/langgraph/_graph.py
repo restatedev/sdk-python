@@ -20,7 +20,12 @@ message as a new ``HumanMessage``:
   ``nodes`` and the tools of ``tools()`` get the handler's context in it
   (``_context.py``). LangGraph's run context is the graph's own
   (``context=``), else the handler's. A retried attempt resumes the run it
-  cut off.
+  cut off. A run that finishes prunes the thread to the latest checkpoint
+  of each namespace (LangGraph's ``aprune``).
+- Any error of the run fails the attempt, and Restate retries it: none is
+  taken for a model provider's refusal, as the built-in agent's model's can
+  be, since a graph's models, tools and nodes are all its own (a tool or a
+  node may call a model too). A ``TerminalError`` ends the turn.
 - After each step, the AI and tool messages the step added are copied into
   the agent's conversation, by their ids, so that the ``messages``, ``sync``
   and ``watch`` views show the run as it goes, as they do for the built-in
@@ -47,8 +52,8 @@ message as a new ``HumanMessage``:
   signal's value, as ``interrupt()``'s result. The turn waits without
   holding a process; a retried attempt joins the same waits. Static
   breakpoints (``interrupt_before``, ``interrupt_after``) have nothing to
-  wait for: a graph that has them, or a subgraph LangGraph finds in it, is
-  refused, and a run that stops at another subgraph's fails.
+  wait for: a compiled graph that has them is refused, and a run that stops
+  at a subgraph's fails.
 - The graph may trim its history, its input and answer included (as a
   summarizing graph does): a run is found by its checkpoints' metadata,
   which name its prompt, and its answer is read from the conversation.
@@ -66,7 +71,6 @@ from __future__ import annotations
 import asyncio
 import json
 import typing
-import weakref
 from collections.abc import Sequence
 from typing import Any
 
@@ -102,43 +106,17 @@ BREAKPOINTS = (
 """Why a graph with static breakpoints is refused, and a run stopped at a subgraph's fails."""
 
 
-_CHECKED: weakref.WeakSet[Any] = weakref.WeakSet()
-"""The graphs that ``check`` passed, which it does not check again (and so does not compile again)."""
-
-
 def check(graph: AnyGraph) -> None:
-    """Raise ``TypeError`` if ``graph`` has no ``messages`` in its state, or it or a subgraph has static breakpoints.
+    """Raise ``TypeError`` if ``graph`` has no ``messages`` in its state, or is compiled with static breakpoints.
 
-    The subgraphs are those LangGraph finds: its nodes that are graphs, and
-    a graph that a node calls, if the node names it. One that a node makes
-    or calls otherwise is found only when its breakpoint stops a run, which
-    then fails (see ``at_breakpoint``). A graph checked once is not checked
-    again: ``chat`` checks its graph at each message, as ``prompt`` does.
+    A subgraph's static breakpoints are found when one stops a run, which
+    then fails (see ``at_breakpoint``): LangGraph has no public way to find
+    every subgraph (a node may call one it makes).
     """
-    if graph in _CHECKED:
-        return
     if "messages" not in graph.channels:
         raise TypeError("the graph's state has no messages: build it on LangGraph's MessagesState")
-    compiled: Pregel[Any, Any, Any, Any]
-    if isinstance(graph, StateGraph):
-        # Each run compiles the graph, so it may still get nodes after this. LangGraph marks a builder it compiled,
-        # and would warn that such nodes do not count: the mark is undone. A graph that does not compile yet is
-        # not checked here; each run compiles it, and fails if it still does not.
-        built = graph.compiled
-        try:
-            compiled = graph.compile()
-        except ValueError:
-            return
-        finally:
-            graph.compiled = built
-    else:
-        compiled = graph
-    # Untyped: LangGraph types a subgraph as a PregelProtocol of unknown parameters.
-    subgraphs: list[tuple[str, object]] = list(typing.cast(Any, compiled).get_subgraphs(recurse=True))
-    for each in [compiled, *(found for _, found in subgraphs)]:
-        if isinstance(each, Pregel) and (each.interrupt_before_nodes or each.interrupt_after_nodes):
-            raise TypeError(BREAKPOINTS)
-    _CHECKED.add(graph)
+    if isinstance(graph, Pregel) and (graph.interrupt_before_nodes or graph.interrupt_after_nodes):
+        raise TypeError(BREAKPOINTS)
 
 
 def _compiled(graph: AnyGraph, saver: SqlCheckpointSaver) -> Any:
@@ -301,35 +279,6 @@ async def _resumed(ctx: SessionContext, saver: SqlCheckpointSaver, snapshot: Sta
     return dict(zip(waits, values, strict=True))
 
 
-_TOOLS = "langchain_core.tools"
-"""The modules of LangChain's tools (``BaseTool``): an error that came out of one is the tool's."""
-
-_MODELS = "langchain_core.language_models"
-"""The modules of LangChain's chat models (``BaseChatModel``): an error that came out of one is the model's."""
-
-
-def _model_error(error: BaseException) -> bool:
-    """Return whether ``error``, which a graph's run failed with, came out of one of its chat models.
-
-    Only such an error can be the model's provider refusing the request (a
-    wrong API key, say): any other is a tool's or a node's own, and a retry
-    may get past it, whatever its name (a ``NotFoundError`` of another API,
-    say). Its traceback tells, frame by frame from the run inwards: the
-    outermost LangChain tool or chat model it came out of decides, so a
-    model that a tool calls is the tool's. Callbacks would not tell: a call
-    with callbacks of its own (a tracer, say) does not run those it inherits.
-    """
-    tb = error.__traceback__
-    while tb is not None:
-        module = str(tb.tb_frame.f_globals.get("__name__", ""))
-        if module.startswith(_TOOLS):
-            return False
-        if module.startswith(_MODELS):
-            return True
-        tb = tb.tb_next
-    return False
-
-
 def at_breakpoint(paused: StateSnapshot) -> bool:
     """Return whether a run stopped with steps to go and no interrupt: at a static breakpoint.
 
@@ -359,7 +308,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         running = conversation.running()
         assert running is not None and running.prompt is not None
         prompt_id = _prompt_id(running)
-        saver = SqlCheckpointSaver(ctx.db, history="latest")
+        saver = SqlCheckpointSaver(ctx.db)
         app = _compiled(graph, saver)
         snapshot = await app.aget_state(THREAD)
         values = typing.cast(dict[str, Any], snapshot.values or {})
@@ -374,6 +323,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
             await _copied(ctx, conversation, known, messages)
+            await saver.aprune([THREAD_ID])
             return await _answer(app, conversation, running, values, before)
         # A run cut off by a crash is resumed: first by the signals its pending interrupts wait for, if any. A new
         # message (or one after a stopped run) starts a run, after what closed the previous run.
@@ -391,18 +341,19 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
                     values = typing.cast(dict[str, Any], state)
                     await _copied(ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])))
             except Exception as error:
-                if not _model_error(error):
-                    # A tool's or a node's error: no refusal, whatever its name.
-                    from_tool(ctx, error)
+                # No refusal, whatever its name: a graph's models, tools and nodes are all its own.
+                from_tool(ctx, error)
                 raise
             # The run stops at its interrupts: it goes on with the signals that answer them.
             paused = await _paused(app)
             resumes = await _resumed(ctx, saver, paused)
             if resumes is None:
                 if at_breakpoint(paused):
-                    # At the static breakpoint of a subgraph that check() could not find. Fail, rather than
+                    # At a subgraph's static breakpoint, which check() does not look for. Fail, rather than
                     # answer with a run half done.
                     raise TerminalError(BREAKPOINTS)
+                # Only the latest checkpoint of each namespace is read again; a paused or cut-off run keeps it too.
+                await saver.aprune([THREAD_ID])
                 return await _answer(app, conversation, running, values, before)
             start = Command(resume=resumes)
 
