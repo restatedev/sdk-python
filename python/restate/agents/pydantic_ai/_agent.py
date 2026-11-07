@@ -23,6 +23,38 @@ stored:
   ``restate.TerminalError``, which a retry would only repeat, is instead
   returned to the model as the tool's answer, and so are arguments that do not
   validate (Pydantic AI asks the model again).
+- Only an error of a model request can be its provider refusing (a wrong
+  API key, say), which ends the turn unanswered: Pydantic AI tells them apart
+  (``on_model_request_error``). Any other error fails the attempt, and
+  Restate retries it, such as one of an instructions function's.
+- Pydantic AI's errors that a retry would meet again end the turn for good:
+  a usage limit (Pydantic AI's default is 50 model requests a run, which
+  ``usage_limits`` raises: a retry would carry on with a fresh limit),
+  retries that ran out (a tool's, or the answer's), a
+  content filter, and a setup error (``UserError``). A response that a model
+  could not read (a body that is not JSON, say) is retried.
+- A run that stops for tool calls it cannot make itself (Pydantic AI's
+  deferred tools: ``requires_approval``, ``CallDeferred``) fails its turn
+  rather than answer with them, as nothing gives their approvals or results:
+  pause for a person with ``restate.agents``' ``wait_for_signal`` tool
+  instead. The turn closes the calls.
+- An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
+  ``deps``: a value, or for ``agent`` also a function of the handler's
+  context.
+- The built-in agent gets Pydantic AI's own capability for a conversation
+  that lives long: the compaction of its model's provider, where Pydantic AI
+  has one (``AnthropicCompaction``, and ``OpenAICompaction`` for OpenAI's
+  Responses API, which ``openai/...`` models use). It summarizes the
+  history as it nears the model's context window, which a long conversation
+  would otherwise outgrow, failing each turn. A model that its provider does
+  not compact (Anthropic's before the 4.6 models, say) refuses such requests:
+  run it as an ``Agent`` of your own, which runs as you configured it. Give
+  that the capabilities it needs, such as
+  ``Agent(model, capabilities=[AnthropicCompaction()])``.
+- The conversation stores no system prompt: Pydantic AI's
+  ``ReinjectSystemPrompt`` gives each run the system prompt of an ``Agent``
+  of your own (``system_prompt``), as it is now. (``instructions`` apply to
+  every request anyway.)
 - Each message is answered once per invocation, by the shared conversation of
   ``restate.agents`` (``_conversation.py``), which also closes a stopped,
   refused or failed run.
@@ -35,8 +67,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
-from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UnexpectedModelBehavior, UserError
+from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt
+from pydantic_ai.exceptions import ContentFilterError, UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -50,12 +82,14 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model, ModelRequestContext, infer_model
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.usage import UsageLimits
 from pydantic_core import to_json
 
-from pydantic_ai import Agent, NativeOutput, PromptedOutput, RunContext
+from pydantic_ai import Agent, DeferredToolRequests, NativeOutput, PromptedOutput, RunContext
 from pydantic_ai import Tool as PydanticTool
 from restate.agents._common import (
     CANCELLATION,
+    ErrorSet,
     ModelError,
     PerSession,
     check_own,
@@ -80,6 +114,8 @@ AnyModel: typing.TypeAlias = str | Model
 AnyTool: typing.TypeAlias = Tool | PydanticTool[Any] | Callable[..., Any]
 """A tool: one made with ``restate.agents`` (``tool``, ``call``, ...), a Pydantic AI tool, or a plain function."""
 
+_Capability: typing.TypeAlias = AbstractCapability[Any]
+
 
 def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[Any]:
     """Return ``given`` as a Pydantic AI toolset for a run in ``ctx``.
@@ -97,6 +133,12 @@ def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[A
 
     return FunctionToolset([native(t) if isinstance(t, Tool) else t for t in given])
 
+
+DEFERRED = (
+    "the run stopped for tool calls that need an approval or a result from outside it (Pydantic AI's deferred tools), "
+    "which nothing gives here: pause for a person with restate.agents' wait_for_signal tool instead"
+)
+"""Why a run that ends with Pydantic AI's ``DeferredToolRequests`` fails its turn."""
 
 # ModelMessage is an Annotated union (discriminated), which TypeAdapter takes though its type says otherwise.
 # Bytes (a tool's binary result, say) as base64, as pydantic-ai's own ModelMessagesTypeAdapter stores them.
@@ -167,12 +209,15 @@ class _Restate(AbstractCapability[Any]):
     It stores the requests before each model request and each response as it
     arrives, and publishes each tool call as it starts and ends for clients
     that follow the conversation. A tool's ``restate.TerminalError`` becomes its
-    answer to the model; any other error fails the attempt.
+    answer to the model; any other error fails the attempt. It records the
+    errors of model requests, the only ones that can be a refusal.
     """
 
     def __init__(self, ctx: SessionContext, conversation: Conversation) -> None:
         self.ctx = ctx
         self.conversation = conversation
+        self.model_errors = ErrorSet()
+        """The errors that the run's model requests failed with."""
 
     async def store(self, messages: Sequence[ModelMessage]) -> None:
         """Store the tools' results in ``messages`` (the run's) that the conversation does not have yet.
@@ -191,6 +236,12 @@ class _Restate(AbstractCapability[Any]):
     ) -> ModelRequestContext:
         await self.store(ctx.messages)
         return request_context
+
+    async def on_model_request_error(
+        self, ctx: RunContext[Any], *, request_context: ModelRequestContext, error: Exception
+    ) -> ModelResponse:
+        self.model_errors.add(error)
+        raise error
 
     async def after_model_request(
         self, ctx: RunContext[Any], *, request_context: ModelRequestContext, response: ModelResponse
@@ -237,7 +288,9 @@ def _model(model: str | Model | None) -> Model:
     try:
         provider, model_id = provider_of(named)
         return infer_model(f"{provider}:{model_id}" if provider else named)
-    except (ImportError, UserError, ValueError) as error:
+    except Exception as error:
+        # Making the model makes no request: whatever fails is how it is set up, such as a provider's SDK whose
+        # API key is not set (raising its own error before Pydantic AI 2.15 checks it first).
         raise ModelError(f'the model "{named}": {error}') from error
 
 
@@ -256,6 +309,44 @@ def _output_spec(output: type[BaseModel], model: Model) -> NativeOutput[Any] | P
     return PromptedOutput(output)
 
 
+def _compaction(model: Model) -> _Capability | None:
+    """Return the compaction of ``model``'s provider, if Pydantic AI has one: Anthropic's, and the Responses API's."""
+    try:
+        if model.system == "anthropic":
+            from pydantic_ai.models.anthropic import (  # pylint: disable=import-outside-toplevel
+                AnthropicCompaction,
+                AnthropicModel,
+            )
+
+            return AnthropicCompaction() if isinstance(model, AnthropicModel) else None
+        if model.system == "openai":
+            from pydantic_ai.models.openai import (  # pylint: disable=import-outside-toplevel
+                OpenAICompaction,
+                OpenAIResponsesModel,
+            )
+
+            return OpenAICompaction() if isinstance(model, OpenAIResponsesModel) else None
+    except ImportError:
+        pass
+    return None
+
+
+def _capabilities(own: Agent[Any, str] | None, model: Model) -> list[_Capability]:
+    """Return the capabilities that a run gets beside the agent's own.
+
+    The built-in agent (``own`` is ``None``) gets the compaction of its
+    model's provider, for a conversation that lives long; an Agent of your
+    own runs as you configured it. Either gets ``ReinjectSystemPrompt``,
+    unless the agent has one: the conversation stores no system prompt,
+    which Pydantic AI keeps in the history it is given.
+    """
+    have = {type(capability) for capability in (own.root_capability.capabilities if own is not None else ())}
+    chosen = [compaction] if own is None and (compaction := _compaction(model)) is not None else []
+    if ReinjectSystemPrompt not in have:
+        chosen.append(ReinjectSystemPrompt())
+    return chosen
+
+
 def _run(
     ctx: SessionContext,
     own: Agent[Any, str] | None,
@@ -263,12 +354,19 @@ def _run(
     system: str | None,
     given: Sequence[AnyTool],
     output: type[BaseModel] | None = None,
+    deps: Any = None,
+    usage_limits: UsageLimits | None = None,
 ) -> Run:
-    """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer (``output``'s JSON)."""
+    """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer (``output``'s JSON).
+
+    ``deps`` is the run's dependencies (Pydantic AI's ``deps``), and ``usage_limits`` its limits: options of a run,
+    which an ``Agent`` cannot hold.
+    """
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
     agent: Agent[Any, str] = own or Agent(instructions=system)
     toolsets = [_toolset(given, ctx)] if given else []
+    chosen = _capabilities(own, model)
 
     async def run(conversation: Conversation) -> str:
         if (final := conversation.final_reply()) is not None:
@@ -279,16 +377,42 @@ def _run(
         spec = _output_spec(output, model) if output is not None else None
         try:
             result = await agent.run(
-                message_history=history, model=model, toolsets=toolsets, capabilities=[restate], output_type=spec
+                message_history=history,
+                model=model,
+                toolsets=toolsets,
+                capabilities=[restate, *chosen],
+                output_type=spec,
+                deps=deps,
+                usage_limits=usage_limits,
             )
-        except UnexpectedModelBehavior:
+        except UnexpectedModelBehavior as error:
+            if error in restate.model_errors and not isinstance(error, ContentFilterError):
+                # A model request's one response that its model could not read (a body that is not JSON, say): a
+                # retry asks again.
+                raise
             # Pydantic AI asked again for an answer that validates, and gave up: the reply is the answer for
             # `answer_with`, which asks once more or fails for good, rather than an error that Restate retries.
-            if spec is None or (final := conversation.final_reply()) is None:
-                raise
-            return final
+            if spec is not None and (final := conversation.final_reply()) is not None:
+                return final
+            # Retries that ran out (a tool's, the answer's), a content filter, a token limit: a retry would carry on
+            # with fresh retries, and meet it again.
+            raise TerminalError(f"the agent gave up: {error}") from error
+        except UsageLimitExceeded as error:
+            # A retry would carry on with a fresh limit, and so would never end an agent that keeps calling tools.
+            raise TerminalError(f"the run reached its usage limit: {error}") from error
+        except UserError as error:
+            raise TerminalError(f"the agent is not set up right: {error}") from error
+        except Exception as error:
+            if error not in restate.model_errors:
+                # Not a model request's: no refusal, whatever its name (an instructions function's, say).
+                from_tool(ctx, error)
+            raise
         # The messages that no model request stored: an output tool's return, say.
         await restate.store(result.all_messages())
+        if isinstance(result.output, DeferredToolRequests):
+            # Calls that wait for an approval or for a result from outside the run, which nothing gives: fail rather
+            # than answer with them. The conversation closes them, as a provider refuses calls without results.
+            raise TerminalError(DEFERRED)
         return result.output if isinstance(result.output, str) else to_json(result.output).decode()
 
     return run
@@ -304,6 +428,8 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: None = None,
+    deps: Any = None,
+    usage_limits: UsageLimits | None = None,
 ) -> str: ...
 
 
@@ -317,6 +443,8 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[M],
+    deps: Any = None,
+    usage_limits: UsageLimits | None = None,
 ) -> M: ...
 
 
@@ -329,6 +457,8 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[BaseModel] | None = None,
+    deps: Any = None,
+    usage_limits: UsageLimits | None = None,
 ) -> Any:
     """Answer a prompt with a Pydantic AI agent, exactly once.
 
@@ -354,6 +484,11 @@ async def prompt(
         output: A Pydantic model, for an answer that is one rather than
             text: asked for with ``NativeOutput`` if the model has a JSON
             schema mode, else with ``PromptedOutput``.
+        deps: The run's dependencies (Pydantic AI's ``deps``), for an
+            ``agent`` with a ``deps_type``.
+        usage_limits: The run's limits (Pydantic AI's ``UsageLimits``),
+            past which the turn fails. Defaults to Pydantic AI's: 50 model
+            requests.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
@@ -366,7 +501,7 @@ async def prompt(
     check_own(agent, system)
 
     def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output))
+        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output, deps, usage_limits))
 
     if output is None:
         return await ask(text)
@@ -382,6 +517,8 @@ def agent(
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
     output: type[BaseModel] | None = None,
+    deps: PerSession[Any] = None,
+    usage_limits: UsageLimits | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
@@ -401,6 +538,11 @@ def agent(
 
         assistant = pydantic_ai.agent("assistant", system=lambda ctx: f"You help {ctx.key}.")
 
+    An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
+    ``deps``, a value or a function of the invocation's context::
+
+        assistant = pydantic_ai.agent("assistant", shop, deps=lambda ctx: Customer(ctx.key))
+
     Args:
         name: The object's name, as Restate serves it.
         pydantic_agent: A Pydantic AI ``Agent`` of your own, whose output is
@@ -415,6 +557,12 @@ def agent(
             text: asked for with ``NativeOutput`` if the model has a JSON
             schema mode, else with ``PromptedOutput``. ``chat`` returns its
             JSON.
+        deps: The runs' dependencies (Pydantic AI's ``deps``), for a
+            ``pydantic_agent`` with a ``deps_type``: a value, or a function of
+            the invocation's context.
+        usage_limits: Each run's limits (Pydantic AI's ``UsageLimits``),
+            past which its turn fails. Defaults to Pydantic AI's: 50 model
+            requests.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -436,6 +584,8 @@ def agent(
             system=await configured(system, ctx),
             tools=await configured(tools, ctx),
             output=output,
+            deps=await configured(deps, ctx),
+            usage_limits=usage_limits,
         )
 
     obj.chat(answer, items=ITEMS, output=output)

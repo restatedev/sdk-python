@@ -263,7 +263,8 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     attempt, and Restate retries the turn. So each integration raises a
     ``TerminalError`` for its framework's errors that a retry would meet
     again: OpenAI's ``MaxTurnsExceeded`` and guardrail tripwires, ADK's model
-    error codes, LangGraph's recursion limit and invalid updates.
+    error codes, LangGraph's recursion limit and invalid updates, Pydantic
+    AI's usage limits, retries that ran out and setup errors.
     """
     invocation_id = ctx.request.id
     companion = _signals.signals_of(ctx)

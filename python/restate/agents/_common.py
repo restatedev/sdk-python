@@ -229,7 +229,7 @@ _FOR_GOOD = frozenset({"AuthenticationError", "PermissionDeniedError", "NotFound
 
 _REFUSED_TEXT = re.compile(
     r"API key not found|no API key|Could not resolve authentication method|Provider is not configured"
-    r"|api_key client option must be set"
+    r"|api_key client option must be set|Missing credentials\. Please pass an `api_key`"
     r'|"code":"(AUTH|MISSING_CREDENTIAL)"',
     re.IGNORECASE,
 )
