@@ -85,9 +85,8 @@ class Client(RestateClient):
         else:
             content_type = target_handler.handler_io.content_type
 
-        if headers is None:
-            headers = {}
-        if headers.get("Content-Type") is None and content_type is not None:
+        headers = dict(headers) if headers is not None else {}
+        if content_type is not None and not any(name.lower() == "content-type" for name in headers):
             headers["Content-Type"] = content_type
 
         service = target_handler.service_tag.name
