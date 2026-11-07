@@ -46,8 +46,10 @@ stored:
   has one (``AnthropicCompaction``, and ``OpenAICompaction`` for OpenAI's
   Responses API, which ``openai/...`` models use). It summarizes the
   history as it nears the model's context window, which a long conversation
-  would otherwise outgrow, failing each turn. An ``Agent`` of your own runs
-  as you configured it: give it the capabilities it needs, such as
+  would otherwise outgrow, failing each turn. A model that its provider does
+  not compact (Anthropic's before the 4.6 models, say) refuses such requests:
+  run it as an ``Agent`` of your own, which runs as you configured it. Give
+  that the capabilities it needs, such as
   ``Agent(model, capabilities=[AnthropicCompaction()])``.
 - The conversation stores no system prompt: Pydantic AI's
   ``ReinjectSystemPrompt`` gives each run the system prompt of an ``Agent``
