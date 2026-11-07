@@ -39,7 +39,7 @@ from restate.agents._common import BUDGET, WINDOW, MessageSerde, Summarize, Wind
 from restate.agents._conversation import SCHEMA, Items, next_start, restart
 from restate.agents._conversation import compact as compact_turns
 from restate.agents._conversation import settle as settle_turn
-from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared
+from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared, publish
 from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.sessions import Migration, SessionContext, SessionObject, ViewContext
@@ -252,6 +252,9 @@ class AgentObject(SessionObject):
         )
         self.background: bool = background
         self._clear: Callable[[SessionContext], Awaitable[None]] | None = None
+        given = typing.cast(object, budget)
+        if isinstance(given, bool) or not isinstance(given, int) or given < 0:
+            raise ValueError(f"budget must be a number of tokens (0 or more), not {budget!r}")
         self._settings = AgentInfo(background=background, window=check_window(window), budget=budget)
         AGENT.on(self, self._settings)
         _signals.with_companion(self)
@@ -485,7 +488,11 @@ def _followed(agent: AgentObject, items: Items) -> None:
         without answering (killed, say), so that the conversation shows the
         turn closed before the next message. Return whether it closed it.
         """
-        return await settle_turn(ctx, items, invocation_id)
+        if not await settle_turn(ctx, items, invocation_id):
+            return False
+        # The companion published as it closed the turn, before this stored how it ended: publish that too.
+        await publish(ctx)
+        return True
 
     async def compact(ctx: SessionContext, _: Nothing = None) -> bool:
         """Summarize the turns before the window that outgrow the agent's budget. Return whether it did."""

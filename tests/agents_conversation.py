@@ -461,3 +461,65 @@ async def test_a_turn_left_without_an_answer_is_ended_by_the_next_and_carries_on
     first, second = seen[1].transcript
     assert (first.answer, first.agent, second.prompt) == (ENDED, "refunds", second.prompt)
     assert seen[1].unanswered() == [] and len(seen) == 2
+
+
+async def test_a_turn_without_a_summary_reads_only_the_turns_its_budget_holds():
+    items = _Counting()
+    obj = sessions.SessionObject("asker")
+    seen: list[list[Item]] = []
+
+    async def run(conversation: Conversation) -> str:
+        seen.append(conversation.history())
+        return "fine"
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        # 10 tokens: 40 characters of turns before the window, of 3 + 4 characters each.
+        return await answer_once(ctx, text, items, run, budget=10)
+
+    backend = Backend()
+    loaded = 0
+    for n in range(100):
+        loaded = items.loaded
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), f"q{n:02}")
+    # The last turn read the previous turn, the 5 before it that the budget holds, and the one past it: not all 99.
+    assert items.loaded - loaded == 1 + 5 + 1
+    assert [item["text"] for item in seen[-1]] == [
+        *(text for n in range(93, 98) for text in (f"q{n}", "fine")),
+        "q98",
+        "q99",
+    ]
+
+
+async def test_a_turn_left_without_an_answer_gets_the_outcomes_of_its_calls():
+    from restate.agents._calls import call_of  # pylint: disable=import-outside-toplevel
+    from restate.agents._common import RETURNED_UNRECORDED  # pylint: disable=import-outside-toplevel
+
+    seen: list[Conversation] = []
+
+    async def run(conversation: Conversation) -> str:
+        seen.append(conversation)
+        if len(seen) == 1:
+            await conversation.append_reply(_calling("c1", "c2"))
+            ctx = typing.cast(Any, conversation).ctx
+            # c1's Restate call returned, but the invocation was gone before its result was stored; c2's never did.
+            await (await call_of(ctx, "lookup", {}, "c1")).answered()
+            raise RuntimeError("the invocation is gone")
+        return "fine"
+
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        async def keeping(conversation: Conversation) -> str:
+            typing.cast(Any, conversation).ctx = ctx
+            return await run(conversation)
+
+        return await answer_once(ctx, text, ITEMS, keeping)
+
+    backend = Backend()
+    with pytest.raises(RuntimeError):
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), "first")
+    await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), "second")
+    results = {r.id: r.output for e in seen[1].entries for r in e.results}
+    assert results["c1"] == RETURNED_UNRECORDED and results["c2"] != RETURNED_UNRECORDED

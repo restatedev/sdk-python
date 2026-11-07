@@ -430,8 +430,16 @@ class Conversation:
             self._index(entry)
 
     @classmethod
-    async def load(cls, db: Database, items: Items, window: Window = "all", budget: int = BUDGET) -> Conversation:
+    async def load(
+        cls, db: Database, items: Items, window: Window = "all", budget: int = BUDGET, *, complete: bool = False
+    ) -> Conversation:
         """Load the conversation from ``db``, whose items are ``items``': the transcript, and the window's turns whole.
+
+        The transcript is read from the latest turn back, in pages, until it
+        holds the window and the turns before it that ``budget`` holds (the
+        model sees no more of them), or the summary's start: so a turn reads
+        a bounded part of a conversation that lives long, whether or not its
+        agent summarizes it.
 
         Args:
             db: The key's database.
@@ -439,27 +447,14 @@ class Conversation:
             window: How many of the latest answered turns to load whole, with their items, or ``"all"``. The
                 latest turn is loaded whole if it has no answer yet.
             budget: How many tokens of the turns before the window ``history`` gives the model.
+            complete: Whether to read the transcript from the summary's start whatever the budget: to summarize it.
         """
         check_window(window)
         await SCHEMA.ensure(db)
         start = await start_of(db)
         last, seq = await last_of(db)
         first = start.n if window == "all" or start.summarized is None else start.summarized
-        rows = await db.values(
-            f"SELECT n, prompt, item, answer, agent, carried FROM {TURNS} WHERE n >= ? ORDER BY n", [first]
-        )
-        transcript = [
-            Entry(
-                int(typing.cast(int, n)),
-                items.load(str(item)),
-                prompt=str(prompt),
-                answer=_str(answer),
-                agent=_str(agent),
-                turn=int(typing.cast(int, n)),
-                carried=_str(carried),
-            )
-            for n, prompt, item, answer, agent, carried in rows
-        ]
+        transcript = await _transcript(db, items, first, None if window == "all" or complete else (window, budget))
         whole = transcript[window_start(transcript, window) :]
         steps: list[Entry] = []
         if whole:
@@ -499,9 +494,10 @@ class Conversation:
 
     @property
     def summary(self) -> str | None:
-        """The summary of the turns before the transcript, if they have one."""
+        """The summary of the turns before the transcript, if they have one (and the transcript is after them)."""
         first = self._transcript[0].n if self._transcript else self._next
-        return self._start.summary if self._start.summarized == first else None
+        summarized = self._start.summarized
+        return self._start.summary if summarized is not None and first >= summarized else None
 
     @property
     def closed(self) -> bool:
@@ -785,6 +781,44 @@ def _position(entry: Entry) -> int:
     return entry.n
 
 
+PAGE = 64
+"""How many turns of the transcript a load reads at a time, from the latest back."""
+
+
+async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tuple[int, int] | None) -> list[Entry]:
+    """Return the turns from position ``first`` on, in order: all of them, or as many as ``bounded`` needs.
+
+    ``bounded`` is the window and the budget: the turns are read from the
+    latest back, a page at a time, and the reading stops once they hold the
+    window and more of the turns before it than the budget holds.
+    """
+    sql = f"SELECT n, prompt, item, answer, agent, carried FROM {TURNS} WHERE n >= ? AND n < ? ORDER BY n DESC LIMIT ?"
+    read: list[Entry] = []
+    before = 2**63 - 1
+    answered = 0
+    left = None if bounded is None else bounded[1] * 4
+    while True:
+        rows = await db.values(sql, [first, before, PAGE if bounded is not None else 2**62])
+        for n, prompt, item, answer, agent, carried in rows:
+            at = int(typing.cast(int, n))
+            entry = Entry(
+                at, items.load(str(item)), str(prompt), _str(answer), agent=_str(agent), turn=at, carried=_str(carried)
+            )
+            read.append(entry)
+            if bounded is None or answer is None:
+                continue
+            answered += 1
+            if answered > bounded[0] and left is not None:
+                # A turn before the window: the model sees its message and answer, while the budget holds them.
+                entry.said = items.read(entry.item).said
+                left -= len(entry.said[1] if entry.said else "") + len(entry.answer or "")
+                if left < 0:
+                    return read[::-1]
+        if bounded is None or len(rows) < PAGE:
+            return read[::-1]
+        before = read[-1].n
+
+
 def _str(value: object) -> str | None:
     return None if value is None else str(value)
 
@@ -937,7 +971,7 @@ async def compact(ctx: SessionContext, items: Items) -> bool:
     settings = settings_of(ctx)
     if settings.summarize is None:
         return False
-    conversation = await Conversation.load(ctx.db, items, settings.window, settings.budget)
+    conversation = await Conversation.load(ctx.db, items, settings.window, settings.budget, complete=True)
     if not conversation.overflowing() or (found := conversation.to_summarize()) is None:
         return False
     turns, after = found

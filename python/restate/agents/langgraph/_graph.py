@@ -33,7 +33,11 @@ message as a new ``HumanMessage``:
 - After each step, the AI and tool messages the step added are copied into
   the agent's conversation, by their ids, so that the ``messages``, ``sync``
   and ``watch`` views show the run as it goes, as they do for the built-in
-  agent.
+  agent. They are the messages after the run's prompt: the graph's state
+  holds the earlier turns too, whose messages the conversation has, but
+  does not load (it loads the previous turn whole, at least). A graph that
+  trims the prompt away has the messages it keeps copied if their ids are
+  not the loaded turns', as a graph that trims keeps the latest messages.
 
   The conversation never gets ahead of the checkpoints: with
   ``durability="sync"``, LangGraph streams a step's state only once its
