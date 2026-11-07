@@ -328,11 +328,12 @@ class Conversation:
         await self._insert(lambda n: [Entry(n, self.items.prompt(text), prompt=prompt_id)])
 
     async def rewrite(self, entry: Entry, item: Item) -> None:
-        """Store ``item`` in place of ``entry``'s item: the same message, as the framework sent it.
+        """Store ``item`` in place of ``entry``'s item: the same message, with what the framework adds to it.
 
-        Such as a prompt with the system prompt that the framework added to
-        it. What the message says (its text, calls and results) stays the
-        same, so its ``seq`` does too: clients render it as before.
+        Such as a prompt with the system prompt that the framework adds to a
+        conversation's first request. What the message says (its text, calls
+        and results) stays the same, so its ``seq`` does too: clients render it
+        as before.
         """
         async with self._writing:
             if self.closed:

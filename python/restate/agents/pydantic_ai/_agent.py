@@ -30,13 +30,15 @@ stored:
 - Pydantic AI's errors that a retry would meet again end the turn for good:
   a usage limit (by default, 50 model requests a run: a retry would carry on
   with a fresh limit), retries that ran out (a tool's, or the answer's), a
-  content filter, and a setup error (``UserError``).
+  content filter, and a setup error (``UserError``). A response that a model
+  could not read (a body that is not JSON, say) is retried.
 - An ``Agent`` of your own keeps its system prompt (``system_prompt``),
   which Pydantic AI adds to a conversation's first request only, and keeps in
-  the message history: the conversation's first prompt is stored as Pydantic
-  AI sent it, system prompt included. (``instructions`` apply to every
-  request instead.) A system prompt given once a conversation has begun
-  applies from its next ``clear``.
+  the message history: it is stored with the conversation's first prompt,
+  when the conversation's first model request is made (after any turns that
+  ended before one, such as for a setup error). (``instructions`` apply to
+  every request instead.) A system prompt given once a model has replied
+  applies from the conversation's next ``clear``.
 - Each message is answered once per invocation, by the shared conversation of
   ``restate.agents`` (``_conversation.py``), which also closes a stopped,
   refused or failed run.
@@ -44,13 +46,14 @@ stored:
 
 from __future__ import annotations
 
+import dataclasses
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded, UserError
+from pydantic_ai.exceptions import ContentFilterError, UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -187,11 +190,13 @@ class _Restate(AbstractCapability[Any]):
     errors of model requests, the only ones that can be a refusal.
     """
 
-    def __init__(self, ctx: SessionContext, conversation: Conversation, prompt: Entry | None = None) -> None:
+    def __init__(self, ctx: SessionContext, conversation: Conversation, first: Entry | None = None) -> None:
         self.ctx = ctx
         self.conversation = conversation
-        self.prompt = prompt
-        """The conversation's first prompt, if Pydantic AI makes its request (with the system prompt) in this run."""
+        self.first = first
+        """The conversation's first prompt, if this run makes the conversation's first request (``_first_request``)."""
+        self.earlier: list[ModelMessage] = []
+        """What the conversation has before this run's prompt, which a run that makes its first request leaves out."""
         self.model_errors = ErrorSet()
         """The errors that the run's model requests failed with."""
 
@@ -210,14 +215,24 @@ class _Restate(AbstractCapability[Any]):
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
     ) -> ModelRequestContext:
-        if self.prompt is not None:
-            # The conversation's first request, as Pydantic AI made it: with the system prompt, which it keeps in
-            # the history, and adds to no later request. Stored in place of the prompt, without the instructions,
-            # which each request has its own of.
-            first = next(m for m in ctx.messages if isinstance(m, ModelRequest))
-            if any(isinstance(part, SystemPromptPart) for part in first.parts):
-                await self.conversation.rewrite(self.prompt, ModelRequest(parts=list(first.parts)))
-            self.prompt = None
+        if self.first is not None:
+            # The conversation's first request, as Pydantic AI made it, with the system prompt, which it keeps in
+            # the history and adds to no later request: the system prompt is stored in the conversation's first
+            # prompt, so that later runs have it.
+            request = next(m for m in ctx.messages if isinstance(m, ModelRequest))
+            if system := _system_prompt(request):
+                stored = typing.cast(ModelRequest, self.first.item)
+                await self.conversation.rewrite(self.first, ModelRequest(parts=[*system, *stored.parts]))
+            self.earlier = [entry.item for entry in self.conversation.entries[:-1]]
+            self.first = None
+        if self.earlier:
+            # The model sees the conversation as it is stored: the prompts before this run's (whose runs ended
+            # before any model request), with the system prompt in the first, then this run's messages.
+            messages = request_context.messages
+            head = messages[0]
+            if isinstance(head, ModelRequest):
+                head = dataclasses.replace(head, parts=[p for p in head.parts if not isinstance(p, SystemPromptPart)])
+            request_context.messages = [*self.earlier, head, *messages[1:]]
         await self.store(ctx.messages)
         return request_context
 
@@ -293,15 +308,27 @@ def _output_spec(output: type[BaseModel], model: Model) -> NativeOutput[Any] | P
     return PromptedOutput(output)
 
 
-def _first_prompt(conversation: Conversation) -> Entry | None:
-    """Return the prompt the conversation begins with, if it is all there is and has no system prompt yet."""
-    if len(conversation.entries) != 1 or conversation.entries[0].prompt is None:
+def _system_prompt(message: ModelMessage) -> list[SystemPromptPart]:
+    """Return the system prompt parts of ``message``."""
+    if not isinstance(message, ModelRequest):
+        return []
+    return [part for part in message.parts if isinstance(part, SystemPromptPart)]
+
+
+def _first_request(conversation: Conversation) -> Entry | None:
+    """Return the conversation's first prompt, if the run of the prompt it ends with makes its first request.
+
+    That is so until a model has replied, and while no request has a system
+    prompt: the conversation is the run's prompt, after any prompts whose runs
+    ended before a model request (a setup error, say) and what closed them.
+    Pydantic AI then adds the system prompt to the run's first request.
+    """
+    entries = conversation.entries
+    if not entries or entries[-1] is not conversation.running():
         return None
-    entry = conversation.entries[0]
-    message = typing.cast(ModelMessage, entry.item)
-    if not isinstance(message, ModelRequest) or any(isinstance(part, SystemPromptPart) for part in message.parts):
+    if any(entry.reply is not None or _system_prompt(entry.item) for entry in entries):
         return None
-    return entry
+    return entries[0] if isinstance(entries[0].item, ModelRequest) else None
 
 
 def _prompted(entry: Entry) -> Any:
@@ -334,11 +361,11 @@ def _run(
             return final
         history = typing.cast(list[ModelMessage], [entry.item for entry in conversation.entries])
         user_prompt: Any = None
-        first = _first_prompt(conversation)
+        first = _first_request(conversation)
         if first is not None:
-            # The conversation's first prompt: Pydantic AI makes its request, with the agent's system prompt, which
-            # it adds to a run with no history only. `_Restate` stores the request in place of the prompt.
-            user_prompt, history = _prompted(first), []
+            # The conversation's first request: Pydantic AI makes it, with the agent's system prompt, which it adds to
+            # a run with no history only. `_Restate` stores the system prompt, and shows the model what came before.
+            user_prompt, history = _prompted(conversation.entries[-1]), []
         restate = _Restate(ctx, conversation, first)
         spec = _output_spec(output, model) if output is not None else None
         try:
@@ -351,6 +378,10 @@ def _run(
                 output_type=spec,
             )
         except UnexpectedModelBehavior as error:
+            if error in restate.model_errors and not isinstance(error, ContentFilterError):
+                # A model request's one response that its model could not read (a body that is not JSON, say): a
+                # retry asks again.
+                raise
             # Pydantic AI asked again for an answer that validates, and gave up: the reply is the answer for
             # `answer_with`, which asks once more or fails for good, rather than an error that Restate retries.
             if spec is not None and (final := conversation.final_reply()) is not None:

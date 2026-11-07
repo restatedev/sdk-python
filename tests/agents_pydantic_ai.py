@@ -25,6 +25,7 @@ import pytest
 pytest.importorskip("pydantic_ai")
 
 from pydantic_ai import Agent, ModelRetry, RunContext  # noqa: E402
+from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
     ModelRequest,
@@ -61,6 +62,9 @@ class AuthenticationError(Exception):
 asked: collections.Counter[str] = collections.Counter()
 """How often the model was asked, by the key word that ends each test's first prompt."""
 
+garbled: collections.Counter[str] = collections.Counter()
+"""How often the model was asked for a reply whose first response it could not read, by the prompt."""
+
 
 def _prompts(messages: list[ModelMessage]) -> list[str]:
     return [
@@ -87,6 +91,11 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart(f"system: {info.instructions}")])
     if word == "refuse":
         raise AuthenticationError("invalid x-api-key")
+    if word == "garbled":
+        garbled[text] += 1
+        if garbled[text] == 1:
+            # As OpenAI's model reports a response body that is not JSON.
+            raise UnexpectedModelBehavior("Invalid response from openai chat completions endpoint, expected JSON data")
     if word == "sysprompt":
         system = [
             p.content
@@ -95,7 +104,8 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             for p in m.parts
             if isinstance(p, SystemPromptPart)
         ]
-        return ModelResponse(parts=[TextPart(f"system prompt: {', '.join(system)}")])
+        prompts = len(_prompts(messages))
+        return ModelResponse(parts=[TextPart(f"system prompt: {', '.join(system)}; prompts: {prompts}")])
     if word in ("loop", "picky"):
         # A model that keeps calling a tool, never answering.
         name = "get_weather" if word == "loop" else "picky"
@@ -201,7 +211,7 @@ async def own_system(ctx: sessions.SessionContext, text: str) -> str:
 @assistant.handler
 async def clash(ctx: sessions.SessionContext, text: str) -> str:
     """An Agent of your own whose tool has the name of one of this package's tools beside it: a setup error."""
-    mine: Agent[None, str] = Agent(FunctionModel(reply))
+    mine: Agent[None, str] = Agent(FunctionModel(reply), system_prompt="Mine.")
 
     @mine.tool_plain(name="get_weather")
     def weather(city: str) -> str:
@@ -452,15 +462,28 @@ async def test_options_may_be_functions_of_the_context(harness: HarnessEnvironme
 async def test_an_agent_of_your_own_keeps_its_system_prompt_in_each_turn(harness: HarnessEnvironment):
     """Pydantic AI adds it to a conversation's first request only: that request is stored, system prompt included."""
     k = key()
-    for _ in range(2):
-        assert (await post(harness, f"{k}/own_system", json=f"sysprompt {k}")).json() == "system prompt: Mine."
+    for turn in (1, 2):
+        answered = (await post(harness, f"{k}/own_system", json=f"sysprompt {k}")).json()
+        assert answered == f"system prompt: Mine.; prompts: {turn}"
     # The conversation reads as before: the system prompt is not a message of its own.
     assert await messages(harness, k) == [
         ("user", f"sysprompt {k}"),
-        ("assistant", "system prompt: Mine."),
+        ("assistant", "system prompt: Mine.; prompts: 1"),
         ("user", f"sysprompt {k}"),
-        ("assistant", "system prompt: Mine."),
+        ("assistant", "system prompt: Mine.; prompts: 2"),
     ]
+
+
+async def test_a_system_prompt_comes_first_after_turns_that_ended_before_any_model_request(
+    harness: HarnessEnvironment,
+):
+    """A setup error, say, ends the first turn before Pydantic AI made its first request: the next turn's is the
+    conversation's first, and the model sees the earlier prompt after the system prompt, as later turns do."""
+    k = key()
+    assert (await post(harness, f"{k}/clash", json=f"weather {k}")).status_code == 500
+    for turn in (2, 3):
+        answered = (await post(harness, f"{k}/own_system", json=f"sysprompt {k}")).json()
+        assert answered == f"system prompt: Mine.; prompts: {turn}"
 
 
 async def test_an_agent_that_keeps_calling_tools_ends_the_turn_at_its_usage_limit(harness: HarnessEnvironment):
@@ -478,6 +501,15 @@ async def test_a_tool_whose_retries_run_out_ends_the_turn(harness: HarnessEnviro
     assert failed.status_code == 500 and "exceeded max retries" in failed.text, failed.text
     assert asked[k] == 2  # one attempt: the call, and the call again after its retry
     assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+
+
+async def test_a_response_that_the_model_could_not_read_is_retried(harness: HarnessEnvironment):
+    """Not one of the run's own errors (retries that ran out, say): a model request's, which a retry asks again."""
+    k = key()
+    answered = await chat(harness, k, f"garbled {k}")
+    assert answered.status_code == 200, answered.text
+    assert answered.json() == f"echo: garbled {k}"
+    assert garbled[f"garbled {k}"] == 2
 
 
 async def test_a_setup_error_of_pydantic_ai_ends_the_turn(harness: HarnessEnvironment):
