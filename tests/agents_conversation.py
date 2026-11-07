@@ -650,3 +650,20 @@ async def test_a_turns_open_calls_are_its_own_and_not_an_earlier_turns():
     # The model was given both turns, flat: the one place where turns are composed.
     assert conversation.history() == [e.item for e in entries]
     assert conversation.knows_result("c0") is False and [e.turn for e in conversation.entries] == [0, 0, 2, 2]
+
+
+async def test_a_turn_answered_with_nothing_to_say_is_answered_once():
+    class Silent(Items):
+        """Items that read an empty message as no message, as ADK's do."""
+
+        def read(self, item: Item) -> Parsed:
+            parsed = super().read(item)
+            return parsed._replace(said=None) if parsed.said is not None and not parsed.said[1] else parsed
+
+    silent = Silent()
+    conversation = Conversation(typing.cast(Any, _Recorded()), silent, [])
+    turn = await conversation.ask("p1", "do it quietly")
+    # No message of the assistant, and an empty answer: nothing to show as the answer, and nothing stored for it.
+    await turn.answered("")
+    assert (turn.status, turn.answer, turn.prompt.answered_at) == ("answered", "", None)
+    assert turn.items == []

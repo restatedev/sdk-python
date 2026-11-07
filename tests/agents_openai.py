@@ -645,6 +645,36 @@ def crash_once_after(monkeypatch: pytest.MonkeyPatch, hook: str, when: Callable[
     monkeypatch.setattr(_agent._Hooks, hook, then_crash)  # pyright: ignore[reportPrivateUsage]
 
 
+async def test_a_turn_answered_by_the_tool_of_an_agent_handed_off_to_carries_that_agent():
+    @tool
+    async def book(city: str) -> str:
+        """Book a trip."""
+        return f"booked {city}"
+
+    def booking(system: str | None, items: list[Item]) -> list[Output]:
+        word = _prompts(items)[-1].split(" ")[0]
+        if word == "handbook" and system == "You triage.":
+            return [calls("call-h", "transfer_to_booker", "{}")]
+        if word == "handbook" and not any(i.get("name") == "book" for i in items):
+            return [calls("call-b", "book", '{"city": "Rome"}')]
+        return reply(system, items)
+
+    scripted = Scripted(booking)
+    booker = Agent(
+        name="booker",
+        instructions="You book.",
+        model=scripted,
+        tools=openai.tools([book]),
+        tool_use_behavior="stop_on_first_tool",
+    )
+    triage = Agent(name="triage", instructions="You triage.", model=scripted, handoffs=[booker])
+    ask = invoker(asker(agent=triage))
+    # The booker answers with its tool's output, and no reply of its own: the turn stores the answer as its reply.
+    assert await ask("handbook Rome") == "booked Rome"
+    # The next turn is with the booker still.
+    assert await ask("system x") == "system: You book."
+
+
 async def test_a_tool_that_ends_the_turn_is_stored_and_not_run_again():
     runs: list[str] = []
 

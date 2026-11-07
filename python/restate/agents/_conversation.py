@@ -595,19 +595,19 @@ class Turn:
         """Store the turn's ``answer``, how it ended (``status``) and what it carries, in one update of its row.
 
         The answer's message is the turn's last message of the assistant, whose
-        id the ``messages`` view's summary gives it; a turn that has none gets
-        ``answer`` as its reply first.
+        id the ``messages`` view's summary gives it. A turn that has none gets
+        ``answer`` as its reply first, from the agent the turn is with; an
+        empty answer gets none, and has no message.
         """
-        if not any(entry.said is not None and entry.said[0] == "assistant" for entry in self.items):
-            await self.append_reply(self._ledger.items.reply(answer, self._carried.get("agent")))
+        at = self._answer_message()
+        if at is None and answer.strip():
+            agent = self._agent()
+            at = await self.append_reply(self._ledger.items.reply(answer, agent), agent=agent)
         ledger = self._ledger
         async with ledger.lock:
             self._check_writable()
-            agent, carried = ledger.carried()
-            replied = next((e.agent for e in reversed(self._entries) if e.reply is not None), None)
-            agent = self._carried.get("agent") or replied or agent
-            carried = self._carried.get("carried", carried)
-            at = next(e.n for e in reversed(self._entries) if e.said is not None and e.said[0] == "assistant")
+            agent = self._agent()
+            carried = self._carried.get("carried", ledger.carried()[1])
             seq = ledger.seq + 1
             await ledger.db.execute(
                 f"UPDATE {TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? "
@@ -618,6 +618,15 @@ class Turn:
             prompt = self.prompt
             prompt.status, prompt.answer, prompt.agent, prompt.carried = status, answer, agent, carried
             prompt.answered_at, prompt.answered_seq = at, seq
+
+    def _answer_message(self) -> int | None:
+        """Return the position of the turn's last message of the assistant, if it has one."""
+        return next((e.n for e in reversed(self.items) if e.said is not None and e.said[0] == "assistant"), None)
+
+    def _agent(self) -> str | None:
+        """Return the agent the turn is with: the one it carries, else its latest reply's, else the previous turn's."""
+        replied = next((e.agent for e in reversed(self._entries) if e.reply is not None), None)
+        return self._carried.get("agent") or replied or self._ledger.carried()[0]
 
     async def close(self, ctx: SessionContext, status: Status, note: str) -> None:
         """Close the turn (stopped, refused, failed, or ended once its invocation is gone) with ``note``.
