@@ -420,6 +420,37 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
     assert len(answering.requests) == 1
 
 
+async def test_a_turn_closed_after_its_handoff_carries_the_agent_it_handed_off_to():
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents import AgentObject  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    def failing(system: str | None, items: list[Item]) -> list[Output]:
+        word = _prompts(items)[-1].split(" ")[0]
+        if word == "handfail" and system == "You triage.":
+            return [calls("call-h", "transfer_to_refunds", "{}")]
+        if word == "handfail":
+            # The agent handed off to fails for good, before its first reply: the turn closes with the error.
+            raise restate.TerminalError("the refunds model is down")
+        return reply(system, items)
+
+    # A window of 0: the next turn loads no reply of this one, only what it carried.
+    obj = AgentObject("asker", window=0)
+    desk_agent = desk(Scripted(failing))
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await openai.prompt(ctx, text, agent=desk_agent)
+
+    backend = Backend()
+    with pytest.raises(restate.TerminalError, match="refunds model is down"):
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), "handfail x")
+    answer = await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), "system x")
+    assert answer == "system: You handle refunds."
+
+
 async def test_a_handoff_cut_off_by_a_crash_is_asked_again_and_hands_off_once(monkeypatch: pytest.MonkeyPatch):
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
     from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel

@@ -283,6 +283,10 @@ class _Hooks(RunHooks[Any]):
     async def on_tool_start(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool) -> None:
         await tool_call_started(self.ctx)
 
+    async def on_handoff(self, context: RunContextWrapper[Any], from_agent: Agent[Any], to_agent: Agent[Any]) -> None:
+        # The turn carries the agent it handed off to, even if it ends before that agent replies.
+        self.conversation.carry(agent=to_agent.name)
+
     async def on_tool_end(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool, result: Any) -> None:
         await tool_call_ended(self.ctx)
 

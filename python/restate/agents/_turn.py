@@ -281,7 +281,9 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     companion = _signals.signals_of(ctx)
     turn: Turn = {"invocationId": invocation_id, "since": _now()}
     # From here until the turn closes, the companion knows about it: `status` and `stop` ask it.
-    await ctx.call(_signals.start, turn, key=companion)
+    # The agent has ``settle`` (``chat()`` adds it), so the companion may send it this turn once it is gone.
+    started: _signals.Started = {**turn, "settles": True}
+    await ctx.call(_signals.start, started, key=companion)
     await stepped(ctx)
 
     async def end() -> None:
