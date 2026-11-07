@@ -41,13 +41,18 @@ stored:
 - An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
   ``deps``: a value, or for ``agent`` also a function of the handler's
   context.
-- An ``Agent`` of your own keeps its system prompt (``system_prompt``),
-  which Pydantic AI adds to a conversation's first request only, and keeps in
-  the message history: it is stored with the conversation's first prompt,
-  when the conversation's first model request is made (after any turns that
-  ended before one, such as for a setup error). (``instructions`` apply to
-  every request instead.) A system prompt given once a model has replied
-  applies from the conversation's next ``clear``.
+- Each run gets Pydantic AI's own capabilities for a conversation that
+  lives long, unless ``capabilities`` gives others: the model provider's
+  compaction, where Pydantic AI has one (``AnthropicCompaction``, and
+  ``OpenAICompaction`` for OpenAI's Responses API, which ``openai/...``
+  models use). It summarizes the history as it nears the model's context
+  window, which a long conversation would otherwise outgrow, failing each
+  turn. ``default_capabilities`` returns them, to add your own to; a default
+  that an Agent of your own already has is left out.
+- The conversation stores no system prompt: Pydantic AI's
+  ``ReinjectSystemPrompt`` gives each run the system prompt of an ``Agent``
+  of your own (``system_prompt``), as it is now. (``instructions`` apply to
+  every request anyway.)
 - Each message is answered once per invocation, by the shared conversation of
   ``restate.agents`` (``_conversation.py``), which also closes a stopped,
   refused or failed run.
@@ -55,20 +60,18 @@ stored:
 
 from __future__ import annotations
 
-import dataclasses
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt
 from pydantic_ai.exceptions import ContentFilterError, UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
-    SystemPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -93,7 +96,7 @@ from restate.agents._common import (
     model_of,
     provider_of,
 )
-from restate.agents._conversation import Call, Conversation, Entry, Item, Parsed, Result, Run, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._tools import Tool, ToolCall
@@ -108,6 +111,9 @@ AnyModel: typing.TypeAlias = str | Model
 
 AnyTool: typing.TypeAlias = Tool | PydanticTool[Any] | Callable[..., Any]
 """A tool: one made with ``restate.agents`` (``tool``, ``call``, ...), a Pydantic AI tool, or a plain function."""
+
+AnyCapability: typing.TypeAlias = AbstractCapability[Any]
+"""A Pydantic AI capability, such as ``AnthropicCompaction`` or ``WebSearch``."""
 
 
 def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[Any]:
@@ -206,11 +212,9 @@ class _Restate(AbstractCapability[Any]):
     errors of model requests, the only ones that can be a refusal.
     """
 
-    def __init__(self, ctx: SessionContext, conversation: Conversation, first: Entry | None = None) -> None:
+    def __init__(self, ctx: SessionContext, conversation: Conversation) -> None:
         self.ctx = ctx
         self.conversation = conversation
-        self.first = first
-        """The conversation's first prompt, if this run makes the conversation's first request (``_first_request``)."""
         self.model_errors = ErrorSet()
         """The errors that the run's model requests failed with."""
 
@@ -229,26 +233,6 @@ class _Restate(AbstractCapability[Any]):
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
     ) -> ModelRequestContext:
-        if self.first is not None:
-            # The conversation's first request, as Pydantic AI made it, with the system prompt, which it keeps in
-            # the history and adds to no later request: the system prompt is stored in the conversation's first
-            # prompt, so that later runs have it.
-            request = next(m for m in ctx.messages if isinstance(m, ModelRequest))
-            if system := _system_prompt(request):
-                stored = typing.cast(ModelRequest, self.first.item)
-                await self.conversation.rewrite(self.first, ModelRequest(parts=[*system, *stored.parts]))
-            if earlier := [entry.item for entry in self.conversation.entries[:-1]]:
-                # The model sees the conversation as it is stored: the prompts before this run's (whose runs ended
-                # before any model request), with the system prompt in the first, then this run's messages. Pydantic
-                # AI keeps what the hook sends as the run's history, so later requests have it too.
-                messages = request_context.messages
-                head = messages[0]
-                if isinstance(head, ModelRequest):
-                    head = dataclasses.replace(
-                        head, parts=[p for p in head.parts if not isinstance(p, SystemPromptPart)]
-                    )
-                request_context.messages = [*earlier, head, *messages[1:]]
-            self.first = None
         await self.store(ctx.messages)
         return request_context
 
@@ -324,37 +308,66 @@ def _output_spec(output: type[BaseModel], model: Model) -> NativeOutput[Any] | P
     return PromptedOutput(output)
 
 
-def _system_prompt(message: ModelMessage) -> list[SystemPromptPart]:
-    """Return the system prompt parts of ``message``."""
-    if not isinstance(message, ModelRequest):
-        return []
-    return [part for part in message.parts if isinstance(part, SystemPromptPart)]
+def _compaction(model: Model) -> AnyCapability | None:
+    """Return the compaction of ``model``'s provider, if Pydantic AI has one: Anthropic's, and the Responses API's."""
+    try:
+        if model.system == "anthropic":
+            from pydantic_ai.models.anthropic import (  # pylint: disable=import-outside-toplevel
+                AnthropicCompaction,
+                AnthropicModel,
+            )
+
+            return AnthropicCompaction() if isinstance(model, AnthropicModel) else None
+        if model.system == "openai":
+            from pydantic_ai.models.openai import (  # pylint: disable=import-outside-toplevel
+                OpenAICompaction,
+                OpenAIResponsesModel,
+            )
+
+            return OpenAICompaction() if isinstance(model, OpenAIResponsesModel) else None
+    except ImportError:
+        pass
+    return None
 
 
-def _first_request(conversation: Conversation) -> Entry | None:
-    """Return the conversation's first prompt, if the run of the prompt it ends with makes its first request.
+def default_capabilities(model: AnyModel | None = None) -> list[AnyCapability]:
+    """Return the Pydantic AI capabilities that each run gets by default: those of a conversation that lives long.
 
-    That is so until a model has replied, and while no request has a system
-    prompt: the conversation is the run's prompt, after any prompts whose runs
-    ended before a model request (a setup error, say) and what closed them.
-    Pydantic AI then adds the system prompt to the run's first request.
+    That is the compaction of the model's provider, where Pydantic AI has one
+    (``AnthropicCompaction``, and ``OpenAICompaction`` for OpenAI's Responses
+    API, which ``openai/...`` models use): it summarizes the history as it
+    nears the model's context window. Add your own to them::
+
+        capabilities=[*pydantic_ai.default_capabilities(model), WebSearch()]
+
+    Args:
+        model: The model, as ``agent`` and ``prompt`` take it.
+
+    Raises:
+        TerminalError: If the model cannot be made (a missing package or API key).
     """
-    entries = conversation.entries
-    if not entries or entries[-1] is not conversation.running():
-        return None
-    if any(entry.reply is not None or _system_prompt(entry.item) for entry in entries):
-        return None
-    return entries[0] if isinstance(entries[0].item, ModelRequest) else None
+    compaction = _compaction(_model(model))
+    return [compaction] if compaction is not None else []
 
 
-def _prompted(entry: Entry) -> Any:
-    """Return what the prompt of ``entry`` asks: its text, or the content of its parts."""
-    parts = [part for part in typing.cast(ModelRequest, entry.item).parts if isinstance(part, UserPromptPart)]
-    if len(parts) == 1:
-        return parts[0].content
-    return [
-        content for part in parts for content in ([part.content] if isinstance(part.content, str) else part.content)
-    ]
+def _capabilities(
+    own: Agent[Any, str] | None, model: Model, given: Sequence[AnyCapability] | None
+) -> list[AnyCapability]:
+    """Return the capabilities of a run: ``given``, else the defaults that ``own`` (an Agent of your own) lacks.
+
+    And ``ReinjectSystemPrompt``, unless one is given or ``own`` has one: the
+    conversation stores no system prompt, which Pydantic AI keeps in the
+    history it is given.
+    """
+    have = {type(capability) for capability in (own.root_capability.capabilities if own is not None else ())}
+    if given is not None:
+        chosen = list(given)
+    else:
+        defaults = [_compaction(model)]
+        chosen = [capability for capability in defaults if capability is not None and type(capability) not in have]
+    if ReinjectSystemPrompt not in have | {type(capability) for capability in chosen}:
+        chosen.append(ReinjectSystemPrompt())
+    return chosen
 
 
 def _run(
@@ -366,36 +379,32 @@ def _run(
     output: type[BaseModel] | None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
+    capabilities: Sequence[AnyCapability] | None = None,
 ) -> Run:
     """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer (``output``'s JSON).
 
-    ``deps`` is the run's dependencies (Pydantic AI's ``deps``), and ``usage_limits`` its limits.
+    ``deps`` is the run's dependencies (Pydantic AI's ``deps``), ``usage_limits`` its limits, and ``capabilities``
+    its capabilities instead of the defaults (see ``_capabilities``).
     """
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
     agent: Agent[Any, str] = own or Agent(instructions=system)
     toolsets = [_toolset(given, ctx)] if given else []
+    chosen = _capabilities(own, model, capabilities)
 
     async def run(conversation: Conversation) -> str:
         if (final := conversation.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
         history = typing.cast(list[ModelMessage], [entry.item for entry in conversation.entries])
-        user_prompt: Any = None
-        first = _first_request(conversation)
-        if first is not None:
-            # The conversation's first request: Pydantic AI makes it, with the agent's system prompt, which it adds to
-            # a run with no history only. `_Restate` stores the system prompt, and shows the model what came before.
-            user_prompt, history = _prompted(conversation.entries[-1]), []
-        restate = _Restate(ctx, conversation, first)
+        restate = _Restate(ctx, conversation)
         spec = _output_spec(output, model) if output is not None else None
         try:
             result = await agent.run(
-                user_prompt,
                 message_history=history,
                 model=model,
                 toolsets=toolsets,
-                capabilities=[restate],
+                capabilities=[restate, *chosen],
                 output_type=spec,
                 deps=deps,
                 usage_limits=usage_limits,
@@ -445,6 +454,7 @@ async def prompt(
     output: None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
+    capabilities: Sequence[AnyCapability] | None = None,
 ) -> str: ...
 
 
@@ -460,6 +470,7 @@ async def prompt(
     output: type[M],
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
+    capabilities: Sequence[AnyCapability] | None = None,
 ) -> M: ...
 
 
@@ -474,6 +485,7 @@ async def prompt(
     output: type[BaseModel] | None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
+    capabilities: Sequence[AnyCapability] | None = None,
 ) -> Any:
     """Answer a prompt with a Pydantic AI agent, exactly once.
 
@@ -504,6 +516,9 @@ async def prompt(
         usage_limits: The run's limits (Pydantic AI's ``UsageLimits``),
             past which the turn fails. Defaults to Pydantic AI's: 50 model
             requests.
+        capabilities: Pydantic AI capabilities for the run, beside
+            ``agent``'s own. Defaults to ``default_capabilities``: the
+            compaction of the model's provider, unless ``agent`` has it.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
@@ -516,7 +531,9 @@ async def prompt(
     check_own(agent, system)
 
     def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output, deps, usage_limits))
+        return answer_once(
+            ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output, deps, usage_limits, capabilities)
+        )
 
     if output is None:
         return await ask(text)
@@ -534,6 +551,7 @@ def agent(
     output: type[BaseModel] | None = None,
     deps: PerSession[Any] = None,
     usage_limits: UsageLimits | None = None,
+    capabilities: PerSession[Sequence[AnyCapability] | None] = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
@@ -578,6 +596,11 @@ def agent(
         usage_limits: Each run's limits (Pydantic AI's ``UsageLimits``),
             past which its turn fails. Defaults to Pydantic AI's: 50 model
             requests.
+        capabilities: Pydantic AI capabilities for each run, beside
+            ``pydantic_agent``'s own: a sequence, or a function of the
+            invocation's context. Defaults to ``default_capabilities``: the
+            compaction of the model's provider, unless ``pydantic_agent`` has
+            it.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -601,6 +624,7 @@ def agent(
             output=output,
             deps=await configured(deps, ctx),
             usage_limits=usage_limits,
+            capabilities=await configured(capabilities, ctx),
         )
 
     obj.chat(answer, items=ITEMS, output=output)

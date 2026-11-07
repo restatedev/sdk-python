@@ -26,6 +26,7 @@ import pytest
 pytest.importorskip("pydantic_ai")
 
 from pydantic_ai import Agent, DeferredToolRequests, ModelRetry, RunContext  # noqa: E402
+from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt  # noqa: E402
 from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
@@ -262,6 +263,23 @@ async def limited(ctx: sessions.SessionContext, text: str) -> str:
     return await pydantic_ai.prompt(
         ctx, text, model=FunctionModel(reply), tools=[get_weather], usage_limits=UsageLimits(request_limit=5)
     )
+
+
+spied: collections.Counter[str] = collections.Counter()
+
+
+class Spy(AbstractCapability[Any]):
+    """A capability of one's own, which counts the model requests it sees, by the prompt."""
+
+    async def before_model_request(self, ctx: RunContext[Any], request_context: Any) -> Any:
+        spied[str(ctx.prompt)] += 1
+        return request_context
+
+
+@assistant.handler
+async def watched(ctx: sessions.SessionContext, text: str) -> str:
+    """A prompt whose runs get a capability of one's own."""
+    return await pydantic_ai.prompt(ctx, text, model=FunctionModel(reply), capabilities=[Spy()])
 
 
 @dataclass
@@ -591,6 +609,53 @@ async def test_a_run_stopped_for_a_deferred_tool_call_fails_and_the_call_is_clos
     failed = await post(harness, f"{k}/approval", json=f"deferred {k}")
     assert failed.status_code == 500 and "wait_for_signal" in failed.text, failed.text
     assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+
+
+async def test_capabilities_of_ones_own_get_each_run(harness: HarnessEnvironment):
+    k = key()
+    assert (await post(harness, f"{k}/watched", json=f"hi {k}")).json() == f"echo: hi {k}"
+    assert spied[f"hi {k}"] == 1
+
+
+def test_the_default_capabilities_are_the_compaction_of_the_models_provider(monkeypatch: pytest.MonkeyPatch):
+    """OpenAI's for its Responses API, which openai/... models use, and none for a provider without one."""
+    from pydantic_ai.models.openai import OpenAICompaction  # pylint: disable=import-outside-toplevel
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert [type(c) for c in pydantic_ai.default_capabilities("openai/gpt-6-sol")] == [OpenAICompaction]
+    assert pydantic_ai.default_capabilities("openai-chat:gpt-6-sol") == []
+    assert pydantic_ai.default_capabilities(FunctionModel(reply)) == []
+
+
+def test_the_default_capabilities_of_an_anthropic_model(monkeypatch: pytest.MonkeyPatch):
+    pytest.importorskip("anthropic")
+    from pydantic_ai.models.anthropic import AnthropicCompaction  # pylint: disable=import-outside-toplevel
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert [type(c) for c in pydantic_ai.default_capabilities("anthropic/claude-sonnet-5-5")] == [AnthropicCompaction]
+
+
+def test_a_runs_capabilities_are_the_defaults_or_those_given_and_reinject_the_system_prompt():
+    """Given capabilities replace the defaults; a default an Agent of your own has is left out; and each run
+    reinjects the system prompt, which the conversation does not store, unless one does already."""
+    from pydantic_ai.models.openai import OpenAICompaction, OpenAIResponsesModel  # pylint: disable=import-outside-toplevel
+    from pydantic_ai.providers.openai import OpenAIProvider  # pylint: disable=import-outside-toplevel
+
+    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
+
+    model = OpenAIResponsesModel("gpt-6-sol", provider=OpenAIProvider(api_key="sk-test"))
+
+    def kinds(own: Any, given: Any) -> list[type]:
+        return [type(c) for c in _agent._capabilities(own, model, given)]  # pyright: ignore[reportPrivateUsage]
+
+    assert kinds(None, None) == [OpenAICompaction, ReinjectSystemPrompt]
+    assert kinds(None, []) == [ReinjectSystemPrompt]
+    assert kinds(None, [Spy()]) == [Spy, ReinjectSystemPrompt]
+    assert kinds(None, [ReinjectSystemPrompt(replace_existing=True)]) == [ReinjectSystemPrompt]
+    compacting: Any = Agent(model, capabilities=[OpenAICompaction(token_threshold=100_000)])
+    assert kinds(compacting, None) == [ReinjectSystemPrompt]
+    reinjecting: Any = Agent(model, capabilities=[ReinjectSystemPrompt()])
+    assert kinds(reinjecting, None) == [OpenAICompaction]
 
 
 async def test_an_agent_of_your_own_gets_its_deps(harness: HarnessEnvironment):
