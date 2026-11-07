@@ -34,7 +34,8 @@ A turn is stored in two parts, in the key's database:
   with its turn. A turn is completed from its own trajectory.
 
 The model gets the transcript, and the whole trajectories of the latest
-``window`` turns (``Conversation.history``): earlier turns are the user's
+``window`` turns, and of any turn after them that another invocation ended
+(see ``_Walk``), in ``Conversation.history``. Earlier turns are the user's
 message and the answer, as many as a budget of tokens holds, and those that
 were summarized are one summary (``compact``). A turn is loaded with only
 what it needs: the transcript, and the window's trajectories
@@ -303,20 +304,41 @@ async def answer_in(db: DatabaseReader, prompt_id: str) -> str | None:
     return _str(row["answer"]) if row else None
 
 
-def window_start(turns: Sequence[Entry], window: Window) -> int:
-    """Return the index in ``turns`` (prompts, in order) of the first turn in ``window``.
+class _Walk:
+    """Tells, of the turns from the latest back, which are in a window of ``size`` turns.
 
-    The window is the ``window`` latest turns that have an answer, and any
-    turn after them that has none (only the latest can have none).
+    The window is the ``size`` latest turns that their framework answered, and
+    the turns after them that it did not: the one being answered (only the
+    latest can have no answer), and those another invocation ended
+    (``ENDED``), whose framework never finished them, so that what they
+    carried is a guess and their own rows say what happened.
     """
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self.seen = 0
+        self.done = False
+
+    def holds(self, answer: str | None) -> bool:
+        """Return whether the next turn back, with ``answer``, is in the window."""
+        if self.done:
+            return False
+        if answer is None or answer == ENDED:
+            return True
+        if self.seen == self.size:
+            self.done = True
+            return False
+        self.seen += 1
+        self.done = self.seen == self.size
+        return True
+
+
+def window_start(turns: Sequence[Entry], window: Window) -> int:
+    """Return the index in ``turns`` (prompts, in order) of the first turn in ``window`` (see ``_Walk``)."""
     if window == "all":
         return 0
-    first, answered = len(turns), 0
-    while first > 0:
-        if turns[first - 1].answer is not None:
-            if answered == window:
-                break
-            answered += 1
+    walk, first = _Walk(window), len(turns)
+    while first > 0 and walk.holds(turns[first - 1].answer):
         first -= 1
     return first
 
@@ -535,15 +557,14 @@ class Conversation:
     def _upcoming(self) -> tuple[list[Entry], int]:
         """Return the turns before the next turn's window, and the position the window starts at.
 
-        That is the window of the latest ``size`` answered turns, as the next
-        turn loads it, whether or not the latest turn is answered yet.
+        That is the window as the next turn loads it, once the latest turn is
+        answered (see ``_Walk``).
         """
         if self.size == "all":
             return [], self._transcript[0].n if self._transcript else self._next
-        answered = [turn for turn in self._transcript if turn.answer is not None]
-        whole = answered[len(answered) - self.size :] if self.size else []
-        start = whole[0].n if whole else self._next
-        return [turn for turn in answered if turn.n < start], start
+        first = window_start(self._transcript, self.size)
+        start = self._transcript[first].n if first < len(self._transcript) else self._next
+        return [turn for turn in self._transcript[:first] if turn.answer is not None], start
 
     def overflowing(self) -> bool:
         """Return whether the turns before the next turn's window outgrow ``budget``: then they are summarized."""
@@ -794,7 +815,7 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
     sql = f"SELECT n, prompt, item, answer, agent, carried FROM {TURNS} WHERE n >= ? AND n < ? ORDER BY n DESC LIMIT ?"
     read: list[Entry] = []
     before = 2**63 - 1
-    answered = 0
+    walk = None if bounded is None else _Walk(bounded[0])
     left = None if bounded is None else bounded[1] * 4
     while True:
         rows = await db.values(sql, [first, before, PAGE if bounded is not None else 2**62])
@@ -804,10 +825,9 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
                 at, items.load(str(item)), str(prompt), _str(answer), agent=_str(agent), turn=at, carried=_str(carried)
             )
             read.append(entry)
-            if bounded is None or answer is None:
+            if walk is None or left is None or walk.holds(entry.answer):
                 continue
-            answered += 1
-            if answered > bounded[0] and left is not None:
+            if entry.answer is not None:
                 # A turn before the window: the model sees its message and answer, while the budget holds them.
                 entry.said = items.read(entry.item).said
                 left -= len(entry.said[1] if entry.said else "") + len(entry.answer or "")

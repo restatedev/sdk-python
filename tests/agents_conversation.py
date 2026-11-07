@@ -593,3 +593,23 @@ async def test_a_window_of_all_loads_every_turn_whole():
         await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), f"q{n}")
     # Every turn is whole: its prompt, its call and its result (the last turn's too, appended since).
     assert len(seen[-1].entries) == 3 * 4 and len(seen[-1].history()) == len(seen[-1].entries)
+
+
+def test_a_turn_another_invocation_ended_stays_in_the_window_as_an_unanswered_one_does():
+    from restate.agents._common import ENDED  # pylint: disable=import-outside-toplevel
+    from restate.agents._conversation import window_start  # pylint: disable=import-outside-toplevel
+
+    def turns(*answers: str | None) -> list[Entry]:
+        return [Entry(n, {"role": "user", "text": f"q{n}"}, f"p{n}", answer) for n, answer in enumerate(answers)]
+
+    # Its framework never finished it, so what it carried is a guess: the next turn reads it whole.
+    assert window_start(turns("a", ENDED), 0) == 1
+    assert window_start(turns("a", ENDED, ENDED), 0) == 1
+    assert window_start(turns("a", "b", ENDED), 1) == 1
+    assert window_start(turns("a", ENDED, None), 0) == 1
+    # One before the window's answered turns is not: the turns after it carried on from it.
+    assert window_start(turns("a", ENDED, "c"), 1) == 2
+    assert window_start(turns("a", ENDED, "c"), 0) == 3
+    # Otherwise, as before.
+    assert window_start(turns("a", "b", None), 1) == 1
+    assert window_start(turns("a", "b"), 0) == 2

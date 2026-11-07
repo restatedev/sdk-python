@@ -491,6 +491,8 @@ async def _go(
 ) -> str:
     """Run the ``Runner`` on from the conversation, with the agent it is with, and return the answer."""
     hooks = _Hooks(ctx, conversation, config)
+    # The turn is with the agent it starts with until a handoff (``_Hooks.on_handoff``): carried if it ends first.
+    conversation.carry(agent=current.name)
     filtered = dataclasses.replace(config, call_model_input_filter=hooks.model_input)
     # The SDK's default, unless given: older versions take no None.
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}

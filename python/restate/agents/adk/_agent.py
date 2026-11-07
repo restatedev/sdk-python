@@ -37,9 +37,8 @@ its stored events:
   messages and answers, and the latest turns' events (``_conversation.py``).
   Its state is carried from turn to turn: each turn stores it with its
   answer, so that it holds however few events are loaded. A turn that ended
-  without ADK (killed, say) has its events' changes applied on top, while it
-  is loaded: with ``window=0``, the changes of a turn closed before the next
-  message arrived are lost.
+  without ADK (killed, then closed by another invocation) has its events'
+  changes applied on top: the next turn loads it whole, whatever its window.
 """
 
 from __future__ import annotations

@@ -451,6 +451,58 @@ async def test_a_turn_closed_after_its_handoff_carries_the_agent_it_handed_off_t
     assert answer == "system: You handle refunds."
 
 
+@pytest.mark.parametrize("ends", ["killed, then settled", "crashed, then failed"])
+async def test_a_turn_that_ends_after_its_handoff_another_way_carries_the_agent_it_handed_off_to(ends: str):
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents import AgentObject  # pylint: disable=import-outside-toplevel
+    from restate.agents._conversation import settle  # pylint: disable=import-outside-toplevel
+    from restate.agents.openai._agent import ITEMS  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    asked_refunds: list[str] = []
+
+    def dying(system: str | None, items: list[Item]) -> list[Output]:
+        word = _prompts(items)[-1].split(" ")[0]
+        if word == "handgone" and system == "You triage.":
+            return [calls("call-g", "transfer_to_refunds", "{}")]
+        if word == "handgone":
+            asked_refunds.append("asked")
+            if ends == "crashed, then failed" and len(asked_refunds) > 1:
+                raise restate.TerminalError("the refunds model is down")
+            # The invocation is gone (or crashed) after the handoff, before the refunds agent replies.
+            raise RuntimeError("the invocation is gone")
+        return reply(system, items)
+
+    obj = AgentObject("asker", window=0)
+    desk_agent = desk(Scripted(dying))
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await openai.prompt(ctx, text, agent=desk_agent)
+
+    @obj.handler(name="settle_as_the_companion_has_it")
+    async def settling(ctx: sessions.SessionContext, invocation_id: str) -> bool:
+        return await settle(ctx, ITEMS, invocation_id)
+
+    backend = Backend()
+
+    def host() -> Host:
+        return Host(backend, service="asker", answers=PUBLISHED)
+
+    gone = request()
+    with pytest.raises(RuntimeError, match="gone"):
+        await invoke(obj, "ask", host(), gone, "handgone x")
+    if ends == "killed, then settled":
+        assert await invoke(obj, "settle_as_the_companion_has_it", host(), request(), gone.id) is True
+    else:
+        # The retry starts with the refunds agent, which fails for good: the turn closes with its error.
+        with pytest.raises(restate.TerminalError, match="model is down"):
+            await invoke(obj, "ask", host(), gone, "handgone x")
+    assert await invoke(obj, "ask", host(), request(), "system x") == "system: You handle refunds."
+
+
 async def test_a_handoff_cut_off_by_a_crash_is_asked_again_and_hands_off_once(monkeypatch: pytest.MonkeyPatch):
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
     from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
