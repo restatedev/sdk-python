@@ -230,7 +230,7 @@ def _current(conversation: Conversation, root: Agent[Any], everyone: dict[str, A
         return root
     agent = everyone.get(latest.agent or "", root)
     targets = _handoffs(agent)
-    for call in (call for e in conversation.entries if e.reply == latest.reply for call in e.calls):
+    for call in (call for e in conversation.reply_entries(latest.reply) for call in e.calls):
         if call.name in targets and conversation.has_result(call.id):
             return everyone.get(targets[call.name], agent)
     return agent
@@ -484,7 +484,7 @@ async def _go(
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:
         agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
-        items = typing.cast(Any, _since_compaction([entry.item for entry in conversation.entries]))
+        items = typing.cast(Any, _since_compaction(conversation.history()))
         run = Runner.run(agent, items, context=options.context, hooks=hooks, run_config=filtered, **limit)
         result = await _unwrapped(ctx, run)
     except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:

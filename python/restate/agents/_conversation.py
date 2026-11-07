@@ -46,6 +46,8 @@ conversation to the answer, storing each step with ``append`` as it goes).
 from __future__ import annotations
 
 import asyncio
+import bisect
+import logging
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -65,6 +67,8 @@ from restate.agents._turn import AttemptEnded, answering, stop_signal_of
 from restate.exceptions import TerminalError
 from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext
 from restate.sessions.internal import Schema
+
+_logger = logging.getLogger(__name__)
 
 Item: typing.TypeAlias = Any
 """An item of the conversation: a framework's own message (a pydantic model, a dict, ...)."""
@@ -211,24 +215,36 @@ async def restart(tx: DatabaseWriter, start: Start) -> None:
 class Conversation:
     """The conversation in the key's database, loaded once and kept in step with it.
 
-    It is read from memory; ``append``, ``answered`` and ``drop`` write to the
-    database and to memory alike. Each item is read (its text, calls and
-    results) once, as it is loaded or appended.
+    It is read from memory: ``entries`` and the methods under *Reading*. Only
+    its own methods change it: ``ask``, ``append``, ``append_reply``,
+    ``answered`` and ``drop`` write to the database and to memory alike, one
+    after another, until ``seal`` closes it to writes. Each item is read (its
+    text, calls and results) once, as it is loaded or appended.
+
+    Tool calls and their results are matched by the call's id, across the
+    whole conversation: each call's id must be its own, as model providers
+    make them. A call whose id an earlier call has (or none, read as ``""``)
+    is logged, as its result may be taken for the other's.
     """
 
     def __init__(self, db: Database, items: Items, entries: list[Entry], start: Start | None = None) -> None:
         self.db = db
         self.items = items
-        self.entries: list[Entry] = []
+        self._entries: list[Entry] = []
         self._start = start or Start()
         self._seq = self._start.seq
         """The last ``seq`` given."""
         self._results: dict[str, Result] = {}
         """The tool calls' results, by their calls' ids."""
+        self._open: list[Call] = []
+        """The tool calls that have no result, in the order they were made: each of them, even if ids repeat."""
+        self._called: set[str] = set()
+        """The ids of the tool calls made."""
         self._prompts: dict[str, Entry] = {}
         """The prompts, by id."""
-        self.closed = False
-        """Whether a stop closed the run: the run, unwinding, then stores nothing more."""
+        self._warned = False
+        """Whether a call's id that an earlier call has was logged: once is enough."""
+        self._closed = False
         self._writing = asyncio.Lock()
         """Held while the conversation changes: tool calls run at once append their results one after another."""
         self._add(entries)
@@ -236,10 +252,35 @@ class Conversation:
     def _add(self, entries: list[Entry]) -> None:
         for entry in entries:
             entry.said, entry.calls, entry.results = self.items.read(entry.item)
-            self._results.update((result.id, result) for result in entry.results)
-            if entry.prompt is not None:
-                self._prompts[entry.prompt] = entry
-        self.entries.extend(entries)
+            self._index(entry)
+        self._entries.extend(entries)
+
+    def _index(self, entry: Entry) -> None:
+        for call in entry.calls:
+            if call.id in self._called and not self._warned:
+                self._warned = True
+                _logger.warning(
+                    "Tool call id %r is used by more than one call: the conversation matches results to calls by id, "
+                    "so a call may be taken as answered by another's result",
+                    call.id,
+                )
+            self._called.add(call.id)
+            if call.id not in self._results:
+                self._open.append(call)
+        for result in entry.results:
+            self._results[result.id] = result
+            if any(call.id == result.id for call in self._open):
+                self._open = [call for call in self._open if call.id != result.id]
+        if entry.prompt is not None:
+            self._prompts[entry.prompt] = entry
+
+    def _reindex(self) -> None:
+        self._results.clear()
+        self._open.clear()
+        self._called.clear()
+        self._prompts.clear()
+        for entry in self._entries:
+            self._index(entry)
 
     @classmethod
     async def load(cls, db: Database, items: Items) -> Conversation:
@@ -256,6 +297,35 @@ class Conversation:
 
     # --- Reading ---
 
+    @property
+    def entries(self) -> Sequence[Entry]:
+        """The entries of the conversation, in order (by position).
+
+        To read: the conversation changes only through its own methods.
+        """
+        return self._entries
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``seal`` closed the conversation to writes."""
+        return self._closed
+
+    def history(self) -> list[Item]:
+        """Return the items of the conversation, in order: what a framework's run starts from."""
+        return [entry.item for entry in self._entries]
+
+    def after(self, n: int) -> Sequence[Entry]:
+        """Return the entries after position ``n``, in order: those of the run that the prompt at ``n`` started, say."""
+        return self._entries[bisect.bisect_right(self._entries, n, key=_position) :]
+
+    def reply_entries(self, reply: int) -> Sequence[Entry]:
+        """Return the entries of the model's reply ``reply``, in order: they follow one another, from position ``reply``."""
+        first = bisect.bisect_left(self._entries, reply, key=_position)
+        end = first
+        while end < len(self._entries) and self._entries[end].reply == reply:
+            end += 1
+        return self._entries[first:end]
+
     def answer_of(self, prompt_id: str) -> str | None:
         """Return the answer of prompt ``prompt_id``, if it has one."""
         prompt = self._prompts.get(prompt_id)
@@ -263,16 +333,17 @@ class Conversation:
 
     def running(self) -> Entry | None:
         """Return the prompt whose run the conversation ends with, if it has no answer yet."""
-        prompt = next((e for e in reversed(self.entries) if e.prompt is not None), None)
+        prompt = next((e for e in reversed(self._entries) if e.prompt is not None), None)
         return prompt if prompt is not None and prompt.answer is None else None
 
     def last_reply(self) -> int | None:
         """Return the id of the model's reply that the conversation ends with, if it ends with one."""
-        return self.entries[-1].reply if self.entries else None
+        return self._entries[-1].reply if self._entries else None
 
     def agent_of(self, reply: int) -> str | None:
         """Return the agent that gave the model's reply ``reply``."""
-        return next((e.agent for e in self.entries if e.reply == reply), None)
+        entries = self.reply_entries(reply)
+        return entries[0].agent if entries else None
 
     def has_result(self, call_id: str) -> bool:
         """Return whether tool call ``call_id`` has a result."""
@@ -284,8 +355,8 @@ class Conversation:
         return result is not None and (not result.failed or result.output == failed)
 
     def unanswered(self) -> list[Call]:
-        """Return the tool calls of the conversation that have no result."""
-        return [call for e in self.entries for call in e.calls if call.id not in self._results]
+        """Return the tool calls of the conversation that have no result, in the order they were made."""
+        return list(self._open)
 
     def new_results(self, items: Sequence[Item]) -> list[Item]:
         """Return the items of ``items`` (a framework's run) that hold a tool call's result the conversation lacks.
@@ -300,7 +371,7 @@ class Conversation:
         reply = self.last_reply()
         if reply is None:
             return None
-        entries = [e for e in self.entries if e.reply == reply]
+        entries = self.reply_entries(reply)
         if any(e.calls for e in entries):
             return None
         said = [e.said for e in entries if e.said is not None]
@@ -321,16 +392,21 @@ class Conversation:
         return await self._insert(lambda n: [Entry(n + i, item, reply=n, agent=agent) for i, item in enumerate(items)])
 
     def _next(self) -> int:
-        return self.entries[-1].n + 1 if self.entries else self._start.n
+        return self._entries[-1].n + 1 if self._entries else self._start.n
 
     async def ask(self, prompt_id: str, text: str) -> None:
         """Append prompt ``prompt_id``, with ``text``."""
         await self._insert(lambda n: [Entry(n, self.items.prompt(text), prompt=prompt_id)])
 
     async def answered(self, prompt_id: str, answer: str) -> None:
-        """Store ``answer`` as the answer of prompt ``prompt_id``."""
-        await self.db.execute(f"UPDATE {TABLE} SET answer = ? WHERE prompt = ?", [answer, prompt_id])
-        self._prompts[prompt_id].answer = answer
+        """Store ``answer`` as the answer of prompt ``prompt_id``, which the conversation has."""
+        prompt = self._prompts.get(prompt_id)
+        if prompt is None:
+            raise KeyError(f"the conversation has no prompt {prompt_id!r}")
+        async with self._writing:
+            self._check_open()
+            await self.db.execute(f"UPDATE {TABLE} SET answer = ? WHERE prompt = ?", [answer, prompt_id])
+            prompt.answer = answer
 
     async def drop(self, reply: int) -> None:
         """Drop the model's reply ``reply``, and what came after it, to ask the model again.
@@ -341,16 +417,26 @@ class Conversation:
         reply's messages take the dropped ones' ids; the ``seq`` is kept, so
         that a client's cursor still sees them.
         """
-        async with self._writing, self.db.transaction() as tx:
-            await tx.execute(f"DELETE FROM {TABLE} WHERE n >= ?", [reply])
-            await restart(tx, Start(self._start.n, self._seq))
-        kept = [e for e in self.entries if e.n < reply]
-        for dropped in self.entries[len(kept) :]:
-            for result in dropped.results:
-                self._results.pop(result.id, None)
-            if dropped.prompt is not None:
-                del self._prompts[dropped.prompt]
-        self.entries = kept
+        async with self._writing:
+            self._check_open()
+            async with self.db.transaction() as tx:
+                await tx.execute(f"DELETE FROM {TABLE} WHERE n >= ?", [reply])
+                await restart(tx, Start(self._start.n, self._seq))
+            del self._entries[bisect.bisect_left(self._entries, reply, key=_position) :]
+            self._reindex()
+
+    async def seal(self) -> None:
+        """Close the conversation to writes, once those under way are stored.
+
+        For a stopped run: once its run is closed, the run (unwinding, or a task
+        of it left behind) stores nothing more, and any write it tries fails.
+        """
+        async with self._writing:
+            self._closed = True
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("the run was stopped: it stores nothing more")
 
     async def _insert(self, made: Callable[[int], list[Entry]]) -> int:
         """Store the entries that ``made`` makes from the next position, and return that position.
@@ -359,8 +445,7 @@ class Conversation:
         appends that run at once each get places of their own.
         """
         async with self._writing:
-            if self.closed:
-                raise RuntimeError("the run was stopped: it stores nothing more")
+            self._check_open()
             n = self._next()
             added = made(n)
             sql = f"INSERT INTO {TABLE} (n, seq, item, prompt, reply, agent) VALUES (?, ?, ?, ?, ?, ?)"
@@ -379,6 +464,10 @@ class Conversation:
             self._seq += len(rows)
             self._add(added)
             return n
+
+
+def _position(entry: Entry) -> int:
+    return entry.n
 
 
 def _str(value: object) -> str | None:
@@ -449,7 +538,7 @@ async def _answer(ctx: SessionContext, conversation: Conversation, text: str, ru
             if error.status_code == CANCELLATION:
                 # Cancelled: close the run, so that the next prompt starts afresh.
                 await close(ctx, conversation, CANCELLED)
-                conversation.closed = True
+                await conversation.seal()
                 raise
             # Failed for good: close the run with the error, so that the next prompt does not run into it again.
             await close(ctx, conversation, f"Error: {error.message}")

@@ -354,7 +354,7 @@ def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given
         if (final := conversation.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
-        messages = typing.cast(list[BaseMessage], [entry.item for entry in conversation.entries])
+        messages = typing.cast(list[BaseMessage], conversation.history())
         graph = _graph(ctx, conversation, chat_model, tools, system)
         try:
             state = typing.cast(State, await graph.ainvoke({"messages": messages}))

@@ -381,7 +381,7 @@ def _run(
         if (final := conversation.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
-        history = typing.cast(list[ModelMessage], [entry.item for entry in conversation.entries])
+        history = typing.cast(list[ModelMessage], conversation.history())
         restate = _Restate(ctx, conversation)
         spec = _output_spec(output, model) if output is not None else None
         try:

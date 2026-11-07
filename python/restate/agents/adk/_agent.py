@@ -361,7 +361,7 @@ def _final(conversation: Conversation, root: BaseAgent) -> str | None:
     if running is None:
         return None
     invocation = typing.cast(Event, running.item).invocation_id
-    events = [typing.cast(Event, e.item) for e in conversation.entries if e.n > running.n]
+    events = [typing.cast(Event, e.item) for e in conversation.after(running.n)]
     events = [event for event in events if event.invocation_id == invocation]
     responses = [event for event in events if _is_final(event)]
     if any(event.author == root.name and event.actions.end_of_agent for event in events):
