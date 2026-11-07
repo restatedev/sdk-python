@@ -36,7 +36,10 @@ its stored events:
 - The session is the conversation as the model sees it: the earlier turns'
   messages and answers, and the latest turns' events (``_conversation.py``).
   Its state is carried from turn to turn: each turn stores it with its
-  answer, so that it holds however few events are loaded.
+  answer, so that it holds however few events are loaded. A turn that ended
+  without ADK (killed, say) has its events' changes applied on top, while it
+  is loaded: with ``window=0``, the changes of a turn closed before the next
+  message arrived are lost.
 """
 
 from __future__ import annotations
@@ -64,6 +67,7 @@ from google.genai import types
 from pydantic import BaseModel
 
 from restate.agents._common import (
+    ENDED,
     MODEL_ENV,
     ModelError,
     PerSession,
@@ -165,18 +169,20 @@ class _Sessions(BaseSessionService):
     def session(self) -> Session:
         """Return the session: the conversation as the model sees it (``history``), and the state as of now.
 
-        The state is the one the latest answered turn carried, with the
-        changes of the turn being answered (whose events are all loaded).
+        The state is the one the latest turn that ADK answered carried, with
+        the changes of the loaded turns after it: the turn being answered,
+        and a turn that ended without ADK (killed, then closed by another
+        invocation), which carried the state from before its own changes.
         """
         conversation = self.conversation
         session = Session(id=_USER, app_name=_APP, user_id=_USER, last_update_time=time.time())
         session.events.extend(typing.cast(list[Event], conversation.history()))
-        _, carried = conversation.carried()
-        answered = max((turn.n for turn in conversation.transcript if turn.answer is not None), default=-1)
+        base = next((t for t in reversed(conversation.transcript) if t.answer is not None and t.answer != ENDED), None)
+        carried = base.carried if base is not None else None
         if carried is not None:
             session.state.update(json.loads(carried))
         for entry in conversation.entries:
-            if carried is None or (entry.turn is not None and entry.turn > answered):
+            if carried is None or (base is not None and entry.turn is not None and entry.turn > base.n):
                 self._update_session_state(session, typing.cast(Event, entry.item))
         self._carry(session)
         return session

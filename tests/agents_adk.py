@@ -442,7 +442,7 @@ async def test_an_app_of_your_own_keeps_its_plugins_and_gets_this_packages_tools
     assert requests == ["mine", "mine", "mine"]
 
 
-def asking(agent: Any = None, **options: Any) -> Callable[..., Awaitable[Any]]:
+def asking(agent: Any = None, backend: Any = None, **options: Any) -> Callable[..., Awaitable[Any]]:
     """Return how to ask, in process, an object whose handler answers with ``adk.prompt`` (in one backend)."""
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
     from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
@@ -458,12 +458,13 @@ def asking(agent: Any = None, **options: Any) -> Callable[..., Awaitable[Any]]:
     async def ask(ctx: sessions.SessionContext, text: str) -> str:
         return await adk.prompt(ctx, text, **options)
 
-    backend = Backend()
+    backend = backend or Backend()
 
     async def asked(text: str, invocation: Any = None) -> Any:
         host = Host(backend, service="asker", answers={"publish": b"null"})
         return await invoke(asker, "ask", host, invocation or request(), text)
 
+    asked.backend = backend  # type: ignore[attr-defined]
     return asked
 
 
@@ -537,6 +538,37 @@ async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harnes
     assert len(summaries) == 1 and "User: hi one" in summaries[0] and "hi four" not in summaries[0]
     latest = _prompts(requests[-1])
     assert latest[0].startswith("A summary of our conversation so far:") and latest[1:] == ["hi four", "hi five"]
+
+
+async def test_the_state_a_killed_turn_set_holds_after_it_ended():
+    from google.adk.tools.tool_context import ToolContext  # pylint: disable=import-outside-toplevel
+
+    def get_weather(city: str, tool_context: ToolContext) -> str:  # pylint: disable=redefined-outer-name
+        """Remember the city."""
+        tool_context.state["city"] = city
+        return "noted"
+
+    class Dying(Scripted):
+        """Gone after the tool's result is stored, as a killed invocation is."""
+
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            if any(part.function_response for part in llm_request.contents[-1].parts or []):
+                raise RuntimeError("the invocation is gone")
+            async for response in super().generate_content_async(llm_request, stream):
+                yield response
+
+    dying = LlmAgent(name="mine", model=Dying(), instruction="City: {city?}", tools=[get_weather])
+    mine = LlmAgent(name="mine", model=Scripted(), instruction="City: {city?}", tools=[get_weather])
+    backend_asked = asking(dying)
+    assert await backend_asked("hi 0") == "echo: hi 0"
+    with pytest.raises(RuntimeError, match="gone"):
+        await backend_asked("weather Lisbon")
+    # Another invocation ends the killed turn, and the city its tool stored holds.
+    asked = asking(mine, backend=backend_asked.backend)  # type: ignore[attr-defined]
+    assert await asked("hi 2") == "echo: hi 2"
+    assert await asked("system x") == "system: City: Lisbon"
 
 
 async def test_earlier_turns_are_their_messages_and_answers():
