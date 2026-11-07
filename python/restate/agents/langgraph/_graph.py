@@ -338,9 +338,10 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
 
     async def _run(conversation: Conversation) -> str:
         turn = conversation.turn
-        # The run's input: the turn's prompt, or the message that asked again within the turn (an id of its own).
+        # The run's input: the turn's prompt, or the message that asked again within the turn, under an id of its
+        # own that no prompt has (``next_prompt_id`` makes ``<id>:<k>`` only).
         step = turn.latest_ask()
-        prompt_id = _prompt_id(turn) if step is turn.prompt else f"{_prompt_id(turn)}:{step.n}"
+        prompt_id = _prompt_id(turn) if step is turn.prompt else f"{_prompt_id(turn)}:again:{step.n}"
         saver = SqlCheckpointSaver(ctx.db)
         app = _compiled(graph, saver)
         snapshot = await _stored(app)

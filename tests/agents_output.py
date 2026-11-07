@@ -193,7 +193,14 @@ def _planning_graph() -> Any:
     return builder
 
 
-lg_graph = langgraph.agent("lg_graph_planner", graph=_planning_graph(), output=Plan)
+planning = _planning_graph()
+lg_graph = langgraph.agent("lg_graph_planner", graph=planning, output=Plan)
+
+
+@lg_graph.handler
+async def twice(ctx: sessions.SessionContext, texts: list[str]) -> list[Any]:
+    """Two prompts of one invocation, each its own turn, the first of which may ask again within itself."""
+    return [(await langgraph.prompt(ctx, text, graph=planning, output=Plan)).model_dump() for text in texts]
 
 
 # --- The OpenAI Agents SDK: the output type of the agent the run starts with ---
@@ -409,3 +416,13 @@ async def test_a_reply_that_is_wrong_after_asking_again_fails_the_message_and_th
 async def test_a_prompt_of_an_agent_of_your_own_answers_with_a_plan(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     assert (await post(harness, f"pai_native/{key}/own", json=f"plan {key}")).json() == {"title": key, "mode": "native"}
+
+
+@pytest.mark.anyio
+async def test_a_graph_asked_again_within_a_turn_runs_the_next_prompt_of_the_invocation_as_its_own(
+    harness: HarnessEnvironment,
+):
+    key = uuid.uuid4().hex
+    # On a new key, the first prompt asks again at position 2; the invocation's second prompt is `<id>:2`.
+    answers = (await post(harness, f"lg_graph_planner/{key}/twice", json=[f"prose {key}", f"plan {key}2"])).json()
+    assert answers == [{"title": key, "mode": "none"}, {"title": f"{key}2", "mode": "none"}]
