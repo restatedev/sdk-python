@@ -44,8 +44,11 @@ start, and the run resumes from the last step stored:
   asking again only if its agent has no output guardrails.
 - Only an error of a model request can be its provider refusing (a wrong API
   key, say), which ends the turn unanswered: the run's hooks mark each
-  request (``on_llm_start`` to ``on_llm_end``). Any other error fails the
-  attempt, and Restate retries it, such as one of an instructions function's.
+  request, from the input filter's end (when the SDK has run the
+  instructions and the run's own filter, and goes on to make the model and
+  its client, which needs the key) to ``on_llm_end``. Any other error fails
+  the attempt, and Restate retries it, such as one of an instructions
+  function's.
 - The SDK's setup errors (its ``UserError``: an unknown model prefix, say) and
   a package the agent needs that is not installed (``litellm``, say) end the
   turn for good: a retry would meet them again.
@@ -228,7 +231,8 @@ class _Hooks(RunHooks[Any]):
         self.then = config.call_model_input_filter
         """The run's own ``call_model_input_filter``, if it has one."""
         self.requesting = False
-        """Whether a model request is in progress: the only time an error can be its provider refusing."""
+        """Whether a model request is in progress, with the making of its model and client: the only time an error
+        can be its provider refusing."""
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
         """The run's ``call_model_input_filter``: store the tools' outputs before the next request.
@@ -237,16 +241,14 @@ class _Hooks(RunHooks[Any]):
         """
         if outputs := self.conversation.new_results(data.model_data.input):
             await self.conversation.append(*outputs)
-        if self.then is None:
-            return data.model_data
-        filtered = self.then(data)
-        return await filtered if inspect.isawaitable(filtered) else filtered
-
-    async def on_llm_start(
-        self, context: RunContextWrapper[Any], agent: Agent[Any], system_prompt: str | None, input_items: Any
-    ) -> None:
-        # Right before the model request: the instructions and the input filter have run, the model is made.
+        filtered = data.model_data
+        if self.then is not None:
+            given = self.then(data)
+            filtered = await given if inspect.isawaitable(given) else given
+        # The SDK goes on to make the model and its client (which needs the API key: a refusal if it is missing), and
+        # to request it. (The instructions have run already.)
         self.requesting = True
+        return filtered
 
     async def on_llm_end(self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse) -> None:
         self.requesting = False

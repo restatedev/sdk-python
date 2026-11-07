@@ -722,6 +722,34 @@ async def test_an_error_of_the_agents_own_code_is_retried_and_a_models_refusal_i
         await ask("refuse now")
     assert refused.value.status_code == 424
 
+    # An error of the run's own input filter (which runs before the model is made) is retried too.
+    filtered: list[str] = []
+
+    def profile_filter(data: Any) -> Any:
+        filtered.append("profile")
+        if len(filtered) == 1:
+            raise NotFoundError("no profile yet")
+        return data.model_data
+
+    config = RunConfig(call_model_input_filter=profile_filter)
+    ask = invoker(asker(agent=Agent(name="filtered", model=Scripted(reply)), run_config=config))
+    invocation = request_of()
+    with pytest.raises(NotFoundError):
+        await ask("hi there", invocation)
+    assert await ask("hi there", invocation) == "echo: hi there"
+
+
+async def test_a_missing_api_key_is_a_refusal_for_the_built_in_agent_and_one_of_your_own(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The SDK makes the model's client (which needs the key) before the model request: still a refusal.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    for options in ({"model": "openai/gpt-6-sol"}, {"agent": Agent(name="mine", model="gpt-6-sol")}):
+        ask = invoker(asker(**options))
+        with pytest.raises(restate.TerminalError) as refused:
+            await ask("hi there")
+        assert refused.value.status_code == 424, refused.value.message
+
 
 async def test_a_setup_error_of_the_sdk_ends_the_turn():
     ask = invoker(asker(agent=Agent(name="prefixed", model="nosuchprefix/x")))
