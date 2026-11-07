@@ -146,13 +146,14 @@ would catch.
    - The tutorial in `modal-template/python` (lessons 09–16) uses these APIs and
      has no tests.
 9. **The test hygiene adds flakiness and slows CI.**
-   - **Reproducibility.** The harness runs `restatedev/restate:latest`, so a PR
-     can turn red without a code change.
+   - **Reproducibility.** The harness ran `restatedev/restate:latest`, so a PR
+     could turn red without a code change. (Pinned since: see the plan's status.)
    - **Containers.** Each module starts its own session-scoped harness, so about
-     12 Restate containers stay up for the whole run. There is no `conftest.py`.
+     12 Restate containers stay up for the whole run. There was no `conftest.py`
+     (one now marks the server tests; one shared harness is still to do).
    - **Sharing state across threads.**
-     - `agents_object` sets an `asyncio.Event` (`gate`), awaited on the server
-       thread's loop, from the test's loop.
+     - `agents_object` set an `asyncio.Event` (`gate`), awaited on the server
+       thread's loop, from the test's loop (a thread-safe `Gate` since).
      - `agents_langgraph_nodes` never resets its `threading.Event`s, so a test
        fails when rerun in the same process.
      - Monkeypatches of module globals (`DEFAULT_RECURSION_LIMIT`,
@@ -271,7 +272,7 @@ cheapest to test at its own level.
 | 5. Classify errors: refusal (424), retry, or terminal | `refusal_of`, `terminal_of`, each `_run`'s `except` | a bad key retried forever, or a blip fails the turn |
 
 Of the 28 bugs that the fix commits describe (see "How good the suite is"
-below), 12 are in job 5 and 8 are in job 3.
+above), 12 are in job 5 and 8 are in job 3.
 
 ## The strategy: a pyramid
 
@@ -371,10 +372,10 @@ These make the levels above find more than hand-picked cases do.
 ## Hygiene, first
 
 - `tests/conftest.py` with one session-scoped harness for every agent module,
-  and markers `inprocess`, `server`, `e2e`, `live`.
-- `just test-fast` (`-m inprocess`, no Docker), `just test` (all but `e2e` and
+  and markers: `server` (done), then `e2e` and `live`.
+- `just test-fast` (`-m "not server"`, no Docker; done), `just test` (all but `e2e` and
   `live`), `just e2e`.
-- Pin the Restate image by version or digest; update it on purpose.
+- Pin the Restate image by version or digest; update it on purpose (done: `tests/support.py`).
 - A fixture that resets every gate and counter; thread-safe gates for what the
   test sets on the server's loop; no monkeypatched globals while a shared
   server runs.

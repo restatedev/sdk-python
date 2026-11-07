@@ -514,7 +514,11 @@ def main() -> int:
     files = tuple(sorted({f for m in chosen for f in m.tests}))
     print(f"baseline: {len(files)} test files ...", flush=True)
     started = time.monotonic()
-    baseline = failures(files, args.timeout) or set()
+    baseline = failures(files, args.timeout)
+    if baseline is None:
+        # Without a baseline, every test that fails anyway would count against each mutant.
+        print(f"baseline: timed out after {args.timeout:.0f}s; raise --timeout", file=sys.stderr)
+        return 1
     print(f"baseline: {len(baseline)} failing, left out ({time.monotonic() - started:.0f}s)", flush=True)
     for name in sorted(baseline):
         print(f"  {name}")
