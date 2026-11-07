@@ -16,9 +16,11 @@ message to the agent is a run of the graph on the key's thread, with the
 message as a new ``HumanMessage``:
 
 - The graph's checkpoints are in the key's database (``SqlCheckpointSaver``),
-  stored before each step runs (``durability="sync"``), and the run's
-  context is the handler's: the prebuilt ``nodes`` work in it. A retried
-  attempt resumes the run it cut off.
+  stored before each step runs (``durability="sync"``), and the prebuilt
+  ``nodes`` and the tools of ``tools()`` get the handler's context in it
+  (``_context.py``). LangGraph's run context is the graph's own
+  (``context=``), else the handler's. A retried attempt resumes the run it
+  cut off.
 - After each step, the AI and tool messages the step added are copied into
   the agent's conversation, by their ids, so that the ``messages``, ``sync``
   and ``watch`` views show the run as it goes, as they do for the built-in
@@ -45,8 +47,8 @@ message as a new ``HumanMessage``:
   signal's value, as ``interrupt()``'s result. The turn waits without
   holding a process; a retried attempt joins the same waits. Static
   breakpoints (``interrupt_before``, ``interrupt_after``) have nothing to
-  wait for: a graph that has them is refused, and a run that stops at a
-  subgraph's fails.
+  wait for: a graph that has them, or a subgraph LangGraph finds in it, is
+  refused, and a run that stops at another subgraph's fails.
 - The graph may trim its history, its input and answer included (as a
   summarizing graph does): a run is found by its checkpoints' metadata,
   which name its prompt, and its answer is read from the conversation.
@@ -64,9 +66,12 @@ from __future__ import annotations
 import asyncio
 import json
 import typing
+import weakref
 from collections.abc import Sequence
 from typing import Any
+from uuid import UUID
 
+from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
@@ -75,17 +80,21 @@ from langgraph.types import Command, StateSnapshot
 from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
+from restate.agents._common import from_tool
 from restate.agents._conversation import Conversation, Entry, Run
 from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
+from restate.agents.langgraph._context import running as running_graph
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 
 AnyGraph: typing.TypeAlias = StateGraph[Any, Any, Any, Any] | Pregel[Any, Any, Any, Any]
 """A graph of your own: a ``StateGraph`` (uncompiled), or a compiled one such as LangChain's ``create_agent`` makes."""
 
-THREAD: RunnableConfig = {"configurable": {"thread_id": "chat"}}
+THREAD_ID = "chat"
 """The graph's thread: there is one per key, as the key's database is its own."""
+
+THREAD: RunnableConfig = {"configurable": {"thread_id": THREAD_ID}}
 
 
 BREAKPOINTS = (
@@ -96,16 +105,25 @@ BREAKPOINTS = (
 
 
 def check(graph: AnyGraph) -> None:
-    """Raise ``TypeError`` if ``graph`` has no ``messages`` in its state, or has static breakpoints."""
+    """Raise ``TypeError`` if ``graph`` has no ``messages`` in its state, or it or a subgraph has static breakpoints.
+
+    The subgraphs are those LangGraph finds: its nodes that are graphs, and
+    a graph that a node calls, if the node names it. One that a node makes
+    or calls otherwise is found only when its breakpoint stops a run, which
+    then fails (see ``at_breakpoint``).
+    """
     if "messages" not in graph.channels:
         raise TypeError("the graph's state has no messages: build it on LangGraph's MessagesState")
-    if isinstance(graph, Pregel) and (graph.interrupt_before_nodes or graph.interrupt_after_nodes):
-        raise TypeError(BREAKPOINTS)
+    compiled: Pregel[Any, Any, Any, Any] = graph.compile() if isinstance(graph, StateGraph) else graph
+    # Untyped: LangGraph types a subgraph as a PregelProtocol of unknown parameters.
+    subgraphs: list[tuple[str, object]] = list(typing.cast(Any, compiled).get_subgraphs(recurse=True))
+    for each in [compiled, *(found for _, found in subgraphs)]:
+        if isinstance(each, Pregel) and (each.interrupt_before_nodes or each.interrupt_after_nodes):
+            raise TypeError(BREAKPOINTS)
 
 
-def _compiled(graph: AnyGraph, ctx: SessionContext) -> Any:
-    """Return ``graph`` compiled with its checkpoints in the key's database (untyped: its context is ``ctx``)."""
-    saver = SqlCheckpointSaver(ctx.db, history="latest")
+def _compiled(graph: AnyGraph, saver: SqlCheckpointSaver) -> Any:
+    """Return ``graph`` compiled with its checkpoints in ``saver`` (untyped: LangGraph's run context is ours)."""
     if isinstance(graph, StateGraph):
         return graph.compile(checkpointer=saver)
     return graph.copy(update={"checkpointer": saver})
@@ -220,37 +238,21 @@ def _closing(conversation: Conversation, running: Entry, messages: Sequence[Base
 INTERRUPT = "interrupt"
 """The name of the signal that answers LangGraph's ``interrupt()``."""
 
-_RESUME = "__resume__"
-"""LangGraph's channel of a task's resume values, among a checkpoint's pending writes."""
 
+def _interrupts(snapshot: StateSnapshot, resumes: dict[str, int]) -> list[tuple[Any, int]]:
+    """Return the pending interrupts of the run, with how often each was resumed (``resumes``, by interrupt id).
 
-async def _interrupts(app: Any, snapshot: StateSnapshot) -> list[tuple[Any, int]]:
-    """Return the pending interrupts of ``snapshot`` (a graph's or a subgraph's), with how often each was resumed.
-
-    An interrupt is counted at the task that raised it, inside subgraphs,
-    whose resume values are among the pending writes of its own graph's
-    checkpoint.
+    LangGraph keeps each pending interrupt on the graph's task whose step
+    raised it, a subgraph's interrupt included, even one of a node's second
+    subgraph call, whose state LangGraph's subgraph snapshots do not show.
+    How often it was resumed is counted at the task that raised it, in
+    whichever namespace it ran (``SqlCheckpointSaver._resumes``).
     """
-    stored = await app.checkpointer.aget_tuple(snapshot.config)
-    writes = typing.cast(list[tuple[str, str, Any]], stored.pending_writes if stored is not None else [])
-    resumed: dict[str, int] = {}
-    for task_id, channel, values in writes:
-        if channel == _RESUME:
-            count = len(typing.cast(list[Any], values)) if isinstance(values, list) else 1
-            resumed[task_id] = max(resumed.get(task_id, 0), count)
-    found: list[tuple[Any, int]] = []
-    for task in snapshot.tasks:
-        if not task.interrupts:
-            continue
-        if isinstance(task.state, StateSnapshot):
-            found.extend(await _interrupts(app, task.state))
-        else:
-            found.extend((pending, resumed.get(task.id, 0)) for pending in task.interrupts)
-    return found
+    return [(pending, resumes.get(pending.id, 0)) for task in snapshot.tasks for pending in task.interrupts]
 
 
-async def _resumed(ctx: SessionContext, app: Any, snapshot: StateSnapshot) -> dict[str, Any] | None:
-    """Wait for a signal for each pending interrupt of ``snapshot`` (the graph's, with its subgraphs').
+async def _resumed(ctx: SessionContext, saver: SqlCheckpointSaver, snapshot: StateSnapshot) -> dict[str, Any] | None:
+    """Wait for a signal for each pending interrupt of ``snapshot``, the state of the run's graph.
 
     Return their values by interrupt id, or ``None`` if no interrupt is
     pending. Each wait's id is the turn's
@@ -261,9 +263,9 @@ async def _resumed(ctx: SessionContext, app: Any, snapshot: StateSnapshot) -> di
     them (killed, say) has its waits closed with it, as the companion closes
     the waits whose ids start with the turn's.
     """
-    pending = await _interrupts(app, snapshot)
-    if not pending:
+    if not any(task.interrupts for task in snapshot.tasks):
         return None
+    pending = _interrupts(snapshot, await saver._resumes(THREAD_ID))  # pyright: ignore[reportPrivateUsage]
     waits: dict[str, Any] = {}
     for interrupted, times in pending:
         if interrupted.id in waits:
@@ -279,29 +281,80 @@ async def _resumed(ctx: SessionContext, app: Any, snapshot: StateSnapshot) -> di
     return dict(zip(waits, values, strict=True))
 
 
+class _Errors(AsyncCallbackHandler):
+    """Tell, in a graph's run, the errors that its chat models raised from those that its tools raised.
+
+    Only a model's error can be its provider refusing the request (a wrong
+    API key, say): any other is a tool's or a node's own, and a retry may
+    get past it, whatever its name (a ``NotFoundError`` of another API,
+    say). A model that a tool calls is the tool's.
+    """
+
+    def __init__(self, ctx: SessionContext) -> None:
+        super().__init__()
+        self.ctx = ctx
+        self.models: weakref.WeakSet[BaseException] = weakref.WeakSet()
+        """The errors that the run's chat models raised."""
+
+    async def on_llm_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.models.add(error)
+
+    async def on_tool_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        from_tool(self.ctx, error)
+
+    def mark(self, error: BaseException) -> None:
+        """Mark ``error``, which the run failed with, as no refusal unless a chat model raised it."""
+        if error not in self.models:
+            from_tool(self.ctx, error)
+
+
 def at_breakpoint(paused: StateSnapshot) -> bool:
     """Return whether a run stopped with steps to go and no interrupt: at a static breakpoint.
 
     An ``interrupt()`` in a subgraph is on the task of the graph that ran
-    it, even where ``_interrupts`` cannot find the subgraph's own state
-    (a node's second subgraph call, say): that run stopped at an interrupt.
+    it (see ``_interrupts``): that run stopped at an interrupt.
     """
     return bool(paused.next) and not any(task.interrupts for task in paused.tasks)
 
 
 async def _paused(app: Any) -> StateSnapshot:
-    """Return the state of the graph's thread, with its subgraphs': where it stopped, and why."""
-    return typing.cast(StateSnapshot, await app.aget_state(THREAD, subgraphs=True))
+    """Return the state of the graph's thread: where it stopped, and why (its tasks' interrupts)."""
+    return typing.cast(StateSnapshot, await app.aget_state(THREAD))
 
 
-def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
-    """Return the run of a prompt: the graph's, on the key's thread, from the prompt to its answer."""
+def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
+    """Return the run of a prompt: the graph's, on the key's thread, from the prompt to its answer.
+
+    ``context`` is the graph's run context, if not the handler's.
+    """
+    run_context = ctx if context is None else context
 
     async def run(conversation: Conversation) -> str:
+        with running_graph(ctx):
+            return await _run(conversation)
+
+    async def _run(conversation: Conversation) -> str:
         running = conversation.running()
         assert running is not None and running.prompt is not None
         prompt_id = _prompt_id(running)
-        app = _compiled(graph, ctx)
+        saver = SqlCheckpointSaver(ctx.db, history="latest")
+        app = _compiled(graph, saver)
         snapshot = await app.aget_state(THREAD)
         values = typing.cast(dict[str, Any], snapshot.values or {})
         messages = typing.cast(list[BaseMessage], values.get("messages", []))
@@ -311,7 +364,12 @@ def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
         before = str(metadata.get(_STRUCTURED_BEFORE, "")) if asked else await _structured_version(app)
         # Each checkpoint of the run names its prompt, so that a retried attempt finds the run it cut off, and the
         # version its structured response had before it.
-        config: RunnableConfig = {**THREAD, "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before}}
+        errors = _Errors(ctx)
+        config: RunnableConfig = {
+            **THREAD,
+            "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before},
+            "callbacks": [errors],
+        }
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
             await _copied(ctx, conversation, known, messages)
@@ -320,22 +378,27 @@ def run_of(ctx: SessionContext, graph: AnyGraph) -> Run:
         # message (or one after a stopped run) starts a run, after what closed the previous run.
         start: Any
         if asked:
-            resumes = await _resumed(ctx, app, await _paused(app))
+            resumes = await _resumed(ctx, saver, await _paused(app))
             start = Command(resume=resumes) if resumes is not None else None
         else:
             prompt = HumanMessage(str(typing.cast(BaseMessage, running.item).text), id=prompt_id)
             start = {"messages": [*_closing(conversation, running, messages), prompt]}
         while True:
-            async for state in app.astream(start, config, context=ctx, durability="sync", stream_mode="values"):
-                values = typing.cast(dict[str, Any], state)
-                await _copied(ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])))
+            states = app.astream(start, config, context=run_context, durability="sync", stream_mode="values")
+            try:
+                async for state in states:
+                    values = typing.cast(dict[str, Any], state)
+                    await _copied(ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])))
+            except Exception as error:
+                errors.mark(error)
+                raise
             # The run stops at its interrupts: it goes on with the signals that answer them.
             paused = await _paused(app)
-            resumes = await _resumed(ctx, app, paused)
+            resumes = await _resumed(ctx, saver, paused)
             if resumes is None:
                 if at_breakpoint(paused):
-                    # At a subgraph's static breakpoint (the graph's own are refused). Fail, rather than answer
-                    # with a run half done.
+                    # At the static breakpoint of a subgraph that check() could not find. Fail, rather than
+                    # answer with a run half done.
                     raise TerminalError(BREAKPOINTS)
                 return await _answer(app, conversation, running, values, before)
             start = Command(resume=resumes)

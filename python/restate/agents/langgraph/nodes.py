@@ -61,6 +61,7 @@ from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
 from restate.agents._tools import handler_of, input_type_of, inputs_of, keyed, untyped
+from restate.agents.langgraph._context import handler_context
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 
@@ -86,9 +87,12 @@ class _Step(typing.NamedTuple):
 
 def _step(runtime: Runtime[Any], kind: str) -> _Step:
     """Return the run of a node of ``kind``, from LangGraph's runtime and config."""
-    ctx = typing.cast("SessionContext | None", runtime.context)
+    ctx = handler_context(runtime.context)
     if ctx is None:
-        raise TypeError(f"nodes.{kind} runs in a graph invoked with the handler's context: ainvoke(..., context=ctx)")
+        raise TypeError(
+            f"nodes.{kind} runs in a graph that langgraph.agent(graph=...) runs, or that is invoked with the "
+            "handler's context: ainvoke(..., context=ctx)"
+        )
     configurable = get_config().get("configurable", {})
     if configurable.get(_CHECKPOINTER) is None:
         raise TypeError(

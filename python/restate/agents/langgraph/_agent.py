@@ -65,6 +65,7 @@ from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with, asking
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import tool_call_ended, tool_call_started
+from restate.agents.langgraph._context import handler_context
 from restate.agents.langgraph._graph import AnyGraph, check, run_of
 from restate.sessions import SessionContext
 
@@ -142,11 +143,12 @@ class _RestateTool(BaseTool):
 
 
 def _run_context(tool: str) -> SessionContext:
-    """Return the handler's context of the graph run in progress: LangGraph's run context (``context=ctx``)."""
+    """Return the handler's context of the graph run in progress (see ``_context.py``)."""
     try:
-        ctx = typing.cast("SessionContext | None", get_runtime().context)
+        run_context = get_runtime().context
     except RuntimeError:
-        ctx = None
+        run_context = None
+    ctx = handler_context(run_context)
     if ctx is None:
         raise TypeError(
             f"the tool {tool} runs in a graph that langgraph.agent(graph=...) runs, or that is invoked with the "
@@ -303,6 +305,7 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: None = None,
+    context: Any = None,
 ) -> str: ...
 
 
@@ -316,6 +319,7 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[M],
+    context: Any = None,
 ) -> M: ...
 
 
@@ -328,6 +332,7 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[BaseModel] | None = None,
+    context: Any = None,
 ) -> Any:
     """Answer a prompt with a LangGraph agent, exactly once.
 
@@ -353,25 +358,32 @@ async def prompt(
         output: A Pydantic model, for an answer that is one rather than
             text. The system prompt asks for its JSON; with ``graph``, the
             graph's own prompts must, and its last AI message is validated.
+        context: The run context of ``graph`` (LangGraph's
+            ``runtime.context``), for a graph with a ``context_schema``.
+            Defaults to the handler's context. The prebuilt ``nodes`` and the
+            tools of ``tools()`` get the handler's context either way.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
 
     Raises:
         TypeError: If ``graph`` is given with ``model``, ``system`` or
-            ``tools``, its state has no ``messages``, or it has static
-            breakpoints (``interrupt_before``, ``interrupt_after``).
+            ``tools``, its state has no ``messages``, or it or a subgraph
+            of it has static breakpoints (``interrupt_before``,
+            ``interrupt_after``); or if ``context`` is given without
+            ``graph``.
         TerminalError: If the agent's reply is not a value of ``output``,
             twice.
     """
     if graph is not None:
         _check_graph(graph, model, system, tools)
-        run = run_of(ctx, graph)
+        run = run_of(ctx, graph, context)
 
         def ask(text: str) -> Awaitable[str]:
             return answer_once(ctx, text, ITEMS, run)
 
     else:
+        _check_context(context)
         # Without a way to ask for ``output`` natively with any provider's model, the system prompt asks for it.
         asked = system if output is None else asking(system, output)
 
@@ -391,6 +403,7 @@ def agent(
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
     output: type[BaseModel] | None = None,
+    context: PerSession[Any] = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a LangGraph agent: a virtual object with one conversation per key.
@@ -409,10 +422,16 @@ def agent(
     Or bring a graph of your own, built on LangGraph's ``MessagesState``:
     ``chat`` then runs it, with the message as a new ``HumanMessage``, and
     answers with its last AI message. Its checkpoints are in the key's
-    database, and its run's context is the handler's, so the prebuilt
-    ``nodes`` (a signal, a workflow, a call, another agent) work in it::
+    database, and the prebuilt ``nodes`` (a signal, a workflow, a call,
+    another agent) and the tools of ``tools()`` get the handler's context in
+    it::
 
         desk = langgraph.agent("desk", graph=builder)
+
+    A graph with a ``context_schema`` of its own gets its run context from
+    ``context``, a value or a function of the handler's context::
+
+        desk = langgraph.agent("desk", graph=graph, context=lambda ctx: Account(ctx.key))
 
     Args:
         name: The object's name, as Restate serves it.
@@ -431,6 +450,10 @@ def agent(
             text. The system prompt asks for its JSON, which ``chat``
             returns; with ``graph``, the graph's own prompts must, and its
             last AI message is validated.
+        context: The run context of ``graph`` (LangGraph's
+            ``runtime.context``), for a graph with a ``context_schema``: a
+            value, or a function of the invocation's context. Defaults to
+            the handler's context.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -439,13 +462,16 @@ def agent(
 
     Raises:
         TypeError: If ``graph`` is given with ``model``, ``system`` or
-            ``tools``, its state has no ``messages``, or it has static
-            breakpoints (``interrupt_before``, ``interrupt_after``).
+            ``tools``, its state has no ``messages``, or it or a subgraph
+            of it has static breakpoints (``interrupt_before``,
+            ``interrupt_after``); or if ``context`` is given without
+            ``graph``.
         TerminalError: If ``model`` names a provider other than OpenAI or Anthropic.
     """
     if graph is not None:
         _check_graph(graph, model, system, tools)
-        return _graph_agent(name, graph, output, **options)
+        return _graph_agent(name, graph, output, context, **options)
+    _check_context(context)
     if model is None or isinstance(model, str):
         _provider_of_model(model_of(model))
     obj = AgentObject(name, **options)
@@ -471,14 +497,24 @@ def _check_graph(graph: AnyGraph, model: object, system: object, tools: object) 
     check(graph)
 
 
+def _check_context(context: object) -> None:
+    """Raise ``TypeError`` if ``context`` is given to the built-in loop, which has no run context of its own."""
+    if context is not None:
+        raise TypeError("context is the run context of a graph of your own: pass it with graph=")
+
+
 def _graph_agent(
-    name: str, graph: AnyGraph, output: type[BaseModel] | None, **options: Unpack[AgentOptions]
+    name: str,
+    graph: AnyGraph,
+    output: type[BaseModel] | None,
+    context: PerSession[Any],
+    **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create an agent whose ``chat`` runs ``graph`` (see ``_graph.py``)."""
     obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> Any:
-        return await prompt(ctx, text, graph=graph, output=output)
+        return await prompt(ctx, text, graph=graph, output=output, context=await configured(context, ctx))
 
     obj.chat(answer, items=ITEMS, output=output)
     return obj

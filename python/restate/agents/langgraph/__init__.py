@@ -57,6 +57,16 @@ Good to know about a graph of your own:
   (a summarizing node, say) in graphs that live long.
 - Clients see a run step by step, as each step is stored: there is no
   token streaming.
+- Pause a graph with ``interrupt()``, not static breakpoints
+  (``interrupt_before``, ``interrupt_after``), which have nothing to wait
+  for: a graph with them is refused.
+- A graph with a ``context_schema`` (LangGraph's run context) gets it from
+  ``langgraph.agent(..., context=...)``, a value or a function of the
+  handler's context. The prebuilt nodes and Restate tools get the handler's
+  context either way.
+- Only an error of the graph's own chat models can be its provider refusing
+  (a wrong API key, say): the turn ends unanswered. Any other error (a
+  tool's, a node's) fails the attempt, and Restate retries it.
 
 This differs from the older ``restate.ext.langchain`` integration, whose
 middleware makes a LangChain ``create_agent`` agent durable inside any regular

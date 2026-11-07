@@ -20,6 +20,7 @@ import collections
 import threading
 import typing
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, NotRequired, TypedDict
 
@@ -28,10 +29,14 @@ import pytest
 
 pytest.importorskip("langgraph")
 
+from langchain_core.callbacks import CallbackManagerForLLMRun  # noqa: E402
+from langchain_core.language_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage  # noqa: E402
+from langchain_core.outputs import ChatResult  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
+from langgraph.runtime import Runtime  # noqa: E402
 from langgraph.types import interrupt  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -58,7 +63,8 @@ def route(state: Desk) -> str | list[str]:
     word, _ = _asked(state)
     routes = {"refund": "approve", "stop": "approve", "crash": "first", "plan": "plan", "tool": "call_tool"}
     routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
-    routes |= {"deep": "deep", "pause": "pause"}
+    routes |= {"deep": "deep", "pause": "pause", "again": "again", "lookup": "call_lookup", "fetch": "fetch"}
+    routes |= {"refuse": "refuse", "consult": "call_lookup"}
     if word == "both":
         return ["ask", "side"]  # two branches at once
     return routes.get(word, "greet")
@@ -158,14 +164,108 @@ deep = StateGraph(Desk)  # a subgraph whose node interrupts twice
 deep.add_node("twice", typing.cast(Any, twice))
 deep.add_edge(START, "twice")
 deep.add_edge("twice", END)
-paused = StateGraph(Desk)  # a subgraph that stops at a static breakpoint
+paused = StateGraph(Desk)  # a subgraph that greets, compiled with a static breakpoint where a test needs one
 paused.add_node("greet", typing.cast(Any, greet))
 paused.add_edge(START, "greet")
 paused.add_edge("greet", END)
-builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile(), "pause": paused.compile(interrupt_before=["greet"])}
+
+
+async def pause(state: Desk) -> dict[str, Any]:
+    """Run a subgraph compiled here, which stops at a static breakpoint: check() cannot see it."""
+    subgraph: Any = paused.compile(interrupt_before=["greet"])
+    return await subgraph.ainvoke(state)
+
+
+greeting: Any = paused.compile()  # Any: LangGraph types a compiled graph's input loosely
+asked_twice: Any = deep.compile()
+
+
+async def again(state: Desk) -> dict[str, Any]:
+    """Call a subgraph, then one whose node interrupts twice: the second's state is in namespace again:<task>|1."""
+    await greeting.ainvoke(state)
+    return await asked_twice.ainvoke(state)
+
+
+class AuthenticationError(Exception):
+    """As a model SDK names the error of a wrong API key."""
+
+
+class NotFoundError(Exception):
+    """As an SDK names a missing resource: the model's provider refusing, if its model raises it."""
+
+
+lookups: collections.Counter[str] = collections.Counter()
+fetches: collections.Counter[str] = collections.Counter()
+
+
+@tool
+async def lookup(order: str) -> str:
+    """An order's status, from an API whose first answer is an error, as if it were briefly down."""
+    lookups[order] += 1
+    if lookups[order] == 1:
+        raise NotFoundError(f"order {order} not found")
+    return f"order {order} shipped"
+
+
+consults: collections.Counter[str] = collections.Counter()
+
+
+@tool
+async def consult(order: str) -> str:
+    """A second opinion from a model, whose first request its provider refuses: the tool's error, not the agent's."""
+    consults[order] += 1
+    if consults[order] == 1:
+        await Refusing().ainvoke(order)
+    return f"order {order} looks fine"
+
+
+def call_lookup(state: Desk) -> dict[str, Any]:
+    """Call the tool the message names (lookup or consult) for the order it names."""
+    name, order = _asked(state)
+    return {"messages": [AIMessage("", tool_calls=[{"id": f"{name}-{order}", "name": name, "args": {"order": order}}])]}
+
+
+def found(state: Desk) -> dict[str, Any]:
+    result = next(m for m in reversed(state["messages"]) if isinstance(m, ToolMessage))
+    return {"messages": [AIMessage(f"found: {result.text}")]}
+
+
+def fetch(state: Desk) -> dict[str, Any]:
+    """A node whose first run fails with an error named as a model provider's refusal."""
+    rest = _asked(state)[1]
+    fetches[rest] += 1
+    if fetches[rest] == 1:
+        raise NotFoundError(f"{rest} not found")
+    return {"messages": [AIMessage(f"fetched {rest}")]}
+
+
+class Refusing(BaseChatModel):
+    """A model whose provider refuses every request."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "refusing"
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        raise AuthenticationError("invalid x-api-key")
+
+
+async def refuse(state: Desk) -> dict[str, Any]:
+    return {"messages": [await Refusing().ainvoke(state["messages"])]}
+
+
+builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile(), "pause": pause, "again": again}
+builder_nodes |= {"call_lookup": call_lookup, "found": found, "fetch": fetch, "refuse": refuse}
 for name, node in {**builder_nodes, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
+builder.add_node("lookup_tools", ToolNode([lookup, consult]))
 builder.add_node("approve", nodes.wait_for_signal("approval", output="approval"))
 branches = [
     "approve",
@@ -181,9 +281,15 @@ branches = [
     "side",
     "deep",
     "pause",
+    "again",
+    "call_lookup",
+    "fetch",
+    "refuse",
 ]
 builder.add_conditional_edges(START, route, branches)
 builder.add_edge("call_tool", "tools")
+builder.add_edge("call_lookup", "lookup_tools")
+builder.add_edge("lookup_tools", "found")
 builder.add_edge("approve", "confirm")
 builder.add_edge("first", "second")
 for last in (
@@ -200,6 +306,10 @@ for last in (
     "side",
     "deep",
     "pause",
+    "again",
+    "found",
+    "fetch",
+    "refuse",
 ):
     builder.add_edge(last, END)
 
@@ -223,6 +333,30 @@ planner = langgraph.agent("graph_planner", graph=builder, output=Plan)
 patient = langgraph.agent("graph_patient", graph=builder, inactivity_timeout=timedelta(seconds=1))
 
 
+@dataclass
+class Caller:
+    """The runtime context of a graph that has one of its own."""
+
+    name: str
+
+
+def whoami(state: Desk, runtime: Runtime[Caller]) -> dict[str, Any]:
+    return {"messages": [AIMessage(f"you are {runtime.context.name}")]}
+
+
+contextual = StateGraph(Desk, context_schema=Caller)
+contextual.add_node("whoami", typing.cast(Any, whoami))
+contextual.add_node("approve", nodes.wait_for_signal("approval", output="approval"))
+contextual.add_node("confirm", typing.cast(Any, confirm))
+contextual.add_conditional_edges(
+    START, lambda state: "approve" if _asked(state)[0] == "refund" else "whoami", ["approve", "whoami"]
+)
+contextual.add_edge("approve", "confirm")
+contextual.add_edge("confirm", END)
+contextual.add_edge("whoami", END)
+caller = langgraph.agent("graph_context", graph=contextual, context=lambda ctx: Caller(ctx.key))
+
+
 @pytest.fixture(scope="session")
 def anyio_backend():
     return "asyncio"
@@ -231,7 +365,7 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([desk, compiled, planner, patient]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([desk, compiled, planner, patient, caller]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -358,9 +492,10 @@ async def test_an_interrupt_waits_for_a_signal_and_resumes_with_its_value(harnes
     assert (await post(harness, f"graph_desk/{key}/pending")).json() == []
 
 
-@pytest.mark.parametrize("word", ["twice", "deep"])
+@pytest.mark.parametrize("word", ["twice", "deep", "again"])
 async def test_a_node_that_interrupts_twice_waits_twice(harness: HarnessEnvironment, word: str):
-    """In the graph, and in a subgraph, whose resume values are in its own checkpoint."""
+    """In the graph, in a subgraph, whose resume values are in its own checkpoint, and in a node's second subgraph
+    call, whose state LangGraph's subgraph snapshots do not show."""
     key = uuid.uuid4().hex
     answering = asyncio.ensure_future(chat(harness, "graph_desk", key, word))
     [first] = await until_waiting(harness, key)
@@ -440,6 +575,39 @@ async def test_a_static_breakpoint_in_a_subgraph_fails_the_turn_and_the_next_mes
     assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
 
 
+@pytest.mark.parametrize("word", ["lookup", "fetch", "consult"])
+async def test_an_error_of_a_tool_or_a_node_is_retried_whatever_its_name(harness: HarnessEnvironment, word: str):
+    """Named as a model provider's refusal, it is not one: only the error of the agent's own models is, and a model
+    that a tool calls is the tool's."""
+    key = uuid.uuid4().hex
+    answered = await chat(harness, "graph_desk", key, f"{word} {key}")
+    assert answered.status_code == 200, answered.text
+    expected = {
+        "lookup": f"found: order {key} shipped",
+        "fetch": f"fetched {key}",
+        "consult": f"found: order {key} looks fine",
+    }
+    assert answered.json() == expected[word]
+    assert {"lookup": lookups, "fetch": fetches, "consult": consults}[word][key] == 2
+
+
+async def test_a_models_refusal_in_a_graph_fails_with_424_and_the_next_is_answered(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    refused = await chat(harness, "graph_desk", key, f"refuse {key}")
+    assert refused.status_code == 424, refused.text
+    assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
+
+
+async def test_a_graph_has_its_own_context_and_the_prebuilt_nodes_still_work(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    assert (await chat(harness, "graph_context", key, "who")).json() == f"you are {key}"
+    answering = asyncio.ensure_future(chat(harness, "graph_context", key, f"refund {key}"))
+    [wait] = await until_waiting(harness, key, "graph_context")
+    assert wait["name"] == "approval"
+    await post(harness, f"graph_context/{key}/signal", json={"name": "approval", "value": "yes"})
+    assert (await answering).json() == "approved: yes"
+
+
 async def test_output_validates_the_last_ai_message(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     assert (await chat(harness, "graph_planner", key, f"plan {key}")).json() == {"title": key}
@@ -476,34 +644,19 @@ def test_a_graph_has_its_own_model_and_its_state_has_messages():
 
 
 async def test_only_a_run_stopped_with_no_interrupt_is_at_a_breakpoint():
-    """A subgraph's static breakpoint stops a run with no interrupt; a node's second subgraph call that interrupts
-    does not, though its state is not where LangGraph's subgraph snapshots look (its namespace is node:task_id|1)."""
+    """A subgraph's static breakpoint stops a run with no interrupt; an interrupt in a node's second subgraph call
+    does not, though LangGraph's subgraph snapshots do not show its state (its namespace is again:<task>|1)."""
     from langgraph.checkpoint.memory import InMemorySaver  # pylint: disable=import-outside-toplevel
 
-    asked = StateGraph(Desk)
-    asked.add_node("ask", typing.cast(Any, asking))
-    asked.add_edge(START, "ask")
-    asked.add_edge("ask", END)
-    plain: Any = paused.compile()  # Any: LangGraph types a compiled graph's input loosely
-    asking_app: Any = asked.compile()
-
-    async def both(state: Desk) -> dict[str, Any]:
-        await plain.ainvoke(state)
-        return await asking_app.ainvoke(state)
-
-    second = StateGraph(Desk)
-    second.add_node("both", typing.cast(Any, both))
-    second.add_edge(START, "both")
-    second.add_edge("both", END)
     config: Any = {"configurable": {"thread_id": "t"}}
     stopped: dict[str, bool] = {}
-    for word, graph in {"pause": builder, "second": second}.items():
-        app: Any = graph.compile(checkpointer=InMemorySaver())
+    for word in ("pause", "again"):
+        app: Any = builder.compile(checkpointer=InMemorySaver())
         await app.ainvoke({"messages": [HumanMessage(f"{word} x")]}, config, durability="sync")
-        snapshot = await app.aget_state(config, subgraphs=True)
+        snapshot = await app.aget_state(config)
         assert snapshot.next
         stopped[word] = at_breakpoint(snapshot)
-    assert stopped == {"pause": True, "second": False}
+    assert stopped == {"pause": True, "again": False}
 
 
 @pytest.mark.parametrize("breakpoint", [{"interrupt_before": ["tools"]}, {"interrupt_after": ["call_tool"]}])
@@ -511,3 +664,18 @@ def test_a_graph_with_static_breakpoints_is_refused(breakpoint: dict[str, Any]):
     """A run stopped at one has nothing to wait for, and would leave its tool calls without results."""
     with pytest.raises(TypeError, match=r"interrupt\(\)"):
         langgraph.agent("stops", graph=builder.compile(**breakpoint))
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_graph_whose_subgraph_has_static_breakpoints_is_refused(compiled: bool):
+    outer = StateGraph(Desk)
+    outer.add_node("pause", paused.compile(interrupt_before=["greet"]))
+    outer.add_edge(START, "pause")
+    outer.add_edge("pause", END)
+    with pytest.raises(TypeError, match=r"interrupt\(\)"):
+        langgraph.agent("stops", graph=outer.compile() if compiled else outer)
+
+
+def test_context_is_for_a_graph_of_your_own():
+    with pytest.raises(TypeError, match="context"):
+        langgraph.agent("plain", context=lambda ctx: Caller(ctx.key))

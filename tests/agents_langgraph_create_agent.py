@@ -18,6 +18,7 @@ The model is scripted: it answers from the last message.
 import collections
 import typing
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import httpx2
@@ -26,9 +27,10 @@ import pytest
 pytest.importorskip("langchain.agents")
 
 from langchain.agents import create_agent  # noqa: E402
+from langchain.agents.middleware import ModelRequest, dynamic_prompt  # noqa: E402
 from langchain.agents.structured_output import ToolStrategy  # noqa: E402
 from langchain_core.language_models import BaseChatModel  # noqa: E402
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -51,7 +53,10 @@ class Plan(BaseModel):
 
 
 class Scripted(BaseChatModel):
-    """Asks the ledger for "refund <n>", answers with the tool's result, and plans with the Plan tool for "plan <t>"."""
+    """Asks the ledger for "refund <n>", answers with the tool's result, and plans with the Plan tool for "plan <t>".
+
+    For "system", it answers with its system prompt.
+    """
 
     @property
     def _llm_type(self) -> str:
@@ -70,6 +75,9 @@ class Scripted(BaseChatModel):
                 reply = AIMessage(
                     "", tool_calls=[{"id": f"c-{uuid.uuid4().hex}", "name": "add", "args": {"input": int(rest)}}]
                 )
+            elif word == "system":
+                system = next((m for m in messages if isinstance(m, SystemMessage)), None)
+                reply = AIMessage(f"system: {system.text if system else None}")
             elif word == "plan":
                 reply = AIMessage(
                     "", tool_calls=[{"id": f"p-{uuid.uuid4().hex}", "name": "Plan", "args": {"title": rest}}]
@@ -85,6 +93,25 @@ planner = langgraph.agent("ca_planner", graph=create_agent(Scripted(), response_
 plain = langgraph.agent("ca_plain", graph=create_agent(Scripted(), response_format=ToolStrategy(Plan)))
 
 
+@dataclass
+class Account:
+    """The runtime context of an agent that has one of its own."""
+
+    currency: str
+
+
+@dynamic_prompt
+def in_currency(request: ModelRequest) -> str:
+    return f"Amounts are in {typing.cast(Account, request.runtime.context).currency}."
+
+
+accounts = langgraph.agent(
+    "ca_accounts",
+    graph=create_agent(Scripted(), tools=tools, context_schema=Account, middleware=[in_currency]),
+    context=lambda ctx: Account("EUR"),
+)
+
+
 @pytest.fixture(scope="session")
 def anyio_backend():
     return "asyncio"
@@ -93,7 +120,7 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([ledger, desk, planner, plain]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([ledger, desk, planner, plain, accounts]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -127,3 +154,9 @@ async def test_a_structured_response_is_the_answer_only_of_the_run_that_wrote_it
     assert (await chat(harness, "ca_plain", key, "plan a")).json() == '{"title": "a"}'
     # A run that writes none answers with its text, not with the one an earlier run left in the state.
     assert (await chat(harness, "ca_plain", key, "hi")).json() == "echo: hi"
+
+
+async def test_create_agent_has_its_own_context_and_calls_restate_through_the_tools(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    assert (await chat(harness, "ca_accounts", key, "system")).json() == "system: Amounts are in EUR."
+    assert (await chat(harness, "ca_accounts", key, "refund 7")).json() == f"done: {key} owes $7"
