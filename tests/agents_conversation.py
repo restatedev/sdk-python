@@ -25,7 +25,7 @@ from sessions_object import Host, request
 
 import restate
 from restate import sessions
-from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, answer_once
+from restate.agents._conversation import Call, Conversation, Entry, Item, Parsed, Result, answer_once
 from restate.agents.internal import CANCELLED, from_tool, refusal_of
 from restate.sessions.internal import invoke
 
@@ -262,8 +262,6 @@ class _Recorded:
 
 
 def _conversation(*items: Item) -> Conversation:
-    from restate.agents._conversation import Entry  # pylint: disable=import-outside-toplevel
-
     # The first item starts a turn, as a prompt.
     entries = [Entry(n, item, prompt="p0" if n == 0 else None) for n, item in enumerate(items)]
     return Conversation(typing.cast(Any, _Recorded()), ITEMS, entries)
@@ -358,3 +356,108 @@ async def test_calls_that_share_an_id_are_each_unanswered_until_a_result_has_it(
     assert [c.id for c in conversation.unanswered()] == ["", ""]
     await conversation.append({"result": "", "output": "done"})
     assert conversation.unanswered() == []
+
+
+# --- Turns: what a turn loads, and what the model sees ---------------------------------------------------------------
+
+
+class _Counting(Items):
+    """The made-up framework's items, counting how many it loads from the database."""
+
+    def __init__(self) -> None:
+        self.loaded = 0
+
+    def load(self, stored: str) -> Item:
+        self.loaded += 1
+        return super().load(stored)
+
+
+async def test_a_turn_loads_the_transcript_and_only_the_latest_turns_whole():
+    items = _Counting()
+    obj = sessions.SessionObject("asker")
+    seen: list[list[Item]] = []
+
+    async def run(conversation: Conversation) -> str:
+        seen.append(conversation.history())
+        prompt = typing.cast(Entry, conversation.running())
+        await conversation.append_reply(_calling(f"c{prompt.n}"))
+        await conversation.append({"result": f"c{prompt.n}", "output": "done"})
+        await conversation.append_reply({"role": "assistant", "text": f"answer {prompt.item['text']}"})
+        return f"answer {prompt.item['text']}"
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, items, run)
+
+    backend = Backend()
+    loaded = 0
+    for n in range(30):
+        loaded = items.loaded
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), f"q{n}")
+    # The last turn loaded each earlier turn's prompt once, and the items of one turn only: the previous one's 3.
+    assert items.loaded - loaded == 29 + 3
+    # The model saw the turns before the previous one as their messages and answers, then the previous one whole.
+    *earlier, previous, previous_reply, previous_result, previous_answer, prompt = seen[-1]
+    assert len(earlier) == 28 * 2 and previous == {"role": "user", "text": "q28"}
+    assert earlier[:2] == [{"role": "user", "text": "q0"}, {"role": "assistant", "text": "answer q0"}]
+    assert [item for item in earlier if "calls" in item or "result" in item] == []
+    assert previous_reply["calls"] and previous_result["result"] and previous_answer["text"] == "answer q28"
+    assert prompt == {"role": "user", "text": "q29"}
+
+
+def _turns(*answers: str) -> Conversation:
+    """A conversation of answered turns, each its prompt and answer, loaded with no turn whole."""
+
+    transcript = [Entry(n, {"role": "user", "text": f"q{n}"}, f"p{n}", answer) for n, answer in enumerate(answers)]
+    return Conversation(typing.cast(Any, _Recorded()), ITEMS, [], transcript=transcript, budget=10, window=0)
+
+
+async def test_the_model_sees_the_latest_earlier_turns_that_the_budget_holds():
+    # 40 characters: the turns of 2 + 18 characters each, of which two fit.
+    conversation = _turns("a" * 18, "b" * 18, "c" * 18)
+    assert conversation.history() == [
+        {"role": "user", "text": "q1"},
+        {"role": "assistant", "text": "b" * 18},
+        {"role": "user", "text": "q2"},
+        {"role": "assistant", "text": "c" * 18},
+    ]
+    # They outgrow it: the turns that half of it does not hold are summarized, up to the one it does.
+    assert conversation.overflowing()
+    found = conversation.to_summarize()
+    assert found is not None and [turn.n for turn in found[0]] == [0, 1] and found[1] == 2
+
+
+async def test_a_summary_stands_for_the_turns_before_the_transcript():
+    from restate.agents._conversation import SUMMARY, Start  # pylint: disable=import-outside-toplevel
+
+    transcript = [Entry(2, {"role": "user", "text": "q2"}, "p2", "c")]
+    start = Start(summary="they talked", summarized=2)
+    conversation = Conversation(typing.cast(Any, _Recorded()), ITEMS, [], start, transcript=transcript, window=0)
+    assert conversation.history() == [
+        {"role": "user", "text": SUMMARY + "they talked"},
+        {"role": "assistant", "text": "Understood."},
+        {"role": "user", "text": "q2"},
+        {"role": "assistant", "text": "c"},
+    ]
+
+
+async def test_a_turn_left_without_an_answer_is_ended_by_the_next_and_carries_on_its_agent():
+    from restate.agents.internal import ENDED  # pylint: disable=import-outside-toplevel
+
+    seen: list[Conversation] = []
+
+    async def run(conversation: Conversation) -> str:
+        seen.append(conversation)
+        if len(seen) == 1:
+            await conversation.append_reply(_calling("c1"), agent="refunds")
+            raise RuntimeError("the invocation is gone")
+        return "fine"
+
+    ask = asking(run)
+    with pytest.raises(RuntimeError):
+        await ask("first")
+    # Another invocation: the first turn's is gone, so its turn ends, its call with a result, and it is not run again.
+    assert await ask("second") == "fine"
+    first, second = seen[1].transcript
+    assert (first.answer, first.agent, second.prompt) == (ENDED, "refunds", second.prompt)
+    assert seen[1].unanswered() == [] and len(seen) == 2

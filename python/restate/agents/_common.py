@@ -189,6 +189,16 @@ BUDGET = 32_000
 """How many tokens of the turns before the window the model sees, by default, counted as 4 characters each."""
 
 
+Summarize: typing.TypeAlias = Callable[[SessionContext, str], Awaitable[str]]
+"""How an agent summarizes earlier turns: from the request (``SUMMARIZE`` and the turns, as text) to the summary."""
+
+SUMMARIZE = (
+    "Summarize the conversation below, for the assistant who carries it on: keep the facts, names, numbers, "
+    "decisions, the user's preferences, and what is still open. Answer with the summary only.\n\n"
+)
+"""What a request to summarize earlier turns starts with, before the turns themselves."""
+
+
 def check_window(window: Window) -> Window:
     """Return ``window`` if it is one: a number of turns (0 or more), or ``"all"``."""
     given = typing.cast(object, window)

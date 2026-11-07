@@ -164,11 +164,29 @@ def desk() -> LlmAgent:
 
 triage = adk.agent("adk_desk", agent=desk())
 
+requests: list[list[types.Content]] = []
+"""The requests of the agent with a small budget."""
+
+
+class Remembering(Scripted):
+    """The scripted model, keeping each request's contents."""
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        requests.append(list(llm_request.contents))
+        async for response in super().generate_content_async(llm_request, stream):
+            yield response
+
+
+summarizing = adk.agent("adk_summarizing", model=Remembering(), budget=10)
+"""An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
+
 
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, triage]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, triage, summarizing]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -509,6 +527,16 @@ async def test_a_workflows_first_step_stored_before_a_crash_is_not_its_answer(mo
         await ask("system x", invocation)
     # The retry goes on with the second step, whose response is the answer.
     assert await ask("system x", invocation) == "system: Step two."
+
+
+async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
+    k = key()
+    for word in ("one", "two", "three", "four", "five"):
+        assert (await chat(harness, k, f"hi {word}", "adk_summarizing")).json() == f"echo: hi {word}"
+    summaries = [_prompts(contents)[-1] for contents in requests if _prompts(contents)[-1].startswith("Summarize")]
+    assert len(summaries) == 1 and "User: hi one" in summaries[0] and "hi four" not in summaries[0]
+    latest = _prompts(requests[-1])
+    assert latest[0].startswith("A summary of our conversation so far:") and latest[1:] == ["hi four", "hi five"]
 
 
 async def test_earlier_turns_are_their_messages_and_answers():

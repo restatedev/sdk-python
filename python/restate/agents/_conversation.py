@@ -82,6 +82,7 @@ from restate.agents._common import (
     CANCELLATION,
     CANCELLED,
     ENDED,
+    SUMMARIZE,
     UNANSWERED,
     Window,
     check_window,
@@ -93,7 +94,7 @@ from restate.agents._common import (
 from restate.agents._turn import AttemptEnded, answering, settings_of, stop_signal_of
 from restate.exceptions import TerminalError
 from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext
-from restate.sessions.internal import Schema
+from restate.sessions.internal import Schema, definition_of
 
 _logger = logging.getLogger(__name__)
 
@@ -351,6 +352,7 @@ class Conversation:
         last: int | None = None,
         seq: int = 0,
         budget: int = BUDGET,
+        window: Window = "all",
     ) -> None:
         """Make the conversation of ``entries``, as ``load`` loaded them from ``db``.
 
@@ -364,10 +366,13 @@ class Conversation:
             last: The last position stored, if past those of ``entries`` and ``transcript``.
             seq: The last ``seq`` stored.
             budget: How many tokens of the turns before the window ``history`` gives the model.
+            window: How many of the latest answered turns ``entries`` holds whole, or ``"all"``.
         """
         self.db = db
         self.items = items
         self.budget = budget
+        self.size: Window = window
+        """How many of the latest answered turns are loaded whole: the window's size."""
         self._start = start or Start()
         self._transcript = transcript if transcript is not None else [e for e in entries if e.prompt is not None]
         positions = [n for n in (last, entries[-1].n if entries else None) if n is not None]
@@ -472,7 +477,7 @@ class Conversation:
                 for n, turn, item, reply, agent in stored
             ]
         entries = sorted([*whole, *steps], key=_position)
-        return cls(db, items, entries, start, transcript=transcript, last=last, seq=seq, budget=budget)
+        return cls(db, items, entries, start, transcript=transcript, last=last, seq=seq, budget=budget, window=window)
 
     # --- Reading ---
 
@@ -507,20 +512,62 @@ class Conversation:
         """Return the position of the window's first turn: the turns before it are in the transcript only."""
         return self._entries[0].n if self._entries else self._next
 
-    def earlier(self) -> list[Entry]:
-        """Return the turns before the window that ``history`` gives the model: the latest that ``budget`` holds."""
+    def _before(self) -> list[Entry]:
+        """Return the turns before the window, which the model sees as their messages and answers."""
         start = self.window()
-        before = [turn for turn in self._transcript if turn.n < start and turn.answer is not None]
-        left = self.budget * 4
+        return [turn for turn in self._transcript if turn.n < start and turn.answer is not None]
+
+    def _size(self, turn: Entry) -> int:
+        """Return the size of ``turn`` as the transcript has it, in characters: its message and its answer."""
+        if turn.said is None:
+            turn.said = self.items.read(turn.item).said
+        return len(turn.said[1] if turn.said else "") + len(turn.answer or "")
+
+    def _latest(self, turns: list[Entry], characters: int) -> list[Entry]:
+        """Return the latest of ``turns`` that ``characters`` holds, in order."""
         kept = 0
-        for turn in reversed(before):
-            if turn.said is None:
-                turn.said = self.items.read(turn.item).said
-            left -= len(turn.said[1] if turn.said else "") + len(turn.answer or "")
-            if left < 0:
+        for turn in reversed(turns):
+            characters -= self._size(turn)
+            if characters < 0:
                 break
             kept += 1
-        return before[len(before) - kept :]
+        return turns[len(turns) - kept :]
+
+    def earlier(self) -> list[Entry]:
+        """Return the turns before the window that ``history`` gives the model: the latest that ``budget`` holds."""
+        return self._latest(self._before(), self.budget * 4)
+
+    def _upcoming(self) -> tuple[list[Entry], int]:
+        """Return the turns before the next turn's window, and the position the window starts at.
+
+        That is the window of the latest ``size`` answered turns, as the next
+        turn loads it, whether or not the latest turn is answered yet.
+        """
+        if self.size == "all":
+            return [], self._transcript[0].n if self._transcript else self._next
+        answered = [turn for turn in self._transcript if turn.answer is not None]
+        whole = answered[len(answered) - self.size :] if self.size else []
+        start = whole[0].n if whole else self._next
+        return [turn for turn in answered if turn.n < start], start
+
+    def overflowing(self) -> bool:
+        """Return whether the turns before the next turn's window outgrow ``budget``: then they are summarized."""
+        before, _ = self._upcoming()
+        return sum(self._size(turn) for turn in before) > self.budget * 4
+
+    def to_summarize(self) -> tuple[list[Entry], int] | None:
+        """Return the turns to summarize, and the position of the first turn after them, if any are to be.
+
+        Those are the turns before the next turn's window but the latest that
+        half the ``budget`` holds, which stay as they are: the next turns have
+        room.
+        """
+        before, start = self._upcoming()
+        kept = self._latest(before, self.budget * 2)
+        summarized = before[: len(before) - len(kept)]
+        if not summarized:
+            return None
+        return summarized, kept[0].n if kept else start
 
     def history(self) -> list[Item]:
         """Return the items the model gets, in order: what a framework's run starts from.
@@ -811,7 +858,12 @@ async def answer_once(
     async def work() -> str:
         return await _answer(ctx, conversation, prompt_id, text, run)
 
-    return await answering(ctx, conversation.stored, work)
+    answered = await answering(ctx, conversation.stored, work)
+    definition = definition_of(ctx)
+    if settings.summarize is not None and definition is not None and conversation.overflowing():
+        # Summarized in an invocation of its own, which the key runs before its next message.
+        ctx.generic_send(definition.name, "compact", key=ctx.key, idempotency_key=f"{prompt_id}:compact")
+    return answered
 
 
 async def _answer(ctx: SessionContext, conversation: Conversation, prompt_id: str, text: str, run: Run) -> str:
@@ -861,4 +913,39 @@ async def settle(ctx: SessionContext, items: Items, invocation_id: str) -> bool:
         return False
     conversation = await Conversation.load(ctx.db, items, 0)
     await close(ctx, conversation, ENDED)
+    return True
+
+
+def _transcribed(conversation: Conversation, turns: Sequence[Entry]) -> str:
+    """Return ``turns`` as text, after the summary of the turns before them, if any: what is summarized."""
+    lines = [f"Summary of the conversation before:\n{conversation.summary}\n"] if conversation.summary else []
+    for turn in turns:
+        said = turn.said[1] if turn.said else ""
+        lines.append(f"User: {said}\nAssistant: {turn.answer or ''}\n")
+    return "\n".join(lines)
+
+
+async def compact(ctx: SessionContext, items: Items) -> bool:
+    """Summarize the turns before the window that outgrow the agent's budget, with the agent's ``summarize``.
+
+    The summary, of the earlier summary and those turns, takes their place in
+    what the model sees (``Conversation.history``); the turns stay stored,
+    and the ``messages`` view shows them as before. A summary that fails is
+    logged, and tried again after the next turn. Return whether it
+    summarized.
+    """
+    settings = settings_of(ctx)
+    if settings.summarize is None:
+        return False
+    conversation = await Conversation.load(ctx.db, items, settings.window, settings.budget)
+    if not conversation.overflowing() or (found := conversation.to_summarize()) is None:
+        return False
+    turns, after = found
+    try:
+        summary = await settings.summarize(ctx, SUMMARIZE + _transcribed(conversation, turns))
+    except Exception as error:
+        _logger.warning("Summarizing the earlier turns failed, and is tried again after the next turn: %s", error)
+        return False
+    start = replace(await start_of(ctx.db), summary=summary, summarized=after)
+    await restart(ctx.db, start)
     return True

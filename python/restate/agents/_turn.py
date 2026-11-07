@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from restate.agents import _signals
 from restate.agents._api import Turn
 from restate.agents._calls import settle
-from restate.agents._common import BUDGET, WINDOW, Window, refusal_of
+from restate.agents._common import BUDGET, WINDOW, Summarize, Window, refusal_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 from restate.sessions._link import Link
@@ -128,6 +128,8 @@ class AgentInfo:
     clear: Callable[[SessionContext], Awaitable[None]] | None = None
     window: Window = WINDOW
     budget: int = BUDGET
+    summarize: Summarize | None = None
+    """How the agent summarizes the turns before the window, past ``budget``: without, they are only trimmed."""
 
 
 AGENT: Link[AgentInfo] = Link("an agent")

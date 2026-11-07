@@ -208,13 +208,18 @@ def desk(model: Model) -> Agent[Any]:
 
 triage = openai.agent("oai_desk", agent=desk(model))
 forgetful = openai.agent("oai_desk_window_0", agent=desk(model), window=0)
+remembering = Scripted(reply)
+"""The model of an agent with a small budget, whose requests the tests read."""
+summarizing = openai.agent("oai_summarizing", model=remembering, budget=10)
+"""An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
 """The same desk, whose model sees no earlier turn whole: the handoff is carried from turn to turn."""
 
 
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, triage, forgetful]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user, triage, forgetful, summarizing]),
+        restate_image="ghcr.io/restatedev/restate:latest",
     ) as harness:
         yield harness
 
@@ -343,6 +348,26 @@ async def test_a_handoff_holds_for_the_next_messages(harness: HarnessEnvironment
     assert (await chat(harness, k, f"system {k}", "oai_desk")).json() == "system: You handle refunds."
     # The refunds agent has the tools that openai.tools() gave it.
     assert (await chat(harness, k, f"weather {k}", "oai_desk")).json() == f"tool said: sunny in {k}"
+
+
+async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
+    k = key()
+    for word in ("one", "two", "three", "four", "five"):
+        assert (await chat(harness, k, f"hi {word}", "oai_summarizing")).json() == f"echo: hi {word}"
+    # Once the fourth turn was answered, the three before it (out of the next window) outgrew the budget: the model
+    # summarized them, in a request of its own.
+    summaries = [
+        _prompts(items)[-1] for _, items in remembering.requests if _prompts(items)[-1].startswith("Summarize")
+    ]
+    assert len(summaries) == 1
+    assert "User: hi one" in summaries[0] and "User: hi three" in summaries[0] and "hi four" not in summaries[0]
+    # The fifth turn's request has the summary in their place, then the fourth turn (the window), and the prompt.
+    latest = _prompts(remembering.requests[-1][1])
+    assert latest[0].startswith("A summary of our conversation so far:") and "User: hi one" in latest[0]
+    assert latest[1:] == ["hi four", "hi five"]
+    # The conversation itself keeps every turn.
+    page = (await post(harness, f"oai_summarizing/{k}/messages", json={})).json()
+    assert len(page["messages"]) == 10
 
 
 async def test_a_handoff_holds_when_the_model_sees_no_earlier_turn_whole(harness: HarnessEnvironment):

@@ -41,6 +41,10 @@ stored:
 - An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
   ``deps``: a value, or for ``agent`` also a function of the handler's
   context.
+- The model sees the earlier turns as their messages and answers, and the
+  latest turns whole (the agent's ``window``), as many as its ``budget``
+  holds; the built-in agent has its model summarize the earliest once they
+  outgrow it, after a turn's answer (``_conversation.py``).
 - The built-in agent gets Pydantic AI's own capability for a conversation
   that lives long: the compaction of its model's provider, where Pydantic AI
   has one (``AnthropicCompaction``, and ``OpenAICompaction`` for OpenAI's
@@ -92,6 +96,7 @@ from restate.agents._common import (
     ErrorSet,
     ModelError,
     PerSession,
+    Summarize,
     check_built_in,
     check_own,
     configured,
@@ -673,5 +678,15 @@ def agent(
             usage_limits,
         )
 
-    obj.chat(answer, items=ITEMS, output=output)
+    obj.chat(answer, items=ITEMS, output=output, summarize=_summarizer(model) if own is None else None)
     return obj
+
+
+def _summarizer(model: PerSession[AnyModel | None]) -> Summarize:
+    """Return how the built-in agent summarizes its earlier turns: with its own model, in a run of its own."""
+
+    async def summarize(ctx: SessionContext, request: str) -> str:
+        result = await Agent(_model(await configured(model, ctx))).run(request)
+        return str(result.output)
+
+    return summarize

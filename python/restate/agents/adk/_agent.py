@@ -53,6 +53,7 @@ from google.adk.agents.invocation_context import LlmCallsLimitExceededError, new
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events import Event
 from google.adk.models import BaseLlm
+from google.adk.models.llm_request import LlmRequest
 from google.adk.plugins import BasePlugin
 from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService, Session
@@ -66,6 +67,7 @@ from restate.agents._common import (
     MODEL_ENV,
     ModelError,
     PerSession,
+    Summarize,
     check_built_in,
     check_own,
     configured,
@@ -623,5 +625,20 @@ def agent(
             run_config,
         )
 
-    obj.chat(answer, items=_Items(), output=output)
+    obj.chat(answer, items=_Items(), output=output, summarize=_summarizer(model) if own is None else None)
     return obj
+
+
+def _summarizer(model: PerSession[AnyModel | None]) -> Summarize:
+    """Return how the built-in agent summarizes its earlier turns: with its own model, in a request of its own."""
+
+    async def summarize(ctx: SessionContext, request: str) -> str:
+        llm = LlmAgent(name="summarizer", model=_model(await configured(model, ctx))).canonical_model
+        asked = LlmRequest(model=llm.model, contents=[types.Content(role="user", parts=[types.Part(text=request)])])
+        texts: list[str] = []
+        async for response in llm.generate_content_async(asked):
+            if response.content is not None:
+                texts.extend(part.text for part in response.content.parts or [] if part.text)
+        return "".join(texts)
+
+    return summarize

@@ -60,6 +60,10 @@ start, and the run resumes from the last step stored:
   (the SDK's run context) and the ``run_config`` you give: its
   ``call_model_input_filter`` runs after this package's, which stores the
   tools' outputs.
+- The model sees the earlier turns as their messages and answers, and the
+  latest turns whole (the agent's ``window``), as many as its ``budget``
+  holds; the built-in agent has its model summarize the earliest once they
+  outgrow it, after a turn's answer (``_conversation.py``).
 - The built-in agent gets OpenAI's server-side compaction, for a conversation
   that lives long (``ModelSettings.context_management``, on versions of the
   SDK that have it): the Responses API summarizes the history as it nears the
@@ -110,6 +114,7 @@ from pydantic_core import to_json
 
 from restate.agents._common import (
     PerSession,
+    Summarize,
     check_built_in,
     check_own,
     configured,
@@ -831,5 +836,16 @@ def agent(
             run,
         )
 
-    obj.chat(answer, items=ITEMS, output=output)
+    obj.chat(answer, items=ITEMS, output=output, summarize=_summarizer(model) if own is None else None)
     return obj
+
+
+def _summarizer(model: PerSession[AnyModel | None]) -> Summarize:
+    """Return how the built-in agent summarizes its earlier turns: with its own model, in a run of its own."""
+
+    async def summarize(ctx: SessionContext, request: str) -> str:
+        chosen = _model(await configured(model, ctx))
+        result = await Runner.run(Agent(name="summarizer"), request, run_config=RunConfig(model=chosen))
+        return str(result.final_output)
+
+    return summarize

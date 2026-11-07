@@ -32,6 +32,10 @@ start, and the run resumes from the last step stored:
   turn that reaches it ends for good, with a terminal error: a retry would
   carry on from where it stopped, with a fresh limit, and so would never end
   a model that keeps calling tools.
+- The model sees the earlier turns as their messages and answers, and the
+  latest turns whole (the agent's ``window``), as many as its ``budget``
+  holds; the built-in agent has its model summarize the earliest once they
+  outgrow it, after a turn's answer (``_conversation.py``).
 - The model sees the latest messages of a conversation that lives long: as
   many as fit in ``WINDOW`` of its context window, by LangChain's
   ``trim_messages`` (starting with a prompt, counted by
@@ -78,6 +82,7 @@ from restate.agents._common import (
     MODEL_ENV,
     ModelError,
     PerSession,
+    Summarize,
     check_built_in,
     check_own,
     configured,
@@ -605,8 +610,19 @@ def agent(
             output=output,
         )
 
-    obj.chat(answer, items=ITEMS, output=output)
+    obj.chat(answer, items=ITEMS, output=output, summarize=_summarizer(model))
     return obj
+
+
+def _summarizer(model: PerSession[ChatModel | None]) -> Summarize:
+    """Return how the built-in agent summarizes its earlier turns: with its own model, in a request of its own."""
+
+    async def summarize(ctx: SessionContext, request: str) -> str:
+        chosen = await configured(model, ctx)
+        chat_model = chosen if isinstance(chosen, BaseChatModel) else _chat_model(model_of(chosen))
+        return _text(await chat_model.ainvoke([HumanMessage(request)]))
+
+    return summarize
 
 
 def _graph_agent(

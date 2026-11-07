@@ -35,8 +35,9 @@ from restate.agents._api import (
     Waiting,
     Watch,
 )
-from restate.agents._common import BUDGET, WINDOW, MessageSerde, Window, check_window, refusal_of
+from restate.agents._common import BUDGET, WINDOW, MessageSerde, Summarize, Window, check_window, refusal_of
 from restate.agents._conversation import SCHEMA, Items, next_start, restart
+from restate.agents._conversation import compact as compact_turns
 from restate.agents._conversation import settle as settle_turn
 from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared
 from restate.object import VirtualObject
@@ -157,6 +158,7 @@ BUILT_IN = frozenset(
         "sync",
         "erase",
         "settle",
+        "compact",
     }
 )
 """The names of the built-in handlers and views of every agent, which are reserved."""
@@ -188,8 +190,9 @@ class AgentObject(SessionObject):
     - ``sync``: read what changed since a cursor, together with the status
       and the revision, for clients that follow the conversation.
 
-    These names, ``erase`` (which ``clear`` uses) and ``settle`` (which closes
-    a turn whose invocation is gone), are reserved:
+    These names, ``erase`` (which ``clear`` uses), ``settle`` (which closes
+    a turn whose invocation is gone) and ``compact`` (which summarizes the
+    earliest turns), are reserved:
     registering a handler or view of your own under one of them raises
     ``ValueError``. You rarely create an ``AgentObject`` yourself: a
     framework's ``agent()`` creates one and calls ``chat()`` for you.
@@ -334,6 +337,7 @@ class AgentObject(SessionObject):
         items: Items,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
         output: type[Any] | None = None,
+        summarize: Summarize | None = None,
     ) -> A: ...
 
     @typing.overload
@@ -344,6 +348,7 @@ class AgentObject(SessionObject):
         items: Items,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
         output: type[Any] | None = None,
+        summarize: Summarize | None = None,
     ) -> Callable[[A], A]: ...
 
     def chat(
@@ -354,6 +359,7 @@ class AgentObject(SessionObject):
         items: Items,
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
         output: type[Any] | None = None,
+        summarize: Summarize | None = None,
     ) -> Any:
         """Turn this object into an agent that answers each message with ``answer``.
 
@@ -381,6 +387,12 @@ class AgentObject(SessionObject):
             output: The type of ``answer``'s answers, if not text (see the
                 frameworks' ``output``). It is the ``chat`` handler's output,
                 as Restate's discovery and serde see it.
+            summarize: Summarizes the turns before the window once they
+                outgrow the agent's ``budget``, from the request (``SUMMARIZE``
+                and the turns, as text) to the summary, which then stands for
+                them. It runs in an invocation of its own (the private
+                ``compact`` handler), after the answer. Without it, the
+                earliest turns are only left out.
 
         Returns:
             ``answer`` itself.
@@ -390,10 +402,12 @@ class AgentObject(SessionObject):
             def decorate(
                 fn: Callable[[SessionContext, str], Awaitable[Any]],
             ) -> Callable[[SessionContext, str], Awaitable[Any]]:
-                return self.chat(fn, items=items, clear=clear, output=output)
+                return self.chat(fn, items=items, clear=clear, output=output, summarize=summarize)
 
             return decorate
-        self._settings = dataclasses.replace(self._settings, background=self.background, clear=clear)
+        self._settings = dataclasses.replace(
+            self._settings, background=self.background, clear=clear, summarize=summarize
+        )
         AGENT.on(self, self._settings)
         answering = answer
 
@@ -442,7 +456,7 @@ async def _stopped(ctx: ViewContext, step: str) -> Stopped:
 
 
 def _followed(agent: AgentObject, items: Items) -> None:
-    """Register the views that ``chat()`` adds (``messages``, ``clear``, ``sync``), and the private ``erase`` and ``settle``."""
+    """Register the views that ``chat()`` adds (``messages``, ``clear``, ``sync``), and the private handlers."""
 
     async def messages(ctx: ViewContext, request: MessagesRequest | None = None) -> Messages:
         """Read the conversation: a page of it, or what changed since a cursor.
@@ -472,6 +486,10 @@ def _followed(agent: AgentObject, items: Items) -> None:
         turn closed before the next message. Return whether it closed it.
         """
         return await settle_turn(ctx, items, invocation_id)
+
+    async def compact(ctx: SessionContext, _: Nothing = None) -> bool:
+        """Summarize the turns before the window that outgrow the agent's budget. Return whether it did."""
+        return await compact_turns(ctx, items)
 
     async def clear(ctx: ViewContext, _: Nothing = None) -> Stopped:
         """Forget the conversation, and empty the key's database.
@@ -512,5 +530,6 @@ def _followed(agent: AgentObject, items: Items) -> None:
     agent.view(messages)
     agent.handler(ingress_private=True)(erase)
     agent.handler(ingress_private=True)(settle)
+    agent.handler(ingress_private=True)(compact)
     agent.view(inactivity_timeout=WAITS)(clear)
     agent.view(inactivity_timeout=WAITS, journal_retention=timedelta(0))(sync)
