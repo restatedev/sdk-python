@@ -92,6 +92,7 @@ from restate.agents._common import (
     ErrorSet,
     ModelError,
     PerSession,
+    check_built_in,
     check_own,
     configured,
     from_tool,
@@ -532,11 +533,12 @@ async def prompt(
 
     Raises:
         TypeError: If ``agent`` is given with ``model``, ``system`` or
-            ``tools``.
+            ``tools``, or ``deps`` without ``agent``.
         TerminalError: If the agent's reply is not a value of ``output``,
             twice.
     """
     check_own(agent, "agent", model=model, system=system, tools=tools)
+    check_built_in(agent, "agent", deps=deps)
     return await _prompt(ctx, text, agent, model, system, tools, output, deps, usage_limits)
 
 
@@ -651,9 +653,10 @@ def agent(
 
     Raises:
         TypeError: If ``agent`` is given with ``model``, ``system`` or
-            ``tools``.
+            ``tools``, or ``deps`` without ``agent``.
     """
     check_own(agent, "agent", model=model, system=system, tools=tools)
+    check_built_in(agent, "agent", deps=deps)
     own = agent
     obj = AgentObject(name, **options)
 

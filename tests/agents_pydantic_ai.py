@@ -517,6 +517,19 @@ def test_an_agent_of_your_own_takes_none_of_the_built_in_agents_options():
     ask: Any = pydantic_ai.prompt
     with pytest.raises(TypeError, match="pass no tools with it"):
         asyncio.run(ask(None, "hi", agent=Agent(instructions="mine"), tools=[get_weather]))
+    # No tools is none of the built-in agent's options.
+    make("mine", agent=Agent(instructions="mine"), tools=[])
+    # The options of a run of your own agent, which the built-in agent would ignore.
+    with pytest.raises(TypeError, match="deps is an option of your own agent: pass it with agent="):
+        make("built_in", system="Hi.", deps=lambda ctx: None)
+    with pytest.raises(TypeError, match="deps is an option of your own agent"):
+        asyncio.run(ask(None, "hi", deps=object()))
+
+
+async def test_a_tool_of_toolset_runs_only_in_a_run_of_agent_or_prompt():
+    mine: Any = Agent(FunctionModel(reply), toolsets=[pydantic_ai.toolset([get_weather])])
+    with pytest.raises(RuntimeError, match=r"agent\(\) or prompt\(\)"):
+        await mine.run("weather Rome")
 
 
 def test_a_providers_http_refusal_is_terminal_and_a_rate_limit_is_retried():

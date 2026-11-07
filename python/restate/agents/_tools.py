@@ -98,8 +98,18 @@ def tools_in(ctx: SessionContext) -> Generator[None, None, None]:
 
 
 def current_call(call_id: str) -> ToolCall:
-    """Return tool call ``call_id`` of the framework run in progress (see ``tools_in``)."""
-    return ToolCall(_RUNNING.get(), call_id)
+    """Return tool call ``call_id`` of the framework run in progress (see ``tools_in``).
+
+    Raises:
+        RuntimeError: If no run is in progress: the framework runs the agent outside ``agent`` or ``prompt``.
+    """
+    try:
+        ctx = _RUNNING.get()
+    except LookupError:
+        raise RuntimeError(
+            "restate.agents tools run in an agent that this package's agent() or prompt() runs, in a Restate handler"
+        ) from None
+    return ToolCall(ctx, call_id)
 
 
 @dataclass(frozen=True)

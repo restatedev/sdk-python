@@ -61,6 +61,7 @@ from restate.agents._common import (
     MODEL_ENV,
     ModelError,
     PerSession,
+    check_built_in,
     check_own,
     configured,
     from_tool,
@@ -469,11 +470,12 @@ async def prompt(
 
     Raises:
         TypeError: If ``agent`` is given with ``model``, ``system`` or
-            ``tools``.
+            ``tools``, or ``run_config`` without ``agent``.
         TerminalError: If the agent's reply is not a value of ``output``,
             twice.
     """
     check_own(agent, "agent", model=model, system=system, tools=tools)
+    check_built_in(agent, "agent", run_config=run_config)
     return await _prompt(ctx, text, agent, model, system, tools, output, run_config)
 
 
@@ -576,10 +578,11 @@ def agent(
 
     Raises:
         TypeError: If ``agent`` is given with ``model``, ``system`` or
-            ``tools``.
+            ``tools``, or ``run_config`` without ``agent``.
         TerminalError: If there is no model, or ``model`` names a provider other than Google.
     """
     check_own(agent, "agent", model=model, system=system, tools=tools)
+    check_built_in(agent, "agent", run_config=run_config)
     if agent is None and (model is None or isinstance(model, str)):
         _model(model)
     own = agent

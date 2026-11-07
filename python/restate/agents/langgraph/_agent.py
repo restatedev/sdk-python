@@ -68,6 +68,7 @@ from restate.agents._common import (
     MODEL_ENV,
     ModelError,
     PerSession,
+    check_built_in,
     check_own,
     configured,
     from_tool,
@@ -423,7 +424,7 @@ async def prompt(
             return answer_once(ctx, text, ITEMS, run)
 
     else:
-        _check_context(context)
+        check_built_in(graph, "graph", context=context)
         # Without a way to ask for ``output`` natively with any provider's model, the system prompt asks for it.
         asked = system if output is None else asking(system, output)
 
@@ -535,7 +536,7 @@ def agent(
         check_own(graph, "graph", model=model, system=system, tools=tools)
         check(graph)
         return _graph_agent(name, graph, output, context, **options)
-    _check_context(context)
+    check_built_in(graph, "graph", context=context)
     if model is None or isinstance(model, str):
         _provider_of_model(model_of(model))
     obj = AgentObject(name, **options)
@@ -552,12 +553,6 @@ def agent(
 
     obj.chat(answer, items=ITEMS, output=output)
     return obj
-
-
-def _check_context(context: object) -> None:
-    """Raise ``TypeError`` if ``context`` is given to the built-in loop, which has no run context of its own."""
-    if context is not None:
-        raise TypeError("context is the run context of a graph of your own: pass it with graph=")
 
 
 def _graph_agent(

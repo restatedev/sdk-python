@@ -74,7 +74,15 @@ from agents.tool_context import ToolContext
 from pydantic import BaseModel
 from pydantic_core import to_json
 
-from restate.agents._common import PerSession, check_own, configured, from_tool, model_id_of, model_of
+from restate.agents._common import (
+    PerSession,
+    check_built_in,
+    check_own,
+    configured,
+    from_tool,
+    model_id_of,
+    model_of,
+)
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
@@ -524,11 +532,12 @@ async def prompt(
 
     Raises:
         TypeError: If ``agent`` is given with ``model``, ``system`` or
-            ``tools``.
+            ``tools``, or ``context`` or ``run_config`` without ``agent``.
         TerminalError: If the agent's reply is not a value of ``output``,
             twice.
     """
     check_own(agent, "agent", model=model, system=system, tools=tools)
+    check_built_in(agent, "agent", context=context, run_config=run_config)
     options = _Options(context, max_turns, run_config)
     return await _prompt(ctx, text, agent, model, system, tools, output, options)
 
@@ -644,10 +653,11 @@ def agent(
 
     Raises:
         TypeError: If ``agent`` is given with ``model``, ``system`` or
-            ``tools``.
+            ``tools``, or ``context`` or ``run_config`` without ``agent``.
         TerminalError: If ``model`` names a provider other than OpenAI.
     """
     check_own(agent, "agent", model=model, system=system, tools=tools)
+    check_built_in(agent, "agent", context=context, run_config=run_config)
     if agent is None and (model is None or isinstance(model, str)):
         _model(model)
     own = agent

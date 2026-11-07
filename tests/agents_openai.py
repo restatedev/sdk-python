@@ -437,6 +437,13 @@ def test_an_agent_of_your_own_takes_none_of_the_built_in_agents_options():
     ask: Any = openai.prompt
     with pytest.raises(TypeError, match="pass no tools with it"):
         asyncio.run(ask(None, "hi", agent=Agent(name="mine"), tools=[get_weather]))
+    # No tools is none of the built-in agent's options.
+    make("mine", agent=Agent(name="mine"), tools=[])
+    # The options of a run of your own agent, which the built-in agent would ignore.
+    with pytest.raises(TypeError, match="context, run_config are options of your own agent: pass them with agent="):
+        make("built_in", system="Hi.", context=object(), run_config=RunConfig())
+    with pytest.raises(TypeError, match="run_config is an option of your own agent"):
+        asyncio.run(ask(None, "hi", run_config=RunConfig()))
 
 
 async def test_a_run_of_more_turns_than_max_turns_fails_its_prompt():

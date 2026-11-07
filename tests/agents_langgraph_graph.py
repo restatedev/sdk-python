@@ -870,5 +870,5 @@ def test_a_graph_may_still_be_built_after_its_agent(caplog: pytest.LogCaptureFix
 def test_context_is_for_a_graph_of_your_own():
     # Any: no overload takes it, as the type checker says.
     make: Any = langgraph.agent
-    with pytest.raises(TypeError, match="context"):
+    with pytest.raises(TypeError, match="context is an option of your own graph: pass it with graph="):
         make("plain", context=lambda ctx: Caller(ctx.key))

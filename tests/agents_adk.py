@@ -319,6 +319,13 @@ def test_an_agent_of_your_own_takes_none_of_the_built_in_agents_options():
     ask: Any = adk.prompt
     with pytest.raises(TypeError, match="pass no tools with it"):
         asyncio.run(ask(None, "hi", agent=LlmAgent(name="mine", model=Scripted()), tools=[get_weather]))
+    # No tools is none of the built-in agent's options.
+    make("mine", agent=LlmAgent(name="mine", model=Scripted()), tools=[])
+    # The options of a run of your own agent, which the built-in agent would ignore.
+    with pytest.raises(TypeError, match="run_config is an option of your own agent: pass it with agent="):
+        make("built_in", model=Scripted(), run_config=RunConfig())
+    with pytest.raises(TypeError, match="run_config is an option of your own agent"):
+        asyncio.run(ask(None, "hi", model=Scripted(), run_config=RunConfig()))
 
 
 # --- In process -----------------------------------------------------------------------------------
