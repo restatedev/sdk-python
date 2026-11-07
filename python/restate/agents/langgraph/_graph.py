@@ -25,7 +25,11 @@ message as a new ``HumanMessage``:
 - Any error of the run fails the attempt, and Restate retries it: none is
   taken for a model provider's refusal, as the built-in agent's model's can
   be, since a graph's models, tools and nodes are all its own (a tool or a
-  node may call a model too). A ``TerminalError`` ends the turn.
+  node may call a model too). A ``TerminalError`` ends the turn, and so do
+  LangGraph's own errors that a retry would meet again, such as a run past
+  its recursion limit (``_errors.py``). A run that an invalid update ended
+  leaves writes that LangGraph cannot apply: the next message starts its run
+  from the checkpoint before them, as a new run discards them.
 - After each step, the AI and tool messages the step added are copied into
   the agent's conversation, by their ids, so that the ``messages``, ``sync``
   and ``watch`` views show the run as it goes, as they do for the built-in
@@ -76,6 +80,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.errors import InvalidUpdateError
 from langgraph.graph import StateGraph
 from langgraph.pregel import Pregel
 from langgraph.types import Command, StateSnapshot
@@ -87,6 +92,7 @@ from restate.agents._conversation import Conversation, Entry, Run
 from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
 from restate.agents.langgraph._context import running as running_graph
+from restate.agents.langgraph._errors import terminal_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 
@@ -288,6 +294,23 @@ def at_breakpoint(paused: StateSnapshot) -> bool:
     return bool(paused.next) and not any(task.interrupts for task in paused.tasks)
 
 
+async def _stored(app: Any) -> StateSnapshot:
+    """Return the state of the graph's thread, as the next run starts from it.
+
+    LangGraph shows the state with the writes of the last step's tasks
+    applied. If they do not fit the state (an invalid update, which ended
+    that run's turn), it is the state of the checkpoint itself, which LangGraph
+    shows without them: a run with new input discards them.
+    """
+    try:
+        return typing.cast(StateSnapshot, await app.aget_state(THREAD))
+    except InvalidUpdateError:
+        latest = await app.checkpointer.aget_tuple(THREAD)
+        if latest is None:
+            raise
+        return typing.cast(StateSnapshot, await app.aget_state(latest.config))
+
+
 async def _paused(app: Any) -> StateSnapshot:
     """Return the state of the graph's thread: where it stopped, and why (its tasks' interrupts)."""
     return typing.cast(StateSnapshot, await app.aget_state(THREAD))
@@ -310,7 +333,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         prompt_id = _prompt_id(running)
         saver = SqlCheckpointSaver(ctx.db)
         app = _compiled(graph, saver)
-        snapshot = await app.aget_state(THREAD)
+        snapshot = await _stored(app)
         values = typing.cast(dict[str, Any], snapshot.values or {})
         messages = typing.cast(list[BaseMessage], values.get("messages", []))
         known = _known(conversation)
@@ -341,6 +364,9 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
                     values = typing.cast(dict[str, Any], state)
                     await _copied(ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])))
             except Exception as error:
+                if (terminal := terminal_of(error)) is not None:
+                    # LangGraph's own error, which a retry would meet again: a run past its recursion limit, say.
+                    raise terminal from error
                 # No refusal, whatever its name: a graph's models, tools and nodes are all its own.
                 from_tool(ctx, error)
                 raise

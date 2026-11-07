@@ -74,6 +74,12 @@ Good to know about a graph of your own:
   key, say), which ends the built-in agent's turn: the agent cannot tell a
   graph's own model from a model that its tools or nodes call. Raise
   ``TerminalError`` in a node to end a turn for good.
+- LangGraph's own errors, which a retry would meet again, end the turn for
+  good: a run past its recursion limit (``GraphRecursionError``: a retry
+  would resume it with a fresh limit, and run on), and an update that does
+  not fit the state (``InvalidUpdateError``). LangGraph's default limit is
+  about ten thousand steps, each of which may call a model: set a lower one
+  with ``graph.with_config(recursion_limit=...)``.
 
 This differs from the older ``restate.ext.langchain`` integration, whose
 middleware makes a LangChain ``create_agent`` agent durable inside any regular
