@@ -16,6 +16,7 @@ import asyncio
 import collections
 import typing
 import uuid
+from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -24,7 +25,7 @@ import pytest
 
 pytest.importorskip("pydantic_ai")
 
-from pydantic_ai import Agent, ModelRetry, RunContext  # noqa: E402
+from pydantic_ai import Agent, DeferredToolRequests, ModelRetry, RunContext  # noqa: E402
 from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
@@ -76,8 +77,24 @@ def _prompts(messages: list[ModelMessage]) -> list[str]:
     ]
 
 
+def _unanswered(messages: list[ModelMessage]) -> set[str]:
+    """The ids of the tool calls in ``messages`` that have no result."""
+    calls = {c.tool_call_id for m in messages if isinstance(m, ModelResponse) for c in m.tool_calls}
+    answered = {
+        p.tool_call_id
+        for m in messages
+        if isinstance(m, ModelRequest)
+        for p in m.parts
+        if isinstance(p, ToolReturnPart | RetryPromptPart)
+    }
+    return calls - answered
+
+
 def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     """The scripted model: it answers the last prompt from the conversation alone, as a retry would ask again."""
+    if unanswered := _unanswered(messages):
+        # As a model provider refuses a history with tool calls that have no results.
+        raise RuntimeError(f"tool calls without results: {sorted(unanswered)}")
     text = _prompts(messages)[-1]
     asked[_prompts(messages)[0].split(" ")[-1]] += 1
     last = messages[-1]
@@ -96,7 +113,12 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if garbled[text] == 1:
             # As OpenAI's model reports a response body that is not JSON.
             raise UnexpectedModelBehavior("Invalid response from openai chat completions endpoint, expected JSON data")
-    if word == "sysprompt":
+    if word == "sysweather" and not results:
+        # Ask for the weather first, then report as sysprompt does: a turn of two model requests.
+        return ModelResponse(
+            parts=[ToolCallPart("get_weather", {"city": rest}, tool_call_id=f"call-{rest}-{len(messages)}")]
+        )
+    if word in ("sysprompt", "sysweather"):
         system = [
             p.content
             for m in messages
@@ -111,7 +133,7 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         name = "get_weather" if word == "loop" else "picky"
         return ModelResponse(parts=[ToolCallPart(name, {"city": rest}, tool_call_id=f"call-{rest}-{len(messages)}")])
     names = {"weather": "get_weather", "crash": "flaky", "wait": "blocking", "wrong": "get_weather"}
-    names |= {"unknown": "nonexistent", "forbidden": "forbidden"}
+    names |= {"unknown": "nonexistent", "forbidden": "forbidden", "deferred": "refund_order"}
     if word in names and not results:
         args: dict[str, Any] = {"town": 3} if word == "wrong" else {"city": rest}
         return ModelResponse(parts=[ToolCallPart(names[word], args, tool_call_id=f"call-{rest}")])
@@ -205,7 +227,7 @@ async def own(ctx: sessions.SessionContext, text: str) -> str:
 async def own_system(ctx: sessions.SessionContext, text: str) -> str:
     """An Agent of your own with a system prompt, which Pydantic AI keeps in the message history."""
     mine: Agent[None, str] = Agent(FunctionModel(reply), system_prompt="Mine.")
-    return await pydantic_ai.prompt(ctx, text, agent=mine)
+    return await pydantic_ai.prompt(ctx, text, agent=mine, tools=[get_weather])
 
 
 @assistant.handler
@@ -218,6 +240,38 @@ async def clash(ctx: sessions.SessionContext, text: str) -> str:
         return f"rainy in {city}"
 
     return await pydantic_ai.prompt(ctx, text, agent=mine, tools=[get_weather])
+
+
+@assistant.handler
+async def approval(ctx: sessions.SessionContext, text: str) -> str:
+    """An Agent of your own with a tool that needs an approval, whose run stops with the call for its caller."""
+    mine: Any = Agent(FunctionModel(reply), output_type=[str, DeferredToolRequests])
+
+    @mine.tool_plain(requires_approval=True)
+    def refund_order(city: str) -> str:
+        return f"refunded in {city}"
+
+    return await pydantic_ai.prompt(ctx, text, agent=mine)
+
+
+@dataclass
+class Shop:
+    """The dependencies of an Agent of your own: who it serves."""
+
+    customer: str
+
+
+def shop_agent() -> Any:
+    shop: Any = Agent(FunctionModel(reply), deps_type=Shop)
+
+    @shop.instructions
+    def prices(run: RunContext[Shop]) -> str:
+        return f"Prices for {run.deps.customer}."
+
+    return shop
+
+
+shop = pydantic_ai.agent("pai_shop", shop_agent(), deps=lambda ctx: Shop(ctx.key))
 
 
 class NotFoundError(Exception):
@@ -271,7 +325,7 @@ trimmed = pydantic_ai.agent("pai_trimmed", trimmed_agent(), tools=[get_weather])
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, trimmed]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user, trimmed, shop]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -481,8 +535,9 @@ async def test_a_system_prompt_comes_first_after_turns_that_ended_before_any_mod
     conversation's first, and the model sees the earlier prompt after the system prompt, as later turns do."""
     k = key()
     assert (await post(harness, f"{k}/clash", json=f"weather {k}")).status_code == 500
-    for turn in (2, 3):
-        answered = (await post(harness, f"{k}/own_system", json=f"sysprompt {k}")).json()
+    # A turn of two model requests (a tool call, then the answer): the second sees the earlier turn once too.
+    for turn, word in ((2, "sysweather"), (3, "sysprompt")):
+        answered = (await post(harness, f"{k}/own_system", json=f"{word} {k}")).json()
         assert answered == f"system prompt: Mine.; prompts: {turn}"
 
 
@@ -510,6 +565,22 @@ async def test_a_response_that_the_model_could_not_read_is_retried(harness: Harn
     assert answered.status_code == 200, answered.text
     assert answered.json() == f"echo: garbled {k}"
     assert garbled[f"garbled {k}"] == 2
+
+
+async def test_a_run_stopped_for_a_deferred_tool_call_fails_and_the_call_is_closed(harness: HarnessEnvironment):
+    """Nothing gives its approval: the turn fails rather than answer with the call, and the next message is answered,
+    with the call closed (a provider refuses calls without results; the scripted model too)."""
+    k = key()
+    failed = await post(harness, f"{k}/approval", json=f"deferred {k}")
+    assert failed.status_code == 500 and "wait_for_signal" in failed.text, failed.text
+    assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+
+
+async def test_an_agent_of_your_own_gets_its_deps(harness: HarnessEnvironment):
+    k = key()
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        url = f"{harness.ingress_url}/pai_shop/{k}/chat"
+        assert (await ingress.post(url, content=f"system {k}", headers=TEXT)).json() == f"system: Prices for {k}."
 
 
 async def test_a_setup_error_of_pydantic_ai_ends_the_turn(harness: HarnessEnvironment):

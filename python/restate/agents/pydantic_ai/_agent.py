@@ -32,6 +32,13 @@ stored:
   with a fresh limit), retries that ran out (a tool's, or the answer's), a
   content filter, and a setup error (``UserError``). A response that a model
   could not read (a body that is not JSON, say) is retried.
+- A run that stops for tool calls it cannot make itself (Pydantic AI's
+  deferred tools: ``requires_approval``, ``CallDeferred``) fails its turn
+  rather than answer with them, as nothing gives their approvals or results:
+  pause for a person with ``restate.agents``' ``wait_for_signal`` tool
+  instead. The turn closes the calls.
+- An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
+  ``deps``, a value or a function of the handler's context.
 - An ``Agent`` of your own keeps its system prompt (``system_prompt``),
   which Pydantic AI adds to a conversation's first request only, and keeps in
   the message history: it is stored with the conversation's first prompt,
@@ -70,7 +77,7 @@ from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_core import to_json
 
-from pydantic_ai import Agent, NativeOutput, PromptedOutput, RunContext
+from pydantic_ai import Agent, DeferredToolRequests, NativeOutput, PromptedOutput, RunContext
 from pydantic_ai import Tool as PydanticTool
 from restate.agents._common import (
     CANCELLATION,
@@ -119,6 +126,12 @@ def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[A
 
 # ModelMessage is an Annotated union (discriminated), which TypeAdapter takes though its type says otherwise.
 # Bytes (a tool's binary result, say) as base64, as pydantic-ai's own ModelMessagesTypeAdapter stores them.
+DEFERRED = (
+    "the run stopped for tool calls that need an approval or a result from outside it (Pydantic AI's deferred tools), "
+    "which nothing gives here: pause for a person with restate.agents' wait_for_signal tool instead"
+)
+"""Why a run that ends with Pydantic AI's ``DeferredToolRequests`` fails its turn."""
+
 _MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(
     typing.cast(Any, ModelMessage), config=ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
 )
@@ -195,8 +208,6 @@ class _Restate(AbstractCapability[Any]):
         self.conversation = conversation
         self.first = first
         """The conversation's first prompt, if this run makes the conversation's first request (``_first_request``)."""
-        self.earlier: list[ModelMessage] = []
-        """What the conversation has before this run's prompt, which a run that makes its first request leaves out."""
         self.model_errors = ErrorSet()
         """The errors that the run's model requests failed with."""
 
@@ -223,16 +234,18 @@ class _Restate(AbstractCapability[Any]):
             if system := _system_prompt(request):
                 stored = typing.cast(ModelRequest, self.first.item)
                 await self.conversation.rewrite(self.first, ModelRequest(parts=[*system, *stored.parts]))
-            self.earlier = [entry.item for entry in self.conversation.entries[:-1]]
+            if earlier := [entry.item for entry in self.conversation.entries[:-1]]:
+                # The model sees the conversation as it is stored: the prompts before this run's (whose runs ended
+                # before any model request), with the system prompt in the first, then this run's messages. Pydantic
+                # AI keeps what the hook sends as the run's history, so later requests have it too.
+                messages = request_context.messages
+                head = messages[0]
+                if isinstance(head, ModelRequest):
+                    head = dataclasses.replace(
+                        head, parts=[p for p in head.parts if not isinstance(p, SystemPromptPart)]
+                    )
+                request_context.messages = [*earlier, head, *messages[1:]]
             self.first = None
-        if self.earlier:
-            # The model sees the conversation as it is stored: the prompts before this run's (whose runs ended
-            # before any model request), with the system prompt in the first, then this run's messages.
-            messages = request_context.messages
-            head = messages[0]
-            if isinstance(head, ModelRequest):
-                head = dataclasses.replace(head, parts=[p for p in head.parts if not isinstance(p, SystemPromptPart)])
-            request_context.messages = [*self.earlier, head, *messages[1:]]
         await self.store(ctx.messages)
         return request_context
 
@@ -348,8 +361,12 @@ def _run(
     system: str | None,
     given: Sequence[AnyTool],
     output: type[BaseModel] | None = None,
+    deps: Any = None,
 ) -> Run:
-    """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer (``output``'s JSON)."""
+    """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer (``output``'s JSON).
+
+    ``deps`` is the run's dependencies (Pydantic AI's ``deps``).
+    """
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
     agent: Agent[Any, str] = own or Agent(instructions=system)
@@ -376,6 +393,7 @@ def _run(
                 toolsets=toolsets,
                 capabilities=[restate],
                 output_type=spec,
+                deps=deps,
             )
         except UnexpectedModelBehavior as error:
             if error in restate.model_errors and not isinstance(error, ContentFilterError):
@@ -401,6 +419,10 @@ def _run(
             raise
         # The messages that no model request stored: an output tool's return, say.
         await restate.store(result.all_messages())
+        if isinstance(result.output, DeferredToolRequests):
+            # Calls that wait for an approval or for a result from outside the run, which nothing gives: fail rather
+            # than answer with them. The conversation closes them, as a provider refuses calls without results.
+            raise TerminalError(DEFERRED)
         return result.output if isinstance(result.output, str) else to_json(result.output).decode()
 
     return run
@@ -416,6 +438,7 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: None = None,
+    deps: Any = None,
 ) -> str: ...
 
 
@@ -429,6 +452,7 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[M],
+    deps: Any = None,
 ) -> M: ...
 
 
@@ -441,6 +465,7 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[BaseModel] | None = None,
+    deps: Any = None,
 ) -> Any:
     """Answer a prompt with a Pydantic AI agent, exactly once.
 
@@ -466,6 +491,8 @@ async def prompt(
         output: A Pydantic model, for an answer that is one rather than
             text: asked for with ``NativeOutput`` if the model has a JSON
             schema mode, else with ``PromptedOutput``.
+        deps: The run's dependencies (Pydantic AI's ``deps``), for an
+            ``agent`` with a ``deps_type``.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
@@ -478,7 +505,7 @@ async def prompt(
     check_own(agent, system)
 
     def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output))
+        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output, deps))
 
     if output is None:
         return await ask(text)
@@ -494,6 +521,7 @@ def agent(
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
     output: type[BaseModel] | None = None,
+    deps: PerSession[Any] = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
@@ -513,6 +541,11 @@ def agent(
 
         assistant = pydantic_ai.agent("assistant", system=lambda ctx: f"You help {ctx.key}.")
 
+    An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
+    ``deps``, a value or a function of the invocation's context::
+
+        assistant = pydantic_ai.agent("assistant", shop, deps=lambda ctx: Customer(ctx.key))
+
     Args:
         name: The object's name, as Restate serves it.
         pydantic_agent: A Pydantic AI ``Agent`` of your own, whose output is
@@ -527,6 +560,9 @@ def agent(
             text: asked for with ``NativeOutput`` if the model has a JSON
             schema mode, else with ``PromptedOutput``. ``chat`` returns its
             JSON.
+        deps: The runs' dependencies (Pydantic AI's ``deps``), for a
+            ``pydantic_agent`` with a ``deps_type``: a value, or a function of
+            the invocation's context.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -548,6 +584,7 @@ def agent(
             system=await configured(system, ctx),
             tools=await configured(tools, ctx),
             output=output,
+            deps=await configured(deps, ctx),
         )
 
     obj.chat(answer, items=ITEMS, output=output)
