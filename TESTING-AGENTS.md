@@ -397,7 +397,7 @@ Status:
   - The Restate image is pinned (`tests/support.py`, `RESTATE_IMAGE`
     overrides it).
   - Tests that need a server are marked `server` (`tests/conftest.py`), and
-    `just test-fast` runs the 231 others without Docker in about 16 seconds.
+    `just test-fast` runs the 238 others without Docker in about 16 seconds.
   - `agents_object` opens its gate safely across threads.
 
   Still to do: one shared harness, coverage with a ratchet, resetting the
