@@ -262,8 +262,9 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     provider's refusal (``refusal_of``), as a 424. Any other error fails the
     attempt, and Restate retries the turn. So each integration raises a
     ``TerminalError`` for its framework's errors that a retry would meet
-    again: OpenAI's ``MaxTurnsExceeded`` and guardrail tripwires, ADK's model
-    error codes, LangGraph's recursion limit and invalid updates, Pydantic
+    again: OpenAI's ``MaxTurnsExceeded``, guardrail tripwires, setup errors
+    and runs stopped for approvals, ADK's model error codes and limit of model
+    calls, LangGraph's recursion limit and invalid updates, Pydantic
     AI's usage limits, retries that ran out and setup errors.
     """
     invocation_id = ctx.request.id
