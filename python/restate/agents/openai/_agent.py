@@ -60,6 +60,18 @@ start, and the run resumes from the last step stored:
   (the SDK's run context) and the ``run_config`` you give: its
   ``call_model_input_filter`` runs after this package's, which stores the
   tools' outputs.
+- The built-in agent gets OpenAI's server-side compaction, for a conversation
+  that lives long (``ModelSettings.context_management``, on versions of the
+  SDK that have it): the Responses API summarizes the history as it nears the
+  model's context window, which a long conversation would otherwise outgrow,
+  failing each turn. Its compaction item is stored like any reply, and a
+  request starts with the latest one: it stands for the items before it,
+  which OpenAI's guide says need not be sent again (as the SDK's own
+  compacting session drops them), so that requests stop growing with the
+  conversation, which is stored whole. A model of the Chat Completions API,
+  or of another provider, gets
+  none, and a model that OpenAI does not compact refuses such requests: run
+  it as an ``Agent`` of your own, configured as you need.
 """
 
 from __future__ import annotations
@@ -81,6 +93,8 @@ from agents import (
     MaxTurnsExceeded,
     Model,
     ModelResponse,
+    ModelSettings,
+    OpenAIResponsesModel,
     OutputGuardrailTripwireTriggered,
     RunConfig,
     RunContextWrapper,
@@ -428,8 +442,10 @@ def _run(
     it hands off to answers with its own output type, as text if it has none.
     """
     if own is None:
-        root: Agent[Any] = Agent(name="assistant", instructions=system, tools=tools(given))
-        config = RunConfig(model=_model(model), nest_handoff_history=False)
+        chosen = _model(model)
+        settings = _long_lived(chosen)
+        root: Agent[Any] = Agent(name="assistant", instructions=system, tools=tools(given), model_settings=settings)
+        config = RunConfig(model=chosen, nest_handoff_history=False)
     else:
         root = own
         # The conversation is the full transcript, which a handoff passes on as it is.
@@ -468,7 +484,7 @@ async def _go(
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:
         agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
-        items = typing.cast(Any, [entry.item for entry in conversation.entries])
+        items = typing.cast(Any, _since_compaction([entry.item for entry in conversation.entries]))
         run = Runner.run(agent, items, context=options.context, hooks=hooks, run_config=filtered, **limit)
         result = await _unwrapped(ctx, run)
     except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:
@@ -491,6 +507,12 @@ async def _go(
         # conversation closes them, so that they never run.
         raise TerminalError(APPROVALS)
     return _output(result.final_output)
+
+
+def _since_compaction(items: list[Item]) -> list[Item]:
+    """Return ``items`` from the latest compaction item on (OpenAI's), which stands for those before it."""
+    latest = max((i for i, item in enumerate(items) if item.get("type") == "compaction"), default=0)
+    return items[latest:]
 
 
 def tools(given: Sequence[AnyTool]) -> list[SdkTool]:
@@ -524,6 +546,24 @@ def _function_tool(tool: Tool) -> FunctionTool:
         on_invoke_tool=invoke,
         strict_json_schema=False,
     )
+
+
+COMPACTION: list[Any] = [{"type": "compaction"}]
+"""OpenAI's server-side compaction, at its default threshold, as Pydantic AI's ``OpenAICompaction`` asks for it."""
+
+
+def _long_lived(model: str | Model) -> ModelSettings:
+    """Return the built-in agent's model settings, for a conversation that lives long.
+
+    A model of the Responses API (a model id, which the SDK's default
+    provider makes one of, or such a model) gets OpenAI's server-side
+    compaction, on versions of the SDK that have it (``context_management``);
+    any other model, none.
+    """
+    has_it = "context_management" in {field.name for field in dataclasses.fields(ModelSettings)}
+    if has_it and isinstance(model, str | OpenAIResponsesModel):
+        return ModelSettings(context_management=COMPACTION)
+    return ModelSettings()
 
 
 def _model(model: AnyModel | None) -> str | Model:

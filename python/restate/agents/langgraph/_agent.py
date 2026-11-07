@@ -32,6 +32,15 @@ start, and the run resumes from the last step stored:
   turn that reaches it ends for good, with a terminal error: a retry would
   carry on from where it stopped, with a fresh limit, and so would never end
   a model that keeps calling tools.
+- The model sees the latest messages of a conversation that lives long: as
+  many as fit in ``WINDOW`` of its context window, by LangChain's
+  ``trim_messages`` (starting with a prompt, counted by
+  ``count_tokens_approximately``). The conversation is stored whole. That
+  takes a chat model whose profile has its context window
+  (``max_input_tokens``), as LangChain's integrations have for the models
+  they know, else the model sees all of it. For a summary of the earlier
+  messages instead, pass a graph of your own, such as ``create_agent`` with
+  LangChain's ``SummarizationMiddleware``.
 
 For a graph of your own, ``SqlCheckpointSaver`` stores LangGraph's checkpoints
 in the object's database instead.
@@ -56,6 +65,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
@@ -253,6 +263,46 @@ def _tool_messages(ran: Any) -> list[BaseMessage]:
     return typing.cast(list[BaseMessage], messages)
 
 
+WINDOW = 0.75
+"""The share of the model's context window that the conversation fills, at most: the rest is for the system prompt,
+the tools, the reply, and the approximate count's error."""
+
+
+def _window(model: BaseChatModel) -> int | None:
+    """Return how many tokens of the conversation ``model`` sees: ``WINDOW`` of its context window, if its profile has it.
+
+    LangChain's integrations give their chat models a profile, for the models
+    they know (``langchain-core`` 1.1 and later); one without it sees all of
+    the conversation.
+    """
+    # A ModelProfile (a TypedDict) where langchain-core has one, which older versions do not.
+    profile = typing.cast(dict[str, object] | None, getattr(model, "profile", None))
+    limit = profile.get("max_input_tokens") if isinstance(profile, dict) else None
+    return int(limit * WINDOW) if isinstance(limit, int) and limit > 0 else None
+
+
+def _latest(messages: Sequence[BaseMessage], window: int | None) -> list[BaseMessage]:
+    """Return the latest of ``messages`` that fit in ``window`` tokens, starting with a prompt (LangChain's ``trim_messages``).
+
+    The latest prompt and what followed it are sent whole, even if they do not fit.
+    """
+    if window is None:
+        return list(messages)
+    # Typed partly unknown (its text splitter's type).
+    trim = typing.cast(Any, langchain_messages.trim_messages)
+    fitting: list[BaseMessage] = trim(
+        messages,
+        max_tokens=window,
+        strategy="last",
+        token_counter=count_tokens_approximately,
+        start_on="human",
+    )
+    if fitting:
+        return fitting
+    last_prompt = max((i for i, message in enumerate(messages) if isinstance(message, HumanMessage)), default=0)
+    return list(messages[last_prompt:])
+
+
 def _graph(
     ctx: SessionContext, conversation: Conversation, model: BaseChatModel, tools: list[BaseTool], system: str | None
 ) -> Any:
@@ -263,9 +313,10 @@ def _graph(
     """
     bound = model.bind_tools(tools) if tools else model
     node = ToolNode(tools)
+    window = _window(model)
 
     async def call_model(state: State) -> dict[str, Any]:
-        messages = state["messages"]
+        messages = _latest(state["messages"], window)
         reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
         await conversation.append_reply(reply)
         return {"messages": [reply]}
