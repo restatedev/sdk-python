@@ -69,9 +69,7 @@ import typing
 import weakref
 from collections.abc import Sequence
 from typing import Any
-from uuid import UUID
 
-from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
@@ -80,7 +78,7 @@ from langgraph.types import Command, StateSnapshot
 from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
-from restate.agents._common import ErrorSet, from_tool
+from restate.agents._common import from_tool
 from restate.agents._conversation import Conversation, Entry, Run
 from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
@@ -267,7 +265,8 @@ def _interrupts(snapshot: StateSnapshot, resumes: dict[str, int]) -> list[tuple[
     raised it, a subgraph's interrupt included, even one of a node's second
     subgraph call, whose state LangGraph's subgraph snapshots do not show.
     How often it was resumed is counted at the task that raised it, in
-    whichever namespace it ran (``SqlCheckpointSaver._resumes``).
+    whichever namespace that ran (``SqlCheckpointSaver._resumes``), not at
+    the tasks of the graphs above it, which list it too.
     """
     return [(pending, resumes.get(pending.id, 0)) for task in snapshot.tasks for pending in task.interrupts]
 
@@ -302,55 +301,33 @@ async def _resumed(ctx: SessionContext, saver: SqlCheckpointSaver, snapshot: Sta
     return dict(zip(waits, values, strict=True))
 
 
-class _Errors(BaseCallbackHandler):
-    """Tell, in a graph's run, the errors that its chat models raised from those that its tools raised.
+_TOOLS = "langchain_core.tools"
+"""The modules of LangChain's tools (``BaseTool``): an error that came out of one is the tool's."""
 
-    Only a model's error can be its provider refusing the request (a wrong
-    API key, say): any other is a tool's or a node's own, and a retry may
-    get past it, whatever its name (a ``NotFoundError`` of another API,
-    say). A model that a tool calls is the tool's.
+_MODELS = "langchain_core.language_models"
+"""The modules of LangChain's chat models (``BaseChatModel``): an error that came out of one is the model's."""
 
-    It is a sync handler, run inline where the model or the tool runs: an
-    async one has no fallback for ``on_chat_model_start`` under the sync
-    callback manager of a sync node, and LangChain would log an error at
-    each of its model calls.
+
+def _model_error(error: BaseException) -> bool:
+    """Return whether ``error``, which a graph's run failed with, came out of one of its chat models.
+
+    Only such an error can be the model's provider refusing the request (a
+    wrong API key, say): any other is a tool's or a node's own, and a retry
+    may get past it, whatever its name (a ``NotFoundError`` of another API,
+    say). Its traceback tells, frame by frame from the run inwards: the
+    outermost LangChain tool or chat model it came out of decides, so a
+    model that a tool calls is the tool's. Callbacks would not tell: a call
+    with callbacks of its own (a tracer, say) does not run those it inherits.
     """
-
-    run_inline = True
-
-    def __init__(self, ctx: SessionContext) -> None:
-        super().__init__()
-        self.ctx = ctx
-        self.models = ErrorSet()
-        """The errors that the run's chat models raised."""
-        self.tools = ErrorSet()
-        """The errors that the run's tools raised."""
-
-    def on_llm_error(
-        self,
-        error: BaseException,
-        *,
-        run_id: UUID,
-        parent_run_id: UUID | None = None,
-        tags: list[str] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        self.models.add(error)
-
-    def on_tool_error(
-        self,
-        error: BaseException,
-        *,
-        run_id: UUID,
-        parent_run_id: UUID | None = None,
-        **kwargs: Any,
-    ) -> None:
-        self.tools.add(error)
-
-    def mark(self, error: BaseException) -> None:
-        """Mark ``error``, which the run failed with, as no refusal unless the graph's own chat model raised it."""
-        if error in self.tools or error not in self.models:
-            from_tool(self.ctx, error)
+    tb = error.__traceback__
+    while tb is not None:
+        module = str(tb.tb_frame.f_globals.get("__name__", ""))
+        if module.startswith(_TOOLS):
+            return False
+        if module.startswith(_MODELS):
+            return True
+        tb = tb.tb_next
+    return False
 
 
 def at_breakpoint(paused: StateSnapshot) -> bool:
@@ -393,12 +370,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         before = str(metadata.get(_STRUCTURED_BEFORE, "")) if asked else await _structured_version(app)
         # Each checkpoint of the run names its prompt, so that a retried attempt finds the run it cut off, and the
         # version its structured response had before it.
-        errors = _Errors(ctx)
-        config: RunnableConfig = {
-            **THREAD,
-            "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before},
-            "callbacks": [errors],
-        }
+        config: RunnableConfig = {**THREAD, "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before}}
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
             await _copied(ctx, conversation, known, messages)
@@ -419,7 +391,9 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
                     values = typing.cast(dict[str, Any], state)
                     await _copied(ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])))
             except Exception as error:
-                errors.mark(error)
+                if not _model_error(error):
+                    # A tool's or a node's error: no refusal, whatever its name.
+                    from_tool(ctx, error)
                 raise
             # The run stops at its interrupts: it goes on with the signals that answer them.
             paused = await _paused(app)

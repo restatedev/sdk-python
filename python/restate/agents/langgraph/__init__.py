@@ -64,9 +64,11 @@ Good to know about a graph of your own:
   ``langgraph.agent(..., context=...)``, a value or a function of the
   handler's context. The prebuilt nodes and Restate tools get the handler's
   context either way.
-- Only an error of the graph's own chat models can be its provider refusing
-  (a wrong API key, say): the turn ends unanswered. Any other error (a
-  tool's, a node's) fails the attempt, and Restate retries it.
+- Only an error of the graph's own chat models (LangChain's) can be its
+  provider refusing (a wrong API key, say): the turn ends unanswered. Any
+  other error fails the attempt, and Restate retries it: a tool's (a model
+  that a tool calls included), or a node's, such as one that calls a
+  provider's SDK itself.
 
 This differs from the older ``restate.ext.langchain`` integration, whose
 middleware makes a LangChain ``create_agent`` agent durable inside any regular

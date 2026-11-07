@@ -29,7 +29,7 @@ import pytest
 
 pytest.importorskip("langgraph")
 
-from langchain_core.callbacks import CallbackManagerForLLMRun  # noqa: E402
+from langchain_core.callbacks import BaseCallbackHandler, CallbackManagerForLLMRun  # noqa: E402
 from langchain_core.language_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage  # noqa: E402
 from langchain_core.outputs import ChatResult  # noqa: E402
@@ -65,7 +65,7 @@ def route(state: Desk) -> str | list[str]:
     routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
     routes |= {"deep": "deep", "pause": "pause", "again": "again", "lookup": "call_lookup", "fetch": "fetch"}
     routes |= {"refuse": "refuse", "refuse_sync": "refuse_sync", "refuse_builtin": "refuse_builtin"}
-    routes |= {"consult": "call_lookup", "count": "call_lookup"}
+    routes |= {"consult": "call_lookup", "count": "call_lookup", "refuse_traced": "refuse_traced", "nested": "nested"}
     if word == "both":
         return ["ask", "side"]  # two branches at once
     return routes.get(word, "greet")
@@ -181,6 +181,14 @@ greeting: Any = paused.compile()  # Any: LangGraph types a compiled graph's inpu
 asked_twice: Any = deep.compile()
 
 
+async def nested(state: Desk) -> dict[str, Any]:
+    """Ask for an approval itself, then run a subgraph whose node interrupts twice: LangGraph lists each of those
+    interrupts again on this node's task, with this node's own resume values."""
+    approved = interrupt("approve?")
+    inner = await asked_twice.ainvoke(state)
+    return {"messages": [AIMessage(f"{approved}: {inner['messages'][-1].text}")]}
+
+
 async def again(state: Desk) -> dict[str, Any]:
     """Call a subgraph, then one whose node interrupts twice: the second's state is in namespace again:<task>|1."""
     await greeting.ainvoke(state)
@@ -282,6 +290,14 @@ async def refuse_builtin(state: Desk) -> dict[str, Any]:
     return {"messages": [await Refusing(builtin=True).ainvoke(state["messages"])]}
 
 
+class Tracer(BaseCallbackHandler):
+    """A tracing handler of one's own, as Langfuse's: set on a call, it replaces the callbacks that the call inherits."""
+
+
+async def refuse_traced(state: Desk) -> dict[str, Any]:
+    return {"messages": [await Refusing().with_config(callbacks=[Tracer()]).ainvoke(state["messages"])]}
+
+
 def refuse_sync(state: Desk) -> dict[str, Any]:
     """As refuse, from a sync node, whose model reports to the agent's callbacks through a sync callback manager."""
     return {"messages": [Refusing().invoke(state["messages"])]}
@@ -289,7 +305,8 @@ def refuse_sync(state: Desk) -> dict[str, Any]:
 
 builder_nodes: dict[str, Any] = {**steps, "deep": deep.compile(), "pause": pause, "again": again}
 builder_nodes |= {"call_lookup": call_lookup, "found": found, "fetch": fetch, "refuse": refuse}
-builder_nodes |= {"refuse_sync": refuse_sync, "refuse_builtin": refuse_builtin}
+builder_nodes |= {"refuse_sync": refuse_sync, "refuse_builtin": refuse_builtin, "refuse_traced": refuse_traced}
+builder_nodes |= {"nested": nested}
 for name, node in {**builder_nodes, "call_tool": call_tool}.items():
     builder.add_node(name, typing.cast(Any, node))
 builder.add_node("tools", ToolNode([blocking]))
@@ -315,6 +332,8 @@ branches = [
     "refuse",
     "refuse_sync",
     "refuse_builtin",
+    "refuse_traced",
+    "nested",
 ]
 builder.add_conditional_edges(START, route, branches)
 builder.add_edge("call_tool", "tools")
@@ -342,6 +361,8 @@ for last in (
     "refuse",
     "refuse_sync",
     "refuse_builtin",
+    "refuse_traced",
+    "nested",
 ):
     builder.add_edge(last, END)
 
@@ -545,6 +566,28 @@ async def test_a_node_that_interrupts_twice_waits_twice(harness: HarnessEnvironm
     assert (await answering).json() == "twice: A B"
 
 
+async def test_each_interrupt_below_a_node_that_interrupts_itself_waits_for_its_own_signal(
+    harness: HarnessEnvironment,
+):
+    """A node asks for an approval, then runs a subgraph that interrupts twice: three waits, one after another."""
+    key = uuid.uuid4().hex
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, "nested"))
+    answers = {"approve?": "yes", "first?": "A", "second?": "B"}
+    asked: dict[str, str] = {}
+    for _ in range(400):
+        if answering.done():
+            break
+        for wait in (await post(harness, f"graph_desk/{key}/pending")).json():
+            if wait["id"] not in asked:
+                asked[wait["id"]] = wait["input"]
+                await post(
+                    harness, f"graph_desk/{key}/signal", json={"id": wait["id"], "value": answers[wait["input"]]}
+                )
+        await asyncio.sleep(0.05)
+    assert (await answering).json() == "yes: twice: A B"
+    assert list(asked.values()) == ["approve?", "first?", "second?"]
+
+
 async def test_interrupts_of_branches_at_once_wait_at_once(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     answering = asyncio.ensure_future(chat(harness, "graph_desk", key, f"both {key}"))
@@ -627,12 +670,12 @@ async def test_an_error_of_a_tool_or_a_node_is_retried_whatever_its_name(
     assert [r.getMessage() for r in caplog.records if "Error in" in r.getMessage()] == []
 
 
-@pytest.mark.parametrize("word", ["refuse", "refuse_sync", "refuse_builtin"])
+@pytest.mark.parametrize("word", ["refuse", "refuse_sync", "refuse_builtin", "refuse_traced"])
 async def test_a_models_refusal_in_a_graph_fails_with_424_and_the_next_is_answered(
     harness: HarnessEnvironment, word: str, caplog: pytest.LogCaptureFixture
 ):
-    """From an async node, a sync one, and as Anthropic's missing key (a TypeError, of a built-in type); telling the
-    model's error apart logs no callback errors on the way."""
+    """From an async node, a sync one, as Anthropic's missing key (a TypeError, of a built-in type), and from a
+    model with callbacks of its own on the call; telling the model's error apart logs no callback errors."""
     key = uuid.uuid4().hex
     refused = await chat(harness, "graph_desk", key, f"{word} {key}")
     assert refused.status_code == 424, refused.text

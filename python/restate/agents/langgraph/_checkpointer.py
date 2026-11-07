@@ -394,7 +394,9 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         checkpoint, in the namespace of the graph that ran it: the thread's
         own, or a subgraph's (``node:task_id``, or ``node:task_id|1`` for a
         node's second subgraph call, which LangGraph's subgraph snapshots
-        do not show). This reads them in every namespace.
+        do not show). This reads them in every namespace. Each graph above
+        the raiser lists the interrupt again, on its own task with that
+        task's own resume values: the raiser's is the deepest namespace.
         """
         async with self._lock:
             await self._setup()
@@ -413,11 +415,15 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
                 raised[task] = [str(i.id) for i in interrupts if getattr(i, "id", None) is not None]
             else:
                 resumed[task] = len(typing.cast(list[Any], loaded)) if isinstance(loaded, list) else 1
-        counts: dict[str, int] = {}
+        # Each graph above the task that raised an interrupt lists it again, on its own task, with that task's own
+        # resume values (a node that interrupts itself, then runs a subgraph that interrupts): the count is the
+        # raiser's, in the deepest namespace that lists the interrupt.
+        counts: dict[str, tuple[int, int]] = {}
         for task, ids in raised.items():
+            found = (len(task[0]), resumed.get(task, 0))
             for interrupt_id in ids:
-                counts[interrupt_id] = max(counts.get(interrupt_id, 0), resumed.get(task, 0))
-        return counts
+                counts[interrupt_id] = max(counts.get(interrupt_id, (-1, 0)), found)
+        return {interrupt_id: count for interrupt_id, (_, count) in counts.items()}
 
     async def adelete_thread(self, thread_id: str) -> None:
         async with self._lock:
