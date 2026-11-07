@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from restate.extensions import contextvar
 
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 
 from restate import Context, Service, HarnessEnvironment, extensions
 import pytest
@@ -62,9 +63,7 @@ async def greet_with_cm(ctx: Context, name: str) -> str:
 
 @pytest.fixture(scope="session")
 async def restate_test_harness():
-    async with restate.create_test_harness(
-        restate.app([greeter]), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as harness:
+    async with restate.create_test_harness(restate.app([greeter]), restate_image=RESTATE_IMAGE) as harness:
         yield harness
 
 

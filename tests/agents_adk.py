@@ -32,6 +32,7 @@ from google.adk.models.llm_response import LlmResponse  # noqa: E402
 from google.genai import types  # noqa: E402
 
 import restate  # noqa: E402
+from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import adk, tool  # noqa: E402
 from restate.agents._api import Messages  # noqa: E402
@@ -167,9 +168,7 @@ triage = adk.agent("adk_desk", agent=desk())
 
 @pytest.fixture(scope="session")
 async def harness():
-    async with restate.create_test_harness(
-        restate.app([assistant, triage]), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as harness:
+    async with restate.create_test_harness(restate.app([assistant, triage]), restate_image=RESTATE_IMAGE) as harness:
         yield harness
 
 

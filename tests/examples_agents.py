@@ -31,6 +31,7 @@ import httpx2
 import pytest
 
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate.harness import RestateContainer, find_free_port
 
 
@@ -39,7 +40,7 @@ def anyio_backend():
     return "asyncio"
 
 
-pytestmark = [pytest.mark.anyio]
+pytestmark = [pytest.mark.anyio, pytest.mark.server]
 
 EXAMPLES = pathlib.Path(__file__).parent.parent / "examples-agents"
 SERVABLE = (restate.Service, restate.VirtualObject, restate.Workflow)
@@ -75,9 +76,7 @@ async def serving(path: str, setup: Callable[[ModuleType], None] | None = None) 
     if setup is not None:
         setup(module)
     objects = [value for value in vars(module).values() if isinstance(value, SERVABLE)]
-    async with restate.create_test_harness(
-        restate.app(objects), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as harness:
+    async with restate.create_test_harness(restate.app(objects), restate_image=RESTATE_IMAGE) as harness:
         yield Ingress(harness.ingress_url)
 
 
@@ -424,7 +423,7 @@ def serves_http2() -> bool:
 async def test_an_example_as_a_program(tmp_path: pathlib.Path):
     """``uv run`` an example: it serves on PORT, Restate calls it over HTTP/2, and it stops on SIGTERM."""
     # Restate first: Docker maps its ports to free host ports, which could otherwise take the program's.
-    container = RestateContainer("ghcr.io/restatedev/restate:latest", always_replay=False, disable_retries=False)
+    container = RestateContainer(RESTATE_IMAGE, always_replay=False, disable_retries=False)
     container.start()
     port = find_free_port()
     output = tmp_path / "program.log"

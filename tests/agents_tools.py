@@ -182,3 +182,70 @@ async def test_a_stopped_turn_reports_a_call_that_returned_as_done_not_cancelled
         "call-charge": "Error: card declined",
         "call-none": CANCELLED,
     }
+
+
+# --- A call through a crash: kept until its result is stored, then forgotten ----------------------
+
+
+async def test_a_returned_call_is_kept_until_its_result_is_stored_and_forgotten_once_it_is():
+    """A crash after a call returned and before its result is stored, and the model asking again under a new id.
+
+    The call's record outlives the turn's publishes until the conversation
+    has its result: the retry, under a new tool call id, reaches the same
+    Restate call (the same idempotency key) rather than make it again. Once
+    the result is stored, the record is forgotten.
+    """
+    from agents_conversation import ITEMS, PUBLISHED  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents._conversation import Conversation, answer_once  # pylint: disable=import-outside-toplevel
+    from restate.agents._turn import tool_call_ended, tool_call_started  # pylint: disable=import-outside-toplevel
+
+    lookup = call(status, description="The status of an order.")
+    args = {"key": "eu", "order": "o1"}
+    attempts: list[str] = []
+    obj = sessions.SessionObject("crashed_caller")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        async def run(conversation: Conversation) -> str:
+            attempts.append("ran")
+            if len(attempts) == 1:
+                calls = [{"id": "t1", "name": lookup.name, "input": args}]
+                await conversation.append_reply({"role": "assistant", "text": "", "calls": calls})
+                await tool_call_started(ctx)
+                await lookup.run(args, ToolCall(ctx, "t1"))
+                await tool_call_ended(ctx)  # a publish: the calls whose results are stored are forgotten
+                raise RuntimeError("the process crashed before the result was stored")
+            # The framework drops the cut-off reply, and the model makes the call again under a new id.
+            [cut] = [entry.reply for entry in conversation.entries if entry.calls]
+            assert cut is not None
+            await conversation.drop(cut)
+            calls = [{"id": "t2", "name": lookup.name, "input": args}]
+            await conversation.append_reply({"role": "assistant", "text": "", "calls": calls})
+            await tool_call_started(ctx)
+            output = await lookup.run(args, ToolCall(ctx, "t2"))
+            await conversation.append({"result": "t2", "output": output})
+            await tool_call_ended(ctx)
+            await conversation.append_reply({"role": "assistant", "text": "shipped"})
+            return "shipped"
+
+        return await answer_once(ctx, text, ITEMS, run)
+
+    @obj.handler(name="records")
+    async def records(ctx: sessions.SessionContext) -> list[Any]:
+        row = await ctx.db.get("SELECT calls FROM restate_agent_calls")
+        return [] if row is None else json.loads(typing.cast(str, row["calls"]))
+
+    backend, req = Backend(), request()
+    answers = {**PUBLISHED, "status": b'{"order": "o1", "status": "shipped"}'}
+    first = Host(backend, service="crashed_caller", answers=answers)
+    with pytest.raises(RuntimeError, match="crashed before the result"):
+        await internal.invoke(obj, "ask", first, req, "where is o1?")
+    second = Host(backend, service="crashed_caller", answers=answers)
+    assert await internal.invoke(obj, "ask", second, req, "where is o1?") == "shipped"
+
+    # The retry reached the same Restate call: the idempotency key of the first tool call id.
+    made = [c for c in [*first.calls, *second.calls] if c[1] == "status"]
+    assert [c[4] for c in made] == [f"{req.id}:t1", f"{req.id}:t1"]
+    # Its result is stored, and so its record is forgotten.
+    assert await internal.invoke(obj, "records", Host(backend, service="crashed_caller"), req) == []

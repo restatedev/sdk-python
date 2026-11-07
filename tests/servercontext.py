@@ -13,6 +13,7 @@ from restate.exceptions import RetryableError
 
 from contextlib import asynccontextmanager
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import (
     Context,
     HttpError,
@@ -38,6 +39,7 @@ def anyio_backend():
 
 pytestmark = [
     pytest.mark.anyio,
+    pytest.mark.server,
 ]
 
 
@@ -49,9 +51,7 @@ def ohoh():
 async def simple_harness(
     service: Service | VirtualObject | Workflow,
 ) -> typing.AsyncGenerator[restate.RestateClient, None]:
-    async with restate.create_test_harness(
-        restate.app([service]), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as restate_test_harness:
+    async with restate.create_test_harness(restate.app([service]), restate_image=RESTATE_IMAGE) as restate_test_harness:
         yield restate_test_harness.client
 
 

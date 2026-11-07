@@ -42,6 +42,7 @@ from langgraph.types import interrupt  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import restate  # noqa: E402
+from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
@@ -449,7 +450,7 @@ def anyio_backend():
 async def harness():
     async with restate.create_test_harness(
         restate.app([desk, compiled, limited, planner, patient, caller]),
-        restate_image="ghcr.io/restatedev/restate:latest",
+        restate_image=RESTATE_IMAGE,
     ) as harness:
         yield harness
 

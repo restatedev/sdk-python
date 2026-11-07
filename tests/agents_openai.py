@@ -50,6 +50,7 @@ from openai import AsyncOpenAI  # noqa: E402
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText  # noqa: E402
 
 import restate  # noqa: E402
+from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import openai, tool  # noqa: E402
 from restate.agents._api import Messages  # noqa: E402
@@ -212,7 +213,7 @@ triage = openai.agent("oai_desk", agent=desk(model))
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, triage]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user, triage]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
