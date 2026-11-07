@@ -345,3 +345,70 @@ async def test_options_may_be_functions_of_the_context(harness: HarnessEnvironme
         url = f"{harness.ingress_url}/lg_per_user/{k}/chat"
         assert (await ingress.post(url, content=f"system {k}", headers=TEXT)).json() == f"system: You help {k}."
         assert (await ingress.post(url, content=f"weather {k}", headers=TEXT)).json() == f"tool said: sunny in {k}"
+
+
+# --- In process -----------------------------------------------------------------------------------
+
+
+def asking(**options: Any) -> Callable[..., Awaitable[Any]]:
+    """Return how to ask, in process, an object whose handler answers with ``langgraph.prompt`` (in one backend)."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    asker = sessions.SessionObject("asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await langgraph.prompt(ctx, text, **options)
+
+    backend = Backend()
+
+    async def asked(text: str) -> Any:
+        return await invoke(asker, "ask", Host(backend, service="asker", answers={"publish": b"null"}), request(), text)
+
+    return asked
+
+
+async def test_the_built_in_agent_sees_the_latest_messages_that_fit_in_its_context_window():
+    if "profile" not in BaseChatModel.model_fields:
+        pytest.skip("chat models have a profile since langchain-core 1.1")
+    seen: list[list[BaseMessage]] = []
+
+    class Seeing(Scripted):
+        def _generate(
+            self,
+            messages: list[BaseMessage],
+            stop: list[str] | None = None,
+            run_manager: CallbackManagerForLLMRun | None = None,
+            **kwargs: Any,
+        ) -> ChatResult:
+            seen.append(list(messages))
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    # A model whose profile has its context window, as LangChain's integrations give the models they know.
+    ask = asking(model=Seeing(profile={"max_input_tokens": 80}))
+    for n in range(1, 11):
+        assert await ask(f"hi {n}") == f"echo: hi {n}"
+    latest = seen[-1]
+    # The conversation has 19 messages before the last reply: the model saw the latest of them, from a prompt.
+    assert 1 < len(latest) < 19
+    assert isinstance(latest[0], HumanMessage) and latest[-1].content == "hi 10"
+    assert all(message.content != "hi 1" for message in latest)
+
+    # A model without one sees all of the conversation.
+    seen.clear()
+    ask = asking(model=Seeing())
+    for n in range(1, 11):
+        assert await ask(f"hi {n}") == f"echo: hi {n}"
+    assert len(seen[-1]) == 19
+
+
+def test_a_prompt_longer_than_the_window_is_sent_whole():
+    from restate.agents.langgraph import _agent  # pylint: disable=import-outside-toplevel
+
+    messages: list[BaseMessage] = [HumanMessage("hi"), AIMessage("hello"), HumanMessage("x" * 1000)]
+    latest = _agent._latest(messages, 10)  # pyright: ignore[reportPrivateUsage]
+    assert latest == messages[-1:]
+    assert _agent._latest(messages, None) == messages  # pyright: ignore[reportPrivateUsage]
