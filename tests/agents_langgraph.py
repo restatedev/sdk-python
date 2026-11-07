@@ -440,21 +440,21 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
     from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
 
-    from restate.agents._conversation import Conversation  # pylint: disable=import-outside-toplevel
+    from restate.agents._conversation import Turn  # pylint: disable=import-outside-toplevel
     from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
 
     k = key()
-    stored = Conversation.append_reply
+    stored = Turn.append_reply
     crashed: list[bool] = []
 
-    async def store_then_crash_once(self: Conversation, *items: Any, **kwargs: Any) -> Any:
+    async def store_then_crash_once(self: Turn, *items: Any, **kwargs: Any) -> Any:
         result = await stored(self, *items, **kwargs)
         if not crashed and not any(getattr(item, "tool_calls", None) for item in items):
             crashed.append(True)
             raise RuntimeError("the process crashed after storing the answer")
         return result
 
-    monkeypatch.setattr(Conversation, "append_reply", store_then_crash_once)
+    monkeypatch.setattr(Turn, "append_reply", store_then_crash_once)
     asker = sessions.SessionObject("lg_asker")
 
     @asker.handler

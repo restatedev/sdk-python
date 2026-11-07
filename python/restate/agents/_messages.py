@@ -99,10 +99,11 @@ async def page(db: DatabaseReader, items: Items, request: MessagesRequest | None
     await SCHEMA.ensure(db)
     start = await start_of(db)
     cursor = request.get("cursor")
+    summary = request.get("view") == "summary"
     if cursor is not None:
-        result = await _since(db, items, cursor, limit)
+        result = await (_summary_since if summary else _since)(db, items, cursor, limit)
     else:
-        result = await _latest(db, items, request.get("before"), limit)
+        result = await (_summary_latest if summary else _latest)(db, items, request.get("before"), limit)
     if start.n:
         result["first"] = start.n
     return result
@@ -151,6 +152,60 @@ async def _latest(db: DatabaseReader, items: Items, before: int | None, limit: i
         return {"messages": [], "more": False, "cursor": cursor}
     rows = await _rows(db, int(typing.cast(int, first)))
     messages = [m for m in render(items, rows) if m.id < end]
+    [[earlier]] = await db.values(f"SELECT EXISTS (SELECT 1 FROM {TURNS} WHERE n < ?)", [first])
+    return {
+        "messages": [_chat(m) for m in messages[-limit:]],
+        "more": len(messages) > limit or bool(earlier),
+        "cursor": cursor,
+    }
+
+
+# --- The summary: per turn, the user's message and the answer -------------------------------------------------------
+
+_TURN = f"SELECT n, seq, item, answer, answered_at, answered_seq FROM {TURNS}"
+
+
+def _summarized(items: Items, rows: typing.Sequence[typing.Sequence[typing.Any]]) -> list[_Message]:
+    """Render turns' rows (``_TURN``'s columns) as their user's messages and answers, in order.
+
+    The answer's message has the id it has in the full view (the turn's last
+    message of the assistant), and the ``seq`` it was stored with.
+    """
+    messages: list[_Message] = []
+    for n, seq, stored, answer, answered_at, answered_seq in rows:
+        said = items.read(items.load(str(stored))).said
+        text = said[1] if said else ""
+        messages.append(_Message(int(n), "user", [text_part(text)] if text.strip() else [], int(seq)))
+        if answer is not None and answered_at is not None:
+            answered = str(answer)
+            parts: list[Part] = [text_part(answered)] if answered.strip() else []
+            messages.append(_Message(int(answered_at), "assistant", parts, int(typing.cast(int, answered_seq))))
+    return [message for message in messages if message.parts]
+
+
+async def _summary_since(db: DatabaseReader, items: Items, cursor: int, limit: int) -> Messages:
+    """Return the user's messages and answers stored since ``cursor``, in the order they were."""
+    asked = await db.values(f"{_TURN} WHERE seq > ?", [cursor])
+    answered = await db.values(f"{_TURN} WHERE answered_seq > ?", [cursor])
+    rows = {int(typing.cast(int, row[0])): row for row in [*asked, *answered]}
+    messages = sorted((m for m in _summarized(items, list(rows.values())) if m.seq > cursor), key=lambda m: m.seq)
+    shown = messages[:limit]
+    return {
+        "messages": [_chat(m) for m in shown],
+        "more": len(messages) > limit,
+        "cursor": shown[-1].seq if shown else cursor,
+    }
+
+
+async def _summary_latest(db: DatabaseReader, items: Items, before: int | None, limit: int) -> Messages:
+    """Return the latest ``limit`` user's messages and answers before id ``before``: from as many turns, at most."""
+    end = before if before is not None else 2**53 - 1
+    rows = await db.values(f"{_TURN} WHERE n < ? ORDER BY n DESC LIMIT ?", [end, limit])
+    start = await start_of(db)
+    _, now = await last_of(db)
+    cursor = max(start.seq, now)
+    messages = [m for m in _summarized(items, rows[::-1]) if m.id < end]
+    first = int(typing.cast(int, rows[-1][0])) if rows else end
     [[earlier]] = await db.values(f"SELECT EXISTS (SELECT 1 FROM {TURNS} WHERE n < ?)", [first])
     return {
         "messages": [_chat(m) for m in messages[-limit:]],

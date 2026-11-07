@@ -66,7 +66,6 @@ from google.genai import types
 from pydantic import BaseModel
 
 from restate.agents._common import (
-    ENDED,
     MODEL_ENV,
     ModelError,
     PerSession,
@@ -176,19 +175,20 @@ class _Sessions(BaseSessionService):
         conversation = self.conversation
         session = Session(id=_USER, app_name=_APP, user_id=_USER, last_update_time=time.time())
         session.events.extend(typing.cast(list[Event], conversation.history()))
-        base = next((t for t in reversed(conversation.transcript) if t.answer is not None and t.answer != ENDED), None)
+        base = next((t for t in reversed(conversation.transcript) if t.status not in (None, "ended")), None)
         carried = base.carried if base is not None else None
         if carried is not None:
             session.state.update(json.loads(carried))
-        for entry in conversation.entries:
-            if carried is None or (base is not None and entry.turn is not None and entry.turn > base.n):
-                self._update_session_state(session, typing.cast(Event, entry.item))
+        for turn in conversation.turns:
+            if carried is None or (base is not None and turn.n > base.n):
+                for entry in turn.entries:
+                    self._update_session_state(session, typing.cast(Event, entry.item))
         self._carry(session)
         return session
 
     def _carry(self, session: Session) -> None:
         """Have the turn carry the session's state to the next turns."""
-        self.conversation.carry(state=json.dumps(session.state, default=str))
+        self.conversation.turn.carry(state=json.dumps(session.state, default=str))
 
     async def create_session(
         self, *, app_name: str, user_id: str, state: dict[str, Any] | None = None, session_id: str | None = None
@@ -211,10 +211,11 @@ class _Sessions(BaseSessionService):
             # Not stored: a partial event is followed by its whole, and an error code fails the prompt (see ``run``).
             return event
         event = await super().append_event(session, event)
+        turn = self.conversation.turn
         if event.author != "user" and event.content and not event.get_function_responses():
-            await self.conversation.append_reply(event, agent=event.author)
+            await turn.append_reply(event, agent=event.author)
         else:
-            await self.conversation.append(event)
+            await turn.append(event)
         self._carry(session)
         return event
 
@@ -344,11 +345,11 @@ def _final(conversation: Conversation, root: BaseAgent) -> str | None:
     final response is the answer. A step of a workflow (a ``SequentialAgent``
     say) is not: ADK resumes the workflow's next step.
     """
-    running = conversation.running()
-    if running is None:
+    turn = conversation.running()
+    if turn is None:
         return None
-    invocation = typing.cast(Event, running.item).invocation_id
-    events = [typing.cast(Event, e.item) for e in conversation.after(running.n)]
+    invocation = typing.cast(Event, turn.prompt.item).invocation_id
+    events = [typing.cast(Event, e.item) for e in turn.items]
     events = [event for event in events if event.invocation_id == invocation]
     responses = [event for event in events if _is_final(event)]
     if any(event.author == root.name and event.actions.end_of_agent for event in events):
@@ -381,8 +382,8 @@ def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
         if (final := _final(conversation, app.root_agent)) is not None:
             # The run had stored its answer's events, but not its answer: that is the answer, rather than ask again.
             return final
-        running = conversation.running()
-        invocation = typing.cast(Event, running.item).invocation_id if running is not None else None
+        turn = conversation.running()
+        invocation = typing.cast(Event, turn.prompt.item).invocation_id if turn is not None else None
         runner = Runner(app=app, session_service=_Sessions(conversation))
         answer = ""
         events = runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation, run_config=config)

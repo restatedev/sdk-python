@@ -77,12 +77,12 @@ async def answer(ctx: sessions.SessionContext, text: str) -> str:
             call_id = f"call-{text.split()[1]}"
             args = {"order": text.split()[1], "amount": 5}
             call = {"id": call_id, "name": approval.name, "input": args}
-            await conversation.append_reply({"role": "assistant", "text": "", "calls": [call]})
+            await conversation.turn.append_reply({"role": "assistant", "text": "", "calls": [call]})
             result = await run_tool(approval, args, ToolCall(ctx, call_id))
-            await conversation.append({"result": call_id, "output": result})
-            await conversation.append_reply({"role": "assistant", "text": f"refund: {result}"})
+            await conversation.turn.append({"result": call_id, "output": result})
+            await conversation.turn.append_reply({"role": "assistant", "text": f"refund: {result}"})
             return f"refund: {result}"
-        await conversation.append_reply({"role": "assistant", "text": f"echo: {text}"})
+        await conversation.turn.append_reply({"role": "assistant", "text": f"echo: {text}"})
         return f"echo: {text}"
 
     return await answer_once(ctx, text, ITEMS, work)

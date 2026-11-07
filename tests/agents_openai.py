@@ -661,7 +661,15 @@ async def test_a_tool_that_ends_the_turn_is_stored_and_not_run_again():
     assert await ask("hi there") == "echo: hi there"
     assert runs == ["Rome"]
     _, items = scripted.requests[-1]
-    assert [i.get("type", "message") for i in items] == ["message", "function_call", "function_call_output", "message"]
+    # The tool's output was the answer: the turn ends with it as its message, which the next turn's model sees.
+    assert [i.get("type", "message") for i in items] == [
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+        "message",
+    ]
+    assert items[-2] == {"role": "assistant", "content": "booked Rome"}
 
 
 @output_guardrail
@@ -750,7 +758,8 @@ def test_a_tool_output_of_any_kind_is_stored_once():
 
     shell = {"type": "shell_call_output", "call_id": "s1", "output": "ok"}
     function = {"type": "function_call_output", "call_id": "f1", "output": "ok"}
-    stored = Conversation(typing.cast(Any, None), _agent.ITEMS, [Entry(0, shell), Entry(1, function)])
+    prompt = Entry(0, _agent.ITEMS.prompt("go"), prompt="p0")
+    stored = Conversation(typing.cast(Any, None), _agent.ITEMS, [prompt, Entry(1, shell), Entry(2, function)])
     # The SDK hands the stored outputs back with the next request: none of them is new.
     new = {"type": "computer_call_output", "call_id": "c1", "output": "ok"}
     assert stored.new_results([shell, function, new]) == [new]

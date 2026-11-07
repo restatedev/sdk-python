@@ -323,7 +323,7 @@ def _graph(
     async def call_model(state: State) -> dict[str, Any]:
         messages = _latest(state["messages"], window)
         reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
-        await conversation.append_reply(reply)
+        await conversation.turn.append_reply(reply)
         return {"messages": [reply]}
 
     async def run_tools(state: State, config: RunnableConfig) -> Any:
@@ -334,12 +334,12 @@ def _graph(
             # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
             from_tool(ctx, error)
             raise
-        await conversation.append(*_tool_messages(ran))
+        await conversation.turn.append(*_tool_messages(ran))
         await tool_call_ended(ctx)
         return ran
 
     def start(state: State) -> str:
-        return "tools" if conversation.unanswered() else "model"
+        return "tools" if conversation.turn.open_calls() else "model"
 
     graph = StateGraph(State)
     graph.add_node("model", call_model)
@@ -356,7 +356,7 @@ def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given
     tools = [_native(t, ctx) if isinstance(t, Tool) else t for t in given]
 
     async def run(conversation: Conversation) -> str:
-        if (final := conversation.final_reply()) is not None:
+        if (final := conversation.turn.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
         messages = typing.cast(list[BaseMessage], conversation.history())

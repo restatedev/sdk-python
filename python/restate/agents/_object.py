@@ -32,6 +32,7 @@ from restate.agents._api import (
     Signal,
     Status,
     Stopped,
+    View,
     Waiting,
     Watch,
 )
@@ -125,6 +126,8 @@ class SyncRequest(TypedDict, total=False):
     revision: int
     timeoutSeconds: float
     limit: int
+    view: View
+    """How much of each turn the messages show: ``"full"`` (the default) or ``"summary"``."""
 
 
 class Synced(Messages):
@@ -530,6 +533,8 @@ def _followed(agent: AgentObject, items: Items) -> None:
         now = await _companion(ctx, _signals.notifications)()
         status = await _companion(ctx, _signals.status)()
         wanted: MessagesRequest = {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)}
+        if "view" in request:
+            wanted["view"] = request["view"]
         page = await ctx.call(messages, wanted, key=ctx.key)
         synced: Synced = {**page, "revision": now["revision"], "status": status}
         return synced

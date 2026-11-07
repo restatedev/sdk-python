@@ -421,7 +421,7 @@ MUTANTS = [
         "langgraph-reask-stored-reply",
         "after a crash, the model is asked again for a final reply that was already stored",
         f"{AGENTS}/langgraph/_agent.py",
-        "        if (final := conversation.final_reply()) is not None:\n"
+        "        if (final := conversation.turn.final_reply()) is not None:\n"
         "            # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.\n"
         "            return final\n"
         "        messages = ",
@@ -432,7 +432,7 @@ MUTANTS = [
         "pydantic-reask-stored-reply",
         "after a crash, the model is asked again for a final reply that was already stored",
         f"{AGENTS}/pydantic_ai/_agent.py",
-        "        if (final := conversation.final_reply()) is not None:\n"
+        "        if (final := conversation.turn.final_reply()) is not None:\n"
         "            # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.\n"
         "            return final\n"
         "        history = ",

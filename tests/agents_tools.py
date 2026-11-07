@@ -211,22 +211,22 @@ async def test_a_returned_call_is_kept_until_its_result_is_stored_and_forgotten_
             attempts.append("ran")
             if len(attempts) == 1:
                 calls = [{"id": "t1", "name": lookup.name, "input": args}]
-                await conversation.append_reply({"role": "assistant", "text": "", "calls": calls})
+                await conversation.turn.append_reply({"role": "assistant", "text": "", "calls": calls})
                 await tool_call_started(ctx)
                 await lookup.run(args, ToolCall(ctx, "t1"))
                 await tool_call_ended(ctx)  # a publish: the calls whose results are stored are forgotten
                 raise RuntimeError("the process crashed before the result was stored")
             # The framework drops the cut-off reply, and the model makes the call again under a new id.
-            [cut] = [entry.reply for entry in conversation.entries if entry.calls]
+            [cut] = [entry.reply for entry in conversation.turn.items if entry.calls]
             assert cut is not None
-            await conversation.drop(cut)
+            await conversation.turn.drop(cut)
             calls = [{"id": "t2", "name": lookup.name, "input": args}]
-            await conversation.append_reply({"role": "assistant", "text": "", "calls": calls})
+            await conversation.turn.append_reply({"role": "assistant", "text": "", "calls": calls})
             await tool_call_started(ctx)
             output = await lookup.run(args, ToolCall(ctx, "t2"))
-            await conversation.append({"result": "t2", "output": output})
+            await conversation.turn.append({"result": "t2", "output": output})
             await tool_call_ended(ctx)
-            await conversation.append_reply({"role": "assistant", "text": "shipped"})
+            await conversation.turn.append_reply({"role": "assistant", "text": "shipped"})
             return "shipped"
 
         return await answer_once(ctx, text, ITEMS, run)

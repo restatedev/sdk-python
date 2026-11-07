@@ -241,9 +241,9 @@ class _Restate(AbstractCapability[Any]):
         processor (``ProcessHistory``) may have trimmed the run's messages, and
         what it makes of them is the model's to see, not the conversation's.
         """
-        new = [m for m in messages if any(not self.conversation.has_result(i) for i in _result_ids(m))]
+        new = [m for m in messages if any(not self.conversation.knows_result(i) for i in _result_ids(m))]
         if new:
-            await self.conversation.append(*new)
+            await self.conversation.turn.append(*new)
 
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
@@ -261,7 +261,7 @@ class _Restate(AbstractCapability[Any]):
         self, ctx: RunContext[Any], *, request_context: ModelRequestContext, response: ModelResponse
     ) -> ModelResponse:
         await self.store(ctx.messages)
-        await self.conversation.append_reply(response)
+        await self.conversation.turn.append_reply(response)
         return response
 
     async def before_tool_execute(
@@ -383,7 +383,7 @@ def _run(
     chosen = _capabilities(own, model)
 
     async def run(conversation: Conversation) -> str:
-        if (final := conversation.final_reply()) is not None:
+        if (final := conversation.turn.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
         history = typing.cast(list[ModelMessage], conversation.history())
@@ -408,7 +408,7 @@ def _run(
                 raise
             # Pydantic AI asked again for an answer that validates, and gave up: the reply is the answer for
             # `answer_with`, which asks once more or fails for good, rather than an error that Restate retries.
-            if spec is not None and (final := conversation.final_reply()) is not None:
+            if spec is not None and (final := conversation.turn.final_reply()) is not None:
                 return final
             # Retries that ran out (a tool's, the answer's), a content filter, a token limit: a retry would carry on
             # with fresh retries, and meet it again.

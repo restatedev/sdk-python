@@ -94,7 +94,7 @@ async def test_a_prompt_is_answered_once_and_a_retry_returns_the_stored_answer()
 
     async def run(conversation: Conversation) -> str:
         runs.append("ran")
-        await conversation.append_reply({"role": "assistant", "text": "hello"})
+        await conversation.turn.append_reply({"role": "assistant", "text": "hello"})
         return "hello"
 
     ask, invocation = asking(run), request()
@@ -111,13 +111,13 @@ async def test_tool_calls_run_at_once_append_each_result_as_it_comes():
         if len(seen) > 1:
             return "fine"
         calls = [{"id": "c1", "name": "lookup", "input": {}}, {"id": "c2", "name": "lookup", "input": {}}]
-        await conversation.append_reply({"role": "assistant", "text": "", "calls": calls})
+        await conversation.turn.append_reply({"role": "assistant", "text": "", "calls": calls})
 
         async def result(call_id: str) -> None:
-            await conversation.append({"result": call_id, "output": f"{call_id} done"})
+            await conversation.turn.append({"result": call_id, "output": f"{call_id} done"})
 
         await asyncio.gather(result("c1"), result("c2"))
-        await conversation.append_reply({"role": "assistant", "text": "both"})
+        await conversation.turn.append_reply({"role": "assistant", "text": "both"})
         return "both"
 
     ask = asking(run)
@@ -139,7 +139,7 @@ async def test_a_failed_run_is_closed_with_its_error_and_the_next_prompt_starts_
         seen.append([entry.item for entry in conversation.entries])
         if len(seen) == 1:
             call = {"id": "c1", "name": "lookup", "input": {}}
-            await conversation.append_reply({"role": "assistant", "text": "", "calls": [call]})
+            await conversation.turn.append_reply({"role": "assistant", "text": "", "calls": [call]})
             raise restate.TerminalError("boom")
         return "fine"
 
@@ -166,16 +166,17 @@ async def test_a_stopped_run_stores_nothing_more():
     with pytest.raises(restate.TerminalError, match="stopped"):
         await ask("first")
     [conversation] = kept
-    assert conversation.entries[-1].item == {"role": "assistant", "text": CANCELLED}
+    turn = conversation.turn
+    assert turn.entries[-1].item == {"role": "assistant", "text": CANCELLED}
+    assert (turn.status, turn.answer) == ("cancelled", CANCELLED)
     # The run, unwinding after the stop, is fenced off.
     assert conversation.closed
     with pytest.raises(RuntimeError, match="stores nothing more"):
-        await conversation.append({"role": "assistant", "text": "too late"})
+        await turn.append({"role": "assistant", "text": "too late"})
     with pytest.raises(RuntimeError, match="stores nothing more"):
-        await conversation.drop(conversation.entries[-1].n)
-    [prompt] = [entry for entry in conversation.entries if entry.prompt is not None]
+        await turn.drop(turn.entries[-1].n)
     with pytest.raises(RuntimeError, match="stores nothing more"):
-        await conversation.answered(typing.cast(str, prompt.prompt), "too late")
+        await turn.answered("too late")
 
 
 async def test_a_dropped_reply_takes_what_followed_it_and_each_item_is_read_once():
@@ -188,12 +189,12 @@ async def test_a_dropped_reply_takes_what_followed_it_and_each_item_is_read_once
 
     async def run(conversation: Conversation) -> str:
         call = {"id": "c1", "name": "lookup", "input": {}}
-        reply = await conversation.append_reply({"role": "assistant", "text": "", "calls": [call]})
-        await conversation.append({"result": "c1", "output": "found"})
-        assert conversation.has_result("c1") and not conversation.unanswered()
-        await conversation.drop(reply)
+        reply = await conversation.turn.append_reply({"role": "assistant", "text": "", "calls": [call]})
+        await conversation.turn.append({"result": "c1", "output": "found"})
+        assert conversation.turn.has_result("c1") and not conversation.turn.open_calls()
+        await conversation.turn.drop(reply)
         # The reply and the result made from it are gone, from memory and from the database alike.
-        assert not conversation.has_result("c1")
+        assert not conversation.turn.has_result("c1")
         stored = await Conversation.load(conversation.db, ITEMS)
         assert [entry.item for entry in stored.entries] == [entry.item for entry in conversation.entries]
         assert [entry.item for entry in stored.entries] == [{"role": "user", "text": "hi"}]
@@ -208,10 +209,12 @@ async def test_a_dropped_reply_takes_what_followed_it_and_each_item_is_read_once
     host = Host(Backend(), service="asker", answers=PUBLISHED)
     assert await invoke(obj, "ask", host, request(), "hi") == "done"
     # The prompt, the reply and the result, each read once as it was appended; the transcript reads none again.
+    # The run answered with no reply left: its answer is the turn's reply, read as it was appended too.
     assert reads == [
         {"role": "user", "text": "hi"},
         {"role": "assistant", "text": "", "calls": [{"id": "c1", "name": "lookup", "input": {}}]},
         {"result": "c1", "output": "found"},
+        {"role": "assistant", "text": "done"},
     ]
 
 
@@ -273,41 +276,42 @@ def _calling(*ids: str) -> Item:
 
 async def test_a_reply_and_what_follows_a_prompt_are_read_by_position():
     conversation = _conversation({"role": "user", "text": "hi"})
-    first = await conversation.append_reply(_calling("c1"), {"role": "assistant", "text": "thinking"}, agent="a")
-    await conversation.append({"result": "c1", "output": "done"})
-    second = await conversation.append_reply({"role": "assistant", "text": "there"}, agent="b")
+    first = await conversation.turn.append_reply(_calling("c1"), {"role": "assistant", "text": "thinking"}, agent="a")
+    await conversation.turn.append({"result": "c1", "output": "done"})
+    second = await conversation.turn.append_reply({"role": "assistant", "text": "there"}, agent="b")
 
-    assert [e.n for e in conversation.reply_entries(first)] == [1, 2]
-    assert [e.n for e in conversation.reply_entries(second)] == [4]
-    assert conversation.reply_entries(3) == []
-    assert (conversation.agent_of(first), conversation.agent_of(second), conversation.agent_of(3)) == ("a", "b", None)
-    assert [e.n for e in conversation.after(0)] == [1, 2, 3, 4]
-    assert conversation.after(4) == []
+    turn = conversation.turn
+    assert [e.n for e in turn.reply_entries(first)] == [1, 2]
+    assert [e.n for e in turn.reply_entries(second)] == [4]
+    assert turn.reply_entries(3) == []
+    assert (turn.agent_of(first), turn.agent_of(second), turn.agent_of(3)) == ("a", "b", None)
+    assert [e.n for e in turn.items] == [1, 2, 3, 4]
+    assert turn.replies() == [first, second]
     assert conversation.history() == [e.item for e in conversation.entries]
-    assert conversation.final_reply() == "there"
+    assert turn.final_reply() == "there"
 
 
 async def test_unanswered_calls_follow_appends_and_drops():
     conversation = _conversation({"role": "user", "text": "hi"})
-    first = await conversation.append_reply(_calling("c1", "c2"))
-    assert [c.id for c in conversation.unanswered()] == ["c1", "c2"]
-    await conversation.append({"result": "c2", "output": "done"})
-    assert [c.id for c in conversation.unanswered()] == ["c1"]
-    await conversation.append({"result": "c1", "output": "done"})
-    second = await conversation.append_reply(_calling("c3"))
-    assert [c.id for c in conversation.unanswered()] == ["c3"]
+    first = await conversation.turn.append_reply(_calling("c1", "c2"))
+    assert [c.id for c in conversation.turn.open_calls()] == ["c1", "c2"]
+    await conversation.turn.append({"result": "c2", "output": "done"})
+    assert [c.id for c in conversation.turn.open_calls()] == ["c1"]
+    await conversation.turn.append({"result": "c1", "output": "done"})
+    second = await conversation.turn.append_reply(_calling("c3"))
+    assert [c.id for c in conversation.turn.open_calls()] == ["c3"]
 
     # Dropping the second reply forgets its call; dropping the first forgets its calls' results too.
-    await conversation.drop(second)
-    assert conversation.unanswered() == []
-    assert conversation.has_result("c1")
-    await conversation.drop(first)
-    assert conversation.unanswered() == []
-    assert not conversation.has_result("c1")
+    await conversation.turn.drop(second)
+    assert conversation.turn.open_calls() == []
+    assert conversation.turn.has_result("c1")
+    await conversation.turn.drop(first)
+    assert conversation.turn.open_calls() == []
+    assert not conversation.turn.has_result("c1")
     assert [e.n for e in conversation.entries] == [0]
     # The positions are given again.
-    assert await conversation.append_reply(_calling("c1")) == first
-    assert [c.id for c in conversation.unanswered()] == ["c1"]
+    assert await conversation.turn.append_reply(_calling("c1")) == first
+    assert [c.id for c in conversation.turn.open_calls()] == ["c1"]
 
 
 async def test_a_sealed_conversation_stores_nothing_more():
@@ -316,27 +320,36 @@ async def test_a_sealed_conversation_stores_nothing_more():
     await conversation.seal()
     assert conversation.closed
     with pytest.raises(RuntimeError):
-        await conversation.append({"role": "assistant", "text": "late"})
+        await conversation.turn.append({"role": "assistant", "text": "late"})
     with pytest.raises(RuntimeError):
-        await conversation.append_reply({"role": "assistant", "text": "late"})
+        await conversation.turn.append_reply({"role": "assistant", "text": "late"})
     with pytest.raises(RuntimeError):
-        await conversation.drop(1)
+        await conversation.turn.drop(1)
     assert db.statements == []
     assert len(conversation.entries) == 2
 
 
-async def test_answered_needs_a_prompt_of_the_conversation():
+async def test_only_the_turn_being_answered_is_written_and_it_is_answered_once():
     conversation = _conversation()
-    with pytest.raises(RuntimeError):
-        await conversation.append({"role": "assistant", "text": "no turn"})
-    await conversation.ask("p1", "hi")
-    await conversation.answered("p1", "hello")
-    assert conversation.answer_of("p1") == "hello"
-    with pytest.raises(KeyError):
-        await conversation.answered("p2", "hello")
+    with pytest.raises(RuntimeError, match="no turn"):
+        await conversation.turn.append({"role": "assistant", "text": "no turn"})
+    first = await conversation.ask("p1", "hi")
+    with pytest.raises(RuntimeError, match="never overlap"):
+        await conversation.ask("p2", "hello")
+    await first.answered("hello")
+    assert conversation.answer_of("p1") == "hello" and first.status == "answered"
+    # The answer, with no reply of the model, is the turn's reply: the message the summary shows.
+    assert first.items[-1].item == {"role": "assistant", "text": "hello"}
+    assert first.prompt.answered_at == first.items[-1].n
+    with pytest.raises(RuntimeError, match="not the turn being answered"):
+        await first.answered("again")
+    second = await conversation.ask("p2", "and you?")
+    # An earlier turn is read, never written.
+    with pytest.raises(RuntimeError, match="not the turn being answered"):
+        await first.append({"role": "assistant", "text": "late"})
     await conversation.seal()
-    with pytest.raises(RuntimeError):
-        await conversation.answered("p1", "again")
+    with pytest.raises(RuntimeError, match="stores nothing more"):
+        await second.answered("again")
     assert conversation.answer_of("p1") == "hello"
 
 
@@ -344,8 +357,8 @@ async def test_a_call_id_used_twice_is_logged_once(caplog: pytest.LogCaptureFixt
     with caplog.at_level(logging.WARNING, logger="restate.agents._conversation"):
         conversation = _conversation(_calling("c1"), {"result": "c1", "output": "done"})
         assert not caplog.records
-        await conversation.append_reply(_calling("c1"))
-        await conversation.append_reply(_calling("c1", "c1"))
+        await conversation.turn.append_reply(_calling("c1"))
+        await conversation.turn.append_reply(_calling("c1", "c1"))
     assert len(caplog.records) == 1
     assert "'c1'" in caplog.records[0].getMessage()
 
@@ -353,9 +366,9 @@ async def test_a_call_id_used_twice_is_logged_once(caplog: pytest.LogCaptureFixt
 async def test_calls_that_share_an_id_are_each_unanswered_until_a_result_has_it():
     # Calls without an id are read with the id "": each still needs a result of its own when the run is closed.
     conversation = _conversation({"role": "user", "text": "hi"}, _calling("", ""))
-    assert [c.id for c in conversation.unanswered()] == ["", ""]
-    await conversation.append({"result": "", "output": "done"})
-    assert conversation.unanswered() == []
+    assert [c.id for c in conversation.turn.open_calls()] == ["", ""]
+    await conversation.turn.append({"result": "", "output": "done"})
+    assert conversation.turn.open_calls() == []
 
 
 # --- Turns: what a turn loads, and what the model sees ---------------------------------------------------------------
@@ -379,11 +392,11 @@ async def test_a_turn_loads_the_transcript_and_only_the_latest_turns_whole():
 
     async def run(conversation: Conversation) -> str:
         seen.append(conversation.history())
-        prompt = typing.cast(Entry, conversation.running())
-        await conversation.append_reply(_calling(f"c{prompt.n}"))
-        await conversation.append({"result": f"c{prompt.n}", "output": "done"})
-        await conversation.append_reply({"role": "assistant", "text": f"answer {prompt.item['text']}"})
-        return f"answer {prompt.item['text']}"
+        turn = conversation.turn
+        await turn.append_reply(_calling(f"c{turn.n}"))
+        await turn.append({"result": f"c{turn.n}", "output": "done"})
+        await turn.append_reply({"role": "assistant", "text": f"answer {turn.prompt.item['text']}"})
+        return f"answer {turn.prompt.item['text']}"
 
     @obj.handler
     async def ask(ctx: sessions.SessionContext, text: str) -> str:
@@ -408,7 +421,10 @@ async def test_a_turn_loads_the_transcript_and_only_the_latest_turns_whole():
 def _turns(*answers: str) -> Conversation:
     """A conversation of answered turns, each its prompt and answer, loaded with no turn whole."""
 
-    transcript = [Entry(n, {"role": "user", "text": f"q{n}"}, f"p{n}", answer) for n, answer in enumerate(answers)]
+    transcript = [
+        Entry(n, {"role": "user", "text": f"q{n}"}, f"p{n}", answer, status="answered")
+        for n, answer in enumerate(answers)
+    ]
     return Conversation(typing.cast(Any, _Recorded()), ITEMS, [], transcript=transcript, budget=10, window=0)
 
 
@@ -430,7 +446,7 @@ async def test_the_model_sees_the_latest_earlier_turns_that_the_budget_holds():
 async def test_a_summary_stands_for_the_turns_before_the_transcript():
     from restate.agents._conversation import SUMMARY, Start  # pylint: disable=import-outside-toplevel
 
-    transcript = [Entry(2, {"role": "user", "text": "q2"}, "p2", "c")]
+    transcript = [Entry(2, {"role": "user", "text": "q2"}, "p2", "c", status="answered")]
     start = Start(summary="they talked", summarized=2)
     conversation = Conversation(typing.cast(Any, _Recorded()), ITEMS, [], start, transcript=transcript, window=0)
     assert conversation.history() == [
@@ -449,7 +465,7 @@ async def test_a_turn_left_without_an_answer_is_ended_by_the_next_and_carries_on
     async def run(conversation: Conversation) -> str:
         seen.append(conversation)
         if len(seen) == 1:
-            await conversation.append_reply(_calling("c1"), agent="refunds")
+            await conversation.turn.append_reply(_calling("c1"), agent="refunds")
             raise RuntimeError("the invocation is gone")
         return "fine"
 
@@ -460,7 +476,7 @@ async def test_a_turn_left_without_an_answer_is_ended_by_the_next_and_carries_on
     assert await ask("second") == "fine"
     first, second = seen[1].transcript
     assert (first.answer, first.agent, second.prompt) == (ENDED, "refunds", second.prompt)
-    assert seen[1].unanswered() == [] and len(seen) == 2
+    assert seen[1].turn.open_calls() == [] and len(seen) == 2
 
 
 async def test_a_turn_without_a_summary_reads_only_the_turns_its_budget_holds():
@@ -482,11 +498,11 @@ async def test_a_turn_without_a_summary_reads_only_the_turns_its_budget_holds():
     for n in range(100):
         loaded = items.loaded
         await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), f"q{n:02}")
-    # The last turn read the previous turn, the 5 before it that the budget holds, and the one past it: not all 99.
-    assert items.loaded - loaded == 1 + 5 + 1
+    # The last turn read the previous turn (its prompt and answer), the 5 before it that the budget holds, and the
+    # one past it: not all 99.
+    assert items.loaded - loaded == 2 + 5 + 1
     assert [item["text"] for item in seen[-1]] == [
-        *(text for n in range(93, 98) for text in (f"q{n}", "fine")),
-        "q98",
+        *(text for n in range(93, 99) for text in (f"q{n}", "fine")),
         "q99",
     ]
 
@@ -500,7 +516,7 @@ async def test_a_turn_left_without_an_answer_gets_the_outcomes_of_its_calls():
     async def run(conversation: Conversation) -> str:
         seen.append(conversation)
         if len(seen) == 1:
-            await conversation.append_reply(_calling("c1", "c2"))
+            await conversation.turn.append_reply(_calling("c1", "c2"))
             ctx = typing.cast(Any, conversation).ctx
             # c1's Restate call returned, but the invocation was gone before its result was stored; c2's never did.
             await (await call_of(ctx, "lookup", {}, "c1")).answered()
@@ -533,7 +549,7 @@ async def test_settle_closes_only_the_turn_its_gone_invocation_left_and_only_onc
     obj = sessions.SessionObject("asker")
 
     async def dying(conversation: Conversation) -> str:
-        await conversation.append_reply(_calling("c1", "c2"))
+        await conversation.turn.append_reply(_calling("c1", "c2"))
         # c1's Restate call returned, but the invocation was gone before its result was stored; c2's never did.
         await (await call_of(typing.cast(Any, conversation).ctx, "lookup", {}, "c1")).answered()
         raise RuntimeError("the invocation is gone")
@@ -578,8 +594,8 @@ async def test_a_window_of_all_loads_every_turn_whole():
 
     async def run(conversation: Conversation) -> str:
         seen.append(conversation)
-        await conversation.append_reply(_calling(f"c{len(seen)}"))
-        await conversation.append({"result": f"c{len(seen)}", "output": "done"})
+        await conversation.turn.append_reply(_calling(f"c{len(seen)}"))
+        await conversation.turn.append({"result": f"c{len(seen)}", "output": "done"})
         return "fine"
 
     obj = sessions.SessionObject("asker")
@@ -596,20 +612,41 @@ async def test_a_window_of_all_loads_every_turn_whole():
 
 
 def test_a_turn_another_invocation_ended_stays_in_the_window_as_an_unanswered_one_does():
-    from restate.agents._common import ENDED  # pylint: disable=import-outside-toplevel
-    from restate.agents._conversation import window_start  # pylint: disable=import-outside-toplevel
+    from restate.agents._conversation import Status, window_start  # pylint: disable=import-outside-toplevel
 
-    def turns(*answers: str | None) -> list[Entry]:
-        return [Entry(n, {"role": "user", "text": f"q{n}"}, f"p{n}", answer) for n, answer in enumerate(answers)]
+    def turns(*statuses: Status | None) -> list[Entry]:
+        return [
+            Entry(n, {"role": "user", "text": f"q{n}"}, f"p{n}", status=status) for n, status in enumerate(statuses)
+        ]
 
     # Its framework never finished it, so what it carried is a guess: the next turn reads it whole.
-    assert window_start(turns("a", ENDED), 0) == 1
-    assert window_start(turns("a", ENDED, ENDED), 0) == 1
-    assert window_start(turns("a", "b", ENDED), 1) == 1
-    assert window_start(turns("a", ENDED, None), 0) == 1
+    assert window_start(turns("answered", "ended"), 0) == 1
+    assert window_start(turns("answered", "ended", "ended"), 0) == 1
+    assert window_start(turns("answered", "answered", "ended"), 1) == 1
+    assert window_start(turns("answered", "ended", None), 0) == 1
     # One before the window's answered turns is not: the turns after it carried on from it.
-    assert window_start(turns("a", ENDED, "c"), 1) == 2
-    assert window_start(turns("a", ENDED, "c"), 0) == 3
+    assert window_start(turns("answered", "ended", "answered"), 1) == 2
+    assert window_start(turns("answered", "ended", "answered"), 0) == 3
+    # A turn closed by its own run (stopped, failed, refused) carried what its framework had: it counts as answered.
+    assert window_start(turns("answered", "cancelled", None), 0) == 2
     # Otherwise, as before.
-    assert window_start(turns("a", "b", None), 1) == 1
-    assert window_start(turns("a", "b"), 0) == 2
+    assert window_start(turns("answered", "answered", None), 1) == 1
+    assert window_start(turns("answered", "answered"), 0) == 2
+
+
+async def test_a_turns_open_calls_are_its_own_and_not_an_earlier_turns():
+    entries = [
+        Entry(0, {"role": "user", "text": "first"}, "p0", "done", status="answered"),
+        Entry(1, _calling("c0")),
+        Entry(2, {"role": "user", "text": "second"}, "p1"),
+        Entry(3, _calling("c1")),
+    ]
+    conversation = Conversation(typing.cast(Any, _Recorded()), ITEMS, entries)
+    first, second = conversation.turns
+    # The first turn ended with a call left open: it is that turn's, and closing the second does not answer it.
+    assert [c.id for c in first.open_calls()] == ["c0"]
+    assert [c.id for c in second.open_calls()] == ["c1"]
+    assert conversation.turn is second and conversation.running() is second
+    # The model was given both turns, flat: the one place where turns are composed.
+    assert conversation.history() == [e.item for e in entries]
+    assert conversation.knows_result("c0") is False and [e.turn for e in conversation.entries] == [0, 0, 2, 2]

@@ -28,10 +28,17 @@ A turn is stored in two parts, in the key's database:
   prompt (the framework's item for it), the turn's answer once it has one,
   and what a framework carries from turn to turn that is no message: the
   agent the conversation is with (after a handoff, say), and the framework's
-  own state (``Conversation.carry``).
+  own state (``Turn.carry``).
 - The **trajectories**, ``restate_agent_items``: every other item (the
   model's replies, tool calls and their results, compaction items), each
   with its turn. A turn is completed from its own trajectory.
+
+In code, a turn is a ``Turn``: its run reads and writes its own rows, and
+only the latest turn, while it has no answer, is written. It ends once, with a
+status (``answered``, or closed: ``cancelled``, ``failed``, ``refused``,
+``ended``). ``Conversation`` holds the turns, and composes them into what the
+model gets (``history``): the one place where turns are made one flat list.
+See ``TURN-SEMANTICS.md`` at the repository's root.
 
 The model gets the transcript, and the whole trajectories of the latest
 ``window`` turns, and of any turn after them that another invocation ended
@@ -75,7 +82,7 @@ import logging
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from restate.agents._calls import outcomes
 from restate.agents._common import (
@@ -122,11 +129,15 @@ SCHEMA = Schema(
             seq INTEGER NOT NULL,
             prompt TEXT NOT NULL UNIQUE,
             item TEXT NOT NULL,
+            status TEXT,
             answer TEXT,
             agent TEXT,
-            carried TEXT
+            carried TEXT,
+            answered_at INTEGER,
+            answered_seq INTEGER
         )""",
         f"CREATE INDEX {TURNS}_seq ON {TURNS} (seq)",
+        f"CREATE INDEX {TURNS}_answered_seq ON {TURNS} (answered_seq)",
         f"""CREATE TABLE {STEPS} (
             n INTEGER PRIMARY KEY,
             turn INTEGER NOT NULL,
@@ -145,6 +156,11 @@ SCHEMA = Schema(
         )""",
     ],
 )
+
+
+Status: typing.TypeAlias = Literal["answered", "cancelled", "failed", "refused", "ended"]
+"""How a turn ended: answered by its run, or closed: stopped, failed for good, refused by the model's provider, or
+ended by another invocation once its own was gone (``ENDED``)."""
 
 
 class Call(typing.NamedTuple):
@@ -193,7 +209,13 @@ class Entry:
     turn: int | None = None
     """The position of its turn's prompt."""
     carried: str | None = None
-    """On a prompt: the framework's state as of the end of its turn, if it carries one (``Conversation.carry``)."""
+    """On a prompt: the framework's state as of the end of its turn, if it carries one (``Turn.carry``)."""
+    status: Status | None = None
+    """On a prompt: how its turn ended, once it did."""
+    answered_at: int | None = None
+    """On a prompt: the position of its turn's answer, its last message of the assistant, once it has one."""
+    answered_seq: int | None = None
+    """On a prompt: the ``seq`` given as its turn was answered."""
 
 
 class Parsed(typing.NamedTuple):
@@ -276,10 +298,10 @@ async def start_of(db: DatabaseReader) -> Start:
 
 async def last_of(db: DatabaseReader) -> tuple[int | None, int]:
     """Return the last position of ``db``'s rows (``None`` if it has none), and the last ``seq`` they have (or 0)."""
-    [[turn, turn_seq]] = await db.values(f"SELECT MAX(n), MAX(seq) FROM {TURNS}")
+    [[turn, turn_seq, answered_seq]] = await db.values(f"SELECT MAX(n), MAX(seq), MAX(answered_seq) FROM {TURNS}")
     [[step, step_seq]] = await db.values(f"SELECT MAX(n), MAX(seq) FROM {STEPS}")
     positions = [int(typing.cast(int, n)) for n in (turn, step) if n is not None]
-    seqs = [int(typing.cast(int, s)) for s in (turn_seq, step_seq) if s is not None]
+    seqs = [int(typing.cast(int, s)) for s in (turn_seq, answered_seq, step_seq) if s is not None]
     return (max(positions) if positions else None), max(seqs, default=0)
 
 
@@ -309,8 +331,8 @@ class _Walk:
 
     The window is the ``size`` latest turns that their framework answered, and
     the turns after them that it did not: the one being answered (only the
-    latest can have no answer), and those another invocation ended
-    (``ENDED``), whose framework never finished them, so that what they
+    latest can have no answer), and those another invocation ended (status
+    ``ended``), whose framework never finished them, so that what they
     carried is a guess and their own rows say what happened.
     """
 
@@ -319,11 +341,11 @@ class _Walk:
         self.seen = 0
         self.done = False
 
-    def holds(self, answer: str | None) -> bool:
-        """Return whether the next turn back, with ``answer``, is in the window."""
+    def holds(self, status: Status | None) -> bool:
+        """Return whether the next turn back, which ended as ``status`` (or not yet), is in the window."""
         if self.done:
             return False
-        if answer is None or answer == ENDED:
+        if status is None or status == "ended":
             return True
         if self.seen == self.size:
             self.done = True
@@ -338,28 +360,333 @@ def window_start(turns: Sequence[Entry], window: Window) -> int:
     if window == "all":
         return 0
     walk, first = _Walk(window), len(turns)
-    while first > 0 and walk.holds(turns[first - 1].answer):
+    while first > 0 and walk.holds(turns[first - 1].status):
         first -= 1
     return first
+
+
+class _Ledger:
+    """What a conversation and its turns share: the database, the next position and ``seq``, and the writes' lock.
+
+    Writes take the lock one after another (tool calls run at once append
+    their results one after another), so each gets positions of its own.
+    """
+
+    def __init__(self, db: Database, items: Items, start: Start, transcript: list[Entry], next: int, seq: int) -> None:
+        self.db = db
+        self.items = items
+        self.start = start
+        self.transcript = transcript
+        """The turns' prompts, in order: the latest is the latest turn's."""
+        self.next = next
+        """The next position to give."""
+        self.seq = seq
+        """The last ``seq`` given."""
+        self.latest: Turn | None = None
+        """The latest turn, if it is loaded whole: the only one that may be written."""
+        self.closed = False
+        """Whether ``Conversation.seal`` closed the conversation to writes."""
+        self.lock = asyncio.Lock()
+        self.ids: set[str] = set()
+        """The ids of the tool calls made in the loaded turns."""
+        self.warned = False
+        """Whether a call's id that an earlier call has was logged: once is enough."""
+
+    def called(self, call_id: str) -> None:
+        """Note a tool call's id, and log one that an earlier call has (once)."""
+        if call_id in self.ids and not self.warned:
+            self.warned = True
+            _logger.warning(
+                "Tool call id %r is used by more than one call: the conversation matches results to calls by id, "
+                "so a call may be taken as answered by another's result",
+                call_id,
+            )
+        self.ids.add(call_id)
+
+    def check_open(self) -> None:
+        if self.closed:
+            raise RuntimeError("the run was stopped: it stores nothing more")
+
+    def carried(self) -> tuple[str | None, str | None]:
+        """Return the agent and the framework's state that the latest answered turn left."""
+        latest = next((turn for turn in reversed(self.transcript) if turn.answer is not None), None)
+        return (latest.agent, latest.carried) if latest is not None else (None, None)
+
+
+class Turn:
+    """One turn of the conversation: its prompt, and what its run stored to answer it.
+
+    A turn's rows are read and written here, and only here: its open tool
+    calls, its replies and its final reply are this turn's, never another's.
+    Only the latest turn, while it has no answer, can be written to: by its
+    own run, or by whoever closes it (``close``), once its run is gone.
+    """
+
+    def __init__(self, ledger: _Ledger, prompt: Entry, items: Sequence[Entry] = ()) -> None:
+        self._ledger = ledger
+        self.prompt = prompt
+        """The turn's row: its prompt, and once it has them, its status, answer and what it carried."""
+        self._entries: list[Entry] = []
+        self._results: dict[str, Result] = {}
+        """The tool calls' results, by their calls' ids."""
+        self._open: list[Call] = []
+        """The tool calls that have no result, in the order they were made: each of them, even if ids repeat."""
+        self._carried: dict[str, str] = {}
+        """What the turn carries to the turns after it (``agent``, ``carried``), stored with its answer."""
+        self._add([prompt, *items])
+
+    def __repr__(self) -> str:
+        return f"Turn({self.id!r}, n={self.n}, status={self.status!r})"
+
+    @property
+    def id(self) -> str:
+        """The turn's id: its prompt's (see ``next_prompt_id``)."""
+        return typing.cast(str, self.prompt.prompt)
+
+    @property
+    def n(self) -> int:
+        """The turn's position: its prompt's, the id of its user's message."""
+        return self.prompt.n
+
+    @property
+    def status(self) -> Status | None:
+        """How the turn ended, or ``None`` while it is being answered."""
+        return self.prompt.status
+
+    @property
+    def answer(self) -> str | None:
+        """The turn's answer, once it has one: the run's, or the note that closed it."""
+        return self.prompt.answer
+
+    @property
+    def entries(self) -> Sequence[Entry]:
+        """The turn's entries, in order: its prompt, then its items."""
+        return self._entries
+
+    @property
+    def items(self) -> Sequence[Entry]:
+        """The turn's items, in order: the model's replies, the tool calls' results, ..."""
+        return self._entries[1:]
+
+    def _add(self, entries: list[Entry]) -> None:
+        for entry in entries:
+            entry.said, entry.calls, entry.results = self._ledger.items.read(entry.item)
+            entry.turn = self.n
+            self._index(entry)
+        self._entries.extend(entries)
+
+    def _index(self, entry: Entry, *, note: bool = True) -> None:
+        for call in entry.calls:
+            if note:
+                self._ledger.called(call.id)
+            if call.id not in self._results:
+                self._open.append(call)
+        for result in entry.results:
+            self._results[result.id] = result
+            if any(call.id == result.id for call in self._open):
+                self._open = [call for call in self._open if call.id != result.id]
+
+    # --- Reading ---
+
+    def replies(self) -> list[int]:
+        """Return the ids of the model's replies in the turn, in order."""
+        return sorted({entry.reply for entry in self._entries if entry.reply is not None})
+
+    def last_reply(self) -> int | None:
+        """Return the id of the model's reply that the turn ends with, if it ends with one."""
+        return self._entries[-1].reply
+
+    def reply_entries(self, reply: int) -> Sequence[Entry]:
+        """Return the entries of the model's reply ``reply``, in order: they follow one another, from position ``reply``."""
+        first = bisect.bisect_left(self._entries, reply, key=_position)
+        end = first
+        while end < len(self._entries) and self._entries[end].reply == reply:
+            end += 1
+        return self._entries[first:end]
+
+    def agent_of(self, reply: int) -> str | None:
+        """Return the agent that gave the model's reply ``reply``."""
+        entries = self.reply_entries(reply)
+        return entries[0].agent if entries else None
+
+    def final_reply(self) -> str | None:
+        """Return the text of the model's reply the turn ends with, if it ends the run: text, and no tool calls."""
+        reply = self.last_reply()
+        if reply is None:
+            return None
+        entries = self.reply_entries(reply)
+        if any(e.calls for e in entries):
+            return None
+        said = [e.said for e in entries if e.said is not None]
+        return said[-1][1] if said else None
+
+    def open_calls(self) -> list[Call]:
+        """Return the turn's tool calls that have no result, in the order they were made."""
+        return list(self._open)
+
+    def has_result(self, call_id: str) -> bool:
+        """Return whether the turn's tool call ``call_id`` has a result."""
+        return call_id in self._results
+
+    def stored(self, call_id: str, failed: str | None = None) -> bool:
+        """Return whether tool call ``call_id`` has its result: not an error, unless it is ``failed``, its own."""
+        result = self._results.get(call_id)
+        return result is not None and (not result.failed or result.output == failed)
+
+    # --- Writing: only the latest turn, while it has no answer ---
+
+    async def append(self, *items: Item) -> None:
+        """Append ``items`` (a tool's results, say) to the turn, in one transaction.
+
+        Appends may run at once, such as those of tool calls that run at once:
+        each is stored after the ones before it.
+        """
+        await self._insert(lambda n: [Entry(n + i, item) for i, item in enumerate(items)])
+
+    async def append_reply(self, *items: Item, agent: str | None = None) -> int:
+        """Append the model's reply, of ``items`` (given by ``agent``), to the turn, and return its id."""
+        return await self._insert(lambda n: [Entry(n + i, item, reply=n, agent=agent) for i, item in enumerate(items)])
+
+    def carry(self, *, agent: str | None = None, state: str | None = None) -> None:
+        """Keep what the turn carries to the turns after it: it is stored with its answer.
+
+        Args:
+            agent: The agent the conversation is with. By default, the agent of the turn's latest reply,
+                or else the previous turn's.
+            state: The framework's own state, as text (ADK's session state, say): the latest is kept.
+                By default, the previous turn's.
+        """
+        if agent is not None:
+            self._carried["agent"] = agent
+        if state is not None:
+            self._carried["carried"] = state
+
+    async def drop(self, reply: int) -> None:
+        """Drop the turn's reply ``reply``, and what came after it, to ask the model again.
+
+        It is one range delete on the primary key: the reply's items start at
+        position ``reply``, and what follows them (their tools' results, say)
+        was made from the reply. The positions are given again, so the new
+        reply's messages take the dropped ones' ids; the ``seq`` is kept, so
+        that a client's cursor still sees them.
+        """
+        self._check_writable()
+        if reply not in self.replies():
+            raise KeyError(f"turn {self.id!r} has no reply {reply}")
+        ledger = self._ledger
+        async with ledger.lock:
+            self._check_writable()
+            start = replace(ledger.start, seq=ledger.seq)
+            async with ledger.db.transaction() as tx:
+                await tx.execute(f"DELETE FROM {STEPS} WHERE n >= ?", [reply])
+                await restart(tx, start)
+            ledger.start = start
+            ledger.next = min(ledger.next, reply)
+            cut = bisect.bisect_left(self._entries, reply, key=_position)
+            kept, dropped = self._entries[:cut], self._entries[cut:]
+            # The dropped calls are not made: their ids may be made again, by the reply that replaces them.
+            ledger.ids.difference_update(call.id for entry in dropped for call in entry.calls)
+            ledger.ids.update(call.id for entry in kept for call in entry.calls)
+            self._entries, self._results, self._open = kept, {}, []
+            for entry in kept:
+                self._index(entry, note=False)
+
+    async def answered(self, answer: str, status: Status = "answered") -> None:
+        """Store the turn's ``answer``, how it ended (``status``) and what it carries, in one update of its row.
+
+        The answer's message is the turn's last message of the assistant, whose
+        id the ``messages`` view's summary gives it; a turn that has none gets
+        ``answer`` as its reply first.
+        """
+        if not any(entry.said is not None and entry.said[0] == "assistant" for entry in self.items):
+            await self.append_reply(self._ledger.items.reply(answer, self._carried.get("agent")))
+        ledger = self._ledger
+        async with ledger.lock:
+            self._check_writable()
+            agent, carried = ledger.carried()
+            replied = next((e.agent for e in reversed(self._entries) if e.reply is not None), None)
+            agent = self._carried.get("agent") or replied or agent
+            carried = self._carried.get("carried", carried)
+            at = next(e.n for e in reversed(self._entries) if e.said is not None and e.said[0] == "assistant")
+            seq = ledger.seq + 1
+            await ledger.db.execute(
+                f"UPDATE {TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? "
+                f"WHERE n = ?",
+                [status, answer, agent, carried, at, seq, self.n],
+            )
+            ledger.seq = seq
+            prompt = self.prompt
+            prompt.status, prompt.answer, prompt.agent, prompt.carried = status, answer, agent, carried
+            prompt.answered_at, prompt.answered_seq = at, seq
+
+    async def close(self, ctx: SessionContext, status: Status, note: str) -> None:
+        """Close the turn (stopped, refused, failed, or ended once its invocation is gone) with ``note``.
+
+        Each of the turn's tool calls without a result gets one: the error its
+        Restate call returned, a note that it did happen if it returned, or
+        else ``note``. Then ``note`` is the turn's last message, and its
+        answer. The calls' outcomes are those of the invocation that made the
+        turn's prompt: this one, or an earlier one whose calls are still
+        stored. A turn that has its answer has nothing to close.
+        """
+        if self.status is not None:
+            return
+        items = self._ledger.items
+        calls = self.open_calls()
+        returned = await outcomes(ctx, [call.id for call in calls], invocation_of(self.id))
+        results = items.results([(call, cut_off_result(returned, call.id, note)) for call in calls])
+        await self.append(*results, items.reply(note))
+        await self.answered(note, status)
+
+    def _check_writable(self) -> None:
+        """Refuse a write unless this is the latest turn and has no answer: only its run (or its close) writes it."""
+        self._ledger.check_open()
+        if self._ledger.latest is not self or self.status is not None:
+            raise RuntimeError(f"turn {self.id!r} is not the turn being answered: only that turn is written")
+
+    async def _insert(self, made: Callable[[int], list[Entry]]) -> int:
+        """Store the entries that ``made`` makes from the next position, and return that position.
+
+        The position is taken once the appends before have stored theirs, so
+        appends that run at once each get places of their own.
+        """
+        ledger = self._ledger
+        async with ledger.lock:
+            self._check_writable()
+            n = ledger.next
+            added = made(n)
+            sql = f"INSERT INTO {STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)"
+            rows = [
+                [e.n, self.n, ledger.seq + i, ledger.items.dump(e.item), e.reply, e.agent]
+                for i, e in enumerate(added, 1)
+            ]
+            if len(rows) == 1:
+                # One statement commits on its own.
+                await ledger.db.execute(sql, rows[0])
+            else:
+                async with ledger.db.transaction() as tx:
+                    # The same SQL for each row: the database prepares it once.
+                    for row in rows:
+                        await tx.execute(sql, row)
+            ledger.seq += len(rows)
+            ledger.next = n + len(rows)
+            self._add(added)
+            return n
 
 
 class Conversation:
     """The conversation in the key's database, loaded once and kept in step with it.
 
-    It is read from memory: ``transcript``, ``entries`` and the methods under
-    *Reading*. Only its own methods change it: ``ask``, ``append``,
-    ``append_reply``, ``answered`` and ``drop`` write to the database and to
-    memory alike, one after another, until ``seal`` closes it to writes.
+    The conversation is turns (``Turn``): the transcript, every turn's prompt
+    and answer, as far back as a turn needs it; and the window, the latest
+    turns whole. A turn is read and written through its ``Turn``, and only the
+    latest one is written; the conversation composes the turns into what the
+    model gets (``history``), until ``seal`` closes it to writes.
 
-    ``entries`` are the window's turns, whole: each prompt, then its turn's
-    items, in order. They always reach the end of the conversation, so the
-    run of the latest turn reads them. Each of their items is read (its text,
-    calls and results) once, as it is loaded or appended.
-
-    Tool calls and their results are matched by the call's id, within the
-    window: each call's id must be its own, as model providers make them. A
-    call whose id an earlier call has (or none, read as ``""``) is logged, as
-    its result may be taken for the other's.
+    Tool calls and their results are matched by the call's id, within a turn:
+    each call's id must be its own, as model providers make them. A call whose
+    id an earlier call has (or none, read as ``""``) is logged, as its result
+    may be taken for the other's.
     """
 
     def __init__(
@@ -380,7 +707,7 @@ class Conversation:
         Args:
             db: The key's database.
             items: The framework's items.
-            entries: The window's entries, in order: its prompts, and their items.
+            entries: The window's entries, in order: each prompt, then its turn's items.
             start: Where the conversation starts.
             transcript: The turns' prompts, in order, the window's being the same objects as in ``entries``:
                 by default, those of ``entries``.
@@ -394,61 +721,24 @@ class Conversation:
         self.budget = budget
         self.size: Window = window
         """How many of the latest answered turns are loaded whole: the window's size."""
-        self._start = start or Start()
-        self._transcript = transcript if transcript is not None else [e for e in entries if e.prompt is not None]
+        start = start or Start()
+        transcript = transcript if transcript is not None else [e for e in entries if e.prompt is not None]
         positions = [n for n in (last, entries[-1].n if entries else None) if n is not None]
-        positions.extend(turn.n for turn in self._transcript[-1:])
-        self._next = max(self._start.n, max(positions) + 1 if positions else 0)
-        """The next position to give."""
-        self._seq = max(self._start.seq, seq)
-        """The last ``seq`` given."""
-        self._entries: list[Entry] = []
-        self._results: dict[str, Result] = {}
-        """The tool calls' results, by their calls' ids."""
-        self._open: list[Call] = []
-        """The tool calls that have no result, in the order they were made: each of them, even if ids repeat."""
-        self._called: set[str] = set()
-        """The ids of the tool calls made."""
-        self._prompts: dict[str, Entry] = {e.prompt: e for e in self._transcript if e.prompt is not None}
-        """The turns, by their prompts' ids."""
-        self._carried: dict[str, str] = {}
-        """What the turn being answered carries (``agent``, ``carried``), stored with its answer."""
-        self._warned = False
-        """Whether a call's id that an earlier call has was logged: once is enough."""
-        self._closed = False
-        self._writing = asyncio.Lock()
-        """Held while the conversation changes: tool calls run at once append their results one after another."""
-        self._add(entries)
-
-    def _add(self, entries: list[Entry]) -> None:
+        positions.extend(turn.n for turn in transcript[-1:])
+        following = max(start.n, max(positions) + 1 if positions else 0)
+        self._ledger = _Ledger(db, items, start, transcript, following, max(start.seq, seq))
+        self._turns: list[Turn] = []
+        grouped: list[tuple[Entry, list[Entry]]] = []
         for entry in entries:
-            entry.said, entry.calls, entry.results = self.items.read(entry.item)
-            self._index(entry)
-        self._entries.extend(entries)
-
-    def _index(self, entry: Entry) -> None:
-        for call in entry.calls:
-            if call.id in self._called and not self._warned:
-                self._warned = True
-                _logger.warning(
-                    "Tool call id %r is used by more than one call: the conversation matches results to calls by id, "
-                    "so a call may be taken as answered by another's result",
-                    call.id,
-                )
-            self._called.add(call.id)
-            if call.id not in self._results:
-                self._open.append(call)
-        for result in entry.results:
-            self._results[result.id] = result
-            if any(call.id == result.id for call in self._open):
-                self._open = [call for call in self._open if call.id != result.id]
-
-    def _reindex(self) -> None:
-        self._results.clear()
-        self._open.clear()
-        self._called.clear()
-        for entry in self._entries:
-            self._index(entry)
+            if entry.prompt is not None:
+                grouped.append((entry, []))
+            elif grouped:
+                grouped[-1][1].append(entry)
+            else:
+                raise ValueError(f"entry {entry.n} comes before any turn's prompt")
+        self._turns = [Turn(self._ledger, prompt, items) for prompt, items in grouped]
+        if self._turns and transcript and self._turns[-1].prompt is transcript[-1]:
+            self._ledger.latest = self._turns[-1]
 
     @classmethod
     async def load(
@@ -479,60 +769,95 @@ class Conversation:
         whole = transcript[window_start(transcript, window) :]
         steps: list[Entry] = []
         if whole:
-            stored = await db.values(
-                f"SELECT n, turn, item, reply, agent FROM {STEPS} WHERE n > ? ORDER BY n", [whole[0].n]
-            )
+            stored = await db.values(f"SELECT n, item, reply, agent FROM {STEPS} WHERE n > ? ORDER BY n", [whole[0].n])
             steps = [
-                Entry(
-                    int(typing.cast(int, n)),
-                    items.load(str(item)),
-                    reply=_int(reply),
-                    agent=_str(agent),
-                    turn=_int(turn),
-                )
-                for n, turn, item, reply, agent in stored
+                Entry(int(typing.cast(int, n)), items.load(str(item)), reply=_int(reply), agent=_str(agent))
+                for n, item, reply, agent in stored
             ]
         entries = sorted([*whole, *steps], key=_position)
         return cls(db, items, entries, start, transcript=transcript, last=last, seq=seq, budget=budget, window=window)
 
-    # --- Reading ---
-
-    @property
-    def entries(self) -> Sequence[Entry]:
-        """The entries of the window's turns, in order (by position): each prompt, and its turn's items.
-
-        To read: the conversation changes only through its own methods.
-        """
-        return self._entries
+    # --- Reading: the conversation as a whole ---
 
     @property
     def transcript(self) -> Sequence[Entry]:
         """The turns' prompts, in order, from the first after the summary (from the first of all, if loaded whole).
 
-        Each has its turn's ``answer``, and what the turn carried (``agent``, ``carried``) once answered.
+        Each has its turn's ``status`` and ``answer``, and what the turn carried (``agent``, ``carried``), once
+        it has them.
         """
-        return self._transcript
+        return self._ledger.transcript
+
+    @property
+    def turns(self) -> Sequence[Turn]:
+        """The window's turns, whole, in order: the last of them is the latest turn."""
+        return self._turns
+
+    @property
+    def turn(self) -> Turn:
+        """The latest turn: the one being answered, during a run.
+
+        Raises:
+            RuntimeError: If the latest turn is not loaded whole (or there is none).
+        """
+        if self._ledger.latest is None:
+            raise RuntimeError("the conversation has no turn loaded whole yet: ask first")
+        return self._ledger.latest
+
+    def running(self) -> Turn | None:
+        """Return the latest turn if it is being answered: it has no answer yet."""
+        latest = self._ledger.latest
+        return latest if latest is not None and latest.status is None else None
+
+    @property
+    def entries(self) -> Sequence[Entry]:
+        """The window's turns, flat, in order (by position): each prompt, then its turn's items.
+
+        To read what the model was given, across turns (a framework's ids, say). A turn's own state (its
+        open calls, its final reply) is its ``Turn``'s.
+        """
+        return [entry for turn in self._turns for entry in turn.entries]
 
     @property
     def summary(self) -> str | None:
         """The summary of the turns before the transcript, if they have one (and the transcript is after them)."""
-        first = self._transcript[0].n if self._transcript else self._next
-        summarized = self._start.summarized
-        return self._start.summary if summarized is not None and first >= summarized else None
+        transcript, start = self._ledger.transcript, self._ledger.start
+        first = transcript[0].n if transcript else self._ledger.next
+        return start.summary if start.summarized is not None and first >= start.summarized else None
 
     @property
     def closed(self) -> bool:
         """Whether ``seal`` closed the conversation to writes."""
-        return self._closed
+        return self._ledger.closed
+
+    def answer_of(self, prompt_id: str) -> str | None:
+        """Return the answer of the turn of prompt ``prompt_id``, if the transcript has it and it has one."""
+        return next((turn.answer for turn in self._ledger.transcript if turn.prompt == prompt_id), None)
+
+    def carried(self) -> tuple[str | None, str | None]:
+        """Return the agent the conversation is with, and the framework's state, as the latest answered turn left them."""
+        return self._ledger.carried()
+
+    def knows_result(self, call_id: str) -> bool:
+        """Return whether a turn of the window holds the result of tool call ``call_id``: the model was given it."""
+        return any(turn.has_result(call_id) for turn in self._turns)
+
+    def new_results(self, items: Sequence[Item]) -> list[Item]:
+        """Return the items of ``items`` (a framework's run) that hold a tool call's result the window lacks.
+
+        Results are found by their calls' ids, not by their place: what a
+        framework hands back may be trimmed, or be the whole conversation again.
+        """
+        return [item for item in items if any(not self.knows_result(r.id) for r in self.items.read(item).results)]
 
     def window(self) -> int:
         """Return the position of the window's first turn: the turns before it are in the transcript only."""
-        return self._entries[0].n if self._entries else self._next
+        return self._turns[0].n if self._turns else self._ledger.next
 
     def _before(self) -> list[Entry]:
         """Return the turns before the window, which the model sees as their messages and answers."""
         start = self.window()
-        return [turn for turn in self._transcript if turn.n < start and turn.answer is not None]
+        return [turn for turn in self._ledger.transcript if turn.n < start and turn.answer is not None]
 
     def _size(self, turn: Entry) -> int:
         """Return the size of ``turn`` as the transcript has it, in characters: its message and its answer."""
@@ -560,11 +885,12 @@ class Conversation:
         That is the window as the next turn loads it, once the latest turn is
         answered (see ``_Walk``).
         """
+        transcript = self._ledger.transcript
         if self.size == "all":
-            return [], self._transcript[0].n if self._transcript else self._next
-        first = window_start(self._transcript, self.size)
-        start = self._transcript[first].n if first < len(self._transcript) else self._next
-        return [turn for turn in self._transcript[:first] if turn.answer is not None], start
+            return [], transcript[0].n if transcript else self._ledger.next
+        first = window_start(transcript, self.size)
+        start = transcript[first].n if first < len(transcript) else self._ledger.next
+        return [turn for turn in transcript[:first] if turn.answer is not None], start
 
     def overflowing(self) -> bool:
         """Return whether the turns before the next turn's window outgrow ``budget``: then they are summarized."""
@@ -586,7 +912,7 @@ class Conversation:
         return summarized, kept[0].n if kept else start
 
     def history(self) -> list[Item]:
-        """Return the items the model gets, in order: what a framework's run starts from.
+        """Return the items the model gets, in order: the one place where turns are composed, flat.
 
         That is the summary of the earliest turns, if they have one; the turns
         before the window, as their prompts and answers, as many of the latest
@@ -597,204 +923,40 @@ class Conversation:
             out.extend(summary_items(self.items, summary))
         for turn in self.earlier():
             out.extend((turn.item, self.items.reply(turn.answer or "", turn.agent)))
-        out.extend(entry.item for entry in self._entries)
+        out.extend(entry.item for turn in self._turns for entry in turn.entries)
         return out
-
-    def after(self, n: int) -> Sequence[Entry]:
-        """Return the entries after position ``n``, in order: those of the run that the prompt at ``n`` started, say."""
-        return self._entries[bisect.bisect_right(self._entries, n, key=_position) :]
-
-    def reply_entries(self, reply: int) -> Sequence[Entry]:
-        """Return the entries of the model's reply ``reply``, in order: they follow one another, from position ``reply``."""
-        first = bisect.bisect_left(self._entries, reply, key=_position)
-        end = first
-        while end < len(self._entries) and self._entries[end].reply == reply:
-            end += 1
-        return self._entries[first:end]
-
-    def answer_of(self, prompt_id: str) -> str | None:
-        """Return the answer of prompt ``prompt_id``, if it has one."""
-        prompt = self._prompts.get(prompt_id)
-        return prompt.answer if prompt is not None else None
-
-    def running(self) -> Entry | None:
-        """Return the prompt of the latest turn if it has no answer yet: the turn being answered."""
-        latest = self._transcript[-1] if self._transcript else None
-        return latest if latest is not None and latest.answer is None else None
-
-    def last_reply(self) -> int | None:
-        """Return the id of the model's reply that the conversation ends with, if it ends with one."""
-        return self._entries[-1].reply if self._entries else None
-
-    def agent_of(self, reply: int) -> str | None:
-        """Return the agent that gave the model's reply ``reply``."""
-        entries = self.reply_entries(reply)
-        return entries[0].agent if entries else None
-
-    def has_result(self, call_id: str) -> bool:
-        """Return whether tool call ``call_id`` has a result."""
-        return call_id in self._results
-
-    def stored(self, call_id: str, failed: str | None = None) -> bool:
-        """Return whether tool call ``call_id`` has its result: not an error, unless it is ``failed``, its own."""
-        result = self._results.get(call_id)
-        return result is not None and (not result.failed or result.output == failed)
-
-    def unanswered(self) -> list[Call]:
-        """Return the tool calls of the window that have no result, in the order they were made."""
-        return list(self._open)
-
-    def new_results(self, items: Sequence[Item]) -> list[Item]:
-        """Return the items of ``items`` (a framework's run) that hold a tool call's result the conversation lacks.
-
-        Results are found by their calls' ids, not by their place: what a
-        framework hands back may be trimmed, or be the whole conversation again.
-        """
-        return [item for item in items if any(r.id not in self._results for r in self.items.read(item).results)]
-
-    def final_reply(self) -> str | None:
-        """Return the text of the model's reply the conversation ends with, if it ends the run: text, and no tool calls."""
-        reply = self.last_reply()
-        if reply is None:
-            return None
-        entries = self.reply_entries(reply)
-        if any(e.calls for e in entries):
-            return None
-        said = [e.said for e in entries if e.said is not None]
-        return said[-1][1] if said else None
 
     # --- Writing ---
 
-    async def ask(self, prompt_id: str, text: str) -> None:
-        """Start the turn of prompt ``prompt_id``, with ``text``."""
-        async with self._writing:
-            self._check_open()
-            n = self._next
-            entry = Entry(n, self.items.prompt(text), prompt=prompt_id, turn=n)
+    async def ask(self, prompt_id: str, text: str) -> Turn:
+        """Start the turn of prompt ``prompt_id``, with ``text``, and return it: the latest turn now."""
+        ledger = self._ledger
+        async with ledger.lock:
+            ledger.check_open()
+            if (running := self.running()) is not None:
+                raise RuntimeError(f"turn {running.id!r} has no answer yet: turns never overlap")
+            n = ledger.next
+            entry = Entry(n, self.items.prompt(text), prompt=prompt_id)
             await self.db.execute(
                 f"INSERT INTO {TURNS} (n, seq, prompt, item) VALUES (?, ?, ?, ?)",
-                [n, self._seq + 1, prompt_id, self.items.dump(entry.item)],
+                [n, ledger.seq + 1, prompt_id, self.items.dump(entry.item)],
             )
-            self._seq += 1
-            self._next = n + 1
-            self._transcript.append(entry)
-            self._prompts[prompt_id] = entry
-            self._carried = {}
-            self._add([entry])
-
-    async def append(self, *items: Item) -> None:
-        """Append ``items`` (a tool's results, say) to the latest turn, in one transaction.
-
-        Appends may run at once, such as those of tool calls that run at once:
-        each is stored after the ones before it.
-        """
-        await self._insert(lambda n, turn: [Entry(n + i, item, turn=turn) for i, item in enumerate(items)])
-
-    async def append_reply(self, *items: Item, agent: str | None = None) -> int:
-        """Append the model's reply, of ``items`` (given by ``agent``), to the latest turn, and return its id."""
-        return await self._insert(
-            lambda n, turn: [Entry(n + i, item, reply=n, agent=agent, turn=turn) for i, item in enumerate(items)]
-        )
-
-    def carry(self, *, agent: str | None = None, state: str | None = None) -> None:
-        """Keep what the turn being answered carries to the turns after it: it is stored with its answer.
-
-        Args:
-            agent: The agent the conversation is with. By default, the agent of the turn's latest reply,
-                or else the previous turn's.
-            state: The framework's own state, as text (ADK's session state, say): the latest is kept.
-                By default, the previous turn's.
-        """
-        if agent is not None:
-            self._carried["agent"] = agent
-        if state is not None:
-            self._carried["carried"] = state
-
-    def carried(self) -> tuple[str | None, str | None]:
-        """Return the agent the conversation is with, and the framework's state, as the latest answered turn left them."""
-        latest = next((turn for turn in reversed(self._transcript) if turn.answer is not None), None)
-        return (latest.agent, latest.carried) if latest is not None else (None, None)
-
-    async def answered(self, prompt_id: str, answer: str) -> None:
-        """Store ``answer`` as the answer of prompt ``prompt_id``, which the conversation has, with what it carries."""
-        prompt = self._prompts.get(prompt_id)
-        if prompt is None:
-            raise KeyError(f"the conversation has no prompt {prompt_id!r}")
-        async with self._writing:
-            self._check_open()
-            agent, carried = self.carried()
-            replied = next(
-                (e.agent for e in reversed(self._entries) if e.turn == prompt.n and e.reply is not None), None
-            )
-            agent = self._carried.get("agent") or replied or agent
-            carried = self._carried.get("carried", carried)
-            await self.db.execute(
-                f"UPDATE {TURNS} SET answer = ?, agent = ?, carried = ? WHERE prompt = ?",
-                [answer, agent, carried, prompt_id],
-            )
-            prompt.answer, prompt.agent, prompt.carried = answer, agent, carried
-
-    async def drop(self, reply: int) -> None:
-        """Drop the model's reply ``reply``, and what came after it, to ask the model again.
-
-        It is one range delete on the primary key: the reply's items start at
-        position ``reply``, and what follows them (their tools' results, say)
-        was made from the reply. The positions are given again, so the new
-        reply's messages take the dropped ones' ids; the ``seq`` is kept, so
-        that a client's cursor still sees them.
-        """
-        async with self._writing:
-            self._check_open()
-            start = replace(self._start, seq=self._seq)
-            async with self.db.transaction() as tx:
-                await tx.execute(f"DELETE FROM {STEPS} WHERE n >= ?", [reply])
-                await restart(tx, start)
-            self._start = start
-            del self._entries[bisect.bisect_left(self._entries, reply, key=_position) :]
-            self._next = min(self._next, reply)
-            self._reindex()
+            ledger.seq += 1
+            ledger.next = n + 1
+            ledger.transcript.append(entry)
+            turn = Turn(ledger, entry)
+            self._turns.append(turn)
+            ledger.latest = turn
+            return turn
 
     async def seal(self) -> None:
         """Close the conversation to writes, once those under way are stored.
 
-        For a stopped run: once its run is closed, the run (unwinding, or a task
+        For a stopped run: once its turn is closed, the run (unwinding, or a task
         of it left behind) stores nothing more, and any write it tries fails.
         """
-        async with self._writing:
-            self._closed = True
-
-    def _check_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("the run was stopped: it stores nothing more")
-
-    async def _insert(self, made: Callable[[int, int], list[Entry]]) -> int:
-        """Store the entries that ``made`` makes from the next position, in the latest turn, and return that position.
-
-        The position is taken once the appends before have stored theirs, so
-        appends that run at once each get places of their own.
-        """
-        async with self._writing:
-            self._check_open()
-            if not self._transcript:
-                raise RuntimeError("the conversation has no turn to append to: ask first")
-            n = self._next
-            added = made(n, self._transcript[-1].n)
-            sql = f"INSERT INTO {STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)"
-            rows = [
-                [e.n, e.turn, self._seq + i, self.items.dump(e.item), e.reply, e.agent] for i, e in enumerate(added, 1)
-            ]
-            if len(rows) == 1:
-                # One statement commits on its own.
-                await self.db.execute(sql, rows[0])
-            else:
-                async with self.db.transaction() as tx:
-                    # The same SQL for each row: the database prepares it once.
-                    for row in rows:
-                        await tx.execute(sql, row)
-            self._seq += len(rows)
-            self._next = n + len(rows)
-            self._add(added)
-            return n
+        async with self._ledger.lock:
+            self._ledger.closed = True
 
 
 def _position(entry: Entry) -> int:
@@ -812,20 +974,32 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
     latest back, a page at a time, and the reading stops once they hold the
     window and more of the turns before it than the budget holds.
     """
-    sql = f"SELECT n, prompt, item, answer, agent, carried FROM {TURNS} WHERE n >= ? AND n < ? ORDER BY n DESC LIMIT ?"
+    sql = (
+        f"SELECT n, prompt, item, status, answer, agent, carried, answered_at, answered_seq FROM {TURNS} "
+        "WHERE n >= ? AND n < ? ORDER BY n DESC LIMIT ?"
+    )
     read: list[Entry] = []
     before = 2**63 - 1
     walk = None if bounded is None else _Walk(bounded[0])
     left = None if bounded is None else bounded[1] * 4
     while True:
         rows = await db.values(sql, [first, before, PAGE if bounded is not None else 2**62])
-        for n, prompt, item, answer, agent, carried in rows:
+        for n, prompt, item, status, answer, agent, carried, answered_at, answered_seq in rows:
             at = int(typing.cast(int, n))
             entry = Entry(
-                at, items.load(str(item)), str(prompt), _str(answer), agent=_str(agent), turn=at, carried=_str(carried)
+                at,
+                items.load(str(item)),
+                str(prompt),
+                _str(answer),
+                agent=_str(agent),
+                turn=at,
+                carried=_str(carried),
+                status=typing.cast(Status | None, _str(status)),
+                answered_at=_int(answered_at),
+                answered_seq=_int(answered_seq),
             )
             read.append(entry)
-            if walk is None or left is None or walk.holds(entry.answer):
+            if walk is None or left is None or walk.holds(entry.status):
                 continue
             if entry.answer is not None:
                 # A turn before the window: the model sees its message and answer, while the budget holds them.
@@ -849,34 +1023,14 @@ def _int(value: object) -> int | None:
 # --- Answering a prompt ---------------------------------------------------------------------------
 
 Run = Callable[[Conversation], Awaitable[str]]
-"""A framework's run: from the conversation (which ends with a prompt, or with the run an earlier attempt left
-unfinished) to the prompt's answer, appending each step as it goes. A tool's error fails the attempt."""
+"""A framework's run: from the conversation, whose latest turn (``conversation.turn``) is the one to answer (just
+asked, or left unfinished by an earlier attempt), to its answer. It reads what the model gets from the
+conversation (``history``), and stores each step in the turn as it goes. A tool's error fails the attempt."""
 
 
 def invocation_of(prompt_id: str) -> str:
     """Return the id of the invocation that made prompt ``prompt_id`` (see ``next_prompt_id``)."""
     return prompt_id.split(":", 1)[0]
-
-
-async def close(ctx: SessionContext, conversation: Conversation, text: str) -> None:
-    """Close the turn being answered (stopped, refused, failed or ended) with ``text``.
-
-    Each tool call without a result gets one: the error its Restate call
-    returned, a note that it did happen if it returned, or else ``text``.
-    Then ``text`` is the reply, and the prompt's answer. A conversation whose
-    latest turn has its answer has nothing to close.
-
-    The calls' outcomes are those of the invocation that made the turn's
-    prompt: this one, or an earlier one whose calls are still stored.
-    """
-    running = conversation.running()
-    if running is None or running.prompt is None:
-        return
-    calls = conversation.unanswered()
-    returned = await outcomes(ctx, [call.id for call in calls], invocation_of(running.prompt))
-    results = conversation.items.results([(call, cut_off_result(returned, call.id, text)) for call in calls])
-    await conversation.append(*results, conversation.items.reply(text))
-    await conversation.answered(running.prompt, text)
 
 
 async def answer_once(
@@ -911,7 +1065,12 @@ async def answer_once(
     async def work() -> str:
         return await _answer(ctx, conversation, prompt_id, text, run)
 
-    answered = await answering(ctx, conversation.stored, work)
+    def stored(call_id: str, failed: str | None) -> bool:
+        # The Restate calls of this invocation are its turn's.
+        running = conversation.running()
+        return running is not None and running.id == prompt_id and running.stored(call_id, failed)
+
+    answered = await answering(ctx, stored, work)
     definition = definition_of(ctx)
     if settings.summarize is not None and definition is not None and conversation.overflowing():
         # Summarized in an invocation of its own, which the key runs before its next message.
@@ -921,11 +1080,11 @@ async def answer_once(
 
 async def _answer(ctx: SessionContext, conversation: Conversation, prompt_id: str, text: str, run: Run) -> str:
     running = conversation.running()
-    if running is not None and running.prompt != prompt_id:
+    if running is not None and running.id != prompt_id:
         # Turns never overlap, so the invocation of this one is gone: it ends unanswered.
-        await close(ctx, conversation, ENDED)
-    if conversation.running() is None:
-        await conversation.ask(prompt_id, text)
+        await running.close(ctx, "ended", ENDED)
+        running = None
+    turn = running or await conversation.ask(prompt_id, text)
     stop = stop_signal_of(ctx)
     going = run(conversation)
     try:
@@ -935,37 +1094,39 @@ async def _answer(ctx: SessionContext, conversation: Conversation, prompt_id: st
         raise
     except TerminalError as error:
         if error.status_code == CANCELLATION:
-            # Cancelled: close the run, so that the next prompt starts afresh.
-            await close(ctx, conversation, CANCELLED)
+            # Cancelled: close the turn, so that the next prompt starts afresh.
+            await turn.close(ctx, "cancelled", CANCELLED)
             await conversation.seal()
             raise
-        # Failed for good: close the run with the error, so that the next prompt does not run into it again.
-        await close(ctx, conversation, f"Error: {error.message}")
+        # Failed for good: close the turn with the error, so that the next prompt does not run into it again.
+        await turn.close(ctx, "failed", f"Error: {error.message}")
         raise
     except Exception as error:
-        # Refused for good (a wrong API key, say): close the run unanswered and fail with a terminal error.
+        # Refused for good (a wrong API key, say): close the turn unanswered and fail with a terminal error.
         refused = refusal_of(ctx, error)
         if refused is None:
             raise
-        await close(ctx, conversation, UNANSWERED)
+        await turn.close(ctx, "refused", UNANSWERED)
         raise refused from error
-    await conversation.answered(prompt_id, answer)
+    await turn.answered(answer)
     return stored_answer(answer)
 
 
 async def settle(ctx: SessionContext, items: Items, invocation_id: str) -> bool:
-    """Close the latest turn with ``ENDED`` if invocation ``invocation_id`` made it and left it without an answer.
+    """Close the latest turn (``ended``) if invocation ``invocation_id`` made it and left it without an answer.
 
     The companion has this done when it finds the turn's invocation gone. It
     is idempotent: a turn that has its answer (closed by a newer turn first,
     say) is left as it is. Return whether it closed the turn.
     """
     await SCHEMA.ensure(ctx.db)
-    row = await ctx.db.get(f"SELECT prompt, answer FROM {TURNS} ORDER BY n DESC LIMIT 1")
-    if row is None or row["answer"] is not None or invocation_of(str(row["prompt"])) != invocation_id:
+    row = await ctx.db.get(f"SELECT prompt, status FROM {TURNS} ORDER BY n DESC LIMIT 1")
+    if row is None or row["status"] is not None or invocation_of(str(row["prompt"])) != invocation_id:
         return False
-    conversation = await Conversation.load(ctx.db, items, 0)
-    await close(ctx, conversation, ENDED)
+    running = (await Conversation.load(ctx.db, items, 0)).running()
+    if running is None:
+        return False
+    await running.close(ctx, "ended", ENDED)
     return True
 
 

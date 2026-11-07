@@ -68,6 +68,15 @@ class ChatMessage(Said):
     """The message's id, which increases through the conversation and stays the same when the message changes."""
 
 
+View = Literal["full", "summary"]
+"""How much of each turn the ``messages`` view shows.
+
+``"full"``: every message, the tool calls with their outputs. ``"summary"``:
+the user's message and the answer, one each per turn, with the same ids as in
+the full view.
+"""
+
+
 class MessagesRequest(TypedDict, total=False):
     """The request of the ``messages`` view.
 
@@ -81,6 +90,8 @@ class MessagesRequest(TypedDict, total=False):
     """Return the messages before the one with this ``id``, for scrolling back."""
     cursor: int
     """Return the messages that are new or changed since this cursor, in the order they changed."""
+    view: View
+    """How much of each turn to show: ``"full"`` (the default) or ``"summary"``."""
 
 
 class _Messages(TypedDict):

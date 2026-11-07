@@ -43,7 +43,7 @@ except ImportError as error:
         "restate.agents.client needs Restate's client: install the client extra, pip install restate-sdk[client]"
     ) from error
 
-from restate.agents._api import ChatMessage, Messages, MessagesRequest, Signal, Status, Waiting
+from restate.agents._api import ChatMessage, Messages, MessagesRequest, Signal, Status, View, Waiting
 from restate.agents._object import Synced, SyncRequest
 from restate.client_types import HttpError, RestateClient
 
@@ -120,10 +120,21 @@ class AgentClient:
         return sent.invocation_id
 
     async def messages(
-        self, *, limit: int | None = None, before: int | None = None, cursor: int | None = None
+        self,
+        *,
+        limit: int | None = None,
+        before: int | None = None,
+        cursor: int | None = None,
+        view: View | None = None,
     ) -> Messages:
-        """Return a page of the conversation: the latest ``limit`` messages (before id ``before``), or what changed since ``cursor``."""
+        """Return a page of the conversation: the latest ``limit`` messages (before id ``before``), or what changed since ``cursor``.
+
+        ``view`` is how much of each turn to show: ``"full"`` (the default), or ``"summary"``, the user's
+        message and the answer.
+        """
         request: MessagesRequest = {}
+        if view is not None:
+            request["view"] = view
         if limit is not None:
             request["limit"] = limit
         if before is not None:
@@ -165,7 +176,9 @@ class AgentClient:
         """Forget the conversation (stopping the message being answered, whose id it returns)."""
         return cast("str | None", (await self._call("clear"))["stopped"])
 
-    async def follow(self, *, cursor: int = 0, wait: float = 50) -> AsyncGenerator[Followed, None]:
+    async def follow(
+        self, *, cursor: int = 0, wait: float = 50, view: View | None = None
+    ) -> AsyncGenerator[Followed, None]:
         """Follow the conversation: what the agent does and the messages so far, then each change, as it comes.
 
         Each change is one ``sync`` that waits in Restate (for at most
@@ -176,10 +189,13 @@ class AgentClient:
         Args:
             cursor: Start after this cursor (a page's, or a change's); by default, from the start.
             wait: How long one wait for a change lasts at most, in seconds.
+            view: How much of each turn to show: ``"full"`` (the default), or ``"summary"``.
         """
         revision: int | None = None
         while True:
             request: SyncRequest = {"cursor": cursor, "timeoutSeconds": wait}
+            if view is not None:
+                request["view"] = view
             if revision is not None:
                 request["revision"] = revision
             synced = await self._synced(request)

@@ -92,7 +92,7 @@ from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
 from restate.agents._common import from_tool
-from restate.agents._conversation import Conversation, Entry, Run
+from restate.agents._conversation import Conversation, Run, Turn
 from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
 from restate.agents.langgraph._context import running as running_graph
@@ -161,7 +161,7 @@ async def _structured_version(app: Any) -> str:
     return str(versions.get(_STRUCTURED, ""))
 
 
-async def _answer(app: Any, conversation: Conversation, running: Entry, state: dict[str, Any], before: str) -> str:
+async def _answer(app: Any, turn: Turn, state: dict[str, Any], before: str) -> str:
     """Return the run's answer: the JSON of the ``structured_response`` it wrote, else its last AI message's text.
 
     A ``structured_response`` counts only if the run wrote it (its channel's
@@ -174,14 +174,14 @@ async def _answer(app: Any, conversation: Conversation, running: Entry, state: d
         return json.dumps(to_jsonable_python(structured))
     copied = [
         item
-        for e in conversation.after(running.n)
+        for e in turn.items
         if isinstance(item := typing.cast(BaseMessage, e.item), AIMessage) and item.id is not None
     ]
     return str(copied[-1].text) if copied else ""
 
 
 async def _copied(
-    ctx: SessionContext, conversation: Conversation, known: set[str], messages: Sequence[BaseMessage], prompt: str
+    ctx: SessionContext, turn: Turn, known: set[str], messages: Sequence[BaseMessage], prompt: str
 ) -> None:
     """Copy the AI and tool messages of ``messages`` (the graph's state) that the conversation does not have yet.
 
@@ -203,20 +203,20 @@ async def _copied(
     ]
     for message in new:
         if isinstance(message, AIMessage):
-            await conversation.append_reply(message)
+            await turn.append_reply(message)
         else:
-            await conversation.append(message)
+            await turn.append(message)
         known.add(typing.cast(str, message.id))
     if new:
         await stepped(ctx)
 
 
-def _prompt_id(entry: Entry) -> str:
-    """Return the id of a prompt's ``HumanMessage`` in the graph: the conversation's id of the prompt."""
-    return f"prompt:{entry.prompt}"
+def _prompt_id(turn: Turn) -> str:
+    """Return the id of a turn's prompt, as a ``HumanMessage`` in the graph: the conversation's id of the turn."""
+    return f"prompt:{turn.id}"
 
 
-def _closing(conversation: Conversation, running: Entry, messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+def _closing(conversation: Conversation, turn: Turn, messages: Sequence[BaseMessage]) -> list[BaseMessage]:
     """Return what the conversation has of the previous prompt's run that the graph does not.
 
     That is what closed the run, if it was stopped, refused or failed: the
@@ -228,19 +228,19 @@ def _closing(conversation: Conversation, running: Entry, messages: Sequence[Base
     history, say) is not brought back. Each gets an id of its own, so that
     it is carried once.
     """
-    earlier = [e for e in conversation.entries if e.prompt is not None and e.n < running.n]
-    if not earlier:
+    turns = list(conversation.turns)
+    at = turns.index(turn)
+    if at == 0:
         return []
-    previous = earlier[-1]
+    previous = turns[at - 1]
     known = {m.id for m in messages}
-    between = [e for e in conversation.entries if previous.n <= e.n < running.n]
-    copied = any(e.prompt is None and typing.cast(BaseMessage, e.item).id is not None for e in between)
+    copied = any(typing.cast(BaseMessage, e.item).id is not None for e in previous.items)
     carried: list[BaseMessage] = []
-    for entry in between:
+    for entry in previous.entries:
         item = typing.cast(BaseMessage, entry.item)
         if entry.prompt is not None:
-            if not copied and _prompt_id(entry) not in known:
-                carried.append(HumanMessage(str(item.text), id=_prompt_id(entry)))
+            if not copied and _prompt_id(previous) not in known:
+                carried.append(HumanMessage(str(item.text), id=_prompt_id(previous)))
         elif item.id is None and f"closed:{entry.n}" not in known:
             carried.append(item.model_copy(update={"id": f"closed:{entry.n}"}))
     return carried
@@ -333,9 +333,8 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
             return await _run(conversation)
 
     async def _run(conversation: Conversation) -> str:
-        running = conversation.running()
-        assert running is not None and running.prompt is not None
-        prompt_id = _prompt_id(running)
+        turn = conversation.turn
+        prompt_id = _prompt_id(turn)
         saver = SqlCheckpointSaver(ctx.db)
         app = _compiled(graph, saver)
         snapshot = await _stored(app)
@@ -350,9 +349,9 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         config: RunnableConfig = {**THREAD, "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before}}
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
-            await _copied(ctx, conversation, known, messages, prompt_id)
+            await _copied(ctx, turn, known, messages, prompt_id)
             await saver.aprune([THREAD_ID])
-            return await _answer(app, conversation, running, values, before)
+            return await _answer(app, turn, values, before)
         # A run cut off by a crash is resumed: first by the signals its pending interrupts wait for, if any. A new
         # message (or one after a stopped run) starts a run, after what closed the previous run.
         start: Any
@@ -360,15 +359,15 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
             resumes = await _resumed(ctx, saver, await _stored(app))
             start = Command(resume=resumes) if resumes is not None else None
         else:
-            prompt = HumanMessage(str(typing.cast(BaseMessage, running.item).text), id=prompt_id)
-            start = {"messages": [*_closing(conversation, running, messages), prompt]}
+            prompt = HumanMessage(str(typing.cast(BaseMessage, turn.prompt.item).text), id=prompt_id)
+            start = {"messages": [*_closing(conversation, turn, messages), prompt]}
         while True:
             states = app.astream(start, config, context=run_context, durability="sync", stream_mode="values")
             try:
                 async for state in states:
                     values = typing.cast(dict[str, Any], state)
                     await _copied(
-                        ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])), prompt_id
+                        ctx, turn, known, typing.cast(list[BaseMessage], values.get("messages", [])), prompt_id
                     )
             except Exception as error:
                 if (terminal := terminal_of(error)) is not None:
@@ -387,7 +386,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
                     raise TerminalError(BREAKPOINTS)
                 # Only the latest checkpoint of each namespace is read again; a paused or cut-off run keeps it too.
                 await saver.aprune([THREAD_ID])
-                return await _answer(app, conversation, running, values, before)
+                return await _answer(app, turn, values, before)
             start = Command(resume=resumes)
 
     return run

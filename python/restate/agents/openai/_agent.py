@@ -233,13 +233,14 @@ def _current(conversation: Conversation, root: Agent[Any], everyone: dict[str, A
 
     With no reply loaded (the window holds none), it is the agent the latest answered turn left it with.
     """
-    latest = next((e for e in reversed(conversation.entries) if e.reply is not None), None)
-    if latest is None or latest.reply is None:
+    turn = next((turn for turn in reversed(conversation.turns) if turn.replies()), None)
+    if turn is None:
         return everyone.get(conversation.carried()[0] or "", root)
-    agent = everyone.get(latest.agent or "", root)
+    latest = turn.replies()[-1]
+    agent = everyone.get(turn.agent_of(latest) or "", root)
     targets = _handoffs(agent)
-    for call in (call for e in conversation.reply_entries(latest.reply) for call in e.calls):
-        if call.name in targets and conversation.has_result(call.id):
+    for call in (call for e in turn.reply_entries(latest) for call in e.calls):
+        if call.name in targets and turn.has_result(call.id):
             return everyone.get(targets[call.name], agent)
     return agent
 
@@ -265,7 +266,7 @@ class _Hooks(RunHooks[Any]):
         The run's own filter then changes what the model sees, not what is stored.
         """
         if outputs := self.conversation.new_results(data.model_data.input):
-            await self.conversation.append(*outputs)
+            await self.conversation.turn.append(*outputs)
         filtered = data.model_data
         if self.then is not None:
             given = self.then(data)
@@ -278,14 +279,14 @@ class _Hooks(RunHooks[Any]):
     async def on_llm_end(self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse) -> None:
         self.requesting = False
         reply = typing.cast(list[Item], response.to_input_items())
-        await self.conversation.append_reply(*reply, agent=agent.name)
+        await self.conversation.turn.append_reply(*reply, agent=agent.name)
 
     async def on_tool_start(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool) -> None:
         await tool_call_started(self.ctx)
 
     async def on_handoff(self, context: RunContextWrapper[Any], from_agent: Agent[Any], to_agent: Agent[Any]) -> None:
         # The turn carries the agent it handed off to, even if it ends before that agent replies.
-        self.conversation.carry(agent=to_agent.name)
+        self.conversation.turn.carry(agent=to_agent.name)
 
     async def on_tool_end(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool, result: Any) -> None:
         await tool_call_ended(self.ctx)
@@ -301,10 +302,11 @@ async def _resume(
     on. A reply with any other call (a handoff, say) is dropped instead, and
     its agent is asked again.
     """
-    calls = conversation.unanswered()
+    turn = conversation.turn
+    calls = turn.open_calls()
     if not calls:
         return agent
-    cut = next(e for e in conversation.entries if calls[0] in e.calls)
+    cut = next(e for e in turn.entries if calls[0] in e.calls)
     agent = everyone.get(cut.agent or "", agent)
     found = {tool.name: tool for tool in await agent.get_all_tools(RunContextWrapper(context))}
     known = {*found, *_handoffs(agent)}
@@ -318,7 +320,7 @@ async def _resume(
         # A call that only the SDK's runner can make (a handoff, a hosted tool, a tool with guardrails), or decide on
         # (another tool's approval function): ask the agent again instead.
         if cut.reply is not None:
-            await conversation.drop(cut.reply)
+            await turn.drop(cut.reply)
         return agent
     outputs: list[Item] = []
     for call in calls:
@@ -337,7 +339,7 @@ async def _resume(
                 raise
             await tool_call_ended(ctx)
         outputs.extend(ITEMS.results([(call, output)]))
-    await conversation.append(*outputs)
+    await turn.append(*outputs)
     return agent
 
 
@@ -467,14 +469,15 @@ def _run(
     everyone = _agents(root)
 
     async def run(conversation: Conversation) -> str:
-        reply = conversation.last_reply()
-        if reply is not None and (final := conversation.final_reply()) is not None:
-            replier = everyone.get(conversation.agent_of(reply) or "", root)
+        turn = conversation.turn
+        reply = turn.last_reply()
+        if reply is not None and (final := turn.final_reply()) is not None:
+            replier = everyone.get(turn.agent_of(reply) or "", root)
             if not (replier.output_guardrails or config.output_guardrails):
                 # The run had stored its final reply, but not its answer: that is the answer.
                 return final
             # Its output guardrails may not have passed it: ask again, and they run on the new reply.
-            await conversation.drop(reply)
+            await turn.drop(reply)
         with tools_in(ctx):
             return await _go(ctx, conversation, _current(conversation, root, everyone), everyone, config, options)
 
@@ -491,8 +494,9 @@ async def _go(
 ) -> str:
     """Run the ``Runner`` on from the conversation, with the agent it is with, and return the answer."""
     hooks = _Hooks(ctx, conversation, config)
+    turn = conversation.turn
     # The turn is with the agent it starts with until a handoff (``_Hooks.on_handoff``): carried if it ends first.
-    conversation.carry(agent=current.name)
+    turn.carry(agent=current.name)
     filtered = dataclasses.replace(config, call_model_input_filter=hooks.model_input)
     # The SDK's default, unless given: older versions take no None.
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
@@ -503,8 +507,8 @@ async def _go(
         result = await _unwrapped(ctx, run)
     except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:
         # The reply the guardrail blocked is not kept.
-        if (blocked := conversation.last_reply()) is not None:
-            await conversation.drop(blocked)
+        if (blocked := turn.last_reply()) is not None:
+            await turn.drop(blocked)
         raise TerminalError(str(error)) from error
     except TerminalError:
         raise
@@ -515,7 +519,7 @@ async def _go(
         raise
     # The outputs that no model request stored: those of a tool that ends the turn, say.
     if outputs := conversation.new_results(result.to_input_list()):
-        await conversation.append(*outputs)
+        await turn.append(*outputs)
     if getattr(result, "interruptions", None):
         # Calls that wait for an approval, which nothing gives: fail rather than answer without them. The
         # conversation closes them, so that they never run.

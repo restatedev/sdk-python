@@ -31,12 +31,14 @@ stored and loaded, and the `settle` and `compact` handlers, are this SDK's
   database.
 - **Message.** One call of the agent's `chat` handler: one Restate
   invocation, whose id (`inv_1f…`) is also the message's id.
-- **Turn.** The agent answering one message: its `chat` invocation, from its
-  start to its end. A turn is the invocation, not one run of it.
-- **Prompt.** What a turn asks its framework (OpenAI Agents, Pydantic AI,
-  ADK, LangGraph): the message. Its id is the invocation's id, or
-  `<id>:2`, `<id>:3` for later prompts of a handler that prompts more than
-  once. A prompt is a turn of the conversation.
+- **Turn.** One prompt, and what answers it: the unit of the conversation
+  ([The turn model](#the-turn-model)). Its id is the prompt's: the
+  invocation's id, or `<id>:2`, `<id>:3` for later prompts of a handler that
+  prompts more than once. A `chat` message is one turn.
+- **Invocation.** The `chat` invocation answering a message, from its start
+  to its end, across its attempts: what the companion follows (`status`
+  calls it the turn being answered, `answering`) and what `stop` cancels.
+  An invocation of a handler of your own can hold several turns.
 - **Attempt.** One run of a turn's invocation. A crash, a lost connection or
   a suspension ends an attempt; Restate starts another, which runs the
   handler again from its first line and resumes from what the database has.
@@ -349,6 +351,65 @@ sequenceDiagram
   before `clear` is answered first, then forgotten too. Message ids and
   cursors carry on.
 
+## The turn model
+
+A turn is the unit of the conversation, in storage, in code and in views.
+Turns are composed into one flat list in one place only: what the model gets.
+
+- **Identity.** A turn's id is its prompt's id. Every row of the
+  conversation belongs to one turn: the turn's row, or one of its items.
+- **Ownership.** Only the latest turn, while it has no answer, is written,
+  and only by its own run. The one exception is closing a turn whose
+  invocation is gone (`ended`): `settle`, or the next turn, writes its
+  closing record (a result for each open call, the note, the answer), and
+  nothing else.
+- **Scope.** A turn's run reads and writes its own turn: its open calls, its
+  replies, its final reply, its drops. Earlier turns are read-only context.
+- **Lifecycle.** A turn is being answered (no status), then ends once, with a
+  status: `answered` by its run, or closed as `cancelled`, `failed`,
+  `refused` or `ended`. The status, the answer, the answer's message and
+  what the turn carries are stored in one update of its row.
+- **Two projections.** The transcript (each turn's message and answer) and a
+  turn's detail (its steps), read separately: the `messages` view's
+  `summary` and `full` views.
+- **One composition.** `Conversation.history()` composes the turns into what
+  the model gets: the summary, the earlier turns' messages and answers, the
+  window's turns whole. Nothing else flattens turns.
+
+In code ([`_conversation.py`](python/restate/agents/_conversation.py)):
+
+```
+Conversation                      the key's conversation, loaded for a turn
+  transcript                      every loaded turn's row: prompt, status, answer, carried
+  turns                           the window's turns, whole
+  turn                            the latest turn: the one a run answers
+  history()                       what the model gets: the one place turns are composed
+  knows_result(), new_results()   what the model was given, across turns (to tell new results)
+  ask(prompt_id, text) -> Turn    start the next turn: refused while another has no answer
+
+Turn                              one prompt, and what answers it
+  id, n, status, answer, prompt   its row
+  entries, items                  its prompt and steps
+  open_calls(), replies(), last_reply(), final_reply(), stored()   its own state, never another turn's
+  append(), append_reply(), drop(), carry()                         its run's writes
+  answered(answer), close(ctx, status, note)                        its end: once
+```
+
+A turn always ends with a message of the assistant: its last reply, the
+note that closed it, or, for a run that answered with no reply left (a tool
+that ends the turn, say), its answer, stored as its reply. That message is
+the answer's in the summary, under the same id.
+
+Decisions still open:
+
+- The `output=` re-ask ("Reply again, with JSON only: ...") is a turn of its
+  own today, a user's message the person did not type. It could be a step
+  of the turn it re-asks instead.
+- `restate.agents.Turn`, the wire type of `status`'s `answering`, is the
+  invocation being answered; `restate.agents.internal.Turn` is the
+  conversation's turn. The wire type could be renamed (it is shared with the
+  TypeScript SDK).
+
 ## The conversation
 
 ### What a turn stores
@@ -357,7 +418,8 @@ The conversation is two tables in the key's database, and a row of where it
 starts:
 
 ```sql
-restate_agent_turns  (n, seq, prompt, item, answer, agent, carried)  -- the transcript: one row per turn
+restate_agent_turns  (n, seq, prompt, item, status, answer, agent, carried,
+                      answered_at, answered_seq)                    -- the transcript: one row per turn
 restate_agent_items  (n, turn, seq, item, reply, agent)              -- the trajectories
 restate_agent_conversation_start (n, seq, summary, summarized)       -- the first position, the last seq, the summary
 ```
@@ -366,8 +428,9 @@ restate_agent_conversation_start (n, seq, summary, summarized)       -- the firs
   ids of the messages that `messages` shows. A turn's prompt has the turn's
   position; its items come after it, before the next turn's.
 - **`seq`** increases with every row written, so that a client can ask what
-  changed since a cursor. Storing an answer, an agent or a state does not
-  increase it: they are for the model, and the view shows the reply rows.
+  changed since a cursor. A turn's answer takes one too (`answered_seq`),
+  for the summary view; its message's id is `answered_at`, the turn's last
+  message of the assistant, the id the full view shows it under.
 - **Appends only.** Rows are appended, in one transaction per step. A
   reply at the end can be dropped (to ask the model again: an output
   guardrail tripped, say), which is one range delete; its `seq` is kept in
@@ -506,7 +569,7 @@ own answer, and the companion's turn is the invocation, all of them.
 | --- | --- |
 | `status` | `answering`: the turn from its `start` to its close, or null; `waiting`: its tools' waits |
 | `pending` | the waits, oldest first, each with its id (`<turn>:<call>`) for `signal` |
-| `messages` | the conversation as stored: every turn, with its tool calls and their outputs, and how a closed turn ended |
+| `messages` | the conversation as stored. `view: "full"` (the default): every turn, with its tool calls and their outputs, and how a closed turn ended. `view: "summary"`: each turn's message and answer, under the same ids |
 | `notifications`, `watch` | the revision; `watch` waits (up to a minute) for a newer one |
 | `sync` | the revision, `status`, and the messages since a cursor, at once: what a follower reads |
 

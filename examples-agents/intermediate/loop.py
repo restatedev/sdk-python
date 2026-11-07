@@ -188,18 +188,18 @@ async def answer(ctx: sessions.SessionContext, text: str) -> str:
                 if found is not None
                 else f"Error: there is no tool named {call.name}"
             )
-            await conversation.append(result(call.id, output))  # stored as soon as it comes
+            await conversation.turn.append(result(call.id, output))  # stored as soon as it comes
 
-        if (final := conversation.final_reply()) is not None:
+        if (final := conversation.turn.final_reply()) is not None:
             # A crash came after the model's final reply was stored, before its answer was: that is the answer.
             return final
         while True:
             # The tool calls with no result yet (the last reply's, or those a crash cut off), all at once.
-            await all_of(run_call(call) for call in conversation.unanswered())
+            await all_of(run_call(call) for call in conversation.turn.open_calls())
             reply = await complete(conversation.history())
-            await conversation.append_reply(*reply)
+            await conversation.turn.append_reply(*reply)
             if not any(item["type"] == "function_call" for item in reply):
-                return conversation.final_reply() or ""
+                return conversation.turn.final_reply() or ""
 
     return await answer_once(ctx, text, MESSAGES, run)
 

@@ -80,6 +80,7 @@ from restate.agents._api import (
     TextPart,
     ToolPart,
     Turn,
+    View,
     Waiting,
     Watch,
 )
@@ -109,6 +110,7 @@ __all__ = [
     "ToolCall",
     "ToolPart",
     "Turn",
+    "View",
     "Waiting",
     "Watch",
     "call",
