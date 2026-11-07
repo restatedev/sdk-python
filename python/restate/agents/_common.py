@@ -295,10 +295,15 @@ def refusal(error: BaseException) -> TerminalError | None:
     return terminal
 
 
+def raised_by_tool(ctx: SessionContext, error: BaseException) -> bool:
+    """Return whether ``error`` is one that ``from_tool`` recorded in the attempt of ``ctx``."""
+    failed_tool = _TOOL_ERRORS.get(ctx)
+    return failed_tool is not None and error in failed_tool
+
+
 def refusal_of(ctx: SessionContext, error: BaseException) -> TerminalError | None:
     """Return ``refusal(error)``, except for errors that a framework's tool raised in the attempt (see ``from_tool``)."""
-    failed_tool = _TOOL_ERRORS.get(ctx)
-    if failed_tool is not None and error in failed_tool:
+    if raised_by_tool(ctx, error):
         return None
     return refusal(error)
 
