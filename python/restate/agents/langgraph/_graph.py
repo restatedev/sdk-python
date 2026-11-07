@@ -295,12 +295,14 @@ def at_breakpoint(paused: StateSnapshot) -> bool:
 
 
 async def _stored(app: Any) -> StateSnapshot:
-    """Return the state of the graph's thread, as the next run starts from it.
+    """Return the state of the graph's thread: where it stopped, and why (its tasks' interrupts).
 
     LangGraph shows the state with the writes of the last step's tasks
-    applied. If they do not fit the state (an invalid update, which ended
-    that run's turn), it is the state of the checkpoint itself, which LangGraph
-    shows without them: a run with new input discards them.
+    applied. If they do not fit the state (an invalid update), it is the
+    state of the checkpoint itself, which LangGraph shows without them. A run
+    with new input discards them, and resuming the run that made them (a
+    retried attempt, after a crash before its turn ended) fails at them, with
+    the terminal error.
     """
     try:
         return typing.cast(StateSnapshot, await app.aget_state(THREAD))
@@ -309,11 +311,6 @@ async def _stored(app: Any) -> StateSnapshot:
         if latest is None:
             raise
         return typing.cast(StateSnapshot, await app.aget_state(latest.config))
-
-
-async def _paused(app: Any) -> StateSnapshot:
-    """Return the state of the graph's thread: where it stopped, and why (its tasks' interrupts)."""
-    return typing.cast(StateSnapshot, await app.aget_state(THREAD))
 
 
 def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
@@ -352,7 +349,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         # message (or one after a stopped run) starts a run, after what closed the previous run.
         start: Any
         if asked:
-            resumes = await _resumed(ctx, saver, await _paused(app))
+            resumes = await _resumed(ctx, saver, await _stored(app))
             start = Command(resume=resumes) if resumes is not None else None
         else:
             prompt = HumanMessage(str(typing.cast(BaseMessage, running.item).text), id=prompt_id)
@@ -371,7 +368,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
                 from_tool(ctx, error)
                 raise
             # The run stops at its interrupts: it goes on with the signals that answer them.
-            paused = await _paused(app)
+            paused = await _stored(app)
             resumes = await _resumed(ctx, saver, paused)
             if resumes is None:
                 if at_breakpoint(paused):

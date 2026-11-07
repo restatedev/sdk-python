@@ -34,6 +34,7 @@ from langchain_core.language_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
+from langgraph.errors import InvalidUpdateError  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
 from langgraph.runtime import Runtime  # noqa: E402
@@ -728,13 +729,32 @@ async def test_an_invalid_update_of_the_graph_ends_the_turn(harness: HarnessEnvi
     assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
 
 
+async def test_a_run_resumed_after_an_invalid_update_ends_its_turn(
+    harness: HarnessEnvironment, monkeypatch: pytest.MonkeyPatch
+):
+    """As after a crash before the turn ended, or on a key that an earlier version retried: the update's writes are
+    stored, the retried attempt resumes the run that made them, and LangGraph cannot show its state with them."""
+    from restate.agents.langgraph import _graph  # pylint: disable=import-outside-toplevel
+
+    key = uuid.uuid4().hex
+    retried: list[str] = []
+
+    def retried_once(error: BaseException) -> TerminalError | None:
+        if key not in retried and isinstance(error, InvalidUpdateError):
+            retried.append(key)
+            return None  # the attempt fails, as a crash would, and Restate retries it
+        return terminal_of(error)
+
+    monkeypatch.setattr(_graph, "terminal_of", retried_once)
+    failed = await chat(harness, "graph_desk", key, f"clash {key}")
+    assert failed.status_code == 500 and "invalid state update" in failed.text, failed.text
+    assert retried == [key]
+    assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
+
+
 def test_only_langgraphs_own_errors_end_a_turn():
     """Python's RecursionError, which user code may raise, is retried as any other error."""
-    from langgraph.errors import (  # pylint: disable=import-outside-toplevel
-        EmptyInputError,
-        GraphRecursionError,
-        InvalidUpdateError,
-    )
+    from langgraph.errors import EmptyInputError, GraphRecursionError  # pylint: disable=import-outside-toplevel
 
     langgraphs: list[Exception] = [GraphRecursionError("limit"), InvalidUpdateError("update"), EmptyInputError("input")]
     assert all(isinstance(terminal_of(error), TerminalError) for error in langgraphs)
