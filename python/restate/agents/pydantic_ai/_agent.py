@@ -41,14 +41,14 @@ stored:
 - An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
   ``deps``: a value, or for ``agent`` also a function of the handler's
   context.
-- Each run gets Pydantic AI's own capabilities for a conversation that
-  lives long, unless ``capabilities`` gives others: the model provider's
-  compaction, where Pydantic AI has one (``AnthropicCompaction``, and
-  ``OpenAICompaction`` for OpenAI's Responses API, which ``openai/...``
-  models use). It summarizes the history as it nears the model's context
-  window, which a long conversation would otherwise outgrow, failing each
-  turn. ``default_capabilities`` returns them, to add your own to; a default
-  that an Agent of your own already has is left out.
+- The built-in agent gets Pydantic AI's own capability for a conversation
+  that lives long: the compaction of its model's provider, where Pydantic AI
+  has one (``AnthropicCompaction``, and ``OpenAICompaction`` for OpenAI's
+  Responses API, which ``openai/...`` models use). It summarizes the
+  history as it nears the model's context window, which a long conversation
+  would otherwise outgrow, failing each turn. An ``Agent`` of your own runs
+  as you configured it: give it the capabilities it needs, such as
+  ``Agent(model, capabilities=[AnthropicCompaction()])``.
 - The conversation stores no system prompt: Pydantic AI's
   ``ReinjectSystemPrompt`` gives each run the system prompt of an ``Agent``
   of your own (``system_prompt``), as it is now. (``instructions`` apply to
@@ -112,8 +112,7 @@ AnyModel: typing.TypeAlias = str | Model
 AnyTool: typing.TypeAlias = Tool | PydanticTool[Any] | Callable[..., Any]
 """A tool: one made with ``restate.agents`` (``tool``, ``call``, ...), a Pydantic AI tool, or a plain function."""
 
-AnyCapability: typing.TypeAlias = AbstractCapability[Any]
-"""A Pydantic AI capability, such as ``AnthropicCompaction`` or ``WebSearch``."""
+_Capability: typing.TypeAlias = AbstractCapability[Any]
 
 
 def _toolset(given: Sequence[AnyTool], ctx: SessionContext) -> FunctionToolset[Any]:
@@ -308,7 +307,7 @@ def _output_spec(output: type[BaseModel], model: Model) -> NativeOutput[Any] | P
     return PromptedOutput(output)
 
 
-def _compaction(model: Model) -> AnyCapability | None:
+def _compaction(model: Model) -> _Capability | None:
     """Return the compaction of ``model``'s provider, if Pydantic AI has one: Anthropic's, and the Responses API's."""
     try:
         if model.system == "anthropic":
@@ -330,42 +329,18 @@ def _compaction(model: Model) -> AnyCapability | None:
     return None
 
 
-def default_capabilities(model: AnyModel | None = None) -> list[AnyCapability]:
-    """Return the Pydantic AI capabilities that each run gets by default: those of a conversation that lives long.
+def _capabilities(own: Agent[Any, str] | None, model: Model) -> list[_Capability]:
+    """Return the capabilities that a run gets beside the agent's own.
 
-    That is the compaction of the model's provider, where Pydantic AI has one
-    (``AnthropicCompaction``, and ``OpenAICompaction`` for OpenAI's Responses
-    API, which ``openai/...`` models use): it summarizes the history as it
-    nears the model's context window. Add your own to them::
-
-        capabilities=[*pydantic_ai.default_capabilities(model), WebSearch()]
-
-    Args:
-        model: The model, as ``agent`` and ``prompt`` take it.
-
-    Raises:
-        TerminalError: If the model cannot be made (a missing package or API key).
-    """
-    compaction = _compaction(_model(model))
-    return [compaction] if compaction is not None else []
-
-
-def _capabilities(
-    own: Agent[Any, str] | None, model: Model, given: Sequence[AnyCapability] | None
-) -> list[AnyCapability]:
-    """Return the capabilities of a run: ``given``, else the defaults that ``own`` (an Agent of your own) lacks.
-
-    And ``ReinjectSystemPrompt``, unless one is given or ``own`` has one: the
-    conversation stores no system prompt, which Pydantic AI keeps in the
-    history it is given.
+    The built-in agent (``own`` is ``None``) gets the compaction of its
+    model's provider, for a conversation that lives long; an Agent of your
+    own runs as you configured it. Either gets ``ReinjectSystemPrompt``,
+    unless the agent has one: the conversation stores no system prompt,
+    which Pydantic AI keeps in the history it is given.
     """
     have = {type(capability) for capability in (own.root_capability.capabilities if own is not None else ())}
-    if given is not None:
-        chosen = list(given)
-    else:
-        defaults = [_compaction(model)]
-        chosen = [capability for capability in defaults if capability is not None and type(capability) not in have]
-    if ReinjectSystemPrompt not in have | {type(capability) for capability in chosen}:
+    chosen = [compaction] if own is None and (compaction := _compaction(model)) is not None else []
+    if ReinjectSystemPrompt not in have:
         chosen.append(ReinjectSystemPrompt())
     return chosen
 
@@ -379,18 +354,17 @@ def _run(
     output: type[BaseModel] | None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
-    capabilities: Sequence[AnyCapability] | None = None,
 ) -> Run:
     """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer (``output``'s JSON).
 
-    ``deps`` is the run's dependencies (Pydantic AI's ``deps``), ``usage_limits`` its limits, and ``capabilities``
-    its capabilities instead of the defaults (see ``_capabilities``).
+    ``deps`` is the run's dependencies (Pydantic AI's ``deps``), and ``usage_limits`` its limits: options of a run,
+    which an ``Agent`` cannot hold.
     """
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
     agent: Agent[Any, str] = own or Agent(instructions=system)
     toolsets = [_toolset(given, ctx)] if given else []
-    chosen = _capabilities(own, model, capabilities)
+    chosen = _capabilities(own, model)
 
     async def run(conversation: Conversation) -> str:
         if (final := conversation.final_reply()) is not None:
@@ -454,7 +428,6 @@ async def prompt(
     output: None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
-    capabilities: Sequence[AnyCapability] | None = None,
 ) -> str: ...
 
 
@@ -470,7 +443,6 @@ async def prompt(
     output: type[M],
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
-    capabilities: Sequence[AnyCapability] | None = None,
 ) -> M: ...
 
 
@@ -485,7 +457,6 @@ async def prompt(
     output: type[BaseModel] | None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
-    capabilities: Sequence[AnyCapability] | None = None,
 ) -> Any:
     """Answer a prompt with a Pydantic AI agent, exactly once.
 
@@ -516,9 +487,6 @@ async def prompt(
         usage_limits: The run's limits (Pydantic AI's ``UsageLimits``),
             past which the turn fails. Defaults to Pydantic AI's: 50 model
             requests.
-        capabilities: Pydantic AI capabilities for the run, beside
-            ``agent``'s own. Defaults to ``default_capabilities``: the
-            compaction of the model's provider, unless ``agent`` has it.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
@@ -531,9 +499,7 @@ async def prompt(
     check_own(agent, system)
 
     def ask(text: str) -> Awaitable[str]:
-        return answer_once(
-            ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output, deps, usage_limits, capabilities)
-        )
+        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output, deps, usage_limits))
 
     if output is None:
         return await ask(text)
@@ -551,7 +517,6 @@ def agent(
     output: type[BaseModel] | None = None,
     deps: PerSession[Any] = None,
     usage_limits: UsageLimits | None = None,
-    capabilities: PerSession[Sequence[AnyCapability] | None] = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
@@ -596,11 +561,6 @@ def agent(
         usage_limits: Each run's limits (Pydantic AI's ``UsageLimits``),
             past which its turn fails. Defaults to Pydantic AI's: 50 model
             requests.
-        capabilities: Pydantic AI capabilities for each run, beside
-            ``pydantic_agent``'s own: a sequence, or a function of the
-            invocation's context. Defaults to ``default_capabilities``: the
-            compaction of the model's provider, unless ``pydantic_agent`` has
-            it.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -624,7 +584,6 @@ def agent(
             output=output,
             deps=await configured(deps, ctx),
             usage_limits=usage_limits,
-            capabilities=await configured(capabilities, ctx),
         )
 
     obj.chat(answer, items=ITEMS, output=output)

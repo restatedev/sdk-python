@@ -278,8 +278,9 @@ class Spy(AbstractCapability[Any]):
 
 @assistant.handler
 async def watched(ctx: sessions.SessionContext, text: str) -> str:
-    """A prompt whose runs get a capability of one's own."""
-    return await pydantic_ai.prompt(ctx, text, model=FunctionModel(reply), capabilities=[Spy()])
+    """An Agent of your own, configured with a capability of its own."""
+    mine: Any = Agent(FunctionModel(reply), capabilities=[Spy()])
+    return await pydantic_ai.prompt(ctx, text, agent=mine)
 
 
 @dataclass
@@ -611,51 +612,60 @@ async def test_a_run_stopped_for_a_deferred_tool_call_fails_and_the_call_is_clos
     assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
 
 
-async def test_capabilities_of_ones_own_get_each_run(harness: HarnessEnvironment):
+async def test_an_agent_of_your_own_runs_with_its_own_capabilities(harness: HarnessEnvironment):
     k = key()
     assert (await post(harness, f"{k}/watched", json=f"hi {k}")).json() == f"echo: hi {k}"
     assert spied[f"hi {k}"] == 1
 
 
-def test_the_default_capabilities_are_the_compaction_of_the_models_provider(monkeypatch: pytest.MonkeyPatch):
-    """OpenAI's for its Responses API, which openai/... models use, and none for a provider without one."""
-    from pydantic_ai.models.openai import OpenAICompaction  # pylint: disable=import-outside-toplevel
+def kinds(own: Any, model: Any) -> list[type]:
+    """The kinds of the capabilities that a run of ``own`` (an Agent of your own, or None) on ``model`` gets."""
+    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    assert [type(c) for c in pydantic_ai.default_capabilities("openai/gpt-6-sol")] == [OpenAICompaction]
-    assert pydantic_ai.default_capabilities("openai-chat:gpt-6-sol") == []
-    assert pydantic_ai.default_capabilities(FunctionModel(reply)) == []
+    return [type(c) for c in _agent._capabilities(own, model)]  # pyright: ignore[reportPrivateUsage]
 
 
-def test_the_default_capabilities_of_an_anthropic_model(monkeypatch: pytest.MonkeyPatch):
+def test_the_built_in_agent_gets_the_compaction_of_its_models_provider():
+    """OpenAI's for its Responses API, which openai/... models use, and none for a provider without one; and each
+    run reinjects the system prompt, which the conversation does not store."""
+    from pydantic_ai.models.openai import (  # pylint: disable=import-outside-toplevel
+        OpenAIChatModel,
+        OpenAICompaction,
+        OpenAIResponsesModel,
+    )
+    from pydantic_ai.providers.openai import OpenAIProvider  # pylint: disable=import-outside-toplevel
+
+    provider = OpenAIProvider(api_key="sk-test")
+    assert kinds(None, OpenAIResponsesModel("gpt-6-sol", provider=provider)) == [OpenAICompaction, ReinjectSystemPrompt]
+    assert kinds(None, OpenAIChatModel("gpt-6-sol", provider=provider)) == [ReinjectSystemPrompt]
+    assert kinds(None, FunctionModel(reply)) == [ReinjectSystemPrompt]
+
+
+def test_the_built_in_agent_on_anthropic_gets_its_compaction():
     pytest.importorskip("anthropic")
-    from pydantic_ai.models.anthropic import AnthropicCompaction  # pylint: disable=import-outside-toplevel
+    from pydantic_ai.models.anthropic import (  # pylint: disable=import-outside-toplevel
+        AnthropicCompaction,
+        AnthropicModel,
+    )
+    from pydantic_ai.providers.anthropic import AnthropicProvider  # pylint: disable=import-outside-toplevel
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    assert [type(c) for c in pydantic_ai.default_capabilities("anthropic/claude-sonnet-5-5")] == [AnthropicCompaction]
+    model = AnthropicModel("claude-sonnet-5-5", provider=AnthropicProvider(api_key="sk-test"))
+    assert kinds(None, model) == [AnthropicCompaction, ReinjectSystemPrompt]
 
 
-def test_a_runs_capabilities_are_the_defaults_or_those_given_and_reinject_the_system_prompt():
-    """Given capabilities replace the defaults; a default an Agent of your own has is left out; and each run
-    reinjects the system prompt, which the conversation does not store, unless one does already."""
+def test_an_agent_of_your_own_runs_as_configured_with_the_system_prompt_reinjected():
+    """No compaction is added to it, whether it has its own or not; the system prompt is reinjected, unless the agent
+    reinjects it itself (with replace_existing=True, say)."""
     from pydantic_ai.models.openai import OpenAICompaction, OpenAIResponsesModel  # pylint: disable=import-outside-toplevel
     from pydantic_ai.providers.openai import OpenAIProvider  # pylint: disable=import-outside-toplevel
 
-    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
-
     model = OpenAIResponsesModel("gpt-6-sol", provider=OpenAIProvider(api_key="sk-test"))
-
-    def kinds(own: Any, given: Any) -> list[type]:
-        return [type(c) for c in _agent._capabilities(own, model, given)]  # pyright: ignore[reportPrivateUsage]
-
-    assert kinds(None, None) == [OpenAICompaction, ReinjectSystemPrompt]
-    assert kinds(None, []) == [ReinjectSystemPrompt]
-    assert kinds(None, [Spy()]) == [Spy, ReinjectSystemPrompt]
-    assert kinds(None, [ReinjectSystemPrompt(replace_existing=True)]) == [ReinjectSystemPrompt]
+    plain: Any = Agent(model)
+    assert kinds(plain, model) == [ReinjectSystemPrompt]
     compacting: Any = Agent(model, capabilities=[OpenAICompaction(token_threshold=100_000)])
-    assert kinds(compacting, None) == [ReinjectSystemPrompt]
-    reinjecting: Any = Agent(model, capabilities=[ReinjectSystemPrompt()])
-    assert kinds(reinjecting, None) == [OpenAICompaction]
+    assert kinds(compacting, model) == [ReinjectSystemPrompt]
+    reinjecting: Any = Agent(model, capabilities=[ReinjectSystemPrompt(replace_existing=True)])
+    assert kinds(reinjecting, model) == []
 
 
 async def test_an_agent_of_your_own_gets_its_deps(harness: HarnessEnvironment):

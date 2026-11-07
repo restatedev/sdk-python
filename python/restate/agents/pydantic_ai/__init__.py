@@ -51,6 +51,6 @@ except ImportError as error:
         "restate.agents.pydantic_ai needs Pydantic AI: install the pydantic_ai extra, pip install restate-sdk[pydantic_ai]"
     ) from error
 
-from restate.agents.pydantic_ai._agent import AnyCapability, AnyModel, AnyTool, agent, default_capabilities, prompt
+from restate.agents.pydantic_ai._agent import AnyModel, AnyTool, agent, prompt
 
-__all__ = ["AnyCapability", "AnyModel", "AnyTool", "agent", "default_capabilities", "prompt"]
+__all__ = ["AnyModel", "AnyTool", "agent", "prompt"]
