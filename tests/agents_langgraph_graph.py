@@ -44,7 +44,7 @@ from pydantic import BaseModel  # noqa: E402
 import restate  # noqa: E402
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
-from restate.agents.internal import CANCELLED  # noqa: E402
+from restate.agents.internal import CANCELLED, ENDED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
 from restate.agents.langgraph._errors import terminal_of  # noqa: E402
 from restate.agents.langgraph._graph import at_breakpoint  # noqa: E402
@@ -484,11 +484,15 @@ async def test_chat_runs_the_graph_and_the_conversation_goes_on(harness: Harness
     key = uuid.uuid4().hex
     assert (await chat(harness, agent, key, f"hi {key}")).json() == f"hello {key}"
     assert (await chat(harness, agent, key, "hi again")).json() == "hello again"
+    # The graph's state holds every turn; the conversation loads only the latest whole, and copies each message once.
+    assert (await chat(harness, agent, key, "hi there")).json() == "hello there"
     assert await messages(harness, agent, key) == [
         ("user", f"hi {key}"),
         ("assistant", f"hello {key}"),
         ("user", "hi again"),
         ("assistant", "hello again"),
+        ("user", "hi there"),
+        ("assistant", "hello there"),
     ]
 
 
@@ -651,6 +655,12 @@ async def test_a_killed_turn_leaves_no_wait_behind(harness: HarnessEnvironment, 
             break
         await asyncio.sleep(0.05)
     assert (await post(harness, f"graph_desk/{key}/pending")).json() == []
+    # The companion has the agent close the killed turn in the conversation, before any next message.
+    for _ in range(200):
+        if (await messages(harness, "graph_desk", key))[-1] == ("assistant", ENDED):
+            break
+        await asyncio.sleep(0.05)
+    assert (await messages(harness, "graph_desk", key))[-1] == ("assistant", ENDED)
 
 
 async def test_a_turn_suspended_while_it_waits_resumes_on_the_same_wait(harness: HarnessEnvironment):

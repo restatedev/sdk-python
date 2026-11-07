@@ -164,7 +164,7 @@ class _Items:
     def prompt(self, text: str) -> Item:
         return {"role": "user", "content": text}
 
-    def reply(self, text: str) -> Item:
+    def reply(self, text: str, agent: str | None = None) -> Item:
         return {"role": "assistant", "content": text}
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
@@ -224,10 +224,13 @@ def _handoffs(agent: Agent[Any]) -> dict[str, str]:
 
 
 def _current(conversation: Conversation, root: Agent[Any], everyone: dict[str, Agent[Any]]) -> Agent[Any]:
-    """Return the agent the conversation is with: the latest reply's, or the agent that reply handed off to."""
+    """Return the agent the conversation is with: the latest reply's, or the agent that reply handed off to.
+
+    With no reply loaded (the window holds none), it is the agent the latest answered turn left it with.
+    """
     latest = next((e for e in reversed(conversation.entries) if e.reply is not None), None)
     if latest is None or latest.reply is None:
-        return root
+        return everyone.get(conversation.carried()[0] or "", root)
     agent = everyone.get(latest.agent or "", root)
     targets = _handoffs(agent)
     for call in (call for e in conversation.reply_entries(latest.reply) for call in e.calls):

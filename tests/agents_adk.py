@@ -511,9 +511,7 @@ async def test_a_workflows_first_step_stored_before_a_crash_is_not_its_answer(mo
     assert await ask("system x", invocation) == "system: Step two."
 
 
-async def test_the_built_in_agent_compacts_a_long_conversation():
-    from restate.agents.adk._agent import COMPACT_EVERY  # pylint: disable=import-outside-toplevel
-
+async def test_earlier_turns_are_their_messages_and_answers():
     seen: list[list[types.Content]] = []
 
     class Seeing(Scripted):
@@ -524,40 +522,27 @@ async def test_the_built_in_agent_compacts_a_long_conversation():
             async for response in super().generate_content_async(llm_request, stream):
                 yield response
 
-    asked = asking(model=Seeing())
-    for n in range(1, COMPACT_EVERY + 2):
-        assert await asked(f"hi {n}") == f"echo: hi {n}"
-    # After the first COMPACT_EVERY invocations, ADK had the model summarize them (a request of its own) ...
-    summarized = seen[-2]
-    assert len(summarized) == 1 and "hi 1" in str(summarized[0].parts)
-    # ... and the next request has the summary (as ADK shows an event of another author) in place of their events.
-    latest = seen[-1]
-    assert len(latest) == 2
-    assert "said: echo: The following is a conversation history" in str(latest[0].parts)
-    assert latest[-1].parts and latest[-1].parts[0].text == f"hi {COMPACT_EVERY + 1}"
+    asked = asking(model=Seeing(), tools=[get_weather])
+    assert await asked("weather Lisbon") == "tool said: sunny in Lisbon"
+    assert await asked("hi 2") == "echo: hi 2"
+    assert await asked("hi 3") == "echo: hi 3"
+    # The first turn is its message and answer; the previous one is whole (here, the same); then the prompt.
+    texts = [part.text for content in seen[-1] for part in content.parts or []]
+    assert texts == ["weather Lisbon", "tool said: sunny in Lisbon", "hi 2", "echo: hi 2", "hi 3"]
 
 
-class BadRequestError(Exception):
-    """As a model's SDK names a request it refuses: the model's provider refusing, if it ended the turn."""
+async def test_the_session_state_holds_across_turns_that_are_not_loaded():
+    from google.adk.tools.tool_context import ToolContext  # pylint: disable=import-outside-toplevel
 
+    def get_weather(city: str, tool_context: ToolContext) -> str:  # pylint: disable=redefined-outer-name
+        """Remember the city."""
+        tool_context.state["city"] = city
+        return "noted"
 
-async def test_a_compaction_that_fails_leaves_the_turn_answered():
-    from restate.agents.adk._agent import COMPACT_EVERY  # pylint: disable=import-outside-toplevel
-
-    summaries: list[str] = []
-
-    class NoSummaries(Scripted):
-        async def generate_content_async(
-            self, llm_request: LlmRequest, stream: bool = False
-        ) -> AsyncGenerator[LlmResponse, None]:
-            if "The following is a conversation history" in str(llm_request.contents):
-                summaries.append("refused")
-                raise BadRequestError("the summary's request is refused")
-            async for response in super().generate_content_async(llm_request, stream):
-                yield response
-
-    asked = asking(model=NoSummaries())
-    for n in range(1, COMPACT_EVERY + 2):
-        assert await asked(f"hi {n}") == f"echo: hi {n}"
-    # ADK tried to compact after the last two turns, which were answered all the same.
-    assert summaries == ["refused", "refused"]
+    mine = LlmAgent(name="mine", model=Scripted(), instruction="City: {city?}", tools=[get_weather])
+    asked = asking(mine)
+    assert await asked("weather Lisbon") == "tool said: noted"
+    assert await asked("hi 2") == "echo: hi 2"
+    assert await asked("hi 3") == "echo: hi 3"
+    # The first turn's events are not loaded any more: its state is, as the latest turn carried it.
+    assert await asked("system x") == "system: City: Lisbon"

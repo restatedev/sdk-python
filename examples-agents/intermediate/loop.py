@@ -19,7 +19,9 @@ Or talk with the agent, and approve, from the agents' command line:
 
 The loop is plain Python, and Restate makes it durable:
 
-- The conversation is in the key's database. Each of the model's replies is
+- The conversation is in the key's database, and the model gets its history
+  (``conversation.history()``): earlier turns as messages and answers, and the
+  latest turns whole. Each of the model's replies is
   stored before its tools run, and each tool's result as it comes back.
 - The tools a reply calls run at once, and each result is stored as it comes.
 - A crash, or a lost connection, retries the turn. The loop starts again from
@@ -122,7 +124,7 @@ class Messages:
     def prompt(self, text: str) -> dict[str, Any]:
         return {"role": "user", "content": text}
 
-    def reply(self, text: str) -> dict[str, Any]:
+    def reply(self, text: str, agent: str | None = None) -> dict[str, Any]:
         return {"role": "assistant", "content": text}
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[dict[str, Any]]:
@@ -194,7 +196,7 @@ async def answer(ctx: sessions.SessionContext, text: str) -> str:
         while True:
             # The tool calls with no result yet (the last reply's, or those a crash cut off), all at once.
             await all_of(run_call(call) for call in conversation.unanswered())
-            reply = await complete([e.item for e in conversation.entries])
+            reply = await complete(conversation.history())
             await conversation.append_reply(*reply)
             if not any(item["type"] == "function_call" for item in reply):
                 return conversation.final_reply() or ""

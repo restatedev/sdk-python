@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from restate.agents import _signals
 from restate.agents._api import Turn
 from restate.agents._calls import settle
-from restate.agents._common import refusal_of
+from restate.agents._common import BUDGET, WINDOW, Window, refusal_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 from restate.sessions._link import Link
@@ -121,10 +121,13 @@ def stop_signal_of(ctx: SessionContext) -> Stop | None:
 
 @dataclass(frozen=True)
 class AgentInfo:
-    """An agent's settings: whether it works unwatched (``background``), and what its ``clear`` also empties."""
+    """An agent's settings: whether it works unwatched (``background``), what its ``clear`` also empties, and how
+    much of the conversation its model sees (``window`` and ``budget``, see ``_conversation.py``)."""
 
     background: bool = False
     clear: Callable[[SessionContext], Awaitable[None]] | None = None
+    window: Window = WINDOW
+    budget: int = BUDGET
 
 
 AGENT: Link[AgentInfo] = Link("an agent")
@@ -134,6 +137,11 @@ AGENT: Link[AgentInfo] = Link("an agent")
 def _agent_of(ctx: SessionContext) -> AgentInfo | None:
     definition = definition_of(ctx)
     return AGENT.of(definition) if definition is not None else None
+
+
+def settings_of(ctx: SessionContext) -> AgentInfo:
+    """Return the settings of the agent of ``ctx``: the defaults, for a session object that is no agent."""
+    return _agent_of(ctx) or AgentInfo()
 
 
 async def cleared(ctx: SessionContext) -> None:

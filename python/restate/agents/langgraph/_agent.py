@@ -89,7 +89,7 @@ from restate.agents._conversation import Call, Conversation, Item, Parsed, Resul
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with, asking
 from restate.agents._tools import Tool, ToolCall
-from restate.agents._turn import tool_call_ended, tool_call_started
+from restate.agents._turn import settings_of, tool_call_ended, tool_call_started
 from restate.agents.langgraph._context import handler_context
 from restate.agents.langgraph._errors import terminal_of
 from restate.agents.langgraph._graph import AnyGraph, check, run_of
@@ -236,7 +236,7 @@ class _Items:
     def prompt(self, text: str) -> Item:
         return HumanMessage(text)
 
-    def reply(self, text: str) -> Item:
+    def reply(self, text: str, agent: str | None = None) -> Item:
         return AIMessage(text)
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
@@ -470,9 +470,12 @@ async def prompt(
         check_own(graph, "graph", model=model, system=system, tools=tools)
         check(graph)
         run = run_of(ctx, graph, context)
+        # The graph's run reads the previous turn whole, to give the graph what closed it (see ``_closing``).
+        window = settings_of(ctx).window
+        whole = window if window == "all" else max(window, 1)
 
         def ask(text: str) -> Awaitable[str]:
-            return answer_once(ctx, text, ITEMS, run)
+            return answer_once(ctx, text, ITEMS, run, whole)
 
     else:
         check_built_in(graph, "graph", context=context)

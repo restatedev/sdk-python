@@ -53,7 +53,7 @@ class Items:
     def prompt(self, text: str) -> Item:
         return {"role": "user", "text": text}
 
-    def reply(self, text: str) -> Item:
+    def reply(self, text: str, agent: str | None = None) -> Item:
         return {"role": "assistant", "text": text}
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
@@ -264,7 +264,9 @@ class _Recorded:
 def _conversation(*items: Item) -> Conversation:
     from restate.agents._conversation import Entry  # pylint: disable=import-outside-toplevel
 
-    return Conversation(typing.cast(Any, _Recorded()), ITEMS, [Entry(n, item) for n, item in enumerate(items)])
+    # The first item starts a turn, as a prompt.
+    entries = [Entry(n, item, prompt="p0" if n == 0 else None) for n, item in enumerate(items)]
+    return Conversation(typing.cast(Any, _Recorded()), ITEMS, entries)
 
 
 def _calling(*ids: str) -> Item:
@@ -327,6 +329,8 @@ async def test_a_sealed_conversation_stores_nothing_more():
 
 async def test_answered_needs_a_prompt_of_the_conversation():
     conversation = _conversation()
+    with pytest.raises(RuntimeError):
+        await conversation.append({"role": "assistant", "text": "no turn"})
     await conversation.ask("p1", "hi")
     await conversation.answered("p1", "hello")
     assert conversation.answer_of("p1") == "hello"

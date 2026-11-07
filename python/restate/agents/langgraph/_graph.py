@@ -177,17 +177,21 @@ async def _answer(app: Any, conversation: Conversation, running: Entry, state: d
 
 
 async def _copied(
-    ctx: SessionContext, conversation: Conversation, known: set[str], messages: Sequence[BaseMessage]
+    ctx: SessionContext, conversation: Conversation, known: set[str], messages: Sequence[BaseMessage], prompt: str
 ) -> None:
     """Copy the AI and tool messages of ``messages`` (the graph's state) that the conversation does not have yet.
 
-    ``known`` is the ids the conversation has, which this adds to; the
-    messages the conversation gave the graph are not copied back. Then
-    publish.
+    Those are the messages after the run's prompt (whose id is ``prompt``),
+    as the graph's state holds the earlier turns too, which the conversation
+    may not have loaded. If the graph trimmed the prompt away, they are the
+    messages whose ids are not ``known``. ``known`` is the ids the
+    conversation has, which this adds to; the messages the conversation gave
+    the graph are not copied back. Then publish.
     """
+    at = next((i for i, m in enumerate(messages) if m.id == prompt), None)
     new = [
         m
-        for m in messages
+        for m in (messages if at is None else messages[at + 1 :])
         if isinstance(m, AIMessage | ToolMessage)
         and m.id is not None
         and m.id not in known
@@ -342,7 +346,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         config: RunnableConfig = {**THREAD, "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before}}
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
-            await _copied(ctx, conversation, known, messages)
+            await _copied(ctx, conversation, known, messages, prompt_id)
             await saver.aprune([THREAD_ID])
             return await _answer(app, conversation, running, values, before)
         # A run cut off by a crash is resumed: first by the signals its pending interrupts wait for, if any. A new
@@ -359,7 +363,9 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
             try:
                 async for state in states:
                     values = typing.cast(dict[str, Any], state)
-                    await _copied(ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])))
+                    await _copied(
+                        ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])), prompt_id
+                    )
             except Exception as error:
                 if (terminal := terminal_of(error)) is not None:
                     # LangGraph's own error, which a retry would meet again: a run past its recursion limit, say.

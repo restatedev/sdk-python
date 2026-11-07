@@ -167,12 +167,20 @@ async def settle(ctx: SessionContext, stored: Callable[[str, str | None], bool])
     await _store(ctx, state)
 
 
-async def outcomes(ctx: SessionContext, call_ids: Iterable[str]) -> dict[str, str | None]:
-    """Return which of ``call_ids`` made a Restate call that returned in this invocation.
+async def outcomes(
+    ctx: SessionContext, call_ids: Iterable[str], invocation: str | None = None
+) -> dict[str, str | None]:
+    """Return which of ``call_ids`` made a Restate call that returned in this invocation, or in ``invocation``.
 
     Each such id maps to the terminal error the call returned (``Error: <message>``), or to ``None`` if
     it succeeded. A tool call whose Restate call has not returned, or that made none, is left out.
+
+    An earlier ``invocation``'s calls are read only while they are still stored: until an invocation of
+    the key makes calls of its own. They are read, never changed.
     """
-    _, state = await _calls_of(ctx)
+    if invocation is not None and invocation != ctx.request.id:
+        state = await _load(ctx, invocation)
+    else:
+        _, state = await _calls_of(ctx)
     wanted = set(call_ids)
     return {i: call.get("failed") for call in state.calls if call.get("done") for i in call["ids"] if i in wanted}

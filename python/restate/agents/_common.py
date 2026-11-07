@@ -179,11 +179,33 @@ class MessageSerde(Serde[str]):
         return (obj or "").encode()
 
 
+Window: typing.TypeAlias = "int | typing.Literal['all']"
+"""How many of the latest answered turns the model sees whole (with their tool calls and results), or ``"all"``."""
+
+WINDOW: Window = 1
+"""The window by default: the previous turn's tool calls and results stay in view, for a follow-up."""
+
+BUDGET = 32_000
+"""How many tokens of the turns before the window the model sees, by default, counted as 4 characters each."""
+
+
+def check_window(window: Window) -> Window:
+    """Return ``window`` if it is one: a number of turns (0 or more), or ``"all"``."""
+    given = typing.cast(object, window)
+    if given != "all" and (isinstance(given, bool) or not isinstance(given, int) or given < 0):
+        raise ValueError(f"window must be a number of turns (0 or more) or 'all', not {window!r}")
+    return window
+
+
 CANCELLATION = 409
 """The status code of Restate's cancellation error, which a stopped turn fails with."""
 
 CANCELLED = "Cancelled: the turn was stopped before it finished."
 """The answer of a cancelled turn, and the result of each tool call it cut off, which the model sees later in the conversation."""
+
+ENDED = "Ended: the turn ended before it finished, and was not answered."
+"""The answer of a turn whose invocation ended without answering it (killed, say), and the result of each tool call
+it cut off. A newer message, or the companion noticing that the turn's invocation is gone, closes it with this."""
 
 RETURNED_UNRECORDED = (
     "Done, but the turn was stopped before this call's result was recorded: it did happen, so check its "

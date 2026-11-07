@@ -33,14 +33,10 @@ its stored events:
   default) fails its prompt for good: a retry would carry on with a fresh count.
 - An agent or ``App`` of your own runs as you configured it, with the
   ``run_config`` you give.
-- The built-in agent gets ADK's events compaction, for a conversation that
-  lives long (``EventsCompactionConfig``): every ``COMPACT_EVERY``
-  invocations, its model summarizes them (with the ``COMPACT_OVERLAP`` before
-  them), and its requests have the summaries in place of the events they
-  cover. A summary is an event like any other, stored in the session, which
-  the conversation's messages do not show. ADK compacts after the run's
-  answer: a summary that fails (its model request, say) leaves the turn
-  answered, and is tried again after the next one.
+- The session is the conversation as the model sees it: the earlier turns'
+  messages and answers, and the latest turns' events (``_conversation.py``).
+  Its state is carried from turn to turn: each turn stores it with its
+  answer, so that it holds however few events are loaded.
 """
 
 from __future__ import annotations
@@ -55,8 +51,6 @@ from typing import Any, Unpack
 from google.adk.agents import BaseAgent, LlmAgent, RunConfig
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError, new_invocation_context_id
 from google.adk.apps import App, ResumabilityConfig
-from google.adk.apps.app import EventsCompactionConfig
-from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
 from google.adk.events import Event
 from google.adk.models import BaseLlm
 from google.adk.plugins import BasePlugin
@@ -131,9 +125,9 @@ class _Items:
         content = types.Content(role="user", parts=[types.Part(text=text)])
         return Event(author="user", invocation_id=new_invocation_context_id(), content=content)
 
-    def reply(self, text: str) -> Item:
+    def reply(self, text: str, agent: str | None = None) -> Item:
         content = types.Content(role="model", parts=[types.Part(text=text)])
-        return Event(author=self.author, content=content)
+        return Event(author=agent or self.author, content=content)
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         if not results:
@@ -167,12 +161,27 @@ class _Sessions(BaseSessionService):
         self.conversation = conversation
 
     def session(self) -> Session:
+        """Return the session: the conversation as the model sees it (``history``), and the state as of now.
+
+        The state is the one the latest answered turn carried, with the
+        changes of the turn being answered (whose events are all loaded).
+        """
+        conversation = self.conversation
         session = Session(id=_USER, app_name=_APP, user_id=_USER, last_update_time=time.time())
-        for entry in self.conversation.entries:
-            event = typing.cast(Event, entry.item)
-            self._update_session_state(session, event)
-            session.events.append(event)
+        session.events.extend(typing.cast(list[Event], conversation.history()))
+        _, carried = conversation.carried()
+        answered = max((turn.n for turn in conversation.transcript if turn.answer is not None), default=-1)
+        if carried is not None:
+            session.state.update(json.loads(carried))
+        for entry in conversation.entries:
+            if carried is None or (entry.turn is not None and entry.turn > answered):
+                self._update_session_state(session, typing.cast(Event, entry.item))
+        self._carry(session)
         return session
+
+    def _carry(self, session: Session) -> None:
+        """Have the turn carry the session's state to the next turns."""
+        self.conversation.carry(state=json.dumps(session.state, default=str))
 
     async def create_session(
         self, *, app_name: str, user_id: str, state: dict[str, Any] | None = None, session_id: str | None = None
@@ -199,6 +208,7 @@ class _Sessions(BaseSessionService):
             await self.conversation.append_reply(event, agent=event.author)
         else:
             await self.conversation.append(event)
+        self._carry(session)
         return event
 
 
@@ -286,30 +296,6 @@ def _model(model: AnyModel | None) -> str | BaseLlm:
 # --- A run ----------------------------------------------------------------------------------------
 
 
-COMPACT_EVERY = 10
-"""How many invocations of the built-in agent ADK's events compaction summarizes at a time."""
-
-COMPACT_OVERLAP = 2
-"""How many invocations before them each summary covers again, for continuity."""
-
-
-class _Summarizer(LlmEventSummarizer):
-    """ADK's summarizer of events, whose failure leaves the turn answered.
-
-    ADK compacts after the run's answer, which an error would fail (as a
-    refusal, if its model request's looks like one). A summarizer that
-    returns ``None`` (ADK's contract for one that failed) leaves the events
-    as they are, and they are summarized again after the next turn.
-    """
-
-    async def maybe_summarize_events(self, *, events: list[Event]) -> Event | None:
-        try:
-            return await super().maybe_summarize_events(events=events)
-        except Exception as error:
-            logger.warning("ADK's events compaction failed, and runs again after the next turn: %s", error)
-            return None
-
-
 def _app(
     ctx: SessionContext,
     own: BaseAgent | App | None,
@@ -328,13 +314,7 @@ def _app(
         root = LlmAgent(
             name="assistant", model=_model(model), instruction=system or "", tools=tools(given), output_schema=output
         )
-        # For a conversation that lives long, which would otherwise outgrow the model's context window.
-        compaction = EventsCompactionConfig(
-            summarizer=_Summarizer(llm=root.canonical_model),
-            compaction_interval=COMPACT_EVERY,
-            overlap_size=COMPACT_OVERLAP,
-        )
-        app = App(name=_APP, root_agent=root, events_compaction_config=compaction)
+        app = App(name=_APP, root_agent=root)
     else:
         app = own if isinstance(own, App) else App(name=_APP, root_agent=own)
         # A workflow agent (a SequentialAgent, say) has no output schema: its answer is asked again for as JSON.

@@ -207,12 +207,14 @@ def desk(model: Model) -> Agent[Any]:
 
 
 triage = openai.agent("oai_desk", agent=desk(model))
+forgetful = openai.agent("oai_desk_window_0", agent=desk(model), window=0)
+"""The same desk, whose model sees no earlier turn whole: the handoff is carried from turn to turn."""
 
 
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, triage]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user, triage, forgetful]), restate_image="ghcr.io/restatedev/restate:latest"
     ) as harness:
         yield harness
 
@@ -341,6 +343,13 @@ async def test_a_handoff_holds_for_the_next_messages(harness: HarnessEnvironment
     assert (await chat(harness, k, f"system {k}", "oai_desk")).json() == "system: You handle refunds."
     # The refunds agent has the tools that openai.tools() gave it.
     assert (await chat(harness, k, f"weather {k}", "oai_desk")).json() == f"tool said: sunny in {k}"
+
+
+async def test_a_handoff_holds_when_the_model_sees_no_earlier_turn_whole(harness: HarnessEnvironment):
+    k = key()
+    await chat(harness, k, f"handoff {k}", "oai_desk_window_0")
+    assert (await chat(harness, k, f"system {k}", "oai_desk_window_0")).json() == "system: You handle refunds."
+    assert (await chat(harness, k, f"system {k}", "oai_desk_window_0")).json() == "system: You handle refunds."
 
 
 # --- In process -----------------------------------------------------------------------------------

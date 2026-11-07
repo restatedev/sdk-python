@@ -23,7 +23,7 @@ from sessions_object import Host, run  # pylint: disable=import-error
 from restate import sessions
 from restate.agents import _messages
 from restate.agents._api import Messages, MessagesRequest
-from restate.agents._conversation import TABLE, Conversation, Entry, next_start, restart
+from restate.agents._conversation import STEPS, TURNS, Conversation, Entry, next_start, restart
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ chat = sessions.SessionObject("rendered")
 @chat.handler
 async def ask(ctx: sessions.SessionContext, text: str) -> None:
     conversation = await Conversation.load(ctx.db, ITEMS)
-    await conversation.ask(f"{ctx.request.id}:{len(conversation.entries)}", text)
+    await conversation.ask(f"{ctx.request.id}:{len(conversation.transcript)}", text)
 
 
 @chat.handler
@@ -63,7 +63,8 @@ async def clear(ctx: sessions.SessionContext) -> None:
     await Conversation.load(ctx.db, ITEMS)
     start = await next_start(ctx.db)
     async with ctx.db.transaction() as tx:
-        await tx.execute(f"DELETE FROM {TABLE}")
+        await tx.execute(f"DELETE FROM {TURNS}")
+        await tx.execute(f"DELETE FROM {STEPS}")
         await restart(tx, start)
 
 

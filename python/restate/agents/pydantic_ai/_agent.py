@@ -177,7 +177,7 @@ class _Items:
     def prompt(self, text: str) -> Item:
         return ModelRequest(parts=[UserPromptPart(text)])
 
-    def reply(self, text: str) -> Item:
+    def reply(self, text: str, agent: str | None = None) -> Item:
         return ModelResponse(parts=[TextPart(text)])
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:

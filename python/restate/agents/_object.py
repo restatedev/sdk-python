@@ -16,6 +16,7 @@ into an agent that answers messages.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import typing
 from collections.abc import Awaitable, Callable, Sequence
@@ -34,8 +35,9 @@ from restate.agents._api import (
     Waiting,
     Watch,
 )
-from restate.agents._common import MessageSerde, refusal_of
+from restate.agents._common import BUDGET, WINDOW, MessageSerde, Window, check_window, refusal_of
 from restate.agents._conversation import SCHEMA, Items, next_start, restart
+from restate.agents._conversation import settle as settle_turn
 from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared
 from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
@@ -78,6 +80,11 @@ class AgentOptions(TypedDict, total=False):
         ingress_private: Whether only other services may call it.
         invocation_retry_policy: How Restate retries a failed turn. Defaults
             to ``RETRIES``.
+        window: How many of the latest answered turns the model sees whole,
+            with their tool calls and results, or ``"all"``. Defaults to 1.
+        budget: How many tokens of the turns before the window the model
+            sees, as their messages and answers: the latest that fit.
+            Defaults to ``BUDGET``.
     """
 
     description: str | None
@@ -90,6 +97,8 @@ class AgentOptions(TypedDict, total=False):
     idempotency_retention: timedelta | None
     ingress_private: bool | None
     invocation_retry_policy: InvocationRetryPolicy | None
+    window: Window
+    budget: int
 
 
 WAITS = timedelta(seconds=15)
@@ -135,7 +144,20 @@ optional input takes those requests and requests without a body alike.
 
 
 BUILT_IN = frozenset(
-    {"signal", "pending", "status", "stop", "notifications", "watch", "chat", "messages", "clear", "sync", "erase"}
+    {
+        "signal",
+        "pending",
+        "status",
+        "stop",
+        "notifications",
+        "watch",
+        "chat",
+        "messages",
+        "clear",
+        "sync",
+        "erase",
+        "settle",
+    }
 )
 """The names of the built-in handlers and views of every agent, which are reserved."""
 
@@ -166,7 +188,8 @@ class AgentObject(SessionObject):
     - ``sync``: read what changed since a cursor, together with the status
       and the revision, for clients that follow the conversation.
 
-    These names, and ``erase`` (which ``clear`` uses), are reserved:
+    These names, ``erase`` (which ``clear`` uses) and ``settle`` (which closes
+    a turn whose invocation is gone), are reserved:
     registering a handler or view of your own under one of them raises
     ``ValueError``. You rarely create an ``AgentObject`` yourself: a
     framework's ``agent()`` creates one and calls ``chat()`` for you.
@@ -188,6 +211,11 @@ class AgentObject(SessionObject):
         ingress_private: Whether only other services may call it.
         invocation_retry_policy: How Restate retries a failed handler.
             Defaults to ``RETRIES``.
+        window: How many of the latest answered turns the model sees whole,
+            with their tool calls and results, or ``"all"``: earlier turns
+            are their messages and answers. Defaults to 1.
+        budget: How many tokens of the turns before the window the model
+            sees: the latest that fit. Defaults to ``BUDGET``.
     """
 
     def __init__(
@@ -204,6 +232,8 @@ class AgentObject(SessionObject):
         idempotency_retention: timedelta | None = None,
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = RETRIES,
+        window: Window = WINDOW,
+        budget: int = BUDGET,
     ) -> None:
         super().__init__(
             name,
@@ -219,7 +249,8 @@ class AgentObject(SessionObject):
         )
         self.background: bool = background
         self._clear: Callable[[SessionContext], Awaitable[None]] | None = None
-        AGENT.on(self, AgentInfo(background=background))
+        self._settings = AgentInfo(background=background, window=check_window(window), budget=budget)
+        AGENT.on(self, self._settings)
         _signals.with_companion(self)
         self._building = True
         try:
@@ -362,7 +393,8 @@ class AgentObject(SessionObject):
                 return self.chat(fn, items=items, clear=clear, output=output)
 
             return decorate
-        AGENT.on(self, AgentInfo(background=self.background, clear=clear))
+        self._settings = dataclasses.replace(self._settings, background=self.background, clear=clear)
+        AGENT.on(self, self._settings)
         answering = answer
 
         async def chat(ctx: SessionContext, text: str) -> Any:
@@ -410,7 +442,7 @@ async def _stopped(ctx: ViewContext, step: str) -> Stopped:
 
 
 def _followed(agent: AgentObject, items: Items) -> None:
-    """Register the views that ``chat()`` adds (``messages``, ``clear``, ``sync``), and the private ``erase``."""
+    """Register the views that ``chat()`` adds (``messages``, ``clear``, ``sync``), and the private ``erase`` and ``settle``."""
 
     async def messages(ctx: ViewContext, request: MessagesRequest | None = None) -> Messages:
         """Read the conversation: a page of it, or what changed since a cursor.
@@ -431,6 +463,15 @@ def _followed(agent: AgentObject, items: Items) -> None:
             await restart(tx, start)
         await cleared(ctx)
         await ctx.call(_signals.reset, key=_signals.signals_of(ctx), idempotency_key=f"{ctx.request.id}:reset")
+
+    async def settle(ctx: SessionContext, invocation_id: str) -> bool:
+        """Close the latest turn, unanswered, if invocation ``invocation_id`` ran it and is gone.
+
+        The companion sends this once it finds the turn's invocation ended
+        without answering (killed, say), so that the conversation shows the
+        turn closed before the next message. Return whether it closed it.
+        """
+        return await settle_turn(ctx, items, invocation_id)
 
     async def clear(ctx: ViewContext, _: Nothing = None) -> Stopped:
         """Forget the conversation, and empty the key's database.
@@ -470,5 +511,6 @@ def _followed(agent: AgentObject, items: Items) -> None:
 
     agent.view(messages)
     agent.handler(ingress_private=True)(erase)
+    agent.handler(ingress_private=True)(settle)
     agent.view(inactivity_timeout=WAITS)(clear)
     agent.view(inactivity_timeout=WAITS, journal_retention=timedelta(0))(sync)
