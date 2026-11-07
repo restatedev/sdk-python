@@ -5,8 +5,14 @@ is answered once, and each tool call is made once, through crashes, retries,
 cancellations and long waits.** The tests should be organised around that
 promise. Today they are organised around the frameworks.
 
-This document has three parts: what the tests cover now, the gaps, and a plan
-in small PRs. It follows `sdk-sessions/coverage.md`, which did the same for the
+This document covers:
+
+- what the tests cover now, and the gaps;
+- how good the suite is, measured by bringing past bugs back;
+- the strategy: a pyramid, mostly unit tests, then integration, then a few
+  end-to-end tests, with the techniques that make it find what hand-picked
+  cases miss;
+- a plan in small PRs. It follows `sdk-sessions/coverage.md`, which did the same for the
 TypeScript packages. Several of its tools carry over: the seeded crash
 campaign, the e2e bank of agents, and the nightly soak.
 
@@ -156,259 +162,238 @@ would catch.
    - **Running separately.** The tests can't run without Docker, can't run in
      parallel (xdist), and coverage is not measured.
 
-## The strategy
+## How good the suite is: past bugs brought back
 
-There are five layers. Each one answers a question the others can't.
+`scripts/resurrect.py` measures the suite against bugs that really happened.
 
-| Layer | Question | Runs | Speed |
+- **28 history mutants.** Each brings back, on today's code, one bug that a fix
+  commit describes (#276, #278, #290, #291, #292, #294).
+- **5 durability mutants.** Each breaks the contract of a turn without
+  matching any past fix.
+
+For each mutant, the runner runs the test files that use the code it changes.
+It then asks: which tests fail?
+
+- **Caught:** a test other than the fix's own regression tests fails. The
+  suite would have found the bug without them.
+- **Regression only:** only the tests that the fix commit added fail.
+- **Survived:** nothing fails.
+
+The run was against Restate 1.8.1 on 7 November 2026. The baseline was 283
+passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
+
+| Mutant | Kind | Bug brought back | Verdict |
 | --- | --- | --- | --- |
-| **1. Conformance suite** | Does every framework keep the contract? | PR, in-process and real server | seconds per framework |
-| **2. Crash sweeps** | Does any single crash point break the contract? | PR (bounded), nightly (all) | seconds to minutes |
-| **3. Model-based property tests** | Do the conversation storage and its views stay coherent under any sequence of operations? | PR | seconds |
-| **4. E2E chaos** | Does it hold with real processes killed, a real server restarted, and several frameworks at once? | PR (short), nightly (long, soak) | minutes |
-| **5. Drift canaries** | Do new framework, server and model versions still fit? | nightly, allowed to fail | minutes |
+| `openai-approval-resume` | #294 | a cut-off call that needs an approval runs on the retry, without it | regression only |
+| `openai-approval-run` | #294 | a run stopped for approvals answers "null", and the next message runs the call | regression only |
+| `openai-approval-function` | #294 | `needs_approval` read by truthiness | regression only |
+| `openai-refusal-window` | #294 | an error of the agent's own code is taken for a refusal | regression only |
+| `openai-missing-key` | #294 | a missing API key is retried forever | **caught** |
+| `openai-setup-error` | #294 | the SDK's setup errors are retried forever | regression only |
+| `openai-tool-timeout` | #294 | a resumed call bypasses its tool's timeout | regression only |
+| `openai-tool-guardrails` | #294 | a cut-off call to a guarded tool bypasses its guardrails | regression only |
+| `pydantic-system-prompt` | #292 | an Agent of your own loses its system prompt each turn | regression only |
+| `pydantic-usage-limit` | #292 | `UsageLimitExceeded` retried with a fresh limit | regression only |
+| `pydantic-gave-up` | #292 | `UnexpectedModelBehavior` retried forever | regression only |
+| `pydantic-unreadable-response` | #292 | one unreadable response ends the turn | regression only |
+| `pydantic-user-error` | #292 | `UserError` retried forever | regression only |
+| `pydantic-refusal-by-name` | #292 | an error of the agent's own code is a refusal by its name | regression only |
+| `pydantic-deferred` | #292 | a deferred tool call answers with its repr | regression only |
+| `pydantic-deps` | #292 | an Agent of your own gets no deps | regression only |
+| `pydantic-model-error` | #292 | a model that cannot be made is not a refusal | **caught** |
+| `langgraph-own-errors` | #291 | recursion limit and invalid update retried forever | regression only |
+| `langgraph-invalid-update-state` | #291 | an invalid update fails every later read of the state | regression only |
+| `langgraph-static-breakpoints` | #290 | a graph with static breakpoints is accepted | regression only |
+| `langgraph-subgraph-breakpoint` | #290 | a run stopped at a subgraph's breakpoint answers half done | regression only |
+| `langgraph-refusal-by-name` | #290 | a graph's error is a refusal by its name | regression only |
+| `langgraph-prune` | #290 | a finished turn keeps every checkpoint | regression only |
+| `errors-weakref` | #290 | a tool's `KeyError` is masked by "cannot create weak reference" | **caught** |
+| `client-dot-keys` | #278 | a key of `.` or `..` reaches another path | regression only |
+| `cli-ctrl-c` | #278 | Ctrl-C waits for a line of input | regression only |
+| `views-optional-body` | #276 | a view refuses the TypeScript client's request | **caught** |
+| `langgraph-responses-api` | #276 | OpenAI models run on Chat Completions | regression only |
+| `pydantic-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **caught** |
+| `calls-new-id-not-matched` | durability | a call asked again under a new id makes its Restate call again | **caught** |
+| `langgraph-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **SURVIVED** |
+| `calls-settled-early` | durability | a returned call is forgotten before its result is stored; after a crash, the model asking again under a new id makes it again | **SURVIVED** |
+| `calls-never-settled` | durability | a call's record is never forgotten: the key's state grows with every call | **SURVIVED** |
 
-Hygiene (shared fixtures, markers, pinned images, coverage) comes first,
-because every layer depends on it.
+What it says:
 
-### 1. One conformance suite, run against every framework
+- **Every past bug is caught today, but almost only by its own regression
+  test.** 24 of 28 are caught only by the test that their fix added; 4 (14%)
+  would have been caught by the rest of the suite. The suite records the bugs
+  it has met, and finds few new ones. That is the case for shared,
+  framework-independent tests: the conformance suite, the error tables, the
+  sweeps.
+- **12 of the 28 past bugs are error classification.** That is job 5: a
+  refusal, a retry or a terminal error decided wrongly, as with
+  `*-refusal-*`, `*-setup-error`, `*-usage-limit`, `*-gave-up`,
+  `*-own-errors`, `*-model-error` and `errors-weakref`. A table of errors
+  against outcomes, per framework, at the unit level, would have caught most
+  of them before release. 8 more are in resuming (job 3).
+- **"Retried forever" bugs fail slowly.** Such a mutant takes 75 to 280
+  seconds, against about 13 for the others, because the test waits for its
+  `until()` timeout while Restate retries. A test harness with a small retry
+  budget, or an assertion on the number of attempts, would fail them at once.
+- **Two predicted gaps are confirmed, and one is new.**
+  - LangGraph's built-in agent has no test that a stored reply isn't asked
+    for again; the coverage table had marked it missing.
+  - Nothing checks that a returned Restate call is kept until its result is
+    stored. The code looks right; the point is that no test would notice if it
+    stopped being right, and a double effect is the bug users can't afford.
+    This is what the crash sweeps (plan #4) will cover.
+  - Nothing checks that call records are ever cleaned up.
 
-The contract is written once, as tests that take a **framework adapter**, and
-pytest runs them for every framework:
+Run it with `uv run --no-sync python scripts/resurrect.py` (with Docker), or
+pass mutant names to run some. Every future fix should add a mutant.
 
-```python
-# tests/agents/conformance/adapter.py
-class Framework(Protocol):
-    name: str
-    def agent(self, name: str, *, model: Teller, tools: list[Tool], **options) -> AgentObject: ...
-    def prompt(self, ctx, text: str, *, model: Teller, **options) -> Awaitable[Any]: ...
-    def own_agent(self, name: str, *, model: Teller, tools: list[Tool]) -> AgentObject: ...  # agent= / graph=
-    # The framework's own crash points, for the sweeps: the hooks that store a step.
-    store_points: Sequence[str]
-```
+## What an integration does, and so what to test
 
-- **The teller.** A single scripted model, `Teller`, reads a small script language from the prompt and turns each step
-  into the framework's native response types. Examples: `say <text>`,
-  `call <tool> <json>`, `call* <tool> <json> x3` (parallel calls), `refuse`,
-  `fail-once`, `output <json>`.
-  - Each adapter only converts the teller's steps into its framework's own
-    response objects (`ModelResponse`, `LlmResponse`, `AIMessage`, Pydantic AI's
-    `ModelResponse`).
-  - The teller records every request, so a test can assert "asked once".
-  - This mirrors the TypeScript `test/fakes/fakes.ts`.
-- **The tools.** `get_weather`, `flaky`, `blocking` and `forbidden` move into
-  the suite.
-  - The bank (`transfer`, `audit`) is added, with the tool call id as the
-    transfer id, as in TypeScript `test/bank.ts`.
-  - Every effect is counted in a ledger object, by call id, so "made once" can
-    be asserted.
-- **The scenarios.** Every row of the table above becomes one test, applied to
-  every column:
-  - a scenario that doesn't apply to a framework is skipped, with the reason
-    stated (for example, handoffs outside OpenAI and ADK);
-  - a scenario that applies but isn't supported yet is marked xfail.
-  - The rows include the ones missing today: Restate tools through each
-    framework, `background=`, `clear` and cursors, and `PerSession` for ADK.
-  - The holes then become visible in the test report.
-- **What stays in each framework's file.** Only what belongs to that framework:
-  OpenAI's guardrails and handoff filters, LangGraph's checkpointer and
-  interrupts, Pydantic AI's capabilities, ADK's plugins and `SequentialAgent`.
-- **Possibly public.** `restate.agents.testing`, offering `Teller` and an
-  in-process `run_turn()`, would let users test their own agents the same way.
-  The modal-template tutorial could then be tested with it, which closes gap 8
-  there.
+Each integration is a thin layer between its framework's agent loop and
+Restate. It has five jobs. Each job fails in its own way, and each is
+cheapest to test at its own level.
 
-The existing per-framework contract tests are deleted once the suite covers
-them. The goal is fewer lines in total, with more cells covered.
+| Job | Where | What goes wrong |
+| --- | --- | --- |
+| 1. Translate messages: framework message ↔ stored row, and what each holds (text, tool calls, tool results) | `_Items` in each `_agent.py` | a call is lost or misread after a reload |
+| 2. Store each step as it happens, from the framework's hooks | OpenAI `_Hooks`, Pydantic AI `_Restate`, ADK `_Sessions`, LangGraph's nodes | a step is stored twice, or not at all, before a crash |
+| 3. Resume: rebuild the framework's state, skip calls already made, don't ask again for a stored reply | OpenAI `_resume`, `_current`; ADK `_final`; `final_reply` | a tool runs twice, or the model is asked again |
+| 4. Wrap tools: schema, argument validation, errors back to the model | `_function_tool`, `toolset`, `_AdkTool`, `_RestateTool` | a wrong schema, or bad arguments crash the turn |
+| 5. Classify errors: refusal (424), retry, or terminal | `refusal_of`, `terminal_of`, each `_run`'s `except` | a bad key retried forever, or a blip fails the turn |
 
-### 2. Crash sweeps: every crash point, not a chosen one
+Of the 28 bugs that the fix commits describe (see "How good the suite is"
+below), 12 are in job 5 and 8 are in job 3.
 
-A scenario runs in-process on `Host` and counts the syncs of a clean run, `N`.
-It then runs once for each `n` in `0..N`:
+## The strategy: a pyramid
 
-1. `crash_after(n)`, which loses that sync's writes as a crash would;
-2. re-invoke with the same request, as Restate's retry does;
-3. repeat until the invocation ends;
-4. check the invariants.
+Today the pyramid is upside down for the integrations. Every framework
+behaviour is tested against a real Restate server: 133 of the 240 tests in
+`tests/agents_*.py` need Docker (the other 107 run in 24 seconds without it).
+The fix is to move the contract down to the in-process level, where a turn
+costs milliseconds and every crash point can be tried, and keep the server
+for what only a server shows.
 
-The invariants are the contract, stated as checks on the final state:
+### Unit (about 70%): milliseconds, no server, no Docker, no network
 
-- The `messages` view has each prompt once, in order, each followed by its
-  answer. There are no orphan tool calls (a call without its result), except in
-  a run that is closed on purpose.
-- Each side effect happened once, as recorded by the ledger by call id.
-- The teller was not asked again for a step whose reply was already stored. A
-  reply cut off by a crash may be asked for again, which the sweep shows exactly.
-- Ids only increase, and a cursor follower that read between the attempts sees
-  every change once and never goes back.
-- The final answer equals the answer of the clean run.
+- **(a) Pure functions, per framework (jobs 1, 4 and 5), as tables.**
+  - Round trips: `load(dump(m)) == m` and `read(m)` for every kind of message
+    (text, a call, parallel calls, a tool error, structured output, a
+    handoff), generated by Hypothesis from the frameworks' Pydantic types.
+  - Tool schemas, and bad arguments returned to the model.
+  - **Error classification:** a table of exceptions (each provider's
+    authentication error, rate limit, timeout, a `TerminalError`, each
+    framework's own errors, a setup error, an `ImportError`) against the
+    outcome: refused, retried or terminal. This is where most past bugs were.
+- **(b) One turn, everything real except Restate (jobs 2 and 3).**
+  - The real framework, the real integration and the real SQLite database,
+    with `Host` as Restate and a scripted model, the teller. One turn is a
+    function call.
+  - The shared contract is written once, as a conformance suite run for every
+    framework through a small adapter. The rows of the table above become its
+    scenarios, including the missing cells.
+  - **Crash sweeps:** each scenario runs clean, counting its syncs `N`, then
+    once for each `n` in `0..N` with `crash_after(n)`, retried until it ends.
+    The invariants: each prompt answered once, each ledger effect once, the
+    teller not asked again for a stored step, the clean run's answer and
+    `messages`.
+  - Prerequisite: `Host` keeps a journal of completed `run` and `call` entries
+    across attempts. Today it forgets more than Restate does.
+- **(c) The core with the made-up framework** (`agents_conversation`,
+  `agents_messages`, `agents_tools`), plus a Hypothesis state machine of the
+  conversation and its `messages` view against a plain list.
 
-More about the sweeps:
+### Integration (about 25%): seconds, a real Restate server
 
-- **Two crashes per run.** Double crashes (`n1`, `n2`) are swept on a seeded
-  sample, since the pairs grow as N².
-- **Where it runs.** In PR CI, every single crash point of the core scenarios
-  runs for every framework (one answer, one tool call, two parallel tool calls,
-  a refusal, a wait). Pairs and all scenarios run nightly. A failure prints its
-  scenario, framework and `n` (or the seed), and those are enough to replay it.
-- **Prerequisite: `Host` needs a journal across attempts.**
-  - Today `Host` has no VM. `ctx.run` results and call answers are not kept
-    from one attempt to the next, so a sweep would test a host that forgets more
-    than Restate does.
-  - `Host` should keep a journal of completed `run` and `call` entries, keyed
-    by their order. A crash keeps everything up to the last completed entry.
-  - The crash then lands where it does on a real server: after the journal and
-    before the database sync, or the other way around.
-  - This is the one real piece of infrastructure in the plan, and it is worth
-    building with the sessions tests, which need it too.
-- **Real-server sweeps.** On the real server, a nightly run of the conformance
-  suite with `always_replay=True` and with `disable_retries=False` covers the
-  replay path that `Host` can't.
+Only what `Host` fakes or cannot show, once per framework rather than once per
+behaviour:
 
-### 3. Model-based property tests for the conversation
+- HTTP ingress, registration, the plain-text `chat` body and the JSON shared
+  with the other SDKs.
+- Suspension over a long `wait_for_signal`; cancellation by `stop` and by the
+  admin API; attach; the retry policy; idempotency keys; views during a turn.
+- `restate.agents.client` and `python -m restate.agents chat`.
+- A **differential test** that keeps `Host` honest: a few scenarios run on
+  both, and their final states must match.
 
-Use `hypothesis` stateful testing (`RuleBasedStateMachine`) on
-`Conversation`, `_messages` and the start table.
+### End-to-end (about 5%): minutes
 
-- **Operations:** `ask`, `append` a reply with calls and results, `answered`,
-  drop the reply at the end, `clear`, `restart`, and a crash, `Backend.lose()`,
-  between any two of them.
-- **The model:** a plain Python list of messages, a `seq` counter and a start
-  position.
-- **Invariants:**
-  - `messages(limit, before)` pages the model's list, oldest first, with no
-    gaps or duplicates.
-  - A cursor follower that reads after every step ends up with exactly the
-    model's messages, keyed by id.
-  - `first` appears exactly after a `clear`.
-  - `seq` never decreases, even after a drop.
-  - Loading the conversation again gives back the same items.
+- **Chaos:** agents of every framework in their own processes, killed at
+  seeded random points while the server restarts; every prompt must move
+  money exactly once. A port of `sdk-sessions/packages/e2e/crash.ts`, whose
+  driver may be reused, since the wire format is shared.
+- **Nightly, never blocking:** a soak; the newest and oldest allowed version
+  of each framework; Restate `latest`; one smoke test per framework on a real
+  model.
 
-This replaces hand-written edge cases with generated ones and finds the cursor
-bugs that clients would hit. It runs in seconds and needs no framework.
+## The techniques
 
-### 4. End-to-end chaos: real processes, killed
+These make the levels above find more than hand-picked cases do.
 
-Port the agents' part of `sdk-sessions/packages/e2e/crash.ts`. Better still,
-reuse its driver, since it speaks HTTP and the wire format is shared.
+- **Bug resurrection** (`scripts/resurrect.py`, below). The bugs that the fix
+  commits describe, brought back one at a time. It measures the suite against
+  bugs that really happened, and grows with each fix.
+- **Oracles that need no expected value**, on the crash sweeps:
+  - *Crash invariance:* a crashed and retried run ends as the clean one.
+  - *Same requests to the model:* after a resume, each request the teller
+    gets equals the clean run's at that step: history, order of results,
+    system prompt, current agent. This catches a resume that rebuilds the
+    state slightly wrong even when the answer is still right, and guards the
+    provider's prompt cache.
+  - *Framework against framework:* the same script gives the same `messages`
+    in all four, apart from documented differences.
+- **Generated scripts** (Hypothesis stateful testing): the teller's script
+  and the client's actions (prompt, crash, retry, stop, signal, clear, read
+  with a cursor) are generated; the contract is checked after every step;
+  failures shrink to the shortest script that breaks it.
+- **Failpoints:** named points in the code (`failpoint("openai.after_llm_end")`,
+  a dict lookup when off) where a test injects a crash, an error, a
+  cancellation, the end of the attempt, or a delay. The sweep runs every point
+  × every fault, including points between syncs (after a tool's effect,
+  before its return) that `crash_after` cannot reach. They replace today's
+  monkeypatches of private hooks, which break on refactors.
+- **Mutation testing:** mutmut on `python/restate/agents`, on the unit level
+  only, for changed lines on PRs and in full weekly; plus hand-written
+  durability mutants (store after the effect, skip a sync, forget a stored
+  result), as `scripts/resurrect.py` holds.
+- **Later:** a seeded scheduler for asyncio (parallel tool calls, a stop
+  racing a commit), recorded real responses to check the teller's shapes, and
+  ids on the docstrings' promises cited by the tests.
 
-- **Setup.**
-  - Each framework's agent runs in its own `restate.serve` process, wrapped by
-    a fault injector. With probability `ABORT_PER_MILLE`, it calls `os._exit(1)`
-    on a state request or a journal write.
-  - A ledger object holds the accounts.
-  - A client sends prompts such as "move 5 from 1 to 2", and resends each one
-    until it is answered.
-  - The Restate server is killed and restarted twice during the run.
-- **Checks.**
-  - Every prompt moved money exactly once.
-  - The total amount of money is unchanged.
-  - Each conversation has each prompt once, in order.
-  - `status` and `messages`, read throughout, only ever show committed states.
-- **Seeds.** Every random choice comes from `ABORT_SEED`, which is printed at
-  the start and on failure.
-- **Where it runs.**
-  - PR CI: about 3 minutes, a few keys per framework.
-  - Nightly: a `SOAK_MINUTES=45` run with thousands of keys, a cap on each
-    process's memory, a share of the invocations cancelled mid-turn, and some
-    long `wait_for_signal` waits resolved late. Python's per-turn allocations,
-    such as reloading the whole conversation every turn, would show up here.
-- **Cross-SDK.** A TypeScript client following a Python agent pins gap 6 from
-  the outside. Golden JSON fixtures of `Messages`, `Status`, `Waiting`,
-  `Signal` and `Resolved`, kept in one place and checked by both SDKs, pin it
-  from the inside.
+## Hygiene, first
 
-### 5. Drift canaries (nightly, allowed to fail, with a summary)
-
-- **Newest dependencies.** The conformance suite on the newest release, and the
-  prereleases, of `openai-agents`, `pydantic-ai-slim`, `google-adk`, `langgraph`
-  and `langchain-core`, with nothing pinned. A framework's breaking change shows
-  up within a day, not at a user's upgrade.
-- **Oldest dependencies.** Oldest-allowed jobs for `openai-agents` and
-  `google-adk`, beside the existing LangGraph and Pydantic AI ones. The step is
-  already generic: it reads the extra from `pyproject.toml`.
-- **Server versions.** The real-server tier against the pinned Restate image
-  and against `latest`.
-- **Live models.**
-  - When the keys are present (a nightly secret), one smoke scenario per
-    framework runs on a real, cheap model: an answer, a tool call, structured
-    output, and a refusal with a deliberately wrong key.
-  - The assertions are structural only: a tool was called, the output
-    validates, a 424 came back. They never compare text.
-  - This is the only guard that the teller's response shapes match the real
-    ones.
-  - It is never in PR CI and never blocks a merge.
-
-### Hygiene first
-
-- A `tests/conftest.py` with **one session-scoped harness** for all agent
-  modules, and markers:
-  - `inprocess`: no Docker;
-  - `server`: needs the real-server tier;
-  - `e2e`;
-  - `live`.
-- New Justfile recipes, so a contributor without Docker can still run the
-  in-process tests and the sweeps:
-
-  | Recipe | Runs |
-  | --- | --- |
-  | `just test-fast` | `-m inprocess` |
-  | `just test` | everything except `e2e` and `live` |
-  | `just e2e` | the e2e tier |
-- **Pin the Restate image** in the harness, by digest or version, and update it
-  on purpose, like any other dependency.
-- **State shared with the server thread:**
-  - a fixture that resets every gate and counter;
-  - `asyncio.Event`s that the test sets for the server's loop replaced with a
-    thread-safe gate (`loop.call_soon_threadsafe`, or a `threading.Event`
-    polled by the tool);
-  - no monkeypatching of globals while a shared server runs. Use per-agent
-    options, or a harness of the test's own.
-- **Polling, not sleeping.** `until(condition)` everywhere. A "nothing more
-  arrives" check waits on a sentinel event sent after the event in question,
-  instead of sleeping.
-- **Coverage.**
-  - `coverage run --branch` on `python/restate/agents`, reported per module in
-    the job summary.
-  - A ratchet, so coverage can't drop, rather than a target number.
-  - The untested branches listed in gap 5 are the first to close.
-- **Flakiness.** Nightly `pytest -p randomly` and `--count=5` on the
-  real-server tier, so flakiness is measured instead of discovered.
+- `tests/conftest.py` with one session-scoped harness for every agent module,
+  and markers `inprocess`, `server`, `e2e`, `live`.
+- `just test-fast` (`-m inprocess`, no Docker), `just test` (all but `e2e` and
+  `live`), `just e2e`.
+- Pin the Restate image by version or digest; update it on purpose.
+- A fixture that resets every gate and counter; thread-safe gates for what the
+  test sets on the server's loop; no monkeypatched globals while a shared
+  server runs.
+- `until(condition)` instead of sleeps.
+- Branch coverage of `python/restate/agents` per module in the job summary,
+  with a ratchet rather than a target.
+- Nightly `pytest -p randomly` and `--count=5` on the server level, to measure
+  flakiness.
 
 ## The plan
 
-The work comes in small PRs, in this order. "PR" means the job runs on every
-push; "nightly" means a scheduled workflow that uploads its logs on failure.
+In this order. "PR" runs on every push; "nightly" is scheduled, with logs
+uploaded on failure.
 
-| # | Change | Closes | Runs | Size |
-| --- | --- | --- | --- | --- |
-| 1 | Hygiene: `conftest.py` with one shared harness, markers, pinned Restate image, thread-safe gates, `just test-fast` | 9 | PR | Small |
-| 2 | Branch coverage in CI, with a ratchet | 9 | PR | Small |
-| 3 | `Teller` and the adapters for the four frameworks, plus the bank and ledger tools | 3 | PR | Medium |
-| 4 | The conformance suite: today's nine contract tests, then the missing cells (Restate tools through each framework, `background`, `clear` and cursors, `PerSession` for ADK, a LangGraph tool's `TerminalError`, a stored answer not asked again for LangGraph); delete what it replaces | 3, 4 | PR | Medium |
-| 5 | Tests of the untested core branches (gap 5) | 5 | PR | Small |
-| 6 | `Host` with a journal across attempts | 1 (prerequisite) | PR | Medium |
-| 7 | Crash sweeps over the conformance scenarios: single points in PR, pairs and seeds nightly | 1 | PR and nightly | Medium |
-| 8 | `hypothesis` state machine for the conversation and `messages` | (new) | PR | Small |
-| 9 | Golden wire-format fixtures, shared with `sdk-sessions` | 6 | PR | Small |
-| 10 | E2E chaos: agents in killed processes, with the server restarted, `ABORT_SEED` | 2 | PR (short) | Large |
-| 11 | Nightly workflow: soak, `always_replay`, newest and oldest dependency jobs, Restate `latest`, random order and repeats | 2, 7 | Nightly | Small |
-| 12 | Live-model smoke tests, with keys from a secret | 7 | Nightly | Small |
-| 13 | The serve-only examples run their commented flows on the teller; `restate.agents.testing` made public if the API holds, and the modal-template tutorial tested with it | 8 | PR | Medium |
+| # | Change | Runs | Size |
+| --- | --- | --- | --- |
+| 1 | Bug resurrection: `scripts/resurrect.py` (done), its survivors turned into tests, and a nightly job that fails when a mutant survives | PR, nightly | Small |
+| 2 | Hygiene: `conftest.py`, markers, pinned image, thread-safe gates, `just test-fast`, coverage with a ratchet | PR | Small |
+| 3 | The teller, the adapters, the bank and ledger tools; the conformance suite at the unit level, with its missing cells; the server tests it replaces deleted | PR | Medium |
+| 4 | `Host` with a journal; the crash sweeps, with the crash-invariance and same-requests oracles | PR, nightly | Medium |
+| 5 | Error-classification and round-trip tables per framework; the Hypothesis model of the conversation | PR | Small |
+| 6 | Generated scripts (Hypothesis stateful) on the sweeps | PR, nightly | Medium |
+| 7 | Failpoints, replacing the monkeypatches | PR | Medium |
+| 8 | Mutation testing, generic and durability, weekly | Weekly | Small |
+| 9 | Golden wire-format fixtures, shared with `sdk-sessions`; the `Host` differential test | PR | Small |
+| 10 | End-to-end chaos with `ABORT_SEED`; nightly soak, version and live-model jobs | PR (short), nightly | Large |
 
-**Order of value.**
-
-- #1 and #2 take an afternoon, and they make every later failure readable.
-- #3 and #4 are where most of the missing cells close.
-- #6 and #7 find the bugs that nobody has thought of.
-- #10 is the end-to-end proof, and the most expensive.
-- #11 to #13 can come whenever convenient.
-
-**Not planned, on purpose.**
-
-- Real models in PR CI: they are slow, cost money, give nondeterministic text,
-  and need secrets on forks.
-- Tests of Restate's own guarantees: those belong to the server's project. This
-  suite tests what the package builds on them.
-- Token streaming: no integration offers it yet. When one does, it joins the
-  conformance suite as a column of behaviours, not as a file of its own.
+Not planned, on purpose: real models in PR CI (slow, paid, nondeterministic,
+no secrets on forks); tests of Restate's own guarantees (its project's); token
+streaming, which no integration offers yet.
