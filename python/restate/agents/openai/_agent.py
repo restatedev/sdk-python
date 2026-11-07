@@ -195,7 +195,7 @@ def _current(conversation: Conversation, root: Agent[Any], everyone: dict[str, A
         return root
     agent = everyone.get(latest.agent or "", root)
     targets = _handoffs(agent)
-    for call in (call for e in conversation.entries if e.reply == latest.reply for call in e.calls):
+    for call in (call for e in conversation.reply_entries(latest.reply) for call in e.calls):
         if call.name in targets and conversation.has_result(call.id):
             return everyone.get(targets[call.name], agent)
     return agent
@@ -364,7 +364,7 @@ async def _go(
     agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
     hooks = _Hooks(ctx, conversation, config)
     filtered = dataclasses.replace(config, call_model_input_filter=hooks.model_input)
-    items = typing.cast(Any, [entry.item for entry in conversation.entries])
+    items = typing.cast(Any, conversation.history())
     # The SDK's default, unless given: older versions take no None.
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:

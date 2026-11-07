@@ -170,8 +170,8 @@ async def _answer(app: Any, conversation: Conversation, running: Entry, state: d
         return json.dumps(to_jsonable_python(structured))
     copied = [
         item
-        for e in conversation.entries
-        if e.n > running.n and isinstance(item := typing.cast(BaseMessage, e.item), AIMessage) and item.id is not None
+        for e in conversation.after(running.n)
+        if isinstance(item := typing.cast(BaseMessage, e.item), AIMessage) and item.id is not None
     ]
     return str(copied[-1].text) if copied else ""
 
