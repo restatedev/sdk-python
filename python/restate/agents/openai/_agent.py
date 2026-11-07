@@ -45,8 +45,12 @@ start, and the run resumes from the last step stored:
   that lives long (``ModelSettings.context_management``, on versions of the
   SDK that have it): the Responses API summarizes the history as it nears the
   model's context window, which a long conversation would otherwise outgrow,
-  failing each turn. Its compaction item is stored like any reply, and sent
-  back. A model of the Chat Completions API, or of another provider, gets
+  failing each turn. Its compaction item is stored like any reply, and a
+  request starts with the latest one: it stands for the items before it,
+  which OpenAI's guide says need not be sent again (as the SDK's own
+  compacting session drops them), so that requests stop growing with the
+  conversation, which is stored whole. A model of the Chat Completions API,
+  or of another provider, gets
   none, and a model that OpenAI does not compact refuses such requests: run
   it as an ``Agent`` of your own, configured as you need.
 """
@@ -376,7 +380,7 @@ async def _go(
     agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
     hooks = _Hooks(ctx, conversation, config)
     filtered = dataclasses.replace(config, call_model_input_filter=hooks.model_input)
-    items = typing.cast(Any, [entry.item for entry in conversation.entries])
+    items = typing.cast(Any, _since_compaction([entry.item for entry in conversation.entries]))
     # The SDK's default, unless given: older versions take no None.
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:
@@ -391,6 +395,12 @@ async def _go(
     if outputs := conversation.new_results(result.to_input_list()):
         await conversation.append(*outputs)
     return _output(result.final_output)
+
+
+def _since_compaction(items: list[Item]) -> list[Item]:
+    """Return ``items`` from the latest compaction item on (OpenAI's), which stands for those before it."""
+    latest = max((i for i, item in enumerate(items) if item.get("type") == "compaction"), default=0)
+    return items[latest:]
 
 
 def tools(given: Sequence[AnyTool]) -> list[SdkTool]:

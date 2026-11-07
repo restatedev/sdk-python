@@ -15,6 +15,7 @@
 import asyncio
 import collections
 import copy
+import dataclasses
 import json
 import typing
 import uuid
@@ -672,3 +673,27 @@ def test_only_a_model_of_the_responses_api_gets_compaction():
     assert compaction(OpenAIResponsesModel(model="gpt-6-sol", openai_client=client)) == [{"type": "compaction"}]
     assert compaction(OpenAIChatCompletionsModel(model="gpt-6-sol", openai_client=client)) is None
     assert compaction(Scripted(reply)) is None
+
+
+async def test_a_request_starts_with_the_latest_compaction_item(monkeypatch: pytest.MonkeyPatch):
+    from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
+
+    compacted = {"type": "compaction", "id": "cmp_1", "encrypted_content": "the summary"}
+    original = _agent._Hooks.on_llm_end  # pyright: ignore[reportPrivateUsage]
+
+    async def compacting(self: Any, context: Any, agent: Any, response: ModelResponse) -> None:
+        # As OpenAI's server-side compaction does, at the second turn: its reply starts with a compaction item.
+        if any("compact" in json.dumps(item) for item in response.to_input_items()):
+            response = dataclasses.replace(response, output=[typing.cast(Any, compacted), *response.output])
+        await original(self, context, agent, response)
+
+    monkeypatch.setattr(_agent._Hooks, "on_llm_end", compacting)  # pyright: ignore[reportPrivateUsage]
+    scripted = Scripted(reply)
+    ask = invoker(asker(model=scripted))
+    assert await ask("hi there") == "echo: hi there"
+    assert await ask("compact now") == "echo: compact now"
+    assert await ask("hi again") == "echo: hi again"
+    _, items = scripted.requests[-1]
+    # The request starts with the compaction item, which stands for the conversation before it.
+    assert items[0] == compacted
+    assert [i.get("content") for i in items if i.get("role") == "user"] == ["hi again"]
