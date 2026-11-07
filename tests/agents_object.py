@@ -28,6 +28,7 @@ from agents_conversation import ITEMS  # pylint: disable=import-error
 import pytest
 
 import restate
+from support import RESTATE_IMAGE, Gate  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions
 from restate.agents._api import Messages, Status
 from restate.agents._object import AgentObject
@@ -59,7 +60,7 @@ class Refund(pydantic.BaseModel):
 approval = wait_for_signal("approval", description="Wait for a manager to approve a refund.", input=Refund)
 
 # A scripted framework, on the made-up items of agents_conversation: it answers with an echo.
-gate = asyncio.Event()
+gate = Gate()
 forgotten: list[str] = []
 
 
@@ -97,9 +98,7 @@ assistant.chat(answer, items=ITEMS, clear=forget)
 
 @pytest.fixture(scope="session")
 async def harness():
-    async with restate.create_test_harness(
-        restate.app([assistant]), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as harness:
+    async with restate.create_test_harness(restate.app([assistant]), restate_image=RESTATE_IMAGE) as harness:
         yield harness
 
 
@@ -197,7 +196,7 @@ async def test_the_views_without_input_take_a_request_with_a_json_content_type(h
 
 async def test_status_says_which_message_is_answered_and_stop_cancels_it(harness: HarnessEnvironment):
     key = str(uuid.uuid4())
-    gate.clear()
+    gate.close()
     invocation = await send(harness, key, "wait")
 
     async def answering() -> bool:
@@ -209,7 +208,7 @@ async def test_status_says_which_message_is_answered_and_stop_cancels_it(harness
     assert (await attach(harness, invocation)).status_code == 409
     assert (await call(harness, "status", key)).json()["answering"] is None
     # The next message is answered.
-    gate.set()
+    gate.open()
     assert (await call(harness, "chat", key, "next")).json() == "echo: next"
 
 

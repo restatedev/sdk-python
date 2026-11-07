@@ -42,6 +42,7 @@ from pydantic_ai.messages import (  # noqa: E402
 from pydantic_ai.models.function import AgentInfo, FunctionModel  # noqa: E402
 
 import restate  # noqa: E402
+from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import tool  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
@@ -377,8 +378,7 @@ summarizing = pydantic_ai.agent("pai_summarizing", model=FunctionModel(rememberi
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, trimmed, shop, summarizing]),
-        restate_image="ghcr.io/restatedev/restate:latest",
+        restate.app([assistant, per_user, trimmed, shop, summarizing]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 

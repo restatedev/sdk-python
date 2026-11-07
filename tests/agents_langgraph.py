@@ -33,6 +33,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 from langchain_core.tools import tool as langchain_tool  # noqa: E402
 
 import restate  # noqa: E402
+from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import tool  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
@@ -197,7 +198,7 @@ summarizing = langgraph.agent("lg_summarizing", model=Remembering(), budget=10)
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, summarizing]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([assistant, per_user, summarizing]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -432,6 +433,40 @@ def test_a_prompt_longer_than_the_window_is_sent_whole():
     latest = _agent._latest(messages, 10)  # pyright: ignore[reportPrivateUsage]
     assert latest == messages[-1:]
     assert _agent._latest(messages, None) == messages  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatch: pytest.MonkeyPatch):
+    """A crash after the model's final reply is stored: the retry answers with it, without asking the model again."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents._conversation import Conversation  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    k = key()
+    stored = Conversation.append_reply
+    crashed: list[bool] = []
+
+    async def store_then_crash_once(self: Conversation, *items: Any, **kwargs: Any) -> Any:
+        result = await stored(self, *items, **kwargs)
+        if not crashed and not any(getattr(item, "tool_calls", None) for item in items):
+            crashed.append(True)
+            raise RuntimeError("the process crashed after storing the answer")
+        return result
+
+    monkeypatch.setattr(Conversation, "append_reply", store_then_crash_once)
+    asker = sessions.SessionObject("lg_asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await langgraph.prompt(ctx, text, model=Scripted(), system="Answer briefly.")
+
+    backend, invocation = Backend(), request()
+    with pytest.raises(RuntimeError, match="crashed after storing"):
+        await invoke(asker, "ask", Host(backend, service="lg_asker"), invocation, f"hi {k}")
+    # The retry (the same invocation) returns the answer that was stored, without asking the model again.
+    assert await invoke(asker, "ask", Host(backend, service="lg_asker"), invocation, f"hi {k}") == f"echo: hi {k}"
+    assert asked[k] == 1
 
 
 async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):

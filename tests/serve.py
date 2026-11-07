@@ -25,6 +25,7 @@ import httpx2
 import pytest
 
 from restate.harness import RestateContainer, find_free_port
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 
 
 @pytest.fixture(scope="session")
@@ -90,11 +91,12 @@ def serves_http2() -> bool:
 
 
 @pytest.mark.anyio
+@pytest.mark.server
 @pytest.mark.skipif(not serves_http2(), reason="needs the serve extra")
 @pytest.mark.parametrize("command", ["program", "cli"])
 async def test_a_program_serves_its_app_over_http2_and_stops_on_sigterm(tmp_path: pathlib.Path, command: str):
     # Restate first: Docker maps its ports to free host ports, which could otherwise take the program's.
-    container = RestateContainer("ghcr.io/restatedev/restate:latest", always_replay=False, disable_retries=False)
+    container = RestateContainer(RESTATE_IMAGE, always_replay=False, disable_retries=False)
     container.start()
     port = find_free_port()
     output = tmp_path / "program.log"

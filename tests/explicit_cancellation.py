@@ -19,6 +19,7 @@ import httpx2
 import pytest
 
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import Context, HarnessEnvironment, Service, VirtualObject, Workflow
 from restate._preview import cancel_previous_calls, cancellation
 
@@ -126,7 +127,7 @@ async def ask_for_cancellation(ctx: Context) -> None:
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([sleeper, explicit, on_one_handler, implicit]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([sleeper, explicit, on_one_handler, implicit]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 

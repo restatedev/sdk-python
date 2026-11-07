@@ -15,6 +15,7 @@ import httpx2
 import pytest
 
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import Context, ObjectContext, Service, VirtualObject, Workflow, WorkflowContext
 from restate.vm import VMWrapper
 
@@ -70,6 +71,7 @@ def test_the_vm_takes_it():
 
 
 @pytest.mark.anyio
+@pytest.mark.server
 async def test_a_retry_runs_the_handler_again_and_entries_are_named():
     calls = 0
     counter = VirtualObject("counter", explicit_recovery=True)
@@ -87,9 +89,7 @@ async def test_a_retry_runs_the_handler_again_and_entries_are_named():
             raise ValueError("retry me")
         return ctx.request().id
 
-    async with restate.create_test_harness(
-        restate.app([counter]), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as harness:
+    async with restate.create_test_harness(restate.app([counter]), restate_image=RESTATE_IMAGE) as harness:
         invocation_id = await harness.client.object_call(add, key="a", arg=None)
         assert calls == 2
 

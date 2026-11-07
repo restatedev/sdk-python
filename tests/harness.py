@@ -11,6 +11,7 @@
 
 import uuid
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import (
     Context,
     Service,
@@ -93,7 +94,7 @@ async def payment_verified(ctx: WorkflowSharedContext, result: str):
 @pytest.fixture(scope="session")
 async def restate_test_harness():
     async with restate.create_test_harness(
-        restate.app([greeter, counter, payment]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([greeter, counter, payment]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
