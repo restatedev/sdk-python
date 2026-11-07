@@ -509,3 +509,29 @@ async def test_a_workflows_first_step_stored_before_a_crash_is_not_its_answer(mo
         await ask("system x", invocation)
     # The retry goes on with the second step, whose response is the answer.
     assert await ask("system x", invocation) == "system: Step two."
+
+
+async def test_the_built_in_agent_compacts_a_long_conversation():
+    from restate.agents.adk._agent import COMPACT_EVERY  # pylint: disable=import-outside-toplevel
+
+    seen: list[list[types.Content]] = []
+
+    class Seeing(Scripted):
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            seen.append(list(llm_request.contents))
+            async for response in super().generate_content_async(llm_request, stream):
+                yield response
+
+    asked = asking(model=Seeing())
+    for n in range(1, COMPACT_EVERY + 2):
+        assert await asked(f"hi {n}") == f"echo: hi {n}"
+    # After the first COMPACT_EVERY invocations, ADK had the model summarize them (a request of its own) ...
+    summarized = seen[-2]
+    assert len(summarized) == 1 and "hi 1" in str(summarized[0].parts)
+    # ... and the next request has the summary (as ADK shows an event of another author) in place of their events.
+    latest = seen[-1]
+    assert len(latest) == 2
+    assert "said: echo: The following is a conversation history" in str(latest[0].parts)
+    assert latest[-1].parts and latest[-1].parts[0].text == f"hi {COMPACT_EVERY + 1}"

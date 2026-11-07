@@ -31,6 +31,8 @@ from agents import (  # noqa: E402
     GuardrailFunctionOutput,
     Model,
     ModelResponse,
+    OpenAIChatCompletionsModel,
+    OpenAIResponsesModel,
     RunConfig,
     RunContextWrapper,
     Usage,
@@ -40,6 +42,7 @@ from agents import (  # noqa: E402
 )
 from agents.extensions import handoff_filters  # noqa: E402
 from agents.run import CallModelData, ModelInputData  # noqa: E402
+from openai import AsyncOpenAI  # noqa: E402
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText  # noqa: E402
 
 import restate  # noqa: E402
@@ -630,3 +633,42 @@ def test_a_tool_output_of_any_kind_is_stored_once():
     # The SDK hands the stored outputs back with the next request: none of them is new.
     new = {"type": "computer_call_output", "call_id": "c1", "output": "ok"}
     assert stored.new_results([shell, function, new]) == [new]
+
+
+# --- In process: a conversation that lives long --------------------------------------------------
+
+
+class ResponsesScripted(OpenAIResponsesModel):
+    """A model of the Responses API (as the SDK's default provider makes of a model id), scripted: it keeps the settings."""
+
+    def __init__(self, settings: list[Any]) -> None:
+        super().__init__(model="scripted", openai_client=AsyncOpenAI(api_key="no requests"))
+        self.scripted = Scripted(reply)
+        self.settings = settings
+
+    async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:  # pyright: ignore[reportIncompatibleMethodOverride]
+        self.settings.append(kwargs["model_settings"])
+        return await self.scripted.get_response(*args, **kwargs)
+
+
+async def test_the_built_in_agent_has_openais_compaction_and_an_agent_of_your_own_runs_as_configured():
+    settings: list[Any] = []
+    ask = invoker(asker(model=ResponsesScripted(settings)))
+    assert await ask("hi there") == "echo: hi there"
+    assert settings[-1].context_management == [{"type": "compaction"}]
+    ask = invoker(asker(agent=Agent(name="mine", model=ResponsesScripted(settings))))
+    assert await ask("hi there") == "echo: hi there"
+    assert settings[-1].context_management is None
+
+
+def test_only_a_model_of_the_responses_api_gets_compaction():
+    from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
+
+    def compaction(model: Any) -> Any:
+        return _agent._long_lived(model).context_management  # pyright: ignore[reportPrivateUsage]
+
+    client = AsyncOpenAI(api_key="no requests")
+    assert compaction("gpt-6-sol") == [{"type": "compaction"}]
+    assert compaction(OpenAIResponsesModel(model="gpt-6-sol", openai_client=client)) == [{"type": "compaction"}]
+    assert compaction(OpenAIChatCompletionsModel(model="gpt-6-sol", openai_client=client)) is None
+    assert compaction(Scripted(reply)) is None

@@ -33,6 +33,12 @@ its stored events:
   default) fails its prompt for good: a retry would carry on with a fresh count.
 - An agent or ``App`` of your own runs as you configured it, with the
   ``run_config`` you give.
+- The built-in agent gets ADK's events compaction, for a conversation that
+  lives long (``EventsCompactionConfig``): every ``COMPACT_EVERY``
+  invocations, its model summarizes them (with the ``COMPACT_OVERLAP`` before
+  them), and its requests have the summaries in place of the events they
+  cover. A summary is an event like any other, stored in the session, which
+  the conversation's messages do not show.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ from typing import Any, Unpack
 from google.adk.agents import BaseAgent, LlmAgent, RunConfig
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError, new_invocation_context_id
 from google.adk.apps import App, ResumabilityConfig
+from google.adk.apps.app import EventsCompactionConfig
 from google.adk.events import Event
 from google.adk.models import BaseLlm
 from google.adk.plugins import BasePlugin
@@ -273,6 +280,13 @@ def _model(model: AnyModel | None) -> str | BaseLlm:
 # --- A run ----------------------------------------------------------------------------------------
 
 
+COMPACT_EVERY = 10
+"""How many invocations of the built-in agent ADK's events compaction summarizes at a time."""
+
+COMPACT_OVERLAP = 2
+"""How many invocations before them each summary covers again, for continuity."""
+
+
 def _app(
     ctx: SessionContext,
     own: BaseAgent | App | None,
@@ -291,7 +305,9 @@ def _app(
         root: BaseAgent = LlmAgent(
             name="assistant", model=_model(model), instruction=system or "", tools=tools(given), output_schema=output
         )
-        app = App(name=_APP, root_agent=root)
+        # For a conversation that lives long, which would otherwise outgrow the model's context window.
+        compaction = EventsCompactionConfig(compaction_interval=COMPACT_EVERY, overlap_size=COMPACT_OVERLAP)
+        app = App(name=_APP, root_agent=root, events_compaction_config=compaction)
     else:
         app = own if isinstance(own, App) else App(name=_APP, root_agent=own)
         # A workflow agent (a SequentialAgent, say) has no output schema: its answer is asked again for as JSON.
