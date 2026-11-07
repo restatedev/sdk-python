@@ -325,7 +325,7 @@ def _app(
     schema with tools.
     """
     if own is None:
-        root: BaseAgent = LlmAgent(
+        root = LlmAgent(
             name="assistant", model=_model(model), instruction=system or "", tools=tools(given), output_schema=output
         )
         # For a conversation that lives long, which would otherwise outgrow the model's context window.
