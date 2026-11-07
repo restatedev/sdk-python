@@ -101,8 +101,9 @@ class Account:
 
 
 @dynamic_prompt
-def in_currency(request: ModelRequest) -> str:
-    return f"Amounts are in {typing.cast(Account, request.runtime.context).currency}."
+def in_currency(request: ModelRequest[Account]) -> str:
+    # Typed with the agent's context_schema, as create_agent checks.
+    return f"Amounts are in {request.runtime.context.currency}."
 
 
 accounts = langgraph.agent(
