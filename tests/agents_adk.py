@@ -535,3 +535,29 @@ async def test_the_built_in_agent_compacts_a_long_conversation():
     assert len(latest) == 2
     assert "said: echo: The following is a conversation history" in str(latest[0].parts)
     assert latest[-1].parts and latest[-1].parts[0].text == f"hi {COMPACT_EVERY + 1}"
+
+
+class BadRequestError(Exception):
+    """As a model's SDK names a request it refuses: the model's provider refusing, if it ended the turn."""
+
+
+async def test_a_compaction_that_fails_leaves_the_turn_answered():
+    from restate.agents.adk._agent import COMPACT_EVERY  # pylint: disable=import-outside-toplevel
+
+    summaries: list[str] = []
+
+    class NoSummaries(Scripted):
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            if "The following is a conversation history" in str(llm_request.contents):
+                summaries.append("refused")
+                raise BadRequestError("the summary's request is refused")
+            async for response in super().generate_content_async(llm_request, stream):
+                yield response
+
+    asked = asking(model=NoSummaries())
+    for n in range(1, COMPACT_EVERY + 2):
+        assert await asked(f"hi {n}") == f"echo: hi {n}"
+    # ADK tried to compact after the last two turns, which were answered all the same.
+    assert summaries == ["refused", "refused"]
