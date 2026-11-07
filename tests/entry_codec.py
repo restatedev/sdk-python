@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import Context, JournalValueCodec, Service, TerminalError
 from restate.client import Client
 from restate.handler import handler_from_callable, invoke_handler
@@ -174,11 +175,12 @@ async def codec_harness(
     async with restate.create_test_harness(
         restate.app([service], journal_value_codec=codec),
         journal_value_codec=codec,
-        restate_image="ghcr.io/restatedev/restate:latest",
+        restate_image=RESTATE_IMAGE,
     ) as harness:
         yield harness.client
 
 
+@pytest.mark.server
 async def test_codec_end_to_end():
     codec = MagicCodec()
     obj = restate.VirtualObject("codec_obj")
@@ -207,6 +209,7 @@ async def test_codec_end_to_end():
         assert result == "hi bob"
 
 
+@pytest.mark.server
 async def test_codec_end_to_end_with_async_provider():
     codec = MagicCodec()
     provider_calls = 0
@@ -226,7 +229,7 @@ async def test_codec_end_to_end_with_async_provider():
     async with restate.create_test_harness(
         restate.app([svc], journal_value_codec=provider),
         journal_value_codec=codec,
-        restate_image="ghcr.io/restatedev/restate:latest",
+        restate_image=RESTATE_IMAGE,
     ) as harness:
         assert await harness.client.service_call(greet, arg="bob") == "hi bob"
         assert await harness.client.service_call(greet, arg="alice") == "hi alice"

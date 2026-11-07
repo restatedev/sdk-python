@@ -39,6 +39,10 @@ typecheck: typecheck-pyright typecheck-mypy
 test:
     uv run -m pytest tests/*
 
+# The tests that need no Restate server (no Docker): in-process, in seconds.
+test-fast:
+    uv run -m pytest tests/* -m "not server"
+
 
 # Recipe to run both mypy and pylint
 verify: format lint lint-rust typecheck test

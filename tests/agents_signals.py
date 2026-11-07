@@ -21,6 +21,7 @@ import httpx2
 import pytest
 
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import HarnessEnvironment
 from restate.agents import _signals
 from restate.agents._api import Signal, Status, Turn, Watch
@@ -60,7 +61,7 @@ async def fail(ctx: restate.Context) -> None:
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([_signals.signals, driver, failing]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([_signals.signals, driver, failing]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 

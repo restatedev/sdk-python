@@ -24,6 +24,7 @@ import pytest
 from agents_conversation import ITEMS  # pylint: disable=import-error
 
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions
 from restate.agents import AgentObject, webhook, webhook_message
 
@@ -65,7 +66,7 @@ unsigned = webhook("anything", route=[triage])
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([issues, unsigned, triage]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([issues, unsigned, triage]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 

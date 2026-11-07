@@ -35,6 +35,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import restate  # noqa: E402
+from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment  # noqa: E402
 from restate.agents import call, langgraph  # noqa: E402
 
@@ -121,7 +122,7 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([ledger, desk, planner, plain, accounts]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([ledger, desk, planner, plain, accounts]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 

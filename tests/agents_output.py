@@ -55,6 +55,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel  # noqa: E402
 from pydantic_ai.profiles.google import GoogleModelProfile  # noqa: E402
 
 import restate  # noqa: E402
+from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import adk, langgraph, openai, pydantic_ai, tool  # noqa: E402
 from restate.agents._api import Messages  # noqa: E402
@@ -273,9 +274,7 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     served = [pai_native, pai_prompted, pai_gemini_2, lg, oai, oai_desk, adk_native, adk_tools]
-    async with restate.create_test_harness(
-        restate.app(served), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as harness:
+    async with restate.create_test_harness(restate.app(served), restate_image=RESTATE_IMAGE) as harness:
         yield harness
 
 

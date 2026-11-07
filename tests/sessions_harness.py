@@ -22,6 +22,7 @@ import httpx2
 import pytest
 
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions
 from restate.sessions import internal
 from restate.sessions import _object, _session
@@ -158,7 +159,7 @@ async def stoppable(ctx: sessions.SessionContext, text: str) -> list[str]:
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([inbox, pricing, sleeper, notes]), restate_image="ghcr.io/restatedev/restate:latest"
+        restate.app([inbox, pricing, sleeper, notes]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 

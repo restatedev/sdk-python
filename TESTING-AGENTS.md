@@ -45,7 +45,7 @@ contract.
 | Answer, and the `messages` view after it | H | H | H | H | H |
 | Tool call | H | H | H | H | H |
 | Crash in a tool: same call id, model not asked again | H | H | H | H | H |
-| An answer stored before a crash is not asked for again | P | P | P | **—** | P (checkpointer only) |
+| An answer stored before a crash is not asked for again | P | P | P | P (new) | P (checkpointer only) |
 | Crash or transient error in a model request | P (partial) | H | **—** | **—** | H |
 | Refused (bad key) → 424, and the next message is answered | H | H | H | H | n/a (retried) |
 | Stop → 409, and the next message starts afresh | H | H | H | H | H |
@@ -214,9 +214,9 @@ passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
 | `langgraph-responses-api` | #276 | OpenAI models run on Chat Completions | regression only |
 | `pydantic-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **caught** |
 | `calls-new-id-not-matched` | durability | a call asked again under a new id makes its Restate call again | **caught** |
-| `langgraph-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **SURVIVED** |
-| `calls-settled-early` | durability | a returned call is forgotten before its result is stored; after a crash, the model asking again under a new id makes it again | **SURVIVED** |
-| `calls-never-settled` | durability | a call's record is never forgotten: the key's state grows with every call | **SURVIVED** |
+| `langgraph-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **SURVIVED**, now caught |
+| `calls-settled-early` | durability | a returned call is forgotten before its result is stored; after a crash, the model asking again under a new id makes it again | **SURVIVED**, now caught |
+| `calls-never-settled` | durability | a call's record is never forgotten: the key's state grows with every call | **SURVIVED**, now caught |
 
 What it says:
 
@@ -244,6 +244,14 @@ What it says:
     stopped being right, and a double effect is the bug users can't afford.
     This is what the crash sweeps (plan #4) will cover.
   - Nothing checks that call records are ever cleaned up.
+
+  Two tests now catch all three, each brought back and seen to fail:
+
+  - `agents_langgraph.test_an_answer_stored_before_a_crash_is_not_asked_for_again`.
+  - `agents_tools.test_a_returned_call_is_kept_until_its_result_is_stored_and_forgotten_once_it_is`.
+    It runs a turn on the made-up framework through a crash between a call's
+    return and its stored result, then a retry under a new call id. It checks
+    that the same idempotency key is used and that no record is left.
 
 Run it with `uv run --no-sync python scripts/resurrect.py` (with Docker), or
 pass mutant names to run some. Every future fix should add a mutant.
@@ -380,6 +388,21 @@ These make the levels above find more than hand-picked cases do.
 
 In this order. "PR" runs on every push; "nightly" is scheduled, with logs
 uploaded on failure.
+
+Status:
+
+- **#1 is done, but for its nightly job.** `scripts/resurrect.py` exists, and
+  the tests for its three survivors.
+- **#2 is begun.** Done so far:
+  - The Restate image is pinned (`tests/support.py`, `RESTATE_IMAGE`
+    overrides it).
+  - Tests that need a server are marked `server` (`tests/conftest.py`), and
+    `just test-fast` runs the 231 others without Docker in about 16 seconds.
+  - `agents_object` opens its gate safely across threads.
+
+  Still to do: one shared harness, coverage with a ratchet, resetting the
+  `threading.Event`s of `agents_langgraph_nodes`, and a retry budget for
+  tests.
 
 | # | Change | Runs | Size |
 | --- | --- | --- | --- |
