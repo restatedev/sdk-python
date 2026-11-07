@@ -36,6 +36,13 @@ and ``chat`` (and each framework's ``prompt``) answers with a value of it::
 
     planner = langgraph.agent("planner", system="Plan the trip.", output=Plan)
 
+Each framework's ``agent`` and ``prompt`` take either the common options of a
+built-in agent (``model``, ``system``, ``tools``), or the framework's own
+agent, configured as the framework does, for everything else: an ``agent=``
+(Pydantic AI, OpenAI Agents SDK, ADK) or a ``graph=`` (LangGraph)::
+
+    desk = pydantic_ai.agent("desk", agent=Agent(model, capabilities=[...], toolsets=[pydantic_ai.toolset([get_weather])]))
+
 This package holds what all frameworks share:
 
 - ``AgentObject``, a session object set up for agents.

@@ -819,8 +819,12 @@ async def test_langgraph_streams_a_step_only_once_its_checkpoint_is_stored():
 
 
 def test_a_graph_has_its_own_model_and_its_state_has_messages():
-    with pytest.raises(TypeError, match="pass no model, system or tools"):
-        langgraph.agent("both", graph=builder, system="Hi.")
+    # Any: no overload takes both, as the type checker says.
+    make: Any = langgraph.agent
+    with pytest.raises(TypeError, match="your own graph is configured .*: pass no system with it"):
+        make("both", graph=builder, system="Hi.")
+    with pytest.raises(TypeError, match="pass no model, tools with it"):
+        make("both", graph=builder, model="openai/gpt-6-sol", tools=[lookup])
 
     class Plain(TypedDict):
         count: int
@@ -864,5 +868,7 @@ def test_a_graph_may_still_be_built_after_its_agent(caplog: pytest.LogCaptureFix
 
 
 def test_context_is_for_a_graph_of_your_own():
-    with pytest.raises(TypeError, match="context"):
-        langgraph.agent("plain", context=lambda ctx: Caller(ctx.key))
+    # Any: no overload takes it, as the type checker says.
+    make: Any = langgraph.agent
+    with pytest.raises(TypeError, match="context is an option of your own graph: pass it with graph="):
+        make("plain", context=lambda ctx: Caller(ctx.key))

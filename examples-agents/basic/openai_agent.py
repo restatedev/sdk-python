@@ -11,7 +11,7 @@ last stored step: a tool call already made is not made again::
 
 The model is ``openai/gpt-6-sol`` unless RESTATE_AGENT_MODEL names another
 OpenAI model. To bring an ``Agent`` of your own, with handoffs and guardrails,
-pass it as ``openai.agent("assistant", Agent(...))``.
+pass it as ``openai.agent("assistant", agent=Agent(...))``.
 """
 
 import asyncio

@@ -64,7 +64,17 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.runtime import get_runtime
 from pydantic import BaseModel, PrivateAttr
 
-from restate.agents._common import MODEL_ENV, ModelError, PerSession, configured, from_tool, model_of, provider_of
+from restate.agents._common import (
+    MODEL_ENV,
+    ModelError,
+    PerSession,
+    check_built_in,
+    check_own,
+    configured,
+    from_tool,
+    model_of,
+    provider_of,
+)
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with, asking
@@ -312,10 +322,31 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
-    graph: AnyGraph | None = None,
     model: ChatModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
+    output: None = None,
+) -> str: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    model: ChatModel | None = None,
+    system: str | None = None,
+    tools: Sequence[AnyTool] = (),
+    output: type[M],
+) -> M: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    graph: AnyGraph,
     output: None = None,
     context: Any = None,
 ) -> str: ...
@@ -326,10 +357,7 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
-    graph: AnyGraph | None = None,
-    model: ChatModel | None = None,
-    system: str | None = None,
-    tools: Sequence[AnyTool] = (),
+    graph: AnyGraph,
     output: type[M],
     context: Any = None,
 ) -> M: ...
@@ -388,14 +416,15 @@ async def prompt(
             twice.
     """
     if graph is not None:
-        _check_graph(graph, model, system, tools)
+        check_own(graph, "graph", model=model, system=system, tools=tools)
+        check(graph)
         run = run_of(ctx, graph, context)
 
         def ask(text: str) -> Awaitable[str]:
             return answer_once(ctx, text, ITEMS, run)
 
     else:
-        _check_context(context)
+        check_built_in(graph, "graph", context=context)
         # Without a way to ask for ``output`` natively with any provider's model, the system prompt asks for it.
         asked = system if output is None else asking(system, output)
 
@@ -405,6 +434,29 @@ async def prompt(
     if output is None:
         return await ask(text)
     return await answer_with(output, text, ask)
+
+
+@typing.overload
+def agent(
+    name: str,
+    *,
+    model: PerSession[ChatModel | None] = None,
+    system: PerSession[str | None] = None,
+    tools: PerSession[Sequence[AnyTool]] = (),
+    output: type[BaseModel] | None = None,
+    **options: Unpack[AgentOptions],
+) -> AgentObject: ...
+
+
+@typing.overload
+def agent(
+    name: str,
+    *,
+    graph: AnyGraph,
+    output: type[BaseModel] | None = None,
+    context: PerSession[Any] = None,
+    **options: Unpack[AgentOptions],
+) -> AgentObject: ...
 
 
 def agent(
@@ -481,9 +533,10 @@ def agent(
         TerminalError: If ``model`` names a provider other than OpenAI or Anthropic.
     """
     if graph is not None:
-        _check_graph(graph, model, system, tools)
+        check_own(graph, "graph", model=model, system=system, tools=tools)
+        check(graph)
         return _graph_agent(name, graph, output, context, **options)
-    _check_context(context)
+    check_built_in(graph, "graph", context=context)
     if model is None or isinstance(model, str):
         _provider_of_model(model_of(model))
     obj = AgentObject(name, **options)
@@ -500,19 +553,6 @@ def agent(
 
     obj.chat(answer, items=ITEMS, output=output)
     return obj
-
-
-def _check_graph(graph: AnyGraph, model: object, system: object, tools: object) -> None:
-    """Raise ``TypeError`` if ``graph`` comes with a model, a system prompt or tools, or ``check`` refuses it."""
-    if model is not None or system is not None or tools != ():
-        raise TypeError("a graph of your own has its own model and tools: pass no model, system or tools")
-    check(graph)
-
-
-def _check_context(context: object) -> None:
-    """Raise ``TypeError`` if ``context`` is given to the built-in loop, which has no run context of its own."""
-    if context is not None:
-        raise TypeError("context is the run context of a graph of your own: pass it with graph=")
 
 
 def _graph_agent(

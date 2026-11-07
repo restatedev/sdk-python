@@ -27,10 +27,17 @@ For example::
     asyncio.run(restate.serve(restate.app([assistant])))
 
 ``agent`` creates an agent, and ``prompt`` answers a prompt from a handler of
-your own; either takes an agent of your own (with sub-agents and callbacks)
-or an ``App`` (with plugins). ``tools`` gives its sub-agents this package's
-tools. ADK runs the agent as a resumable app, on a session whose events are
-stored one at a time.
+your own. Either takes the common options of a built-in agent (``model``,
+``system``, ``tools``), or an agent of your own (with sub-agents and
+callbacks) or an ``App`` (with plugins), configured as ADK does, with its
+runs' ``RunConfig``::
+
+    triage = LlmAgent(name="triage", model="...", sub_agents=[refunds], tools=adk.tools([get_weather]))
+    desk = adk.agent("desk", agent=triage)
+
+``tools`` gives an agent of your own this package's tools. ADK runs the
+agent as a resumable app, on a session whose events are stored one at a
+time.
 
 This differs from the older ``restate.ext.adk`` integration, whose plugin
 runs an agent durably inside any regular Restate handler, journaling its

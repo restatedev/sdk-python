@@ -31,6 +31,7 @@ from agents import (  # noqa: E402
     GuardrailFunctionOutput,
     Model,
     ModelResponse,
+    RunConfig,
     RunContextWrapper,
     Usage,
     handoff,
@@ -38,6 +39,7 @@ from agents import (  # noqa: E402
     set_tracing_disabled,
 )
 from agents.extensions import handoff_filters  # noqa: E402
+from agents.run import CallModelData, ModelInputData  # noqa: E402
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText  # noqa: E402
 
 import restate  # noqa: E402
@@ -197,7 +199,7 @@ def desk(model: Model) -> Agent[Any]:
     return Agent(name="triage", instructions="You triage.", model=model, handoffs=[refunds])
 
 
-triage = openai.agent("oai_desk", desk(model))
+triage = openai.agent("oai_desk", agent=desk(model))
 
 
 @pytest.fixture(scope="session")
@@ -425,9 +427,62 @@ def test_a_model_of_another_provider_is_refused():
         openai.agent("other", model="anthropic/claude-opus-5-5")
 
 
-def test_an_agent_of_your_own_takes_no_system():
-    with pytest.raises(TypeError, match="pass no system"):
-        openai.agent("mine", Agent(name="mine"), system="theirs")
+def test_an_agent_of_your_own_takes_none_of_the_built_in_agents_options():
+    # Any: no overload takes both, as the type checker says.
+    make: Any = openai.agent
+    with pytest.raises(TypeError, match="your own agent is configured .*: pass no system with it"):
+        make("mine", agent=Agent(name="mine"), system="theirs")
+    with pytest.raises(TypeError, match="pass no model, tools with it"):
+        make("mine", agent=Agent(name="mine"), model="openai/gpt-6-sol", tools=[get_weather])
+    ask: Any = openai.prompt
+    with pytest.raises(TypeError, match="pass no tools with it"):
+        asyncio.run(ask(None, "hi", agent=Agent(name="mine"), tools=[get_weather]))
+    # No tools is none of the built-in agent's options.
+    make("mine", agent=Agent(name="mine"), tools=[])
+    # The options of a run of your own agent, which the built-in agent would ignore.
+    with pytest.raises(TypeError, match="context, run_config are options of your own agent: pass them with agent="):
+        make("built_in", system="Hi.", context=object(), run_config=RunConfig())
+    with pytest.raises(TypeError, match="run_config is an option of your own agent"):
+        asyncio.run(ask(None, "hi", run_config=RunConfig()))
+
+
+async def test_a_run_of_more_turns_than_max_turns_fails_its_prompt():
+    ask = invoker(asker(model=Scripted(reply), tools=[get_weather], max_turns=1))
+    with pytest.raises(restate.TerminalError, match="Max turns"):
+        await ask("weather Rome")
+    assert await ask("hi there") == "echo: hi there"
+    ask = invoker(asker(model=Scripted(reply), tools=[get_weather], max_turns=2))
+    assert await ask("weather Rome") == "tool said: sunny in Rome"
+
+
+class Account:
+    """The run context of an Agent of your own: whose account it is."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+async def test_an_agent_of_your_own_gets_its_context_and_its_run_config():
+    filtered: list[int] = []
+
+    async def instructions(run: RunContextWrapper[Account], agent: Agent[Account]) -> str:
+        return f"You help {run.context.name}."
+
+    async def keep_three(data: CallModelData[Any]) -> ModelInputData:
+        # It runs after the tools' outputs are stored, and changes only what the model sees.
+        filtered.append(len(data.model_data.input))
+        return ModelInputData(input=data.model_data.input[-3:], instructions=f"{data.model_data.instructions}!")
+
+    scripted = Scripted(reply)
+    mine = Agent[Account](name="mine", instructions=instructions, model=scripted, tools=openai.tools([get_weather]))
+    config = RunConfig(call_model_input_filter=keep_three)
+    ask = invoker(asker(agent=mine, context=Account("Ada"), run_config=config))
+    assert await ask("system now") == "system: You help Ada.!"
+    assert await ask("weather Rome") == "tool said: sunny in Rome"
+    assert await ask("hi there") == "echo: hi there"
+    # The conversation is stored whole, though the model saw only the last three items of each request.
+    assert filtered == [1, 3, 5, 7]
+    assert [len(items) for _, items in scripted.requests] == [1, 3, 3, 3]
 
 
 # --- In process: an Agent of your own's options ---------------------------------------------------

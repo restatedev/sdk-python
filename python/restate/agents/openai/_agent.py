@@ -35,11 +35,18 @@ start, and the run resumes from the last step stored:
 - A guardrail's tripwire fails the prompt for good, and the reply it blocked is
   dropped from the conversation. A stored reply becomes the answer without
   asking again only if its agent has no output guardrails.
+- A run of more turns than ``max_turns`` (the SDK's default is 10) fails its
+  prompt for good: a retry would carry on with a fresh count.
+- An ``Agent`` of your own runs as you configured it, with the ``context``
+  (the SDK's run context) and the ``run_config`` you give: its
+  ``call_model_input_filter`` runs after this package's, which stores the
+  tools' outputs.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import typing
 from collections.abc import Awaitable, Sequence
@@ -67,7 +74,15 @@ from agents.tool_context import ToolContext
 from pydantic import BaseModel
 from pydantic_core import to_json
 
-from restate.agents._common import PerSession, check_own, configured, from_tool, model_id_of, model_of
+from restate.agents._common import (
+    PerSession,
+    check_built_in,
+    check_own,
+    configured,
+    from_tool,
+    model_id_of,
+    model_of,
+)
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
@@ -192,15 +207,23 @@ def _current(conversation: Conversation, root: Agent[Any], everyone: dict[str, A
 class _Hooks(RunHooks[Any]):
     """Store each step of a run as it comes, and publish each tool call as it starts and ends."""
 
-    def __init__(self, ctx: SessionContext, conversation: Conversation) -> None:
+    def __init__(self, ctx: SessionContext, conversation: Conversation, config: RunConfig) -> None:
         self.ctx = ctx
         self.conversation = conversation
+        self.then = config.call_model_input_filter
+        """The run's own ``call_model_input_filter``, if it has one."""
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
-        """The run's ``call_model_input_filter``: store the tools' outputs before the next request."""
+        """The run's ``call_model_input_filter``: store the tools' outputs before the next request.
+
+        The run's own filter then changes what the model sees, not what is stored.
+        """
         if outputs := self.conversation.new_results(data.model_data.input):
             await self.conversation.append(*outputs)
-        return data.model_data
+        if self.then is None:
+            return data.model_data
+        filtered = self.then(data)
+        return await filtered if inspect.isawaitable(filtered) else filtered
 
     async def on_llm_end(self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse) -> None:
         reply = typing.cast(list[Item], response.to_input_items())
@@ -214,7 +237,7 @@ class _Hooks(RunHooks[Any]):
 
 
 async def _resume(
-    ctx: SessionContext, conversation: Conversation, agent: Agent[Any], everyone: dict[str, Agent[Any]]
+    ctx: SessionContext, conversation: Conversation, agent: Agent[Any], everyone: dict[str, Agent[Any]], context: Any
 ) -> Agent[Any]:
     """Resume from a reply whose tool calls have no outputs (cut off by a crash), and return the agent to run.
 
@@ -228,7 +251,7 @@ async def _resume(
         return agent
     cut = next(e for e in conversation.entries if calls[0] in e.calls)
     agent = everyone.get(cut.agent or "", agent)
-    found = {tool.name: tool for tool in await agent.get_all_tools(RunContextWrapper(None))}
+    found = {tool.name: tool for tool in await agent.get_all_tools(RunContextWrapper(context))}
     known = {*found, *_handoffs(agent)}
     if any(call.name in known and not isinstance(found.get(call.name), FunctionTool) for call in calls):
         # A call that only the SDK can make (a handoff, a hosted tool): ask the agent again instead.
@@ -242,7 +265,7 @@ async def _resume(
             output = f"Error: there is no tool named {call.name!r}"
         else:
             arguments = call.input if isinstance(call.input, str) else json.dumps(call.input)
-            given = ToolContext(None, tool_name=tool.name, tool_call_id=call.id, tool_arguments=arguments)
+            given = ToolContext(context, tool_name=tool.name, tool_call_id=call.id, tool_arguments=arguments)
             await tool_call_started(ctx)
             output = _output(await _unwrapped(ctx, tool.on_invoke_tool(given, arguments)))
             await tool_call_ended(ctx)
@@ -277,13 +300,26 @@ def _output_schema(output: type[BaseModel]) -> AgentOutputSchema:
         return AgentOutputSchema(output, strict_json_schema=False)
 
 
+@dataclasses.dataclass(frozen=True)
+class _Options:
+    """The options of a run that an ``Agent`` cannot hold."""
+
+    context: Any = None
+    """The SDK's run context."""
+    max_turns: int | None = None
+    """The most turns of the run, else the SDK's default."""
+    config: RunConfig | None = None
+    """The run's ``RunConfig``."""
+
+
 def _run(
     ctx: SessionContext,
     own: Agent[Any] | None,
     model: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
-    output: type[BaseModel] | None = None,
+    output: type[BaseModel] | None,
+    options: _Options,
 ) -> Run:
     """Return the run of a prompt: the ``Runner``, from the conversation to the prompt's answer (``output``'s JSON).
 
@@ -294,9 +330,9 @@ def _run(
         root: Agent[Any] = Agent(name="assistant", instructions=system, tools=tools(given))
         config = RunConfig(model=_model(model), nest_handoff_history=False)
     else:
-        root = own.clone(tools=[*own.tools, *tools(given)]) if given else own
-        # A model given overrides each agent's own, as RunConfig does.
-        config = RunConfig(model=_model(model) if model is not None else None, nest_handoff_history=False)
+        root = own
+        # The conversation is the full transcript, which a handoff passes on as it is.
+        config = dataclasses.replace(options.config or RunConfig(), nest_handoff_history=False)
     if output is not None:
         root = root.clone(output_type=_output_schema(output))
     everyone = _agents(root)
@@ -311,7 +347,7 @@ def _run(
             # Its output guardrails may not have passed it: ask again, and they run on the new reply.
             await conversation.drop(reply)
         with tools_in(ctx):
-            return await _go(ctx, conversation, _current(conversation, root, everyone), everyone, config)
+            return await _go(ctx, conversation, _current(conversation, root, everyone), everyone, config, options)
 
     return run
 
@@ -322,14 +358,18 @@ async def _go(
     current: Agent[Any],
     everyone: dict[str, Agent[Any]],
     config: RunConfig,
+    options: _Options,
 ) -> str:
     """Run the ``Runner`` on from the conversation, with the agent it is with, and return the answer."""
-    agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone))
-    hooks = _Hooks(ctx, conversation)
+    agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
+    hooks = _Hooks(ctx, conversation, config)
     filtered = dataclasses.replace(config, call_model_input_filter=hooks.model_input)
     items = typing.cast(Any, [entry.item for entry in conversation.entries])
+    # The SDK's default, unless given: older versions take no None.
+    limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:
-        result = await _unwrapped(ctx, Runner.run(agent, items, hooks=hooks, run_config=filtered))
+        run = Runner.run(agent, items, context=options.context, hooks=hooks, run_config=filtered, **limit)
+        result = await _unwrapped(ctx, run)
     except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:
         # The reply the guardrail blocked is not kept.
         if (blocked := conversation.last_reply()) is not None:
@@ -387,11 +427,11 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
-    agent: Agent[Any] | None = None,
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: None = None,
+    max_turns: int | None = None,
 ) -> str: ...
 
 
@@ -400,11 +440,37 @@ async def prompt(
     ctx: SessionContext,
     text: str,
     *,
-    agent: Agent[Any] | None = None,
     model: AnyModel | None = None,
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[M],
+    max_turns: int | None = None,
+) -> M: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: Agent[Any],
+    output: None = None,
+    context: Any = None,
+    max_turns: int | None = None,
+    run_config: RunConfig | None = None,
+) -> str: ...
+
+
+@typing.overload
+async def prompt(
+    ctx: SessionContext,
+    text: str,
+    *,
+    agent: Agent[Any],
+    output: type[M],
+    context: Any = None,
+    max_turns: int | None = None,
+    run_config: RunConfig | None = None,
 ) -> M: ...
 
 
@@ -417,6 +483,9 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[AnyTool] = (),
     output: type[BaseModel] | None = None,
+    context: Any = None,
+    max_turns: int | None = None,
+    run_config: RunConfig | None = None,
 ) -> Any:
     """Answer a prompt with an OpenAI Agents SDK agent, exactly once.
 
@@ -428,83 +497,154 @@ async def prompt(
         async def summarize(ctx: sessions.SessionContext, topic: str) -> str:
             return await openai.prompt(ctx, f"Summarize what we said about {topic}")
 
+    As ``agent`` does, it takes the common options of the built-in agent, or
+    an ``Agent`` of your own, configured::
+
+        return await openai.prompt(ctx, text, agent=triage)
+
     Args:
         ctx: The handler's context.
         text: The prompt.
-        agent: An ``Agent`` of your own (with handoffs, guardrails, ...), whose
-            output is text. Defaults to one with ``system`` as its instructions.
-        model: ``"openai/<model-id>"``, or a model of the SDK, for every agent
-            of the run. Defaults to the models of ``agent`` and the agents it
-            hands off to; without ``agent``, to ``$RESTATE_AGENT_MODEL``, else
+        agent: An ``Agent`` of your own (with handoffs, guardrails, ...),
+            configured with its model, instructions and tools (``tools()``
+            for this package's), instead of ``model``, ``system`` and
+            ``tools``.
+        model: The built-in agent's model: ``"openai/<model-id>"``, or a
+            model of the SDK. Defaults to ``$RESTATE_AGENT_MODEL``, else
             ``"openai/gpt-6-sol"``.
-        system: The instructions, when there is no ``agent``.
-        tools: ``restate.agents`` tools, or tools of the SDK, beside
-            ``agent``'s own. For the agents it hands off to, see ``tools()``.
+        system: The built-in agent's instructions.
+        tools: The built-in agent's tools: ``restate.agents`` tools, or
+            tools of the SDK.
         output: A Pydantic model, for an answer that is one rather than
-            text: the output type of ``agent`` (or the default agent). An
-            agent it hands off to that answers in text is asked again for
-            its JSON.
+            text: the output type of the agent the run starts with. An agent
+            it hands off to that answers in text is asked again for its JSON.
+        context: The run context of ``agent`` (the SDK's ``context``), which
+            its tools and instructions functions get.
+        max_turns: The most turns of the run, past which the prompt fails.
+            Defaults to the SDK's: 10.
+        run_config: The ``RunConfig`` of ``agent``'s run (a model for every
+            agent, a model provider, tracing, guardrails...). Its
+            ``nest_handoff_history`` is off: the conversation is the full
+            transcript.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
 
     Raises:
-        TypeError: If both ``agent`` and ``system`` are given.
+        TypeError: If ``agent`` is given with ``model``, ``system`` or
+            ``tools``, or ``context`` or ``run_config`` without ``agent``.
         TerminalError: If the agent's reply is not a value of ``output``,
             twice.
     """
-    check_own(agent, system)
+    check_own(agent, "agent", model=model, system=system, tools=tools)
+    check_built_in(agent, "agent", context=context, run_config=run_config)
+    options = _Options(context, max_turns, run_config)
+    return await _prompt(ctx, text, agent, model, system, tools, output, options)
+
+
+async def _prompt(
+    ctx: SessionContext,
+    text: str,
+    own: Agent[Any] | None,
+    model: AnyModel | None,
+    system: str | None,
+    tools: Sequence[AnyTool],
+    output: type[BaseModel] | None,
+    options: _Options,
+) -> Any:
+    """Answer ``text`` as ``prompt`` does, with its options checked."""
 
     def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, agent, model, system, tools, output))
+        return answer_once(ctx, text, ITEMS, _run(ctx, own, model, system, tools, output, options))
 
     if output is None:
         return await ask(text)
     return await answer_with(output, text, ask)
 
 
+@typing.overload
 def agent(
     name: str,
-    openai_agent: Agent[Any] | None = None,
-    /,
     *,
     model: PerSession[AnyModel | None] = None,
     system: PerSession[str | None] = None,
     tools: PerSession[Sequence[AnyTool]] = (),
     output: type[BaseModel] | None = None,
+    max_turns: int | None = None,
+    **options: Unpack[AgentOptions],
+) -> AgentObject: ...
+
+
+@typing.overload
+def agent(
+    name: str,
+    *,
+    agent: Agent[Any],
+    output: type[BaseModel] | None = None,
+    context: PerSession[Any] = None,
+    max_turns: int | None = None,
+    run_config: RunConfig | None = None,
+    **options: Unpack[AgentOptions],
+) -> AgentObject: ...
+
+
+def agent(
+    name: str,
+    *,
+    agent: Agent[Any] | None = None,
+    model: PerSession[AnyModel | None] = None,
+    system: PerSession[str | None] = None,
+    tools: PerSession[Sequence[AnyTool]] = (),
+    output: type[BaseModel] | None = None,
+    context: PerSession[Any] = None,
+    max_turns: int | None = None,
+    run_config: RunConfig | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create an OpenAI Agents SDK agent: a virtual object with one conversation per key.
 
     Its ``chat`` handler answers each message with the SDK's ``Runner``; the
     conversation is kept in the key's database, a step at a time. Add
-    handlers of your own with ``@assistant.handler``::
+    handlers of your own with ``@assistant.handler``.
+
+    The built-in agent takes the common options::
 
         assistant = openai.agent("assistant", system="Answer briefly.", tools=[get_weather])
-
-    Or bring an ``Agent`` of your own, with handoffs and guardrails::
-
-        assistant = openai.agent("desk", Agent(name="triage", handoffs=[refunds]))
 
     ``model``, ``system`` and ``tools`` may each be a function of the
     invocation's context, sync or async, for values that differ per user::
 
         assistant = openai.agent("assistant", system=lambda ctx: f"You help {ctx.key}.")
 
+    For anything more, pass an ``Agent`` of your own, configured as the SDK
+    does: handoffs, guardrails, tools (``tools()`` for this package's), and a
+    ``RunConfig`` for its runs. It runs as you configured it::
+
+        triage = Agent(name="triage", handoffs=[refunds], tools=openai.tools([call(lookup)]))
+        assistant = openai.agent("desk", agent=triage, context=lambda ctx: Account(ctx.key))
+
     Args:
         name: The object's name, as Restate serves it.
-        openai_agent: An ``Agent`` of your own, whose output is text.
-            Defaults to one with ``system`` as its instructions.
-        model: ``"openai/<model-id>"``, or a model of the SDK, for every agent
-            of a run. Defaults to the models of ``openai_agent`` and the agents
-            it hands off to; without ``openai_agent``, to
-            ``$RESTATE_AGENT_MODEL``, else ``"openai/gpt-6-sol"``.
-        system: The instructions, when there is no ``openai_agent``.
-        tools: ``restate.agents`` tools, or tools of the SDK.
+        agent: An ``Agent`` of your own, configured, instead of ``model``,
+            ``system`` and ``tools``.
+        model: The built-in agent's model: ``"openai/<model-id>"``, or a
+            model of the SDK. Defaults to ``$RESTATE_AGENT_MODEL``, else
+            ``"openai/gpt-6-sol"``.
+        system: The built-in agent's instructions.
+        tools: The built-in agent's tools: ``restate.agents`` tools, or
+            tools of the SDK.
         output: A Pydantic model, for answers that are one rather than
-            text: the output type of ``openai_agent`` (or the default
-            agent). An agent it hands off to that answers in text is asked
-            again for its JSON. ``chat`` returns the JSON.
+            text: the output type of the agent a run starts with. An agent
+            it hands off to that answers in text is asked again for its
+            JSON. ``chat`` returns the JSON.
+        context: The run context of ``agent`` (the SDK's ``context``): a
+            value, or a function of the invocation's context.
+        max_turns: The most turns of a run, past which its message fails.
+            Defaults to the SDK's: 10.
+        run_config: The ``RunConfig`` of ``agent``'s runs (a model for every
+            agent, a model provider, tracing, guardrails...). Its
+            ``nest_handoff_history`` is off: the conversation is the full
+            transcript.
         **options: The object's options, such as ``description``,
             ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
 
@@ -512,23 +652,28 @@ def agent(
         The agent, to serve with ``restate.serve(restate.app([agent]))``, or any ASGI server.
 
     Raises:
-        TypeError: If both ``openai_agent`` and ``system`` are given.
+        TypeError: If ``agent`` is given with ``model``, ``system`` or
+            ``tools``, or ``context`` or ``run_config`` without ``agent``.
         TerminalError: If ``model`` names a provider other than OpenAI.
     """
-    check_own(openai_agent, system)
-    if isinstance(model, str) or (model is None and openai_agent is None):
+    check_own(agent, "agent", model=model, system=system, tools=tools)
+    check_built_in(agent, "agent", context=context, run_config=run_config)
+    if agent is None and (model is None or isinstance(model, str)):
         _model(model)
+    own = agent
     obj = AgentObject(name, **options)
 
     async def answer(ctx: SessionContext, text: str) -> Any:
-        return await prompt(
+        run = _Options(await configured(context, ctx), max_turns, run_config)
+        return await _prompt(
             ctx,
             text,
-            agent=openai_agent,
-            model=await configured(model, ctx),
-            system=await configured(system, ctx),
-            tools=await configured(tools, ctx),
-            output=output,
+            own,
+            await configured(model, ctx),
+            await configured(system, ctx),
+            await configured(tools, ctx),
+            output,
+            run,
         )
 
     obj.chat(answer, items=ITEMS, output=output)
