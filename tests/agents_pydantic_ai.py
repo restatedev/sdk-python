@@ -305,6 +305,10 @@ def memorizer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     if word == "remember":
         args: dict[str, Any] = {"content": rest, "file": "facts.md"}
         return ModelResponse(parts=[ToolCallPart("write_memory", args, tool_call_id=f"call-{len(messages)}")])
+    if word == "replace":
+        old, new = rest.split("|")
+        args = {"content": new, "file": "facts.md", "old_text": old}
+        return ModelResponse(parts=[ToolCallPart("write_memory", args, tool_call_id=f"call-{len(messages)}")])
     return ModelResponse(
         parts=[ToolCallPart("read_memory", {"file": "facts.md"}, tool_call_id=f"call-{len(messages)}")]
     )
@@ -339,6 +343,18 @@ async def conflict(ctx: sessions.SessionContext, path: str) -> list[str]:
         found = await store.read(path, max_chars=100)
     assert found is not None
     return [*outcomes, found.content]
+
+
+@remembering.handler
+async def listing(ctx: sessions.SessionContext, _: Any = None) -> list[list[str]]:
+    """The paths under a prefix, at most a limit, and all of them."""
+    from restate.agents._tools import tools_in  # pylint: disable=import-outside-toplevel
+
+    store = pydantic_ai.memory_store(memories, user_of)
+    with tools_in(ctx):
+        for path in ("notes/b.md", "other.md", "notes/a.md", "notes/c.md"):
+            await store.write(path, "x", expected_version=None)
+        return [await store.list_paths("notes/", limit=2), await store.list_paths(limit=10)]
 
 
 @assistant.handler
@@ -769,12 +785,12 @@ async def test_a_crash_while_waiting_for_an_approval_joins_the_same_wait(
     k = key()
     crashed: list[str] = []
 
-    async def open_then_crash(ctx: Any, call_id: str, signal: str, input: Any = None) -> Any:
+    async def open_then_crash(ctx: Any, call_id: str, signal: str, input: Any = None, **options: Any) -> Any:
         if call_id != f"call-{k}" or crashed:
-            return await real(ctx, call_id, signal, input)
+            return await real(ctx, call_id, signal, input, **options)
         crashed.append(call_id)
         # Open the wait, as the attempt does, then crash while it waits: the wait goes on.
-        opened = asyncio.ensure_future(real(ctx, call_id, signal, input))
+        opened = asyncio.ensure_future(real(ctx, call_id, signal, input, **options))
         await until_waiting(harness, k)
         opened.cancel()
         raise RuntimeError("the process crashed while waiting")
@@ -812,6 +828,48 @@ async def test_ask_user_without_an_answerer_waits_for_the_answer(harness: Harnes
     answer = {"answers": [{"header": "Color", "selected": ["Blue"]}]}
     await desk_post(harness, f"{k}/signal", json={"name": "ask_user_question", "value": answer})
     assert (await answering).json() == 'tool said: {"Color":["Blue"]}'
+
+
+class StopBeforeTheNextRequest(AbstractCapability[Any]):
+    """Stops the turn once a call has its result, before the next model request stores it, as ``stop`` may."""
+
+    async def before_model_request(self, ctx: RunContext[Any], request_context: Any) -> Any:
+        if any(isinstance(p, ToolReturnPart) for m in ctx.messages if isinstance(m, ModelRequest) for p in m.parts):
+            raise restate.TerminalError("stopped", status_code=409)
+        return request_context
+
+
+async def test_a_turn_stopped_after_a_denial_is_stored_does_not_report_the_denied_call_done():
+    """The approval returned, but the call never ran: the model must not be told it did."""
+    from agents_pydantic_ai_snapshots import ANSWERS, Chat  # pylint: disable=import-outside-toplevel,import-error
+    from sessions_object import Host, request  # pylint: disable=import-outside-toplevel,import-error
+
+    from restate.agents._conversation import STEPS  # pylint: disable=import-outside-toplevel
+    from restate.agents.pydantic_ai._agent import ITEMS  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    mine: Any = Agent(FunctionModel(reply), capabilities=[StopBeforeTheNextRequest()])
+
+    @mine.tool_plain(requires_approval=True)
+    def refund_order(city: str) -> str:
+        refunds[city] += 1
+        return f"refunded in {city}"
+
+    chat = Chat(pydantic_ai.agent("pai_denied_then_stopped", agent=mine))
+
+    @chat.obj.handler(name="results")
+    async def results(ctx: Any, _: Any = None) -> list[str]:
+        """The results of the tool calls, as stored."""
+        stored = [ITEMS.load(str(item)) for [item] in await ctx.db.values(f"SELECT item FROM {STEPS} ORDER BY n")]
+        requests = [m for m in stored if isinstance(m, ModelRequest)]
+        return [p.model_response_str() for m in requests for p in m.parts if isinstance(p, ToolReturnPart)]
+
+    k = key()
+    host = Host(chat.backend, service=chat.name, answers={**ANSWERS, "wait": b'"no refunds today"'})
+    with pytest.raises(restate.TerminalError):
+        await invoke(chat.obj, "chat", host, request(), f"deferred {k}")
+    assert await invoke(chat.obj, "results", chat.host(), request(), None) == [CANCELLED]
+    assert refunds[k] == 0
 
 
 async def test_an_agent_of_your_own_runs_with_its_own_capabilities(harness: HarnessEnvironment):
@@ -944,6 +1002,12 @@ async def test_a_conflicting_memory_write_is_refused(harness: HarnessEnvironment
     assert outcomes.json()[1:] == ["refused", "first"]
 
 
+async def test_memory_lists_the_paths_under_a_prefix_in_order_up_to_a_limit(harness: HarnessEnvironment):
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        listed = await ingress.post(f"{harness.ingress_url}/pai_remembering/{key()}.x/listing", json=None)
+    assert listed.json() == [["notes/a.md", "notes/b.md"], ["notes/a.md", "notes/b.md", "notes/c.md", "other.md"]]
+
+
 async def test_a_memory_write_of_a_tool_call_that_runs_again_is_applied_once(harness: HarnessEnvironment):
     user = key()
     fact = f"crash {user}"
@@ -951,6 +1015,32 @@ async def test_a_memory_write_of_a_tool_call_that_runs_again_is_applied_once(har
     assert fact in crashed_writes
     recalled = (await remember(harness, f"{user}.b", "recall")).json()
     assert recalled.count(fact) == 1, recalled
+
+
+async def test_a_memory_edit_of_a_tool_call_that_runs_again_is_reported_as_made(harness: HarnessEnvironment):
+    """The edit was made, then the process crashed: the call that runs again finds its receipt, rather than look
+    for the text it replaced (which is gone)."""
+    user = key()
+    assert (await remember(harness, f"{user}.a", f"remember likes tea {user}")).status_code == 200
+    edited = await remember(harness, f"{user}.a", f"replace likes tea {user}|crash likes coffee {user}")
+    assert edited.status_code == 200, edited.text
+    assert f"crash likes coffee {user}" in crashed_writes
+    assert '"status":"updated"' in edited.json() and "not found" not in edited.json(), edited.json()
+    recalled = (await remember(harness, f"{user}.b", "recall")).json()
+    assert recalled.count(f"likes coffee {user}") == 1 and f"likes tea {user}" not in recalled, recalled
+
+
+def test_without_pydantic_ai_harness_the_import_names_the_extra(monkeypatch: pytest.MonkeyPatch):
+    import importlib  # pylint: disable=import-outside-toplevel
+    import sys  # pylint: disable=import-outside-toplevel
+
+    for name in [n for n in sys.modules if n.split(".")[:3] == ["restate", "agents", "pydantic_ai"]]:
+        monkeypatch.delitem(sys.modules, name)
+    # As if it were not installed: its modules imported so far, too, which an import would otherwise find.
+    for name in ["pydantic_ai_harness", *(n for n in sys.modules if n.startswith("pydantic_ai_harness."))]:
+        monkeypatch.setitem(sys.modules, name, None)
+    with pytest.raises(ImportError, match=r"Pydantic AI Harness.*restate-sdk\[pydantic_ai\]"):
+        importlib.import_module("restate.agents.pydantic_ai")
 
 
 def test_a_tool_call_asked_for_again_is_read_as_an_error():

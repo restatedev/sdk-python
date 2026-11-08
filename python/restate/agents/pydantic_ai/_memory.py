@@ -11,13 +11,14 @@
 """Pydantic AI Harness's ``Memory`` on a session object: memory that outlives a conversation.
 
 ``memory`` makes the session object, one key per memory namespace (a user,
-say), whose exclusive handlers make each compare-and-set atomic; its
-database holds the files, their versions, and the receipts of the
-operations. ``memory_store`` gives ``Memory`` a store of one of its keys,
-which a Pydantic AI agent's run calls: each write of a tool call has the
-idempotency key of the call and its order in it, so a call that runs again
-(after a crash) is applied once. The memory is not the conversation's:
-``clear`` leaves it.
+say): its exclusive handlers make each compare-and-set atomic, and its views
+read alongside them. Its database holds the files, their versions, and the
+receipts of the operations. ``memory_store`` gives ``Memory`` a store of one
+of its keys, which a Pydantic AI agent's run calls: each write of a tool call
+has the idempotency key of the call and its order in it, and each operation
+the id of the call, so a call that runs again (after a crash) is applied once,
+and finds the receipt of what it applied. The memory is not the
+conversation's: ``clear`` leaves it.
 """
 
 from __future__ import annotations
@@ -149,24 +150,31 @@ def memory(name: str = "memory") -> sessions.SessionObject:
     async def delete(ctx: SessionContext, request: dict[str, Any]) -> Mutation:
         return await _change(ctx, request["path"], None, request.get("expected"), request.get("operation"))
 
-    @obj.handler
-    async def read(ctx: SessionContext, path: str) -> dict[str, Any] | None:
+    # The reads are views: the conversations that share the memory read it at once, and a write's compare-and-set
+    # refuses one made from a version that has changed since.
+    @obj.view
+    async def read(ctx: sessions.ViewContext, path: str) -> dict[str, Any] | None:
         await SCHEMA.ensure(ctx.db)
         row = await ctx.db.get(f"SELECT content, version, operation FROM {FILES} WHERE path = ?", [path])
         if row is None:
             return None
         return {"content": row["content"], "version": row["version"], "operation": row["operation"]}
 
-    @obj.handler
-    async def operation(ctx: SessionContext, operation: dict[str, str]) -> Mutation | None:
+    @obj.view
+    async def operation(ctx: sessions.ViewContext, operation: dict[str, str]) -> Mutation | None:
         await SCHEMA.ensure(ctx.db)
         return await _receipt(ctx.db, operation)
 
-    @obj.handler
-    async def paths(ctx: SessionContext, prefix: str) -> list[str]:
+    @obj.view
+    async def paths(ctx: sessions.ViewContext, request: dict[str, Any]) -> list[str]:
+        """The paths that start with ``request["prefix"]``, in order, at most ``request["limit"]``."""
         await SCHEMA.ensure(ctx.db)
-        rows = await ctx.db.values(f"SELECT path FROM {FILES} ORDER BY path")
-        return [str(path) for [path] in rows if str(path).startswith(prefix)]
+        prefix = str(request["prefix"])
+        rows = await ctx.db.values(
+            f"SELECT path FROM {FILES} WHERE substr(path, 1, ?) = ? ORDER BY path LIMIT ?",
+            [len(prefix), prefix, int(request["limit"])],
+        )
+        return [str(path) for [path] in rows]
 
     _HANDLERS[obj] = {"write": write, "delete": delete, "read": read, "operation": operation, "paths": paths}
     return obj
@@ -181,7 +189,20 @@ def _mutation(result: Mutation) -> MemoryMutation:
 
 
 def _operation(operation: MemoryOperation | None) -> dict[str, str] | None:
-    return {"id": operation.id, "fingerprint": operation.fingerprint} if operation is not None else None
+    """Return ``operation`` as the memory object takes it: its id and its fingerprint.
+
+    In a tool call, its id is the call's: the invocation's id, the call's, and
+    the fingerprint. The harness's is made of the run's id and step, which
+    every attempt has its own of: a call that runs again (after a crash) would
+    not find the receipt of the change it made before, and would make it again
+    (or fail to, as the text it replaces is gone).
+    """
+    if operation is None:
+        return None
+    call = CALL.get()
+    if call is None:
+        return {"id": operation.id, "fingerprint": operation.fingerprint}
+    return {"id": f"{running().request.id}:{call.id}:{operation.fingerprint}", "fingerprint": operation.fingerprint}
 
 
 class SessionMemoryStore:
@@ -239,7 +260,7 @@ class SessionMemoryStore:
     async def list_paths(self, prefix: str = "", *, limit: int) -> list[str]:
         if limit <= 0:
             raise ValueError("limit must be positive")
-        return list(await self._call("paths", prefix))[:limit]
+        return list(await self._call("paths", {"prefix": prefix, "limit": limit}))
 
 
 def memory_store(obj: sessions.SessionObject, key: str | Callable[[SessionContext], str]) -> SessionMemoryStore:

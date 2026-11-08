@@ -20,9 +20,11 @@
 
 They find the key's database in the run of ``agent`` or ``prompt`` in
 progress, and ``clear`` empties them with the rest of the conversation. A
-tool call runs again after a crash, and the harness's keys are made of the
-run's id, which every attempt has its own of: so a write is done once per
-tool call (by the invocation's id and the call's), however often it runs.
+tool call runs again after a crash, so the plan's reads and writes in a tool
+call are journaled: the call gets what each returned before, and so makes the
+writes it made before, each done once (see ``_journaled``). A spill is named
+by the tool call, as the harness's keys are made of the run's id, which every
+attempt has its own of.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import TypeAdapter
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai_harness.planning import PlanItem, TaskStatus
 from pydantic_ai_harness.step_persistence import RunRecord
@@ -48,25 +51,34 @@ PLAN = "restate_pydantic_ai_plan"
 """``Planning``'s plan: its steps, in order."""
 SPILLS = "restate_pydantic_ai_spills"
 """``ToolOutputLimits``' spilled tool results, by handle."""
-WRITES = "restate_pydantic_ai_writes"
-"""The writes of the stores that tool calls made, by the call and their order in it: each is done once."""
+JOURNAL = "restate_pydantic_ai_journal"
+"""What the plan's reads and writes in each tool call returned, by the invocation, the call, and their order in it."""
 
 SCHEMA = Schema(
     "restate_agents.pydantic_ai",
     [
         f"CREATE TABLE {PLAN} (position INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, item TEXT NOT NULL)",
         f"CREATE TABLE {SPILLS} (handle TEXT PRIMARY KEY, data TEXT NOT NULL)",
-        f"CREATE TABLE {WRITES} (call TEXT NOT NULL, n INTEGER NOT NULL, result TEXT, PRIMARY KEY (call, n))",
+        f"""CREATE TABLE {JOURNAL} (
+            invocation TEXT NOT NULL,
+            call TEXT NOT NULL,
+            n INTEGER NOT NULL,
+            result TEXT NOT NULL,
+            PRIMARY KEY (invocation, call, n)
+        )""",
     ],
 )
 
 
 @dataclasses.dataclass
 class _Call:
-    """The tool call running, and how many writes of the stores it made so far."""
+    """The tool call running, and how far it got: its reads and writes of the plan, and its writes of memory."""
 
     id: str
+    steps: int = 0
+    """How many reads and writes of the plan it made (``_journaled``)."""
     writes: int = 0
+    """How many writes of memory it made (``_memory.py``)."""
 
 
 CALL: contextvars.ContextVar[_Call | None] = contextvars.ContextVar("restate_pydantic_ai_call", default=None)
@@ -82,6 +94,15 @@ def running() -> SessionContext:
     return current_call("").ctx
 
 
+def conversation_id_of(ctx: SessionContext) -> str:
+    """Return the id of the conversation of ``ctx``'s key for Pydantic AI: ``<agent>/<key>``.
+
+    Every run of the key has it, and ``history_source`` lists the turns under it.
+    """
+    definition = definition_of(ctx)
+    return f"{definition.name}/{ctx.key}" if definition is not None else ctx.key
+
+
 async def _db() -> Any:
     ctx = running()
     await SCHEMA.ensure(ctx.db)
@@ -91,29 +112,55 @@ async def _db() -> Any:
 T = typing.TypeVar("T")
 
 
-async def _once(write: Callable[[Any], Awaitable[T]], dump: Callable[[T], str], load: Callable[[str], T]) -> T:
-    """Do ``write`` (with a transaction) once for the tool call running, and return its result.
+async def _journaled(
+    op: Callable[[Any], Awaitable[T]], dump: Callable[[T], str], load: Callable[[str], T], *, writes: bool
+) -> T:
+    """Do ``op``, a read of the plan (with the database) or, if ``writes``, a write (with a transaction), and return
+    its result: once for the tool call running.
 
-    The call's writes are told apart by their order in it, as a call that
-    runs again (after a crash) writes in the same order; the result of one
-    done already is read back. Outside a tool call, ``write`` is done as it
-    comes.
+    A call that runs again (after a crash) gets what each of its reads and
+    writes returned before, told apart by their order in it, and so makes the
+    writes it made before, each done once. Its reads are journaled too: its
+    earlier writes are committed, and reading them would change what it writes
+    next (which steps a status change unblocks, say), so that its writes would
+    not line up with those it made before. Outside a tool call, ``op`` is done
+    as it comes. The journals of earlier invocations, whose calls no longer
+    run, are dropped.
     """
     ctx = running()
     await SCHEMA.ensure(ctx.db)
     call = CALL.get()
     if call is None:
+        if not writes:
+            return await op(ctx.db)
         async with ctx.db.transaction() as tx:
-            return await write(tx)
-    n, call.writes = call.writes, call.writes + 1
-    key = f"{ctx.request.id}:{call.id}"
-    done = await ctx.db.get(f"SELECT result FROM {WRITES} WHERE call = ? AND n = ?", [key, n])
+            return await op(tx)
+    n, call.steps = call.steps, call.steps + 1
+    invocation = ctx.request.id
+    done = await ctx.db.get(
+        f"SELECT result FROM {JOURNAL} WHERE invocation = ? AND call = ? AND n = ?", [invocation, call.id, n]
+    )
     if done is not None:
         return load(str(done["result"]))
     async with ctx.db.transaction() as tx:
-        result = await write(tx)
-        await tx.execute(f"INSERT INTO {WRITES} (call, n, result) VALUES (?, ?, ?)", [key, n, dump(result)])
+        result = await op(tx)
+        await tx.execute(f"DELETE FROM {JOURNAL} WHERE invocation != ?", [invocation])
+        await tx.execute(
+            f"INSERT INTO {JOURNAL} (invocation, call, n, result) VALUES (?, ?, ?, ?)",
+            [invocation, call.id, n, dump(result)],
+        )
     return result
+
+
+_ITEMS: TypeAdapter[list[PlanItem]] = TypeAdapter(list[PlanItem])
+
+
+def _dump_item(item: PlanItem | None) -> str:
+    return item.model_dump_json() if item is not None else "null"
+
+
+def _load_item(stored: str) -> PlanItem | None:
+    return None if stored == "null" else PlanItem.model_validate_json(stored)
 
 
 def _item(stored: object) -> PlanItem:
@@ -127,11 +174,16 @@ class KeyPlanStore:
         return [_item(item) for [item] in await db.values(f"SELECT item FROM {PLAN} ORDER BY position")]
 
     async def get_items(self) -> list[PlanItem]:
-        return await self._items(await _db())
+        return await _journaled(
+            self._items, lambda items: _ITEMS.dump_json(items).decode(), _ITEMS.validate_json, writes=False
+        )
 
     async def get_item(self, item_id: str) -> PlanItem | None:
-        row = await (await _db()).get(f"SELECT item FROM {PLAN} WHERE id = ?", [item_id])
-        return _item(row["item"]) if row is not None else None
+        async def read(db: Any) -> PlanItem | None:
+            row = await db.get(f"SELECT item FROM {PLAN} WHERE id = ?", [item_id])
+            return _item(row["item"]) if row is not None else None
+
+        return await _journaled(read, _dump_item, _load_item, writes=False)
 
     async def set_items(self, items: list[PlanItem]) -> None:
         async def write(tx: Any) -> None:
@@ -142,7 +194,7 @@ class KeyPlanStore:
                     [position, item.id, item.model_dump_json()],
                 )
 
-        await _once(write, lambda _: "null", lambda _: None)
+        await _journaled(write, lambda _: "null", lambda _: None, writes=True)
 
     async def add_item(self, item: PlanItem) -> PlanItem:
         async def write(tx: Any) -> PlanItem:
@@ -155,7 +207,7 @@ class KeyPlanStore:
             )
             return item.model_copy(deep=True)
 
-        return await _once(write, PlanItem.model_dump_json, PlanItem.model_validate_json)
+        return await _journaled(write, PlanItem.model_dump_json, PlanItem.model_validate_json, writes=True)
 
     async def update_item(
         self,
@@ -178,13 +230,7 @@ class KeyPlanStore:
             await tx.execute(f"UPDATE {PLAN} SET item = ? WHERE id = ?", [item.model_dump_json(), item_id])
             return item
 
-        def dump(item: PlanItem | None) -> str:
-            return item.model_dump_json() if item is not None else "null"
-
-        def load(stored: str) -> PlanItem | None:
-            return None if stored == "null" else PlanItem.model_validate_json(stored)
-
-        return await _once(write, dump, load)
+        return await _journaled(write, _dump_item, _load_item, writes=True)
 
     async def remove_item(self, item_id: str) -> bool:
         async def write(tx: Any) -> bool:
@@ -192,7 +238,9 @@ class KeyPlanStore:
             await tx.execute(f"DELETE FROM {PLAN} WHERE id = ?", [item_id])
             return existed
 
-        return await _once(write, lambda existed: "true" if existed else "false", lambda stored: stored == "true")
+        return await _journaled(
+            write, lambda existed: "true" if existed else "false", lambda stored: stored == "true", writes=True
+        )
 
 
 def plan_store() -> KeyPlanStore:
@@ -200,8 +248,9 @@ def plan_store() -> KeyPlanStore:
 
         desk = Agent(model, capabilities=[Planning(store=pydantic_ai.plan_store())])
 
-    ``clear`` empties it with the conversation. Each write of a tool call is
-    done once, however often the call runs.
+    ``clear`` empties it with the conversation. A tool call that runs again
+    (after a crash) reads the plan as it read it before, and each of its
+    writes is done once.
     """
     return KeyPlanStore()
 
@@ -249,7 +298,7 @@ class TurnsHistorySource:
         ctx = running()
         db = await _turns(ctx)
         definition = definition_of(ctx)
-        conversation = f"{definition.name}/{ctx.key}" if definition is not None else ctx.key
+        conversation = conversation_id_of(ctx)
         rows = await db.values(f"SELECT prompt, asked_at FROM {TURNS} ORDER BY n")
         return [
             RunRecord(

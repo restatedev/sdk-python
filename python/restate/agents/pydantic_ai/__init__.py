@@ -65,10 +65,13 @@ any Pydantic AI model as ``model``.
 """
 
 try:
+    import pydantic_ai_harness  # noqa: F401  # pyright: ignore[reportUnusedImport]
+
     import pydantic_ai  # noqa: F401  # pyright: ignore[reportUnusedImport]
 except ImportError as error:
     raise ImportError(
-        "restate.agents.pydantic_ai needs Pydantic AI: install the pydantic_ai extra, pip install restate-sdk[pydantic_ai]"
+        "restate.agents.pydantic_ai needs Pydantic AI and Pydantic AI Harness: install the pydantic_ai extra, "
+        "pip install restate-sdk[pydantic_ai]"
     ) from error
 
 from restate.agents.pydantic_ai._agent import (

@@ -161,10 +161,9 @@ from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._tools import Tool, current_call, tools_in, wait_for
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
-from restate.agents.pydantic_ai._stores import TurnsHistorySource, calling
+from restate.agents.pydantic_ai._stores import TurnsHistorySource, calling, conversation_id_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
-from restate.sessions.internal import definition_of
 
 M = typing.TypeVar("M", bound=BaseModel)
 
@@ -410,7 +409,7 @@ class _Restate(AbstractCapability[Any]):
             return {"tool": call.tool_name, "args": call.args_as_dict()}
 
         async def approval(call: ToolCallPart) -> tuple[str, ToolApproved | ToolDenied]:
-            value = await wait_for(self.ctx, call.tool_call_id, APPROVAL, shown(call))
+            value = await wait_for(self.ctx, call.tool_call_id, APPROVAL, shown(call), approval=True)
             return call.tool_call_id, approval_of(value)
 
         async def result(call: ToolCallPart) -> tuple[str, object]:
@@ -685,12 +684,6 @@ def history_source() -> TurnsHistorySource:
     them.
     """
     return TurnsHistorySource(ITEMS)
-
-
-def conversation_id_of(ctx: SessionContext) -> str:
-    """Return the id of the conversation of ``ctx``'s key for Pydantic AI: ``<agent>/<key>``."""
-    definition = definition_of(ctx)
-    return f"{definition.name}/{ctx.key}" if definition is not None else ctx.key
 
 
 def _run(

@@ -150,6 +150,60 @@ async def test_a_step_added_by_a_tool_call_that_runs_again_is_added_once():
     assert (await chat("read it")).count("Pack") == 1
 
 
+async def test_a_status_change_that_runs_again_after_some_of_its_writes_makes_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Completing A unblocks B and C, one write each: a crash after B's leaves C's to the call that runs again,
+    which reads the plan as it did the first time (not with B unblocked), and so makes C's write."""
+    from pydantic_ai_harness.planning import PlanItem, TaskStatus  # pylint: disable=import-outside-toplevel
+
+    from restate.agents._tools import tools_in  # pylint: disable=import-outside-toplevel
+    from restate.agents.pydantic_ai import _stores  # pylint: disable=import-outside-toplevel
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        # Planning reminds the model of the plan in a prompt of its own: answer by the results alone.
+        if returned := _returned(messages):
+            return ModelResponse(parts=[TextPart(f"tool said: {returned[-1].model_response_str()}")])
+        args = {"task_id": "A", "status": "completed"}
+        return ModelResponse(parts=[ToolCallPart("update_task_status", args, tool_call_id="call-done")])
+
+    planning = Planning(store=pydantic_ai.plan_store(), enable_subtasks=True)
+    mine: Any = Agent(FunctionModel(model), capabilities=[planning])
+    chat = Chat(pydantic_ai.agent("pai_plans_unblocked", agent=mine))
+    store = _stores.KeyPlanStore()
+
+    @chat.obj.handler(name="plan")
+    async def plan(ctx: Any, items: list[dict[str, Any]] | None = None) -> list[str]:
+        with tools_in(ctx):
+            if items is not None:
+                await store.set_items([PlanItem.model_validate(item) for item in items])
+            return [f"{item.id}={item.status.value}" for item in await store.get_items()]
+
+    blocked: dict[str, Any] = {"status": TaskStatus.blocked, "depends_on": ["A"]}
+    seeded: list[dict[str, Any]] = [{"id": "A", "content": "A", "status": TaskStatus.in_progress}]
+    seeded += [{"id": "B", "content": "B", **blocked}, {"id": "C", "content": "C", **blocked}]
+    await invoke(chat.obj, "plan", chat.host(), request(), seeded)
+    update = _stores.KeyPlanStore.update_item
+    written: list[str] = []
+
+    async def crashing(self: Any, item_id: str, **changes: Any) -> Any:
+        updated = await update(self, item_id, **changes)  # committed
+        written.append(item_id)
+        if written == ["A", "B"]:
+            raise RuntimeError("the process crashed between two writes")
+        return updated
+
+    monkeypatch.setattr(_stores.KeyPlanStore, "update_item", crashing)
+    invocation = request()
+    with pytest.raises(RuntimeError, match="crashed between two writes"):
+        await chat("done with A", invocation=invocation)
+    assert await invoke(chat.obj, "plan", chat.host(), request(), None) == ["A=completed", "B=pending", "C=blocked"]
+    await chat("done with A", invocation=invocation)
+    assert await invoke(chat.obj, "plan", chat.host(), request(), None) == ["A=completed", "B=pending", "C=pending"]
+    # The call that ran again got the results of the writes it had made: it made only C's.
+    assert written == ["A", "B", "A", "B", "C"]
+
+
 async def test_a_large_tool_result_spills_and_is_read_in_the_same_turn_and_a_later_one():
     big = "x" * 30_000
     spilled: list[str] = []
