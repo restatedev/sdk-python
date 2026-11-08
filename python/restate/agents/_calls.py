@@ -30,6 +30,7 @@ unless the call itself returned that error.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import typing
 import uuid
@@ -98,6 +99,8 @@ async def _load(ctx: SessionContext, invocation: str) -> _Calls:
 class _Attempt:
     id: str
     calls: _Calls | None = None
+    loading: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Held while the calls are first loaded: calls made at once (deferred tool calls, say) share one state."""
 
 
 _ATTEMPT: ScopeKey[_Attempt] = ScopeKey("the calls of an attempt")
@@ -107,7 +110,9 @@ async def _calls_of(ctx: SessionContext) -> tuple[_Attempt, _Calls]:
     """Return the current attempt and the calls of its invocation."""
     attempt = _ATTEMPT.of(ctx, lambda: _Attempt(id=str(uuid.uuid4())))
     if attempt.calls is None:
-        attempt.calls = await _load(ctx, ctx.request.id)
+        async with attempt.loading:
+            if attempt.calls is None:
+                attempt.calls = await _load(ctx, ctx.request.id)
     return attempt, attempt.calls
 
 

@@ -386,7 +386,8 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         the snapshot of each. The metadata of a checkpoint counts, for each
         delta channel, the steps since its snapshot
         (``counters_since_delta_snapshot``); a channel that has no count
-        there was snapshotted at that checkpoint, or not written yet.
+        there was snapshotted at that checkpoint, and one that the checkpoint
+        does not hold (``channel_versions``) was never written.
         """
         kept: dict[str, Checkpoint] = {}
         waiting: set[str] | None = None
@@ -402,7 +403,11 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
             parent, type_, stored, metadata = rows[0]
             kept[str(at)] = typing.cast(Checkpoint, self._load(type_, stored))
             loaded = typing.cast(dict[str, Any], self._load(type_, metadata))
-            counted = set(typing.cast(dict[str, Any], loaded.get("counters_since_delta_snapshot") or {}))
+            counters = typing.cast(dict[str, Any], loaded.get("counters_since_delta_snapshot") or {})
+            # LangGraph counts every delta channel at every step, written or not, but snapshots (and replays)
+            # only those the checkpoint holds: a channel nothing wrote has nothing to rebuild.
+            versions = kept[str(at)]["channel_versions"]
+            counted = {channel for channel in counters if channel in versions}
             waiting = counted if waiting is None else waiting & counted
             at = parent
         return kept

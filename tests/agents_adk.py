@@ -560,6 +560,34 @@ async def test_a_workflow_nodes_first_step_stored_before_a_crash_is_not_its_answ
     assert await ask("system x", invocation) == "echo: system: Step one."
 
 
+async def test_a_workflow_nodes_last_step_stored_before_a_crash_is_its_answer(monkeypatch: pytest.MonkeyPatch):
+    from google.adk.apps import App  # pylint: disable=import-outside-toplevel
+    from google.adk.workflow import Workflow  # pylint: disable=import-outside-toplevel
+    from sessions_object import request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents.adk import _agent  # pylint: disable=import-outside-toplevel
+
+    append_event = _agent._Sessions.append_event  # pyright: ignore[reportPrivateUsage]
+    crashed: list[bool] = []
+
+    async def crash_after_the_last_step(self: Any, session: Any, event: Any) -> Any:
+        stored = await append_event(self, session, event)
+        if event.author == "second" and final_response(event) and not crashed:
+            crashed.append(True)
+            raise RuntimeError("the process crashed after the last step")
+        return stored
+
+    monkeypatch.setattr(_agent._Sessions, "append_event", crash_after_the_last_step)  # pyright: ignore[reportPrivateUsage]
+    first = LlmAgent(name="first", model=Scripted(), instruction="Step one.")
+    second = LlmAgent(name="second", model=Scripted(), instruction="Step two.")
+    pipeline = App(name="pipeline", root_agent=Workflow(name="pipeline", edges=[("START", first, second)]))
+    ask, invocation = asking(pipeline), request()
+    with pytest.raises(RuntimeError, match="crashed after the last step"):
+        await ask("system x", invocation)
+    # The workflow had stored its last step's response, but not the root's end: that response is the answer.
+    assert await ask("system x", invocation) == "echo: system: Step one."
+
+
 async def test_an_agent_that_adk_retries_after_a_tools_error_answers_once_it_recovers():
     from google.adk.workflow import RetryConfig  # pylint: disable=import-outside-toplevel
 

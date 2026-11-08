@@ -18,6 +18,7 @@ row stored after it, whole. The items are the made-up framework's dicts of
 
 # pylint: disable=missing-function-docstring,import-error
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -387,6 +388,21 @@ async def test_a_framework_waits_for_a_signal_for_its_own_tool_call_once():
     again = host()
     assert await invoke(obj, "deferred", again, invocation, "call-2") == "approved"
     assert [call[4] for call in again.calls] == [f"{invocation.id}:call-1"]
+
+
+async def test_waits_opened_at_once_each_keep_their_record():
+    from restate.agents._calls import _load  # pylint: disable=import-outside-toplevel
+
+    obj = sessions.SessionObject("waiter")
+
+    @obj.handler
+    async def deferred(ctx: sessions.SessionContext, call_ids: list[str]) -> Any:
+        # A framework's deferred calls, opened at once before any other call loaded the invocation's records.
+        await asyncio.gather(*(wait_for(ctx, call_id, "approval") for call_id in call_ids))
+        return sorted(call["ids"][0] for call in (await _load(ctx, ctx.request.id)).calls)
+
+    host = Host(Backend(), service="waiter", key="alice", answers={"wait": b"true"})
+    assert await invoke(obj, "deferred", host, request(), ["c1", "c2", "c3"]) == ["c1", "c2", "c3"]
 
 
 async def test_a_wait_with_nothing_to_show_shows_no_input():

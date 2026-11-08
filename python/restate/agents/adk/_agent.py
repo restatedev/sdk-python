@@ -444,9 +444,24 @@ def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
         if error is not None:
             # The model would not answer (a safety block, say), as it would not again: the prompt fails.
             raise TerminalError(f"the model returned {error.error_code}: {error.error_message or ''}")
+        if not answer and not isinstance(_root(app), BaseAgent):
+            # A Workflow whose last node answered before a crash, but whose end was not stored: ADK replays the
+            # finished nodes without their content, so the answer is the last response the invocation stored.
+            answer = _last_response(conversation)
         return answer
 
     return run
+
+
+def _last_response(conversation: Conversation) -> str:
+    """Return the text of the last final response of the running turn's latest invocation, or ``""``."""
+    turn = conversation.running()
+    if turn is None:
+        return ""
+    invocation = typing.cast(Event, turn.latest_ask().item).invocation_id
+    events = [typing.cast(Event, e.item) for e in turn.items]
+    responses = [event for event in events if event.invocation_id == invocation and _is_final(event)]
+    return _text(responses[-1]) if responses else ""
 
 
 # --- The API --------------------------------------------------------------------------------------

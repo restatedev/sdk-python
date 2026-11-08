@@ -365,6 +365,37 @@ async def test_a_prune_keeps_what_a_delta_channel_is_rebuilt_from(every: int):
     assert max(kept) <= 2 if every == 2 else kept == [4, 8, 12]
 
 
+async def test_a_prune_keeps_no_more_for_a_delta_channel_that_nothing_writes():
+    """LangGraph counts the steps since a snapshot for every delta channel, written or not, and snapshots only
+    those written: a channel that nothing writes must not keep every checkpoint of the thread."""
+
+    class Delta(TypedDict):
+        log: Annotated[list[str], DeltaChannel(appended, snapshot_frequency=2)]
+        unused: Annotated[list[str], DeltaChannel(appended, snapshot_frequency=2)]
+
+    graph = StateGraph(Delta)
+    graph.add_node("a", typing.cast(Any, lambda _: {"log": ["a"]}))
+    graph.add_node("b", typing.cast(Any, lambda _: {"log": ["b"]}))
+    graph.add_edge(START, "a")
+    graph.add_edge("a", "b")
+    graph.add_edge("b", END)
+    backend = Backend()
+    seen: list[tuple[list[str], int]] = []
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        saver = SqlCheckpointSaver(ctx.db)
+        app: Any = graph.compile(checkpointer=saver)
+        for n in range(6):
+            await app.ainvoke({"log": [str(n)]}, THREAD, durability="sync")
+            await saver.aprune(["t"])
+            [(stored,)] = await ctx.db.values("SELECT count(*) FROM restate_langgraph_checkpoints")
+            seen.append(((await app.aget_state(THREAD)).values["log"], int(typing.cast(int, stored))))
+
+    await attempt(backend, go)
+    assert seen[-1][0] == [entry for n in range(6) for entry in (str(n), "a", "b")]
+    assert max(stored for _, stored in seen) <= 2
+
+
 async def test_a_fork_from_an_earlier_checkpoint_leaves_the_branch_it_forked_from():
     backend = Backend()
     seen: dict[str, Any] = {}
