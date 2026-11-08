@@ -173,4 +173,6 @@ port should have a test that fails for it.
   most past bugs were ([What we learned](learnings.md#what-testing-taught-us)).
 - **The database.** The same engine (sdk-shared-core), so the same limits:
   no expression more than 100 deep; and the same `Schema` mechanism, one
-  named schema per library.
+  named schema per library. And the same costs: a `SELECT` of several
+  aggregates scans its table, which a cold process reads whole; see
+  [Access patterns](access-patterns.md) for what each statement costs.

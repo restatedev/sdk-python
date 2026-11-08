@@ -192,9 +192,10 @@ would catch.
 
 `scripts/resurrect.py` measures the suite against bugs that really happened.
 
-- **38 history mutants** (39 until one was retired, below). Each brings back,
+- **39 history mutants** (40 until one was retired, below). Each brings back,
   on today's code, one bug that a fix commit describes (#276, #278, #290,
-  #291, #292, #294, and the review of the storage plan's implementation).
+  #291, #292, #294, the review of the storage plan's implementation, and the
+  measurement of [access patterns](access-patterns.md)).
 - **13 durability mutants.** Each breaks the contract of a turn without
   matching any past fix.
 
@@ -206,8 +207,10 @@ It then asks: which tests fail?
 - **Regression only:** only the tests that the fix commit added fail.
 - **Survived:** nothing fails.
 
-The run was against Restate 1.8.1 on 7 November 2026. The baseline was 283
-passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
+The first run was against Restate 1.8.1 on 7 November 2026. The baseline was
+283 passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
+The table holds its verdicts, and those of the mutants added since, whose
+runs are described after it.
 
 | Mutant | Kind | Bug brought back | Verdict |
 | --- | --- | --- | --- |
@@ -250,6 +253,7 @@ passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
 | `pydantic-memory-run-ids` | review | a replayed memory edit misses its receipt and reports failure | regression only |
 | `pydantic-memory-paths-unlimited` | review | `list_paths` ignores its limit | regression only |
 | `pydantic-import-without-harness` | review | without Pydantic AI Harness, the import names no extra | regression only |
+| `last-of-scans` | access patterns | every turn scans both tables for the last position and seq, and a cold one reads the whole database | regression only |
 | `pydantic-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **caught** |
 | `calls-new-id-not-matched` | durability | a call asked again under a new id makes its Restate call again | **caught** |
 | `langgraph-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **SURVIVED**, now caught |
@@ -279,6 +283,12 @@ history mutants are all caught, `approval-is-the-calls-outcome` by the Pydantic
 AI agent's test too, the other 10 by their own tests only.
 `calls-new-id-not-matched` is still caught by `agents_tools`, now that
 `wait_for` no longer rejoins an earlier attempt's call.
+
+**The access patterns' fix**, on 8 November: `last-of-scans`, run on its own
+against the two test files that use `last_of` (`agents_conversation.py` and
+`agents_messages.py`, which need no server; the baseline had no failures),
+is caught by its own test only. No other test measures what a statement
+reads: the scan returns the same values.
 
 What it says (the run of 7 November):
 

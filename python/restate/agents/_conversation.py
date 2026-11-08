@@ -315,8 +315,11 @@ async def start_of(db: DatabaseReader) -> Start:
 
 async def last_of(db: DatabaseReader) -> tuple[int | None, int]:
     """Return the last position of ``db``'s rows (``None`` if it has none), and the last ``seq`` they have (or 0)."""
-    [[turn, turn_seq, answered_seq]] = await db.values(f"SELECT MAX(n), MAX(seq), MAX(answered_seq) FROM {TURNS}")
-    [[step, step_seq]] = await db.values(f"SELECT MAX(n), MAX(seq) FROM {STEPS}")
+    # One subquery per maximum: each reads the end of its b-tree, where one SELECT of several scans the table.
+    [[turn, turn_seq, answered_seq, step, step_seq]] = await db.values(
+        f"SELECT (SELECT MAX(n) FROM {TURNS}), (SELECT MAX(seq) FROM {TURNS}), (SELECT MAX(answered_seq) FROM {TURNS}), "
+        f"(SELECT MAX(n) FROM {STEPS}), (SELECT MAX(seq) FROM {STEPS})"
+    )
     positions = [int(typing.cast(int, n)) for n in (turn, step) if n is not None]
     seqs = [int(typing.cast(int, s)) for s in (turn_seq, answered_seq, step_seq) if s is not None]
     return (max(positions) if positions else None), max(seqs, default=0)

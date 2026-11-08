@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+import random
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
@@ -25,7 +26,19 @@ from sessions_object import Host, request
 
 import restate
 from restate import sessions
-from restate.agents._conversation import Call, Conversation, Entry, Item, Parsed, Result, answer_once
+from restate.agents._conversation import (
+    SCHEMA,
+    STEPS,
+    TURNS,
+    Call,
+    Conversation,
+    Entry,
+    Item,
+    Parsed,
+    Result,
+    answer_once,
+    last_of,
+)
 from restate.agents.internal import CANCELLED, from_tool, refusal_of
 from restate.sessions.internal import invoke
 
@@ -720,3 +733,61 @@ async def test_a_turn_that_ends_with_a_tool_after_a_message_ends_with_its_answer
     last = turn.items[-1]
     assert last.item == {"role": "assistant", "text": "booked Rome"} and last.agent == "booker"
     assert turn.prompt.answered_at == last.n
+
+
+async def test_the_last_position_and_seq_are_read_from_the_ends_of_the_tables_without_a_scan():
+    """``last_of`` runs at every turn and in the views: a scan would read the whole database in a new process."""
+    obj = sessions.SessionObject("filler")
+    text = random.Random(7)
+
+    @obj.handler
+    async def fill(ctx: sessions.SessionContext, first: int) -> None:
+        # A hundred turns of three long results each, laid out in the file as turns are: each among its steps.
+        await SCHEMA.ensure(ctx.db)
+        async with ctx.db.transaction() as tx:
+            for turn in range(first, first + 400, 4):
+                await tx.execute(
+                    f"INSERT INTO {TURNS} (n, seq, prompt, item, status, answer, answered_at, answered_seq) "
+                    "VALUES (?, ?, ?, ?, 'answered', 'done', ?, ?)",
+                    [turn, turn, f"inv_{turn}:0", json.dumps(ITEMS.prompt("go")), turn + 3, turn + 3],
+                )
+                for step in range(1, 4):
+                    output = "".join(text.choices("abcdefghijklmnopqrstuvwxyz ", k=2000))
+                    await tx.execute(
+                        f"INSERT INTO {STEPS} (n, turn, seq, item) VALUES (?, ?, ?, ?)",
+                        [turn + step, turn, turn + step, json.dumps({"result": f"c{step}", "output": output})],
+                    )
+
+    @obj.view
+    async def ends(ctx: sessions.ViewContext) -> list[int | None]:
+        return list(await last_of(ctx.db))
+
+    @obj.view
+    async def scan(ctx: sessions.ViewContext) -> None:
+        await ctx.db.values(f"SELECT (SELECT SUM(LENGTH(item)) FROM {TURNS}), (SELECT SUM(LENGTH(item)) FROM {STEPS})")
+
+    backend = Backend()
+    for first in range(0, 2400, 400):
+        await invoke(obj, "fill", Host(backend, service="filler"), request(), first)
+
+    class Counting(Host):
+        packs: int = 0
+
+        def get(self, key: str):
+            self.packs += "/pack/" in key
+            return super().get(key)
+
+    async def cold(handler: str, key: str) -> tuple[Any, int]:
+        # The stored state under a key of its own: no process has read it, so every page it needs is a get.
+        copy = Backend()
+        copy.stored = dict(backend.stored)
+        host = Counting(copy, service="filler", key=key, shared=True)
+        return await invoke(obj, handler, host, request()), host.packs
+
+    _, scanned = await cold("scan", "scanned")
+    last, read = await cold("ends", "ended")
+    assert last == [2399, 2399]
+    # A scan reads every part of the file; the maxima, at most a part for the end of each of the five b-trees
+    # they come from (both tables, and the seq and answered_seq indexes). A SELECT of several maxima scanned.
+    assert scanned >= 20
+    assert read <= 5
