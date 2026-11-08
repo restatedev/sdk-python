@@ -124,40 +124,44 @@ turns: ADK's and ours.
 - the warning is logged once per process;
 - the built-in agent is unchanged.
 
-### A2. Retention
-
-- **The state across turns.** At retention 0, the existing tests of "ADK state
-  across turns" pass unchanged, at window 0 and at window 1.
-- **A killed turn.** A turn is killed and closed as ended, the next turn answers,
-  and the steps are pruned. The next turn's state is what it would have been
-  without pruning. `_Sessions.session` takes the base state from the latest turn
-  ADK answered, then applies the state deltas of the loaded turns.
-- **The same requests.** Every model request is the same at retention 0 as with a
-  retention long enough that nothing is deleted.
-- **The full view.** Pruned turns show as prompt and answer, with ADK's events.
-
-### A3. The summary's form
+### A2. The summary's form
 
 - **Keep the default:** a user event, then a model event saying "Understood."
 - **Check whether Gemini needs it.** Gemini may expect alternating roles. Check on
-  the oldest and the latest supported versions. If both accept consecutive user
-  contents, consider a single user event, as the coding agents send their
-  summaries, and explain the choice in your report.
+  the latest release. If it accepts consecutive user contents, consider a single
+  user event, as the coding agents send their summaries, and explain the choice
+  in your report.
+
+### A3. Guards for older ADK versions (D4)
+
+Remove any code that exists only for ADK versions older than the floor, and list
+each removal in your report.
 
 ### A4. Docs
 
 Update the module docstring of `adk/_agent.py`:
 
-- a user App's events compaction is turned off, and why;
-- what retention means for ADK: state is carried on the turn row, and the steps
-  of earlier turns go.
+- a user App's events compaction is turned off, and why.
 
 ## Acceptance
 
 - A1's reproduction fails before the fix and passes after it, on the latest
   release.
-- A2's tests pass.
+- A2's choice is made and tested, and A3 is done.
 - Nothing outside this file's scope changed.
+
+## Later, with steps retention
+
+These checks belong to the README's future work, not to this plan:
+
+- **The state across turns.** With steps deleted, at windows 0 and 1, the next
+  turn's state is the same as before. `_Sessions.session` takes the base state
+  from the latest turn that wasn't ended, then applies the state deltas of the
+  loaded turns.
+- **A killed turn.** A turn that is killed and closed as ended leaves the same
+  state with steps deleted as without.
+- **The same requests and the full view.** The model's requests don't change, and
+  the full view shows deleted turns as prompt and answer.
 
 ## Out of scope
 

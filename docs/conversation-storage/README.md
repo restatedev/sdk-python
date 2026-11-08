@@ -1,26 +1,37 @@
-# Conversation storage: what we keep, for how long, and what each framework needs
+# Conversation storage and the frameworks
 
 > **Status:** a plan. Nothing in this folder is implemented yet. It was written on
 > 2026-11-08 against PR restatedev/sdk-python#296 at commit `670445c`, and its line
-> numbers refer to that commit. It was revised the same day: D1 was clarified,
-> and D4 and D5 were added.
+> numbers refer to that commit. It was revised the same day:
+> - D1 was clarified, and D4 and D5 were added;
+> - steps retention moved to [future work](#future-work-steps-retention);
+> - the scope narrowed to sessions and agents.
 
-This folder holds the research behind three changes to `restate.agents`, and the
-plan for making them:
+**Scope:** `restate.sessions` and `restate.agents` only. That means
+`python/restate/sessions/` and `python/restate/agents/`, with their tests and
+docs. `restate.ext.*`, sdk-shared-core and the TypeScript SDK are out of scope.
 
-1. **Steps retention.** A turn's steps are its model replies, tool calls and tool
-   results. Today they are kept until `clear`; with this change they are deleted
-   once no model reads them any more. The transcript (each turn's prompt and
-   answer) stays.
-2. **Framework alignment.** Each supported framework needs certain state carried
-   from one turn to the next. The research found gaps in our integrations, and
-   this plan closes them.
-3. **One bug found along the way.** When a user's ADK app has events compaction
+This folder holds the research behind these changes, and the plan for making
+them:
+
+1. **Framework alignment.** Each supported framework needs certain things from a
+   turn: state carried from one turn to the next, and a way for the summary to
+   reach its model. The research found gaps in our integrations, and this plan
+   closes them. For Pydantic AI, the integration leans on Pydantic AI Harness
+   (D5).
+2. **One bug found along the way.** When a user's ADK app has events compaction
    on, ADK re-sorts the session we build, and the events come out of order.
+3. **Two clean-ups decided along the way:**
+   - no `DROP TABLE` (D1);
+   - only the latest framework releases (D4).
+
+**Future work, designed but not planned now:** steps retention, which would
+delete a turn's steps once no model reads them any more
+([below](#future-work-steps-retention)).
 
 | File | What it holds | Who implements it |
 | --- | --- | --- |
-| `README.md` (this file) | the research summary, the idea, the shared core work, and how the parts connect | the coordinator (phases 0, 1 and 3) |
+| `README.md` (this file) | the research summary, the decisions, the shared core work, how the parts connect, and the future work | the coordinator (phases 0, 1 and 3) |
 | [`pydantic-ai.md`](pydantic-ai.md) | Pydantic AI and Pydantic AI Harness | one agent (phase 2) |
 | [`adk.md`](adk.md) | Google ADK | one agent (phase 2) |
 | [`langgraph.md`](langgraph.md) | LangGraph and LangChain: the built-in agent, and `graph=` | one agent (phase 2) |
@@ -41,7 +52,7 @@ sequenceDiagram
   participant L as LangGraph agent
   participant O as OpenAI agent
   Note over C: Phase 0: decisions confirmed, tests runnable, baseline recorded
-  Note over C: Phase 1: the core (C0–C9), tested and committed
+  Note over C: Phase 1: the core (C0–C2), tested and committed
   par Phase 2, one worktree each, from phase 1's commit
     C->>P: brief: README.md + pydantic-ai.md
   and
@@ -55,7 +66,7 @@ sequenceDiagram
   A-->>C: report
   L-->>C: report
   O-->>C: report
-  Note over C: Phase 3: core requests, merge, full suite, oldest versions, docs, one push
+  Note over C: Phase 3: core requests, merge, full suite, docs, one push
 ```
 
 ## Where we are
@@ -77,9 +88,7 @@ Each turn, the model gets three things:
 - the earlier turns, as their prompts and answers, as many as `budget` holds;
 - the last `window` turns whole.
 
-Today nothing is deleted except by `clear`, so the steps of every turn stay
-stored, although the model never reads them again once the turn leaves the
-window.
+Nothing is deleted except by `clear`.
 
 ## The research
 
@@ -107,7 +116,7 @@ The framework details are in each framework's file.
 | A turn | a row: status, error, times, first user item, final answer item | none: an `idle` message ends it | none stored |
 | Earlier turns, to the model | as stored, since the last compaction; tool output capped when recorded (10k tokens) | as stored, since the last compaction; tool output capped when produced (2,000 lines or 50 KiB) | as stored, from the compaction's first kept entry |
 | Compaction | at 90% of the window: user messages (≤20k tokens) plus a summary, as a user message with a fixed prefix | at the window minus max(15%, 16k): a summary row, plus the last ~15k tokens as text | at the window minus 16k: an entry with the summary and the first entry kept (~20k tokens) |
-| Old tool output | not cleared | v1 cleared it, opt-in (below); v2 removed that | not cleared; an appended `context_edit` can hide an entry from the model |
+| Old tool output | not cleared | v1 cleared it, opt-in; v2 removed that | not cleared; an appended `context_edit` can hide an entry from the model |
 | Retention | rollouts kept; `history.max_bytes` trims only the prompt log | sessions kept; spilled tool-output files deleted after 7 days | sessions kept |
 | A client sees | turns with `itemsView: full` or `summary` (first user message plus final answer) | every row, and a divider at a compaction | the compacted view; the raw entries over RPC |
 
@@ -119,22 +128,15 @@ What this tells us:
   Its client protocol's `itemsView: summary` is our `view: "summary"`. Sources:
   `codex-rs/state/thread_history_migrations/0001_thread_history.sql` and
   `codex-rs/app-server-protocol/src/protocol/turn_items_view.rs`.
-- **None of the three deletes the steps the model stops seeing.** Each keeps an
-  append-only log, sends the model the history since the last compaction
-  unchanged (which suits the provider's prompt cache), records a compaction by
-  appending a marker, and deletes only whole sessions, when asked. Size limits
-  apply only to side files, and to tool output as it is recorded.
-- **The one precedent for clearing old tool output was opt-in, and is gone.** In
-  opencode v1:
-  - It left the last two user turns alone.
-  - It kept the newest 40,000 tokens of tool output, and acted only if more than
-    20,000 tokens could be cleared.
-  - It marked older outputs as compacted but kept them stored, and the model saw
-    "[Old tool result content cleared]".
-
-  opencode v2 dropped it: `compaction.prune` is now an unsupported setting. pi's
-  `context_edit` is an append-only way to hide an entry from the model, which its
-  extensions can use.
+- **Each of the three:**
+  - keeps an append-only log;
+  - sends the model the history since the last compaction, unchanged, which
+    suits the provider's prompt cache;
+  - records a compaction by appending a marker;
+  - deletes only whole sessions, when asked.
+- **Each sends its summary as a user message, with no assistant reply after
+  it.** Pydantic AI does the same with a summary an app writes (see
+  [`pydantic-ai.md`](pydantic-ai.md)).
 
 ### The frameworks
 
@@ -158,70 +160,10 @@ What this tells us:
      carry yet.
 
    That work belongs to each framework's file.
-3. **Deleting steps the model no longer reads is new ground for coding agents.**
-   Frameworks that rewrite stored history do it when they compact. We delete when
-   a turn leaves the window, because that is when our model stops reading its
-   steps.
-
-## The idea
-
-**The rule.** A turn's steps are deleted once both of these hold:
-
-- no turn's model reads them any more: the turn is before the window the next
-  turn loads (`window_from`);
-- the turn ended at least `steps_retention` ago.
-
-The turn's row stays until `clear`: its prompt, status and answer, and what it
-carries. Deleting steps therefore changes nothing for the model, which reads
-earlier turns from their rows (`_conversation.py:955-970`). It changes nothing
-for summaries either, which are written from the rows
-(`_conversation.py:1194-1200`), nor for the summary view.
-
-**The default.** `steps_retention = timedelta(0)`: steps go as soon as the turn
-leaves the window. With `window=1`, the end of turn N deletes turn N−1's steps.
-A UI that shows past tool calls sets a longer retention, such as
-`timedelta(days=7)`. With `window="all"` nothing is deleted, because the model
-reads everything.
-
-**Who deletes.**
-
-- **The end of every turn**, whether answered or closed, deletes what the rule
-  allows. It does so in the transaction that stores the turn's end.
-- **A private `prune` handler**, when `steps_retention` is more than zero. Each
-  turn's end schedules it with a Restate delayed send. Without it, an idle key
-  would keep its old steps past their retention; `prune` deletes them on time,
-  and no process stays running while it waits.
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant A as Agent (chat), turn N
-  participant DB as Key's database
-  participant P as Agent (prune)
-  A->>DB: the turn's end: status, answer, carried state, ended_at
-  A->>DB: same transaction: delete the steps of turns before window_from<br/>that ended at least steps_retention ago
-  Note over DB: turn rows stay, and the start row records window_from and steps_from
-  opt steps_retention > 0
-    A-)P: prune, delayed by steps_retention
-    Note over P: runs even if the key stays idle
-    P->>DB: delete what the same rule allows now
-  end
-```
-
-**What clients see.**
-
-- The full view shows a turn whose steps were deleted as its prompt and its
-  answer, under the same ids as before. That is how the summary view already
-  shows every turn.
-- A follower keeps whatever it has already read.
-
-**What retention does not reach.** These are documented, not solved here:
-
-- **A LangGraph graph's own state.** The graph's latest checkpoint holds every
-  message its state keeps (see [`langgraph.md`](langgraph.md)).
-- **Each turn's Restate journal.** It keeps the turn's call results and database
-  writes until `journal_retention` runs out.
-- **Freed database pages** (C9).
+3. **A framework's own features come first.** Where a framework already does
+   what our code does, the integration uses the framework's feature, and
+   `restate.agents` supplies what it needs. This is D5 for Pydantic AI Harness,
+   and the same spirit applies to the others.
 
 ## Decisions
 
@@ -236,12 +178,12 @@ sequenceDiagram
   A schema change edits the `CREATE` statements directly. Phase 1 starts by
   removing the two `DROP TABLE IF EXISTS` statements at the top of `SCHEMA`
   (`_conversation.py:125-127`), which #296 added for databases from before it.
-- **D2. Turns are the record; steps expire.** This is the rule above.
+- **D2. Keep the layout.** Turn rows are the record, and items are the detail.
 - **D3. Frameworks plug in through the hooks that already exist:**
   - `Items.summary(text)`, which is optional (`_conversation.py:233-278`);
   - `Turn.carry(agent=..., state=...)` (`_conversation.py:571-583`).
 
-  Phase 1 adds no framework-facing API beyond the core contract below.
+  A framework that needs more from the core asks for it (phase 2, rule 3).
 - **D4. No version floor** (decided 2026-11-08). `restate.agents` is a new
   integration, not announced yet, so it supports only the latest release of each
   framework:
@@ -257,27 +199,22 @@ sequenceDiagram
   - CI's jobs for the oldest versions (`.github/workflows/test.yml:36-91`)
     install the extras' lowest versions, which are then the latest. Keep them or
     remove them; the coordinator decides.
-- **D5. Pydantic AI leans on Pydantic AI Harness.** Where a harness capability
-  does what our code does, the Pydantic AI integration uses the capability, and
-  `restate.agents` supplies what the capability needs (storage, durability). See
-  [`pydantic-ai.md`](pydantic-ai.md).
+- **D5. Pydantic AI leans on Pydantic AI Harness** (decided 2026-11-08). Where a
+  harness capability does what our code does, the Pydantic AI integration uses
+  the capability, and `restate.agents` supplies what the capability needs
+  (storage, durability). See [`pydantic-ai.md`](pydantic-ai.md).
 
 **Open.** These should be answered before phase 1; if one isn't, its
 recommendation applies.
 
 | | Question | Recommendation |
 | --- | --- | --- |
-| Q1 | The default `steps_retention` | `timedelta(0)` |
-| Q2 | Should `chat`'s `journal_retention` default to at most `steps_retention`, so the journal's copy goes too? | No: document it. It is Restate's setting, and users opt in. |
-| Q3 | Expose `prune` to apps ("delete steps now")? | No: it stays private, like `compact`. |
-| Q4 | Pydantic AI's usage limits: per turn (today) or per conversation (what Pydantic AI does with `conversation=`)? | Per turn. See [`pydantic-ai.md`](pydantic-ai.md), P1. |
-| Q5 | A LangGraph graph's own state: document how to trim it, or add an opt-in helper that trims it? | Document now; a helper later, if asked. |
-| Q6 | Land this in #296, or in a follow-up PR on top of it? | Your call. #296 is already large, and approved by the review bot. |
-| Q7 | Should the TypeScript SDK (sdk-sessions) follow? | Out of scope here; decide after this lands. |
+| Q1 | Pydantic AI's usage limits: per turn (today) or per conversation (what Pydantic AI does when it carries a `Conversation`)? | Per turn. See [`pydantic-ai.md`](pydantic-ai.md). |
+| Q2 | Land this in #296, or in a follow-up PR on top of it? | Your call. #296 is already large, and approved by the review bot. |
 
 ## Phase 0: preparation (coordinator)
 
-1. Confirm Q1 to Q6.
+1. Confirm Q1 and Q2.
 2. Make the server tests runnable. They use Docker: `restate.harness` starts
    `ghcr.io/restatedev/restate:1.8.1` (`tests/support.py:7`). Without Docker:
    - install restate-server 1.8.1 from npm (`@restatedev/restate-server`);
@@ -305,207 +242,33 @@ Per D4:
 
 ### C1. Schema
 
-Changes to `SCHEMA` (`_conversation.py:122-160`), per D1:
+Per D1:
 
-- **Remove the two `DROP TABLE IF EXISTS` statements** (`_conversation.py:125-127`)
-  and the comment above them. `SCHEMA` then holds only the `CREATE` statements.
-- **Add the new columns to the `CREATE` statements**, as follows.
+- Remove the two `DROP TABLE IF EXISTS` statements (`_conversation.py:125-127`),
+  and the comment above them. `SCHEMA` then holds only `CREATE` statements.
+- Check the other schemas of `restate.sessions` and `restate.agents` for the same
+  pattern, for example the LangGraph checkpointer's (`langgraph/_checkpointer.py`).
+  Remove any statement that exists only for databases from before.
 
-- **`restate_agent_turns.ended_at INTEGER`**: when the turn ended, in Unix
-  milliseconds. `Turn.answered` writes it along with the status.
-- **`restate_agent_conversation_start.window_from INTEGER`**: the first position
-  of the window the next turn loads, as the latest turn's end computed it.
-- **`restate_agent_conversation_start.steps_from INTEGER`**: steps before this
-  position are deleted. It is NULL while none are.
+### C2. What the frameworks need from the core
 
-The code around them:
+These come from the framework files, and are made before phase 2 so that no
+framework agent edits shared files:
 
-- `Start` (`_conversation.py:282-290`) gets `window_from` and `steps_from`.
-- `start_of` and `restart` read and write them.
-- `next_start`, which `clear` uses through `erase`, resets both to NULL.
+- **Pydantic AI:** the core work its harness plan needs, listed in
+  [`pydantic-ai.md`](pydantic-ai.md) under "What the core provides". If that list
+  is empty, there is nothing to do here.
+- **ADK, LangGraph and OpenAI:** nothing.
 
-### C2. The option
+### Docs
 
-- Add `STEPS_RETENTION = timedelta(0)` to `_common.py`, next to `WINDOW` and
-  `BUDGET`.
-- Add `steps_retention: timedelta` to `AgentOptions` (`_object.py:67-104`), with
-  a docstring in the style of `window` and `budget`: "How long a turn's steps
-  (the model's replies, tool calls and results) are kept once no turn's model
-  reads them: once the turn is before the window. Defaults to 0. The turn's
-  prompt and answer are kept until `clear`."
-- `AgentObject.__init__` (`_object.py:236-261`) takes the option and rejects
-  anything but a non-negative `timedelta`, as it checks `budget`
-  (`_object.py:258-260`). It stores the value in `AgentInfo` (`_turn.py:123-132`).
-- Every framework's `agent()` passes `AgentOptions` through, so the frameworks
-  need no change for this. Phase 3 checks that.
-
-### C3. The rule
-
-This is a pure function in `_conversation.py`, next to `window_start`:
-
-```python
-def steps_cut(turns: Sequence[Entry], window_from: int, retention: timedelta, now_ms: int) -> int:
-    """Return the position before which steps may be deleted.
-
-    That is the position of the first turn, oldest first, that is at or after
-    ``window_from``, has not ended, or ended less than ``retention`` before
-    ``now_ms``. Deleting stops there, so what is deleted is always a prefix:
-    one range delete.
-    """
-```
-
-- `window_from` is computed from the transcript as the next turn will load it:
-  `window_start(transcript, window)`, once the latest turn's status is set. That
-  is what `Conversation._upcoming()` computes (`_conversation.py:923-934`), so
-  share the code.
-- Test it with a table: windows 0, 1, 2 and `"all"`; the statuses answered,
-  cancelled, failed, refused, ended and running; retention 0 and 1 hour, with
-  `ended_at` on both sides of it.
-
-### C4. Deleting at a turn's end
-
-`Turn.answered` (`_conversation.py:615-641`) is the one place every turn ends:
-
-- answered;
-- closed by `close`: cancelled, failed or refused;
-- closed as ended: by `settle`, or by the next turn's `answer_once`.
-
-Turn its single `UPDATE` into one transaction that does the following, in order:
-
-1. Run the `UPDATE`, now also setting `ended_at`.
-2. Compute `window_from` from the transcript, with this turn's status already set.
-   - Use the window the conversation was loaded with. `_Ledger` gets `window` and
-     `retention` fields, which `Conversation.load` sets.
-   - That window is the one `answer_once` was given, so when a framework widens
-     it, the widened window counts. LangGraph's `graph=` does this, through the
-     per-call `whole`.
-3. Compute `cut = steps_cut(...)`. If `cut` is past `start.steps_from`, run
-   `DELETE FROM restate_agent_items WHERE n < ?` and set the start row's
-   `steps_from = cut`.
-4. Store the start row's `window_from`.
-
-Keep `_Ledger.start` in step. Then add a second exception to the ownership rule
-in TURN-SEMANTICS.md ("The turn model"): a turn's end may delete the steps of
-earlier turns that retention allows. It never writes their rows.
-
-### C5. The `prune` handler
-
-All in `_object.py`:
-
-- Add `"prune"` to `BUILT_IN` (`_object.py:150-166`) and to the docstring's list
-  of reserved names (`_object.py:196-200`).
-- Register it next to `compact` (`_object.py:544-545`):
-  `agent.handler(ingress_private=True)(prune)`.
-
-What it does, as `async def prune(ctx: SessionContext, _: Nothing = None) -> bool`:
-
-1. Ensure the schema.
-2. Read the start row.
-3. Read `n` and `ended_at` of the turns from `steps_from` (or the first position)
-   up to `window_from`.
-4. Apply `steps_cut`, delete, and update `steps_from`.
-5. Return whether it deleted anything.
-
-It is idempotent, and it reads neither items nor the window size.
-
-**Scheduling.** When `steps_retention` is more than zero, each turn's end sends
-`prune` to the key:
-
-- with `delay=steps_retention`, which `ctx.generic_send` takes
-  (`python/restate/sessions/_api.py:217-224`);
-- with the idempotency key `f"{prompt_id}:prune"`;
-- next to the `compact` send (`_conversation.py:1123-1127`);
-- also when the turn was closed, on the `TerminalError` paths of `_answer`
-  (`_conversation.py:1157-1172`), so that every turn's end schedules one.
-
-Like `compact`, it runs before the key's next queued message, and no process
-stays running while it waits.
-
-### C6. Loading
-
-No change: steps inside the window are never deleted. The tests assert two
-things:
-
-- loading a pruned conversation reads no step before `steps_from`;
-- `history()` is the same with and without pruning.
-
-### C7. The full view
-
-In `_messages.py`:
-
-- **The answer of a pruned turn.** Today the full view renders a turn's answer
-  from its step row (`_rows`, `_messages.py:112-116`). For a turn before
-  `steps_from`, render it from the turn row instead, under `answered_at`, with
-  `answered_seq`. The summary view already does that (`_summarized`,
-  `_messages.py:168-183`), so share that code.
-- **Cursors.** Deleting writes no `seq`, so `_since` (`_messages.py:119-133`)
-  needs no change, and a follower keeps what it already read. Test two things:
-  - a read from a cursor after pruning returns nothing new;
-  - a fresh read shows pruned turns as their prompt and answer, with the same ids
-    as before.
-- **Optional, to decide in phase 1:** a `stepsFrom` field on `messages` pages,
-  telling a client where the stored steps start. It would be an addition to the
-  wire format, so nothing existing breaks.
-
-### C8. Docs
-
-TURN-SEMANTICS.md:
-
-- "Words": steps retention.
-- "What a turn stores": the new columns.
-- "The turn model": the ownership exception.
-- A new "Retention" section, with the diagram above.
-- "What a client sees": pruned turns.
-- "Guarantees and limits": what retention doesn't reach.
-
-Elsewhere:
-
-- The `AgentOptions` docstring.
-- TESTING-AGENTS.md: a retention row in "The contract, per framework", filled in
-  during phase 3.
-
-### C9. Deletion beyond the tables
-
-This work is independent of the rest, so it can run alongside phase 2.
-
-- **The journal.** Each turn's Restate journal holds its call results and its
-  database writes, until `journal_retention` runs out. Document that a deletion
-  guarantee needs `journal_retention` no longer than `steps_retention` (see Q2).
-- **Freed pages.** Before storing a b-tree page, shared-core zeroes the space in
-  it that no cell uses (`sdk-shared-core/src/sql/io.rs:101-107`). Whole pages
-  added to the freelist have not been checked. Deleting a large tool output frees
-  its overflow pages this way.
-  - Write a test with a store implemented in Python (no VM): store a large unique
-    value, delete it, checkpoint, then search every stored value for its bytes.
-  - If they are found, open an issue on restatedev/sdk-shared-core (zero the freed
-    pages, or support `secure_delete`), and note it in "Guarantees and limits".
-  - Fixing it is not part of this plan.
-
-### Core tests
-
-Most of these run through the made-up framework whose items are plain dicts
-(`agents_conversation.ITEMS`).
-
-| Test | Module | What it checks |
-| --- | --- | --- |
-| The rule | `tests/agents_conversation.py` | the `steps_cut` table (C3) |
-| A turn's end deletes | `tests/agents_conversation.py` | at window 1, turn 3's end deletes the steps of turns 1 and 2 and keeps every row; `steps_from` and `window_from` are set; the same holds when the turn is closed |
-| Ended turns stay in view | `tests/agents_conversation.py` | turns a, then ended, then c: c's end keeps the ended turn's steps until an answered turn follows it |
-| The model's input is unchanged | `tests/agents_conversation.py` | `history()` is the same with and without pruning, turn after turn (an oracle, as the crash sweeps use) |
-| Retention | `tests/agents_conversation.py` | at 1 hour, a turn's end keeps the steps of turns that ended less than an hour ago |
-| `prune` | `tests/agents_object.py` (server) | with `steps_retention=timedelta(seconds=1)`, steps before the window remain after the turn, and are gone a few seconds later with the key idle |
-| Reserved name | `tests/agents_object.py` | registering a handler called `prune` raises `ValueError` |
-| Full view | `tests/agents_messages.py` | pruned turns show as prompt and answer, with the same ids; cursors neither go back nor repeat; `clear` resets `steps_from` |
-| Mutants | `scripts/resurrect.py` | each of these is caught: (1) the cut ignores `window_from`; (2) the delete removes turn rows; (3) `prune` ignores retention; (4) the full view loses its fallback |
+- TURN-SEMANTICS.md: whatever C2 changes.
+- The module docstrings are each framework agent's job.
 
 ## The core contract
 
 Phase 2's agents may rely on the following:
 
-- **Retention is automatic.** Frameworks call nothing. A framework's steps are
-  deleted once their turn is before the window and older than `steps_retention`.
-- **The window a framework passes to `answer_once` is the one retention
-  honours**, because `window_from` is computed with it.
 - **Earlier turns reach the model only from their rows.** `history()` gives them
   as `turn.item` (the stored prompt) followed by `items.reply(answer, agent)`. A
   framework must never depend on an earlier turn's steps outside its window.
@@ -516,12 +279,8 @@ Phase 2's agents may rely on the following:
 - **`Turn.carry(state=...)` is one text slot per turn that the framework owns.**
   A turn that doesn't set it inherits the previous turn's (`_conversation.py:571-583`
   and `_conversation.py:631`). ADK uses it, and Pydantic AI may (see
-  [`pydantic-ai.md`](pydantic-ai.md), P3).
-- **"Without pruning", in the oracle tests,** means a `steps_retention` long
-  enough that nothing is deleted, such as `timedelta(days=3650)`. There is no
-  setting that turns retention off.
-- **Tests can read the setting** through `AgentInfo.steps_retention` and
-  `settings_of(ctx)`.
+  [`pydantic-ai.md`](pydantic-ai.md)).
+- **Whatever C2 adds**, as `pydantic-ai.md` describes it.
 
 ## Phase 2: the framework agents
 
@@ -534,8 +293,9 @@ Phase 2's agents may rely on the following:
    - your framework's tests, as your file lists them;
    - the "Status" line of your file.
 
-   Never edit shared files: `python/restate/agents/_*.py`, `TURN-SEMANTICS.md`,
-   `TESTING-AGENTS.md`, or this README.
+   Never edit shared files: `python/restate/agents/_*.py`,
+   `python/restate/sessions/`, `TURN-SEMANTICS.md`, `TESTING-AGENTS.md`, or this
+   README.
 3. **When you need a core change**, don't make it. Describe it in your report:
    what it is, why, and which test needs it.
 4. **Every fix comes with a test** that fails without it. Run:
@@ -562,7 +322,7 @@ Phase 2's agents may rely on the following:
 > Read `docs/conversation-storage/README.md` first: the core contract, the rules
 > for framework agents, and how to run the tests. For server tests, use the
 > plugin in `<plugin dir>` with `RESTATE_SERVER_BIN=<binary>`. Phase 1 is at
-> `<commit>`. Do work items `<list>`; the decisions taken are `<Q1–Q6 answers>`.
+> `<commit>`. Do work items `<list>`; the decisions taken are `<Q1, Q2 answers>`.
 > Report as the rules say.
 
 ## Phase 3: connecting the dots (coordinator)
@@ -574,23 +334,20 @@ Phase 2's agents may rely on the following:
    are any, the rules settle them: a framework owns its package.
 3. **Checks across the frameworks:**
    - the full suite against a server: `uv run --no-sync -m pytest tests/*`;
-   - CI's jobs for the oldest versions (`.github/workflows/test.yml:36-91`).
-     With the floors at the latest releases, they test the same versions as the
-     rest. Keep them green, or remove them (D4).
    - `uv run ruff format --check`, `uv run ruff check`, pyright and mypy, per
      directory (`Justfile:15-37`);
-   - `scripts/resurrect.py`: every mutant applies, and the new ones are caught;
+   - `scripts/resurrect.py`: every mutant still applies, and is caught;
    - framework against framework: one script (three turns, one tool call each,
-     window 1, retention 0) gives the same `messages` full view in all four,
-     apart from documented differences.
+     window 1) gives the same `messages` full view in all four, apart from
+     documented differences;
+   - CI's jobs for the oldest versions: keep them green, or remove them (D4).
 4. **Docs:**
-   - TURN-SEMANTICS.md: C8, plus each framework's notes;
-   - TESTING-AGENTS.md: the retention row;
+   - TURN-SEMANTICS.md: C2, plus each framework's notes;
+   - TESTING-AGENTS.md: new rows in "The contract, per framework", if the work
+     adds behaviour to the contract;
    - the "Status" lines in this folder.
-
-   Each framework's module docstring is its agent's job.
 5. **Publish.** Push the commits to the branch in one push, and update the PR
-   description, or open a new PR (see Q6).
+   description, or open a new PR (see Q2).
 
 ## Running the tests
 
@@ -603,31 +360,127 @@ Phase 2's agents may rely on the following:
 
 ## Acceptance criteria
 
-- **What is stored.** With the default settings and window 1, after turn N ends,
-  the database holds steps only for:
-  - turn N;
-  - any turn being answered, or ended, after it.
-
-  Every turn row stays.
-- **The model's input** is the same with and without retention, for every
-  framework. Oracle tests check this.
-- **The views.** The full view shows pruned turns as prompt and answer, under
-  unchanged ids. The summary view is unchanged, and cursors keep moving forward.
-- **Idle keys.** With `steps_retention` above zero, an idle key's steps are gone
-  within the retention plus the delay of the scheduled call.
+- **The schema.** `SCHEMA` holds no `DROP TABLE`, and no agent schema keeps
+  statements for databases from before (C1).
+- **The versions.** The extras' floors are the latest releases, and no guard for
+  an older version is left in `restate.agents` (C0, rule 5).
 - **The framework files.** Each framework file's acceptance criteria hold.
 - **The checks.** The full suite, lint, types and `scripts/resurrect.py` all
   pass, on the latest framework releases.
 
 ## Risks
 
-- **A framework that reads an earlier turn's steps outside its window.** None was
-  found, and the oracle tests guard against one.
-- **Clocks.** `ended_at` comes from the process's wall clock. Skew only shifts
-  deletion by the amount of the skew.
-- **One large delete.** The first turn end after retention is enabled on a long
-  conversation deletes everything before the window at once. That is one range
-  delete on the primary key; measure it on a conversation of 10,000 steps.
-- **Expectations of a full history.** Clients that expect the full view to keep
-  every tool call will see older ones go. The default makes this visible at once,
-  and the docs must say so.
+- **Breakage from the version bump.** Most of the frameworks moved several minor
+  versions since #296 was tested. C0 measures the damage first.
+- **The harness changes fast.** It is at 0.x, and released in step with Pydantic
+  AI (0.66 with 2.66). A dependency on its capabilities follows that pace, so pin
+  what the tests cover.
+
+## Future work: steps retention
+
+This is designed, but not planned now. It is kept here so it can be picked up
+later.
+
+**Why.** A turn's steps (its model replies, tool calls and tool results) are
+kept until `clear`, although the model never reads them again once the turn
+leaves the window. Earlier turns reach the model from their rows only
+(`_conversation.py:955-970`), and summaries are written from the rows too
+(`_conversation.py:1194-1200`).
+
+**The rule.** A turn's steps are deleted once both of these hold:
+
+- no turn's model reads them any more: the turn is before the window the next
+  turn loads (`window_from`);
+- the turn ended at least `steps_retention` ago.
+
+The turn's row stays until `clear`, so nothing changes for the model, for
+summaries, or for the summary view.
+
+- **The default** would be `steps_retention = timedelta(0)`. With `window=1`, the
+  end of turn N would delete turn N−1's steps.
+- **A UI that shows past tool calls** would set a longer retention.
+- **With `window="all"`** nothing would be deleted.
+
+**Who deletes:**
+
+- the end of every turn, answered or closed, in the transaction that stores the
+  turn's end;
+- a private `prune` handler, when `steps_retention` is above zero. Each turn's end
+  would schedule it with a Restate delayed send, so that an idle key still loses
+  its old steps on time.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as Agent (chat), turn N
+  participant DB as Key's database
+  participant P as Agent (prune)
+  A->>DB: the turn's end: status, answer, carried state, ended_at
+  A->>DB: same transaction: delete the steps of turns before window_from<br/>that ended at least steps_retention ago
+  Note over DB: turn rows stay, and the start row records window_from and steps_from
+  opt steps_retention > 0
+    A-)P: prune, delayed by steps_retention
+    Note over P: runs even if the key stays idle
+    P->>DB: delete what the same rule allows now
+  end
+```
+
+### The core design, when it is picked up
+
+- **Schema.** Three new columns:
+  - `restate_agent_turns.ended_at`, in Unix milliseconds;
+  - `window_from` on the start row: the window's first position, as the latest
+    turn's end computed it;
+  - `steps_from` on the start row: no steps are stored before it.
+- **The option.** `steps_retention: timedelta` in `AgentOptions`, `AgentObject`
+  and `AgentInfo`, validated like `budget`.
+- **The rule.** A pure `steps_cut(turns, window_from, retention, now_ms)` that
+  returns the position before which steps may go. It stops at the first turn
+  that must stay, so the delete is always one range delete. `window_from` comes
+  from `window_start` on the transcript as the next turn will load it, which is
+  what `Conversation._upcoming()` computes. It uses the window `answer_once` was
+  given, so a framework that widens it (LangGraph's `graph=`) is honoured.
+- **At a turn's end.** `Turn.answered` turns its `UPDATE` into one transaction:
+  the `UPDATE` with `ended_at`; then `window_from`; then the range delete, if the
+  cut moved; then the start row. The ownership rule in TURN-SEMANTICS.md gets a
+  second exception: a turn's end may delete earlier turns' steps, never their
+  rows.
+- **`prune`.** A private handler, its name reserved in `BUILT_IN`. It reads the
+  start row and the `ended_at` of the turns before `window_from`, then deletes
+  what the rule allows. It is idempotent. Each turn's end sends it with
+  `delay=steps_retention` and the idempotency key `<prompt id>:prune`, closed
+  turns included.
+- **The full view.** For a turn before `steps_from`, `_messages.py` renders the
+  answer from the turn row, under `answered_at`, as the summary view already
+  does. Cursors need no change, since deleting writes no `seq`.
+- **Tests:**
+  - the rule, as a table over windows, statuses and retentions;
+  - deletion at a turn's end, for answered and closed turns;
+  - ended turns staying in view;
+  - `history()` unchanged with and without deletion;
+  - `prune` on an idle key, against a server;
+  - the full view's fallback;
+  - mutants in `scripts/resurrect.py`.
+- **Checks per framework:**
+  - Pydantic AI: the same requests with and without deletion, and provider
+    compaction items inside deleted steps.
+  - ADK: the state across turns, and a killed turn.
+  - LangGraph: the widened window is honoured. A graph's own state is out of
+    retention's reach, and the graph has to trim it itself, with
+    `SummarizationMiddleware` or `RemoveMessage`.
+  - OpenAI: handoffs at window 0, and compaction items inside deleted steps.
+- **Questions for then:**
+  - the default retention;
+  - whether apps may call `prune`;
+  - whether to add a LangGraph opt-in that trims the graph's state.
+- **Out of scope even then:** copies outside the key's tables. Those are each
+  turn's Restate journal (kept for `journal_retention`) and freed database pages
+  in shared-core. Neither is part of sessions or agents.
+- **Precedent.** None of the coding agents deletes the steps its model stops
+  seeing. The only precedent was opencode v1's opt-in prune, which v2 removed:
+  - it left the last two user turns alone;
+  - it kept the newest 40,000 tokens of tool output;
+  - it hid older outputs from the model, but kept them stored.
+
+  Among the frameworks, LangChain's `SummarizationMiddleware` and the OpenAI
+  Agents compaction session replace stored history when they compact.

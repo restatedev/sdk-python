@@ -64,20 +64,7 @@
 
 ## Work items
 
-### O1. Retention
-
-- **Handoffs.** At window 0 and retention 0, the existing handoff tests in
-  `tests/agents_openai.py` pass unchanged, including the failed, killed, crashed
-  and tool-ended turns. The carried agent is on the turn row.
-- **Server-side compaction.** Take a turn holding a compaction item, and prune it.
-  The next request is the one built from the transcript: the summary, the earlier
-  turns and the window. `_since_compaction` must see no compaction item from the
-  pruned turns, and must not cut the input at a stale one.
-- **The same requests.** Every model request is the same at retention 0 as with a
-  retention long enough that nothing is deleted.
-- **The full view.** Pruned turns show as prompt and answer, with Responses items.
-
-### O2. The summary's form
+### O1. The summary's form
 
 - **Consider implementing `summary(text)`** to return a single user message,
   without the made-up "Understood." reply.
@@ -90,7 +77,7 @@
     Completions through the SDK's converter.
 - **Report your choice.** If you keep the default, say why.
 
-### O3. Notes for users
+### O2. Notes for users
 
 Add these to the module docstring:
 
@@ -99,25 +86,35 @@ Add these to the module docstring:
 - To clear old tool outputs within the window, add the SDK's `ToolOutputTrimmer`
   as an input filter. It runs after ours (`_agent.py:258-268`).
 
-### O4. Guards for older SDKs (D4)
+### O3. Guards for older SDKs (D4)
 
 - Remove the check for `context_management` (`_agent.py:575-584`). On 0.24 the
   built-in agent always gets server-side compaction.
 - Remove any other guard that exists only for SDKs older than the floor.
 
-### O5. Docs
+### O4. Docs
 
-- **The module docstring:** O2's choice, O3's notes, and what retention means
-  here. The current agent is carried on the turn row; the steps of earlier turns
-  go.
+- **The module docstring:** O1's choice and O2's notes.
 - **Notes for TURN-SEMANTICS.md** go in your report.
 
 ## Acceptance
 
-- O1's tests pass on the latest release.
-- O4 is done: no guard for older SDKs is left.
-- O2's choice is made, and tested.
+- O1's choice is made, and tested.
+- O3 is done: no guard for older SDKs is left.
 - Nothing outside this file's scope changed.
+
+## Later, with steps retention
+
+These checks belong to the README's future work, not to this plan:
+
+- **Handoffs.** At window 0, the handoff tests pass with steps deleted, including
+  the failed, killed, crashed and tool-ended turns. The current agent is carried
+  on the turn row.
+- **Server-side compaction.** When a turn holding a compaction item has its steps
+  deleted, the next request is built from the transcript, and
+  `_since_compaction` never cuts at a stale compaction item.
+- **The same requests and the full view.** The model's requests don't change, and
+  the full view shows deleted turns as prompt and answer.
 
 ## Out of scope
 

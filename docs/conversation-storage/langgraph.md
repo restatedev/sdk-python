@@ -87,79 +87,83 @@ There are two agents:
 
 - **Today:**
   - `whole = max(window, 1)` is passed to `answer_once` per call
-    (`langgraph/_agent.py:479-484`).
+    (`langgraph/_agent.py:479-484`);
   - `compact` reloads with the agent's own window (`_conversation.py:1213-1216`).
-- **Retention is already right.** With phase 1, it computes `window_from` from the
-  window `answer_once` was given.
 - **Check `compact`.** Find out whether `_graph_agent` gives the object a
   `summarize`.
-  - If it doesn't, nothing reads the unwidened window, so there is nothing to do;
-    say so in your report.
-  - If it does, the widened window has to be the agent's own, so that every reader
-    agrees. If that needs a change to `AgentObject` or `chat`, put it in your
-    report as a core request.
-- **Test:** a graph at window 0 and retention 0, over three turns, where turn 2 is
-  killed or fails. Turn 3's graph still gets what closed turn 2. That means turn
-  2's steps were not deleted before turn 3's run, because `window_from` counted
-  the widened window.
+  - If it doesn't, nothing reads the unwidened window, so there is nothing to do.
+    Say so in your report.
+  - If it does, `compact` could summarize the previous turn while the graph also
+    loads it whole. The widened window then has to be the agent's own, so that
+    every reader agrees. If that needs a change to `AgentObject` or `chat`, put it
+    in your report as a core request.
+- **Test**, only if the graph agent summarizes: at window 0, the previous turn is
+  never both summarized and loaded whole.
 
-### L2. The graph's own state (decision Q5)
+### L2. The graph's own state keeps growing (docs)
 
-- **Retention can't reach it.** The latest checkpoint holds every message the
-  graph's state keeps.
-- **Recommended now: document that trimming it is the graph's job.**
-  - Use LangChain's `SummarizationMiddleware`, which rewrites the state, or a node
-    that returns `RemoveMessage`s.
-  - Our `aprune(keep_latest)` then deletes the values that no remaining checkpoint
-    references (`_checkpointer.py:438-455`).
-  - Add a short example to the module docstring of `_graph.py`.
-- **Test** that a trimmed message is really gone: a graph that removes old messages
-  with `RemoveMessage`. After the turn's prune, the bytes of the removed messages
-  are not in `restate_langgraph_channel_values`.
-- **Later, if Q5 asks for it:** an opt-in that removes the messages of pruned
-  turns from the state after each turn. It would work only on a `messages` channel
-  that uses `add_messages`, by id, through `aupdate_state`. It changes what the
-  graph's model sees, so it has to be the graph author's choice.
+- **Why:**
+  - The latest checkpoint holds every message the graph's state keeps.
+  - Our checkpointer deletes the older checkpoints after each turn
+    (`aprune(keep_latest)`, `_graph.py:360,396`).
+  - So what grows is the state itself, and it grows unless the graph trims it.
+- **Document that trimming it is the graph's job:**
+  - LangChain's `SummarizationMiddleware`, which rewrites the state;
+  - or a node that returns `RemoveMessage`s.
 
-### L3. Retention for the built-in agent
+  Our `aprune(keep_latest)` then deletes the values that no remaining checkpoint
+  references (`_checkpointer.py:438-455`). Add a short example to the module
+  docstring of `_graph.py`.
+- **Test that a trimmed message is gone:** a graph removes old messages with
+  `RemoveMessage`. After the turn's prune, the bytes of the removed messages are
+  not in `restate_langgraph_channel_values`.
 
-- **The same requests.** Every model request is the same at retention 0 as with a
-  retention long enough that nothing is deleted.
-- **The full view.** Pruned turns show as prompt and answer, with LangChain's
-  messages.
-- **The summary's form.** Keep the default.
+### L3. The built-in agent's summary form
 
-### L4. The graph agent under retention (verification)
+Keep the default: a user message, then "Understood." If the OpenAI agent switches
+to a single user message (`openai.md`, O1), check whether that works for the chat
+models we test, and report whether LangChain should follow.
 
-- **Deleting our steps leaves the graph's tables alone.** It touches none of the
-  `restate_langgraph_*` tables.
-- **Copying still works.** After a crash, a resume copies messages by id. It must
-  still copy only what's new once earlier turns' steps are gone.
-  - By default, a run copies the messages after its own input, which is
-    unaffected.
-  - A graph that trims its own input away gets copied by id, except for ids that
-    belong to the loaded turns.
-  - Turns outside the window were never loaded, so this is the limit #296
-    documented already ("Guarantees and limits"), not a new one.
-  - Test that a graph that keeps every message gets nothing copied twice over
-    five turns at window 1 and retention 0.
+### L4. Guards for older versions (D4)
+
+- Remove any code in the package that exists only for LangGraph or LangChain
+  versions older than the floor.
+- CI's job for the oldest LangGraph skips the `create_agent` tests, because
+  `create_agent` needs a newer langchain-core (`.github/workflows/test.yml:59`).
+  With the floor at the latest release that skip no longer applies; check that
+  those tests run.
+- List each removal in your report.
 
 ### L5. Docs
 
-- **The module docstrings of `_agent.py` and `_graph.py`:**
-  - the graph's state is the graph's own, with how to trim it (L2);
-  - what retention does to our copy.
+- **The module docstrings of `_agent.py` and `_graph.py`:** the graph's state is
+  the graph's own, and how to trim it (L2).
 - **Notes for TURN-SEMANTICS.md** go in your report.
 
 ## Acceptance
 
-- L1's test and L4's no-duplicates test pass on the latest releases.
+- L1 is settled: either there is nothing to do, or it is fixed and tested.
 - L2's "trimmed means gone" test passes.
-- L3's tests pass.
+- L4 is done.
 - Nothing outside this file's scope changed.
+
+## Later, with steps retention
+
+These checks belong to the README's future work, not to this plan:
+
+- **The widened window is honoured.** Retention computes `window_from` from the
+  window given to `answer_once`. At window 0, when turn 2 is killed, turn 3's
+  graph still gets what closed turn 2.
+- **The built-in agent.** The model's requests don't change, and the full view
+  shows deleted turns as prompt and answer.
+- **The graph agent:**
+  - deleting our steps leaves the `restate_langgraph_*` tables alone;
+  - copying by id copies nothing twice over five turns.
+- **An opt-in to trim the graph's state.** It would remove deleted turns'
+  messages from a `messages` channel that uses `add_messages`, through
+  `aupdate_state`. Whether to add it is a decision for then.
 
 ## Out of scope
 
-- The opt-in that trims the graph's state (L2, later).
 - Checkpoint TTLs.
 - `DeltaChannel`: check only that nothing breaks if a graph uses it.

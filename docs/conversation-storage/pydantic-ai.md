@@ -1,6 +1,6 @@
 # Pydantic AI
 
-> **Status:** not started. This plan is for one agent. Read
+> **Status:** not started. Being rewritten to lean on Pydantic AI Harness (README, D5). This plan is for one agent. Read
 > [`README.md`](README.md) first: the core contract, the rules for framework
 > agents, and how to run the tests.
 
@@ -165,7 +165,7 @@ async def chat(store: SqlStore, conversation_id: str, prompt: str) -> str:
 
 ## Work items
 
-### P1. Usage across turns (decision Q4)
+### P1. Usage across turns (decision Q1)
 
 - **Today** `usage_limits` limits a single turn (`_run`'s docstring,
   `_agent.py:373-376`).
@@ -173,7 +173,7 @@ async def chat(store: SqlStore, conversation_id: str, prompt: str) -> str:
   Pydantic AI's limits would cover the whole conversation. A `request_limit`
   would then eventually fail every turn of a long conversation.
 - **Recommendation:** keep limits per turn, and change nothing now.
-- **If Q4 says per conversation:**
+- **If Q1 says per conversation:**
   - carry the cumulative `RunUsage` in the turn's state, in P3's JSON;
   - pass it as `usage=`, which works on every supported version;
   - say so in the docstring.
@@ -260,33 +260,20 @@ sequenceDiagram
   - `ConversationSearch` would need a `HistorySource` over our tables. That is a
     follow-up, out of scope here.
 
-### P5. Retention
-
-- **The same requests.** Script three turns with one tool call each, at window 1.
-  With retention 0 and with pruning turned off, every model request must be the
-  same. The steps that are deleted are outside the window, so they must be.
-- **Provider compaction items.** When a turn holding a provider compaction item
-  is pruned, nothing breaks. The item goes with the turn's steps, and the next
-  request starts from the transcript.
-- **The full view.** Pruned turns show their prompt and answer through the turn
-  row, with Pydantic AI's items.
-
 ### P6. Docs
 
 - Update the bullet list at the top of `pydantic_ai/_agent.py` (`_agent.py:36-62`):
   - the summary's form;
   - the carried capabilities;
-  - the usage decision;
-  - a note on retention.
+  - the usage decision.
 - Put any notes for TURN-SEMANTICS.md in your report. The coordinator writes that
   file.
 
 ## Acceptance
 
-- P2, P3 and P5 pass on the latest version and on the oldest allowed, with any
-  differences documented.
+- P2 and P3 pass on the latest release.
 - P4's checks pass.
-- If Q4 chose conversation limits, P1's test passes.
+- If Q1 chose conversation limits, P1's test passes.
 - Nothing outside this file's scope changed.
 
 ## Out of scope
