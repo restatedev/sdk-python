@@ -26,9 +26,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from restate.agents import _signals
-from restate.agents._api import Turn
+from restate.agents._api import Answering
 from restate.agents._calls import settle
-from restate.agents._common import refusal_of
+from restate.agents._common import BUDGET, WINDOW, CompactHistory, Summarize, Window, refusal_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 from restate.sessions._link import Link
@@ -121,10 +121,20 @@ def stop_signal_of(ctx: SessionContext) -> Stop | None:
 
 @dataclass(frozen=True)
 class AgentInfo:
-    """An agent's settings: whether it works unwatched (``background``), and what its ``clear`` also empties."""
+    """An agent's settings: whether it works unwatched (``background``), what its ``clear`` also empties, and how
+    much of the conversation its model sees (``window`` and ``budget``, see ``_conversation.py``)."""
 
     background: bool = False
     clear: Callable[[SessionContext], Awaitable[None]] | None = None
+    window: Window = WINDOW
+    budget: int = BUDGET
+    summarize: Summarize | None = None
+    """How the agent summarizes the turns before the window, past ``budget``: without, they are only trimmed."""
+    snapshots: bool = False
+    """Whether the agent takes its history from snapshots (see ``Snapshot``): ``window``, ``budget`` and
+    ``summarize`` then do not apply."""
+    compact_history: CompactHistory | None = None
+    """With ``snapshots``, how the agent compacts its history between turns, when a turn asks for it."""
 
 
 AGENT: Link[AgentInfo] = Link("an agent")
@@ -134,6 +144,11 @@ AGENT: Link[AgentInfo] = Link("an agent")
 def _agent_of(ctx: SessionContext) -> AgentInfo | None:
     definition = definition_of(ctx)
     return AGENT.of(definition) if definition is not None else None
+
+
+def settings_of(ctx: SessionContext) -> AgentInfo:
+    """Return the settings of the agent of ``ctx``: the defaults, for a session object that is no agent."""
+    return _agent_of(ctx) or AgentInfo()
 
 
 async def cleared(ctx: SessionContext) -> None:
@@ -269,9 +284,11 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     """
     invocation_id = ctx.request.id
     companion = _signals.signals_of(ctx)
-    turn: Turn = {"invocationId": invocation_id, "since": _now()}
+    turn: Answering = {"invocationId": invocation_id, "since": _now()}
     # From here until the turn closes, the companion knows about it: `status` and `stop` ask it.
-    await ctx.call(_signals.start, turn, key=companion)
+    # The agent has ``settle`` (``chat()`` adds it), so the companion may send it this turn once it is gone.
+    started: _signals.Started = {**turn, "settles": True}
+    await ctx.call(_signals.start, started, key=companion)
     await stepped(ctx)
 
     async def end() -> None:

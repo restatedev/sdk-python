@@ -27,24 +27,32 @@ its stored events:
 - A tool's error fails the attempt, and Restate retries it. A
   ``restate.TerminalError``, which a retry would only repeat, is instead the
   tool's answer to the model, and so is a call to a tool the agent does not
-  have (which ADK fails the run for).
+  have (which ADK fails the run for). An agent with a ``retry_config`` of its
+  own is first run again by ADK, within the attempt.
 - A transfer to a sub-agent holds for the next messages, as ADK's sessions do.
 - A run of more model calls than its ``RunConfig``'s ``max_llm_calls`` (500 by
   default) fails its prompt for good: a retry would carry on with a fresh count.
 - An agent or ``App`` of your own runs as you configured it, with the
-  ``run_config`` you give.
-- The built-in agent gets ADK's events compaction, for a conversation that
-  lives long (``EventsCompactionConfig``): every ``COMPACT_EVERY``
-  invocations, its model summarizes them (with the ``COMPACT_OVERLAP`` before
-  them), and its requests have the summaries in place of the events they
-  cover. A summary is an event like any other, stored in the session, which
-  the conversation's messages do not show. ADK compacts after the run's
-  answer: a summary that fails (its model request, say) leaves the turn
-  answered, and is tried again after the next one.
+  ``run_config`` you give. An ``App``'s root may be a ``Workflow`` of ADK's.
+- Except for an ``App``'s events compaction (``events_compaction_config``),
+  which is turned off, with a warning: the conversation's summary and window
+  give the model its earlier turns instead (``_conversation.py``). Once the
+  session held a summary of ADK's, ADK would sort its events by time, and put
+  the events the conversation makes as the session loads (its summary, and
+  the earlier turns' answers) after the turns they come before; and the two
+  summaries would cover the same turns. ADK's ``token_threshold`` compacts
+  within a turn too, before each model call: a long turn is not compacted.
+- The session is the conversation as the model sees it: the earlier turns'
+  messages and answers, and the latest turns' events (``_conversation.py``).
+  Its state is carried from turn to turn: each turn stores it with its
+  answer, so that it holds however few events are loaded. A turn that ended
+  without ADK (killed, then closed by another invocation) has its events'
+  changes applied on top: the next turn loads it whole, whatever its window.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import time
@@ -55,23 +63,25 @@ from typing import Any, Unpack
 from google.adk.agents import BaseAgent, LlmAgent, RunConfig
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError, new_invocation_context_id
 from google.adk.apps import App, ResumabilityConfig
-from google.adk.apps.app import EventsCompactionConfig
-from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
 from google.adk.events import Event
 from google.adk.models import BaseLlm
+from google.adk.models.llm_request import LlmRequest
 from google.adk.plugins import BasePlugin
 from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService, Session
 from google.adk.sessions.base_session_service import GetSessionConfig, ListSessionsResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
+from google.adk.workflow import BaseNode
 from google.genai import types
 from pydantic import BaseModel
 
 from restate.agents._common import (
     MODEL_ENV,
+    Check,
     ModelError,
     PerSession,
+    Summarize,
     check_built_in,
     check_own,
     configured,
@@ -131,9 +141,9 @@ class _Items:
         content = types.Content(role="user", parts=[types.Part(text=text)])
         return Event(author="user", invocation_id=new_invocation_context_id(), content=content)
 
-    def reply(self, text: str) -> Item:
+    def reply(self, text: str, agent: str | None = None) -> Item:
         content = types.Content(role="model", parts=[types.Part(text=text)])
-        return Event(author=self.author, content=content)
+        return Event(author=agent or self.author, content=content)
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         if not results:
@@ -167,12 +177,30 @@ class _Sessions(BaseSessionService):
         self.conversation = conversation
 
     def session(self) -> Session:
+        """Return the session: the conversation as the model sees it (``history``), and the state as of now.
+
+        The state is the one the latest turn that ADK answered carried, with
+        the changes of the loaded turns after it: the turn being answered,
+        and a turn that ended without ADK (killed, then closed by another
+        invocation), which carried the state from before its own changes.
+        """
+        conversation = self.conversation
         session = Session(id=_USER, app_name=_APP, user_id=_USER, last_update_time=time.time())
-        for entry in self.conversation.entries:
-            event = typing.cast(Event, entry.item)
-            self._update_session_state(session, event)
-            session.events.append(event)
+        session.events.extend(typing.cast(list[Event], conversation.history()))
+        base = next((t for t in reversed(conversation.transcript) if t.status not in (None, "ended")), None)
+        carried = base.carried if base is not None else None
+        if carried is not None:
+            session.state.update(json.loads(carried))
+        for turn in conversation.turns:
+            if carried is None or (base is not None and turn.n > base.n):
+                for entry in turn.entries:
+                    self._update_session_state(session, typing.cast(Event, entry.item))
+        self._carry(session)
         return session
+
+    def _carry(self, session: Session) -> None:
+        """Have the turn carry the session's state to the next turns."""
+        self.conversation.turn.carry(state=json.dumps(session.state, default=str))
 
     async def create_session(
         self, *, app_name: str, user_id: str, state: dict[str, Any] | None = None, session_id: str | None = None
@@ -195,10 +223,12 @@ class _Sessions(BaseSessionService):
             # Not stored: a partial event is followed by its whole, and an error code fails the prompt (see ``run``).
             return event
         event = await super().append_event(session, event)
+        turn = self.conversation.turn
         if event.author != "user" and event.content and not event.get_function_responses():
-            await self.conversation.append_reply(event, agent=event.author)
+            await turn.append_reply(event, agent=event.author)
         else:
-            await self.conversation.append(event)
+            await turn.append(event)
+        self._carry(session)
         return event
 
 
@@ -247,6 +277,8 @@ class _AdkTool(BaseTool):
         )
 
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
+        # Stopped as its turn stopped, the agent's task ends as cancelled (``Tool.run``): ADK's runner cancels
+        # it and waits for it to end.
         return await self.tool.run(args, current_call(tool_context.function_call_id or ""))
 
 
@@ -286,30 +318,6 @@ def _model(model: AnyModel | None) -> str | BaseLlm:
 # --- A run ----------------------------------------------------------------------------------------
 
 
-COMPACT_EVERY = 10
-"""How many invocations of the built-in agent ADK's events compaction summarizes at a time."""
-
-COMPACT_OVERLAP = 2
-"""How many invocations before them each summary covers again, for continuity."""
-
-
-class _Summarizer(LlmEventSummarizer):
-    """ADK's summarizer of events, whose failure leaves the turn answered.
-
-    ADK compacts after the run's answer, which an error would fail (as a
-    refusal, if its model request's looks like one). A summarizer that
-    returns ``None`` (ADK's contract for one that failed) leaves the events
-    as they are, and they are summarized again after the next turn.
-    """
-
-    async def maybe_summarize_events(self, *, events: list[Event]) -> Event | None:
-        try:
-            return await super().maybe_summarize_events(events=events)
-        except Exception as error:
-            logger.warning("ADK's events compaction failed, and runs again after the next turn: %s", error)
-            return None
-
-
 def _app(
     ctx: SessionContext,
     own: BaseAgent | App | None,
@@ -328,13 +336,7 @@ def _app(
         root = LlmAgent(
             name="assistant", model=_model(model), instruction=system or "", tools=tools(given), output_schema=output
         )
-        # For a conversation that lives long, which would otherwise outgrow the model's context window.
-        compaction = EventsCompactionConfig(
-            summarizer=_Summarizer(llm=root.canonical_model),
-            compaction_interval=COMPACT_EVERY,
-            overlap_size=COMPACT_OVERLAP,
-        )
-        app = App(name=_APP, root_agent=root, events_compaction_config=compaction)
+        app = App(name=_APP, root_agent=root)
     else:
         app = own if isinstance(own, App) else App(name=_APP, root_agent=own)
         # A workflow agent (a SequentialAgent, say) has no output schema: its answer is asked again for as JSON.
@@ -342,26 +344,44 @@ def _app(
             # A clone, which also re-parents the sub-agents.
             schema = app.root_agent.clone(update={"output_schema": output})
             app = app.model_copy(update={"root_agent": schema})
+        if app.events_compaction_config is not None:
+            _without_compaction()
     resumable = ResumabilityConfig(is_resumable=True)
-    return app.model_copy(
-        update={"name": _APP, "plugins": [*app.plugins, _Restate(ctx)], "resumability_config": resumable}
+    update = {"name": _APP, "plugins": [*app.plugins, _Restate(ctx)], "resumability_config": resumable}
+    # The conversation's summary and window stand in for ADK's events compaction (see the module's docstring).
+    return app.model_copy(update={**update, "events_compaction_config": None})
+
+
+@functools.cache
+def _without_compaction() -> None:
+    """Warn, once per process, that an ``App``'s events compaction is turned off."""
+    logger.warning(
+        "restate.agents.adk turns off the events compaction of your App (events_compaction_config): "
+        "the conversation's summary and window give the model its earlier turns instead"
     )
 
 
-def _final(conversation: Conversation, root: BaseAgent) -> str | None:
+def _root(app: App) -> BaseNode:
+    """Return the root of ``app``: an agent, or a node of ADK's (a ``Workflow``), which an ``App`` always has."""
+    assert app.root_agent is not None
+    return app.root_agent
+
+
+def _final(conversation: Conversation, root: BaseNode) -> str | None:
     """Return the answer of the run that the conversation ends with, if its events already hold it.
 
     That is the case once the root agent is done (a resumable app stores an
     event marking it, after which ADK would end the invocation at once), and
     once an agent answered with no workflow agent above it to go on: then the
     final response is the answer. A step of a workflow (a ``SequentialAgent``
-    say) is not: ADK resumes the workflow's next step.
+    say, or a ``Workflow`` node) is not: ADK resumes the workflow's next step.
     """
-    running = conversation.running()
-    if running is None:
+    turn = conversation.running()
+    if turn is None:
         return None
-    invocation = typing.cast(Event, running.item).invocation_id
-    events = [typing.cast(Event, e.item) for e in conversation.entries if e.n > running.n]
+    # The invocation of the turn's latest message of the user: its prompt's, or the one that asked again's.
+    invocation = typing.cast(Event, turn.latest_ask().item).invocation_id
+    events = [typing.cast(Event, e.item) for e in turn.items]
     events = [event for event in events if event.invocation_id == invocation]
     responses = [event for event in events if _is_final(event)]
     if any(event.author == root.name and event.actions.end_of_agent for event in events):
@@ -377,8 +397,13 @@ def _is_final(event: Event) -> bool:
     return event.author != "user" and event.content is not None and event.is_final_response()
 
 
-def _answers(root: BaseAgent, name: str) -> bool:
-    """Return whether agent ``name``'s final response ends its run: no workflow agent above it goes on."""
+def _answers(root: BaseNode, name: str) -> bool:
+    """Return whether agent ``name``'s final response ends its run: no workflow agent above it goes on.
+
+    A root that is a node of ADK's but not an agent (a ``Workflow``) goes on with its graph's next node.
+    """
+    if not isinstance(root, BaseAgent):
+        return False
     agent = root.find_agent(name)
     while agent is not None:
         if not isinstance(agent, LlmAgent):
@@ -391,28 +416,52 @@ def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
     """Return the run of a prompt: ADK's runner, resuming the prompt's invocation, with ``config`` (its ``RunConfig``)."""
 
     async def run(conversation: Conversation) -> str:
-        if (final := _final(conversation, app.root_agent)) is not None:
+        if (final := _final(conversation, _root(app))) is not None:
             # The run had stored its answer's events, but not its answer: that is the answer, rather than ask again.
             return final
-        running = conversation.running()
-        invocation = typing.cast(Event, running.item).invocation_id if running is not None else None
+        turn = conversation.running()
+        invocation = typing.cast(Event, turn.latest_ask().item).invocation_id if turn is not None else None
         runner = Runner(app=app, session_service=_Sessions(conversation))
         answer = ""
+        error: Event | None = None
         events = runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation, run_config=config)
         try:
             with tools_in(ctx):
                 async for event in events:
                     if event.error_code:
-                        # The model would not answer (a safety block, say), as it would not again: the prompt fails.
-                        raise TerminalError(f"the model returned {event.error_code}: {event.error_message or ''}")
-                    if _is_final(event) and (text := _text(event)):
-                        answer = text
-        except LlmCallsLimitExceededError as error:
+                        # The model's error code (a safety block, say), or an error the agent raised (a tool's,
+                        # the model API's), which ADK reports as an event, then raises once the events are done:
+                        # then the error itself decides (a retry of the attempt, or a refusal).
+                        error = event
+                    elif event.content is not None:
+                        # The run went on after an error: ADK ran the agent that failed again (its ``retry_config``).
+                        error = None
+                        if _is_final(event) and (text := _text(event)):
+                            answer = text
+        except LlmCallsLimitExceededError as limit:
             # A retry would carry on with a fresh count, and so would never end an agent that keeps calling tools.
-            raise TerminalError(f"the run reached its limit of model calls: {error}") from error
+            raise TerminalError(f"the run reached its limit of model calls: {limit}") from limit
+        if error is not None:
+            # The model would not answer (a safety block, say), as it would not again: the prompt fails.
+            raise TerminalError(f"the model returned {error.error_code}: {error.error_message or ''}")
+        if not answer and not isinstance(_root(app), BaseAgent):
+            # A Workflow whose last node answered before a crash, but whose end was not stored: ADK replays the
+            # finished nodes without their content, so the answer is the last response the invocation stored.
+            answer = _last_response(conversation)
         return answer
 
     return run
+
+
+def _last_response(conversation: Conversation) -> str:
+    """Return the text of the last final response of the running turn's latest invocation, or ``""``."""
+    turn = conversation.running()
+    if turn is None:
+        return ""
+    invocation = typing.cast(Event, turn.latest_ask().item).invocation_id
+    events = [typing.cast(Event, e.item) for e in turn.items]
+    responses = [event for event in events if event.invocation_id == invocation and _is_final(event)]
+    return _text(responses[-1]) if responses else ""
 
 
 # --- The API --------------------------------------------------------------------------------------
@@ -535,8 +584,8 @@ async def _prompt(
     """Answer ``text`` as ``prompt`` does, with its options checked."""
     app = _app(ctx, own, model, system, tools, output)
 
-    def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app, config))
+    def ask(text: str, check: Check | None = None) -> Awaitable[str]:
+        return answer_once(ctx, text, _Items(_root(app).name), _run(ctx, app, config), check=check)
 
     if output is None:
         return await ask(text)
@@ -643,5 +692,20 @@ def agent(
             run_config,
         )
 
-    obj.chat(answer, items=_Items(), output=output)
+    obj.chat(answer, items=_Items(), output=output, summarize=_summarizer(model) if own is None else None)
     return obj
+
+
+def _summarizer(model: PerSession[AnyModel | None]) -> Summarize:
+    """Return how the built-in agent summarizes its earlier turns: with its own model, in a request of its own."""
+
+    async def summarize(ctx: SessionContext, request: str) -> str:
+        llm = LlmAgent(name="summarizer", model=_model(await configured(model, ctx))).canonical_model
+        asked = LlmRequest(model=llm.model, contents=[types.Content(role="user", parts=[types.Part(text=request)])])
+        texts: list[str] = []
+        async for response in llm.generate_content_async(asked):
+            if response.content is not None:
+                texts.extend(part.text for part in response.content.parts or [] if part.text)
+        return "".join(texts)
+
+    return summarize

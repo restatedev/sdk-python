@@ -24,8 +24,8 @@ import restate
 from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import HarnessEnvironment
 from restate.agents import _signals
-from restate.agents._api import Signal, Status, Turn, Watch
-from restate.agents._signals import WaitRequest
+from restate.agents._api import Signal, Status, Watch
+from restate.agents._signals import Started, WaitRequest
 
 
 @pytest.fixture(scope="session")
@@ -41,13 +41,28 @@ driver = restate.Service("driver")
 
 @driver.handler()
 async def start_turn(ctx: restate.Context, request: dict[str, str]) -> None:
-    turn: Turn = {"invocationId": request["invocation"], "since": "2026-11-04T00:00:00.000Z"}
+    turn: Started = {"invocationId": request["invocation"], "since": "2026-11-04T00:00:00.000Z"}
+    if request.get("settles"):
+        turn["settles"] = True
     await ctx.object_call(_signals.start, key=request["key"], arg=turn)
 
 
 @driver.handler()
 async def close_turn(ctx: restate.Context, request: dict[str, str]) -> None:
     await ctx.object_call(_signals.close, key=request["key"], arg=request["invocation"])
+
+
+settled: list[tuple[str, str]] = []
+"""The turns the companion had the agent settle: its key, and the turn's invocation."""
+
+assistant = restate.VirtualObject("assistant")
+"""The agent of the companions' keys (``assistant:<key>``), which records the turns it is sent to settle."""
+
+
+@assistant.handler()
+async def settle(ctx: restate.ObjectContext, invocation_id: str) -> bool:
+    settled.append((ctx.key(), invocation_id))
+    return True
 
 
 failing = restate.Service("failing")
@@ -61,7 +76,7 @@ async def fail(ctx: restate.Context) -> None:
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([_signals.signals, driver, failing]), restate_image=RESTATE_IMAGE
+        restate.app([_signals.signals, driver, failing, assistant]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -168,3 +183,30 @@ async def test_a_turn_is_answered_until_it_closes_and_a_failed_one_is_closed_for
         return (await harness.client.object_call(_signals.status, key=k, arg=None))["answering"] is None
 
     await until(closed)
+
+
+async def test_a_turn_whose_invocation_is_gone_is_settled_by_its_agent_if_the_agent_settles(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    agent_key = k.split(":", 1)[1]
+
+    async def closed() -> bool:
+        return (await harness.client.object_call(_signals.status, key=k, arg=None))["answering"] is None
+
+    # An agent of another SDK does not say it settles its turns: it is sent nothing.
+    other = await harness.client.service_send(fail, arg=None)
+    await harness.client.service_call(start_turn, arg={"key": k, "invocation": other.invocation_id})
+    await until(closed)
+    # The status shows the turn as every SDK's companion does, with no field of this one's own.
+    mine = await harness.client.service_send(fail, arg=None)
+    await harness.client.service_call(start_turn, arg={"key": k, "invocation": mine.invocation_id, "settles": "yes"})
+    answering = (await harness.client.object_call(_signals.status, key=k, arg=None))["answering"]
+    assert answering is None or set(answering) == {"invocationId", "since"}
+    await until(closed)
+
+    async def sent() -> bool:
+        return (agent_key, mine.invocation_id) in settled
+
+    await until(sent)
+    assert (agent_key, other.invocation_id) not in settled

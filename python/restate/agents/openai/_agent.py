@@ -38,6 +38,9 @@ start, and the run resumes from the last step stored:
   The stored conversation is the full transcript: a handoff passes it on as it
   is, rather than collapsed into one message (``nest_handoff_history`` is off),
   and a handoff's ``input_filter`` changes only what the next agent sees.
+  That takes a handoff to an ``Agent``, or one made with the SDK's
+  ``handoff()``: a ``Handoff`` built by hand names no agent until it is
+  invoked, so the next message goes back to the ``Agent`` you gave.
 - A tool's error fails the attempt, and Restate retries it. A
   ``restate.TerminalError``, which a retry would only repeat, is instead the
   tool's answer to the model.
@@ -59,25 +62,34 @@ start, and the run resumes from the last step stored:
 - An ``Agent`` of your own runs as you configured it, with the ``context``
   (the SDK's run context) and the ``run_config`` you give: its
   ``call_model_input_filter`` runs after this package's, which stores the
-  tools' outputs.
-- The built-in agent gets OpenAI's server-side compaction, for a conversation
-  that lives long (``ModelSettings.context_management``, on versions of the
-  SDK that have it): the Responses API summarizes the history as it nears the
-  model's context window, which a long conversation would otherwise outgrow,
-  failing each turn. Its compaction item is stored like any reply, and a
-  request starts with the latest one: it stands for the items before it,
-  which OpenAI's guide says need not be sent again (as the SDK's own
-  compacting session drops them), so that requests stop growing with the
-  conversation, which is stored whole. A model of the Chat Completions API,
-  or of another provider, gets
-  none, and a model that OpenAI does not compact refuses such requests: run
-  it as an ``Agent`` of your own, configured as you need.
+  tools' outputs: the SDK's ``ToolOutputTrimmer`` there trims old tool
+  outputs in the model's input, not in the conversation.
+- The model sees the earlier turns as their messages and answers, and the
+  latest turns whole (the agent's ``window``), as many as its ``budget``
+  holds; the built-in agent has its model summarize the earliest once they
+  outgrow it, after a turn's answer (``_conversation.py``). The summary is
+  one user message (``SUMMARY`` and its text), with no reply made up after
+  it, as Codex sends its own: the Responses API, and Chat Completions
+  through the SDK's converter, take the user message that follows it.
+- The SDK's ``Session`` stores are not used: only the turns write the
+  conversation. ``OpenAIResponsesCompactionSession``, which rewrites the
+  stored items, does not fit it; OpenAI's server-side compaction does.
+- The built-in agent gets OpenAI's server-side compaction, for a
+  conversation that lives long (``ModelSettings.context_management``): the
+  Responses API summarizes the history as it nears the model's context
+  window, which a long conversation would otherwise outgrow, failing each
+  turn. Its compaction item is stored like any reply, and a request starts
+  with the latest one: it stands for the items before it, which OpenAI's
+  guide says need not be sent again (as the SDK's own compacting session
+  drops them), so that requests stop growing with the conversation, which
+  is stored whole. A model of the Chat Completions API, or of another
+  provider, gets none, and a model that OpenAI does not compact refuses such
+  requests: run it as an ``Agent`` of your own, configured as you need.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import importlib
 import inspect
 import json
 import typing
@@ -104,12 +116,15 @@ from agents import (
 )
 from agents import Tool as SdkTool
 from agents.run import CallModelData, ModelInputData
+from agents.tool import invoke_function_tool
 from agents.tool_context import ToolContext
 from pydantic import BaseModel
 from pydantic_core import to_json
 
 from restate.agents._common import (
+    Check,
     PerSession,
+    Summarize,
     check_built_in,
     check_own,
     configured,
@@ -118,7 +133,7 @@ from restate.agents._common import (
     model_of,
     raised_by_tool,
 )
-from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
+from restate.agents._conversation import SUMMARY, Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._tools import Tool, current_call, tools_in
@@ -164,8 +179,16 @@ class _Items:
     def prompt(self, text: str) -> Item:
         return {"role": "user", "content": text}
 
-    def reply(self, text: str) -> Item:
+    def reply(self, text: str, agent: str | None = None) -> Item:
         return {"role": "assistant", "content": text}
+
+    def summary(self, text: str) -> list[Item]:
+        """Return the summary of the earliest turns as one user message, with no reply made up after it.
+
+        As Codex sends its own: the Responses API, and Chat Completions
+        through the SDK's converter, take consecutive user messages.
+        """
+        return [{"role": "user", "content": SUMMARY + text}]
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         return [{"type": "function_call_output", "call_id": call.id, "output": text} for call, text in results]
@@ -197,7 +220,11 @@ ITEMS = _Items()
 
 
 def _agents(root: Agent[Any]) -> dict[str, Agent[Any]]:
-    """Return the agents that ``root`` and its handoffs reach, by name."""
+    """Return the agents that ``root`` and its handoffs reach, by name.
+
+    A ``Handoff`` made with the SDK's ``handoff()`` keeps its agent; one
+    built by hand names none until it is invoked, and is not followed.
+    """
     found: dict[str, Agent[Any]] = {}
     waiting = [root]
     while waiting:
@@ -206,7 +233,11 @@ def _agents(root: Agent[Any]) -> dict[str, Agent[Any]]:
             continue
         found[agent.name] = agent
         for handoff in agent.handoffs:
-            target = handoff if isinstance(handoff, Agent) else getattr(handoff, "_agent_ref", lambda: None)()
+            if isinstance(handoff, Agent):
+                target: object = handoff
+            else:
+                ref = handoff._agent_ref  # pyright: ignore[reportPrivateUsage]
+                target = ref() if ref is not None else None
             if isinstance(target, Agent):
                 waiting.append(typing.cast(Agent[Any], target))
     return found
@@ -224,14 +255,18 @@ def _handoffs(agent: Agent[Any]) -> dict[str, str]:
 
 
 def _current(conversation: Conversation, root: Agent[Any], everyone: dict[str, Agent[Any]]) -> Agent[Any]:
-    """Return the agent the conversation is with: the latest reply's, or the agent that reply handed off to."""
-    latest = next((e for e in reversed(conversation.entries) if e.reply is not None), None)
-    if latest is None or latest.reply is None:
-        return root
-    agent = everyone.get(latest.agent or "", root)
+    """Return the agent the conversation is with: the latest reply's, or the agent that reply handed off to.
+
+    With no reply loaded (the window holds none), it is the agent the latest answered turn left it with.
+    """
+    turn = next((turn for turn in reversed(conversation.turns) if turn.replies()), None)
+    if turn is None:
+        return everyone.get(conversation.carried()[0] or "", root)
+    latest = turn.replies()[-1]
+    agent = everyone.get(turn.agent_of(latest) or "", root)
     targets = _handoffs(agent)
-    for call in (call for e in conversation.entries if e.reply == latest.reply for call in e.calls):
-        if call.name in targets and conversation.has_result(call.id):
+    for call in (call for e in turn.reply_entries(latest) for call in e.calls):
+        if call.name in targets and turn.has_result(call.id):
             return everyone.get(targets[call.name], agent)
     return agent
 
@@ -257,7 +292,7 @@ class _Hooks(RunHooks[Any]):
         The run's own filter then changes what the model sees, not what is stored.
         """
         if outputs := self.conversation.new_results(data.model_data.input):
-            await self.conversation.append(*outputs)
+            await self.conversation.turn.append(*outputs)
         filtered = data.model_data
         if self.then is not None:
             given = self.then(data)
@@ -270,10 +305,14 @@ class _Hooks(RunHooks[Any]):
     async def on_llm_end(self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse) -> None:
         self.requesting = False
         reply = typing.cast(list[Item], response.to_input_items())
-        await self.conversation.append_reply(*reply, agent=agent.name)
+        await self.conversation.turn.append_reply(*reply, agent=agent.name)
 
     async def on_tool_start(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool) -> None:
         await tool_call_started(self.ctx)
+
+    async def on_handoff(self, context: RunContextWrapper[Any], from_agent: Agent[Any], to_agent: Agent[Any]) -> None:
+        # The turn carries the agent it handed off to, even if it ends before that agent replies.
+        self.conversation.turn.carry(agent=to_agent.name)
 
     async def on_tool_end(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool, result: Any) -> None:
         await tool_call_ended(self.ctx)
@@ -289,10 +328,11 @@ async def _resume(
     on. A reply with any other call (a handoff, say) is dropped instead, and
     its agent is asked again.
     """
-    calls = conversation.unanswered()
+    turn = conversation.turn
+    calls = turn.open_calls()
     if not calls:
         return agent
-    cut = next(e for e in conversation.entries if calls[0] in e.calls)
+    cut = next(e for e in turn.entries if calls[0] in e.calls)
     agent = everyone.get(cut.agent or "", agent)
     found = {tool.name: tool for tool in await agent.get_all_tools(RunContextWrapper(context))}
     known = {*found, *_handoffs(agent)}
@@ -306,7 +346,7 @@ async def _resume(
         # A call that only the SDK's runner can make (a handoff, a hosted tool, a tool with guardrails), or decide on
         # (another tool's approval function): ask the agent again instead.
         if cut.reply is not None:
-            await conversation.drop(cut.reply)
+            await turn.drop(cut.reply)
         return agent
     outputs: list[Item] = []
     for call in calls:
@@ -325,7 +365,7 @@ async def _resume(
                 raise
             await tool_call_ended(ctx)
         outputs.extend(ITEMS.results([(call, output)]))
-    await conversation.append(*outputs)
+    await turn.append(*outputs)
     return agent
 
 
@@ -351,23 +391,16 @@ def _runner_only(tool: SdkTool | None) -> bool:
 
     That is so for any tool but a function tool (a handoff has none), and for
     a function tool with guardrails, which the runner applies around it, and
-    calling the tool itself would bypass. (Older versions of the SDK have no
-    tool guardrails.)
+    calling the tool itself would bypass.
     """
     if not isinstance(tool, FunctionTool):
         return True
-    return any(getattr(tool, name, None) for name in ("tool_input_guardrails", "tool_output_guardrails"))
-
-
-_INVOKE: Any = getattr(importlib.import_module("agents.tool"), "invoke_function_tool", None)
-"""The SDK's invocation of a function tool, which applies its timeout (versions of the SDK with tool timeouts)."""
+    return bool(tool.tool_input_guardrails or tool.tool_output_guardrails)
 
 
 async def _invoke(tool: FunctionTool, context: ToolContext[Any], arguments: str) -> Any:
     """Run a call to ``tool`` as the SDK's runner does, with its timeout, though not its guardrails or approval."""
-    if _INVOKE is None:
-        return await tool.on_invoke_tool(context, arguments)
-    return await _INVOKE(function_tool=tool, context=context, arguments=arguments)
+    return await invoke_function_tool(function_tool=tool, context=context, arguments=arguments)
 
 
 SETUP = "the agent is not set up right"
@@ -455,14 +488,15 @@ def _run(
     everyone = _agents(root)
 
     async def run(conversation: Conversation) -> str:
-        reply = conversation.last_reply()
-        if reply is not None and (final := conversation.final_reply()) is not None:
-            replier = everyone.get(conversation.agent_of(reply) or "", root)
+        turn = conversation.turn
+        reply = turn.last_reply()
+        if reply is not None and (final := turn.final_reply()) is not None:
+            replier = everyone.get(turn.agent_of(reply) or "", root)
             if not (replier.output_guardrails or config.output_guardrails):
                 # The run had stored its final reply, but not its answer: that is the answer.
                 return final
             # Its output guardrails may not have passed it: ask again, and they run on the new reply.
-            await conversation.drop(reply)
+            await turn.drop(reply)
         with tools_in(ctx):
             return await _go(ctx, conversation, _current(conversation, root, everyone), everyone, config, options)
 
@@ -479,18 +513,21 @@ async def _go(
 ) -> str:
     """Run the ``Runner`` on from the conversation, with the agent it is with, and return the answer."""
     hooks = _Hooks(ctx, conversation, config)
+    turn = conversation.turn
+    # The turn is with the agent it starts with until a handoff (``_Hooks.on_handoff``): carried if it ends first.
+    turn.carry(agent=current.name)
     filtered = dataclasses.replace(config, call_model_input_filter=hooks.model_input)
-    # The SDK's default, unless given: older versions take no None.
+    # The SDK's default, unless given: the SDK takes None for no limit at all.
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:
         agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
-        items = typing.cast(Any, _since_compaction([entry.item for entry in conversation.entries]))
+        items = typing.cast(Any, _since_compaction(conversation.history()))
         run = Runner.run(agent, items, context=options.context, hooks=hooks, run_config=filtered, **limit)
         result = await _unwrapped(ctx, run)
     except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:
         # The reply the guardrail blocked is not kept.
-        if (blocked := conversation.last_reply()) is not None:
-            await conversation.drop(blocked)
+        if (blocked := turn.last_reply()) is not None:
+            await turn.drop(blocked)
         raise TerminalError(str(error)) from error
     except TerminalError:
         raise
@@ -501,8 +538,8 @@ async def _go(
         raise
     # The outputs that no model request stored: those of a tool that ends the turn, say.
     if outputs := conversation.new_results(result.to_input_list()):
-        await conversation.append(*outputs)
-    if getattr(result, "interruptions", None):
+        await turn.append(*outputs)
+    if result.interruptions:
         # Calls that wait for an approval, which nothing gives: fail rather than answer without them. The
         # conversation closes them, so that they never run.
         raise TerminalError(APPROVALS)
@@ -557,11 +594,9 @@ def _long_lived(model: str | Model) -> ModelSettings:
 
     A model of the Responses API (a model id, which the SDK's default
     provider makes one of, or such a model) gets OpenAI's server-side
-    compaction, on versions of the SDK that have it (``context_management``);
-    any other model, none.
+    compaction (``context_management``); any other model, none.
     """
-    has_it = "context_management" in {field.name for field in dataclasses.fields(ModelSettings)}
-    if has_it and isinstance(model, str | OpenAIResponsesModel):
+    if isinstance(model, str | OpenAIResponsesModel):
         return ModelSettings(context_management=COMPACTION)
     return ModelSettings()
 
@@ -706,8 +741,8 @@ async def _prompt(
 ) -> Any:
     """Answer ``text`` as ``prompt`` does, with its options checked."""
 
-    def ask(text: str) -> Awaitable[str]:
-        return answer_once(ctx, text, ITEMS, _run(ctx, own, model, system, tools, output, options))
+    def ask(text: str, check: Check | None = None) -> Awaitable[str]:
+        return answer_once(ctx, text, ITEMS, _run(ctx, own, model, system, tools, output, options), check=check)
 
     if output is None:
         return await ask(text)
@@ -828,5 +863,16 @@ def agent(
             run,
         )
 
-    obj.chat(answer, items=ITEMS, output=output)
+    obj.chat(answer, items=ITEMS, output=output, summarize=_summarizer(model) if own is None else None)
     return obj
+
+
+def _summarizer(model: PerSession[AnyModel | None]) -> Summarize:
+    """Return how the built-in agent summarizes its earlier turns: with its own model, in a run of its own."""
+
+    async def summarize(ctx: SessionContext, request: str) -> str:
+        chosen = _model(await configured(model, ctx))
+        result = await Runner.run(Agent(name="summarizer"), request, run_config=RunConfig(model=chosen))
+        return str(result.final_output)
+
+    return summarize

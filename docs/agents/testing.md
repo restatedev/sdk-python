@@ -16,6 +16,23 @@ This document covers:
 TypeScript packages. Several of its tools carry over: the seeded crash
 campaign, the e2e bank of agents, and the nightly soak.
 
+## Running the tests
+
+- **All of them:** `just test` (`uv run -m pytest tests/*`). The tests that
+  need a Restate server start one in Docker (`restate.harness`, pinned in
+  `tests/support.py`; `RESTATE_IMAGE` overrides it).
+- **Without Docker:** `just test-fast` runs the in-process tests
+  (`-m "not server"`). The others can run against a local `restate-server`
+  (from npm, `@restatedev/restate-server`), through a pytest plugin that
+  starts the harness's server as a process instead of a container (none is
+  in the repository yet); `examples_agents.py` then registers its program
+  as `host.docker.internal`, which must point to 127.0.0.1.
+- **The mutants:** `uv run --no-sync python scripts/resurrect.py`, with the
+  same server; run it in a worktree of its own, as it edits the code (and
+  restores it).
+- **Lint and types:** `just lint` and `just typecheck`, per directory, as the
+  `Justfile` runs them (mypy works only that way).
+
 ## What is covered
 
 There are about 6,000 lines of tests in 19 files, for 9,000 lines of code. They
@@ -27,9 +44,9 @@ run in two tiers.
 | Real server | `restate.create_test_harness`: Restate in Docker, with the app on a thread of the test process | each framework's file, `agents_object`, `agents_signals`, `agents_webhook`, `examples_agents` |
 
 Each framework's file runs its agent on a scripted model, which answers from
-the first word of the prompt (`weather`, `crash`, `wait`, `refuse`, ...). CI
-already tests the oldest LangGraph and Pydantic AI that the extras allow, and an
-install with no extras.
+the first word of the prompt (`weather`, `crash`, `wait`, `refuse`, ...). The
+extras' floors are each framework's latest release, so CI tests that release
+only, and an install with no extras.
 
 ### The contract, per framework
 
@@ -57,6 +74,10 @@ contract.
 | The framework's own `agent=` / `graph=` | P, H | H | P | H | H |
 | `wait_for_signal` through the framework | **—** | partial | **—** | **—** | H |
 | `call` / `send` / `workflow` / `subagent` through the framework | **—** | **—** | **—** | `call` only | through nodes, not `agent(graph=)` |
+| History from snapshots, compacted by the framework | n/a | P (the harness's `TieredCompaction`) | n/a | n/a | n/a |
+| A deferred tool call waits for a signal (`wait_for`) | n/a | H | n/a | n/a | H (interrupts) |
+| A stopped turn doesn't report a call done because its approval returned | n/a | P | n/a | n/a | n/a |
+| The summary in the framework's own form (`Items.summary`) | H (one user message) | n/a | H | H | n/a |
 | `background=` | **—** | **—** | **—** | **—** | **—** |
 | `clear` / cursors / `sync` with this framework's items | **—** | **—** | **—** | **—** | **—** |
 
@@ -67,6 +88,10 @@ plain dicts (`agents_conversation.ITEMS`):
 - `agents_messages`: pages, cursors, drops and `clear`.
 - `agents_object`: the views (`status`, `stop`, `signal`, `sync`).
 - `agents_tools`: `call`, `wait_for_signal` and `subagent`.
+- `agents_snapshots`: history from snapshots (loading, `history()`, known
+  results, crashes, `compact` between turns, only the latest kept), each
+  turn's `asked_at`, and `wait_for` (a wait per tool call, and an approval
+  that is not the call's outcome).
 
 ## Gaps
 
@@ -135,8 +160,8 @@ would catch.
    - Every test runs on a scripted model.
    - When OpenAI, Gemini or Anthropic change a response shape, the fakes keep
      passing until a user hits it.
-   - Only LangGraph and Pydantic AI are tested on their oldest allowed version.
-     None of the four is tested on its newest release before users get it.
+   - Only each framework's latest release is supported: the extras' floors
+     are it. A newer release is tested only once the floors move to it.
 8. **Most examples only load.**
    - `examples_agents.py` runs the tutorial, `refund_graph`, `loop` and
      `create_agent` end to end.
@@ -167,9 +192,10 @@ would catch.
 
 `scripts/resurrect.py` measures the suite against bugs that really happened.
 
-- **28 history mutants.** Each brings back, on today's code, one bug that a fix
-  commit describes (#276, #278, #290, #291, #292, #294).
-- **5 durability mutants.** Each breaks the contract of a turn without
+- **38 history mutants** (39 until one was retired, below). Each brings back,
+  on today's code, one bug that a fix commit describes (#276, #278, #290,
+  #291, #292, #294, and the review of the storage plan's implementation).
+- **13 durability mutants.** Each breaks the contract of a turn without
   matching any past fix.
 
 For each mutant, the runner runs the test files that use the code it changes.
@@ -199,7 +225,7 @@ passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
 | `pydantic-unreadable-response` | #292 | one unreadable response ends the turn | regression only |
 | `pydantic-user-error` | #292 | `UserError` retried forever | regression only |
 | `pydantic-refusal-by-name` | #292 | an error of the agent's own code is a refusal by its name | regression only |
-| `pydantic-deferred` | #292 | a deferred tool call answers with its repr | regression only |
+| `pydantic-deferred` | #292 | a deferred tool call answers with its repr | regression only; retired on 8 November |
 | `pydantic-deps` | #292 | an Agent of your own gets no deps | regression only |
 | `pydantic-model-error` | #292 | a model that cannot be made is not a refusal | **caught** |
 | `langgraph-own-errors` | #291 | recursion limit and invalid update retried forever | regression only |
@@ -213,13 +239,48 @@ passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
 | `cli-ctrl-c` | #278 | Ctrl-C waits for a line of input | regression only |
 | `views-optional-body` | #276 | a view refuses the TypeScript client's request | **caught** |
 | `langgraph-responses-api` | #276 | OpenAI models run on Chat Completions | regression only |
+| `langgraph-prune-or-chain` | review | the prune matches the kept versions with an `OR` of each: a `DeltaChannel` graph fails every turn from about its eleventh | regression only |
+| `langgraph-values-or-chain` | review | a checkpoint of more than about 95 channels can't be read | regression only |
+| `wait-rejoins-another-call` | review | a framework's new call with the same input joins an earlier call's wait, and gets its approval or denial | regression only |
+| `approval-is-the-calls-outcome` | review | a turn stopped after a denial reports the denied call as done | **caught** |
+| `call-matched-by-id-alone` | review | an approved tool's own Restate call shares its approval's record | regression only |
+| `snapshots-kept` | review | every snapshot is kept, though only the latest is read | regression only |
+| `pydantic-approval-not-marked` | review | a Pydantic AI approval is taken for the call | regression only |
+| `pydantic-plan-reads-live` | review | a tool call that runs again reads the plan as its first run left it, and a step stays blocked | regression only |
+| `pydantic-memory-run-ids` | review | a replayed memory edit misses its receipt and reports failure | regression only |
+| `pydantic-memory-paths-unlimited` | review | `list_paths` ignores its limit | regression only |
+| `pydantic-import-without-harness` | review | without Pydantic AI Harness, the import names no extra | regression only |
 | `pydantic-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **caught** |
 | `calls-new-id-not-matched` | durability | a call asked again under a new id makes its Restate call again | **caught** |
 | `langgraph-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **SURVIVED**, now caught |
 | `calls-settled-early` | durability | a returned call is forgotten before its result is stored; after a crash, the model asking again under a new id makes it again | **SURVIVED**, now caught |
 | `calls-never-settled` | durability | a call's record is never forgotten: the key's state grows with every call | **SURVIVED**, now caught |
 
-What it says:
+**The run of 8 November 2026**, after the frameworks moved to their latest
+releases ([The frameworks](frameworks.md)), against Restate 1.8.1:
+
+- **History:** 6 caught, 21 regression only. `pydantic-system-prompt` and
+  `langgraph-prune` are now caught by other tests too.
+- **`pydantic-deferred` survived, and is retired.** Deferred tool calls now
+  wait for a signal (`handle_deferred_tool_calls`), so no run stops for them.
+  Its regression test went with the old behaviour, and the guard it removes
+  stays only as a safety net.
+- **Durability: all 13 caught.** That is the 5 above, plus 8 new ones:
+  - `snapshot-rows-twice`, `snapshot-results-unknown`,
+    `snapshot-loads-everything`, `snapshot-hides-unanswered-turn` and
+    `snapshot-compacted-every-turn`, for the core's snapshots;
+  - `pydantic-compaction-not-snapshotted` and `pydantic-denial-approves`, for
+    the Pydantic AI agent;
+  - `tool-cancellation-swallowed`, for a tool whose task the framework
+    cancels.
+
+**The review's fixes**, on 8 November, against Restate 1.8.1: the 11 new
+history mutants are all caught, `approval-is-the-calls-outcome` by the Pydantic
+AI agent's test too, the other 10 by their own tests only.
+`calls-new-id-not-matched` is still caught by `agents_tools`, now that
+`wait_for` no longer rejoins an earlier attempt's call.
+
+What it says (the run of 7 November):
 
 - **Every past bug is caught today, but almost only by its own regression
   test.** 24 of 28 are caught only by the test that their fix added; 4 (14%)

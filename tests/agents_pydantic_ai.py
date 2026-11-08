@@ -25,14 +25,13 @@ import pytest
 
 pytest.importorskip("pydantic_ai")
 
-from pydantic_ai import Agent, DeferredToolRequests, ModelRetry, RunContext  # noqa: E402
-from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt  # noqa: E402
+from pydantic_ai import Agent, ModelRetry, RunContext  # noqa: E402
+from pydantic_ai.capabilities import AbstractCapability  # noqa: E402
 from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     SystemPromptPart,
     TextPart,
     ToolCallPart,
@@ -87,7 +86,7 @@ def _unanswered(messages: list[ModelMessage]) -> set[str]:
         for m in messages
         if isinstance(m, ModelRequest)
         for p in m.parts
-        if isinstance(p, ToolReturnPart | RetryPromptPart)
+        if isinstance(p, ToolReturnPart)
     }
     return calls - answered
 
@@ -100,11 +99,7 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     text = _prompts(messages)[-1]
     asked[_prompts(messages)[0].split(" ")[-1]] += 1
     last = messages[-1]
-    results = (
-        [p for p in last.parts if isinstance(p, ToolReturnPart | RetryPromptPart)]
-        if isinstance(last, ModelRequest)
-        else []
-    )
+    results = [p for p in last.parts if isinstance(p, ToolReturnPart)] if isinstance(last, ModelRequest) else []
     word, _, rest = text.partition(" ")
     if word == "system":
         return ModelResponse(parts=[TextPart(f"system: {info.instructions}")])
@@ -134,6 +129,11 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         # A model that keeps calling a tool, never answering.
         name = "get_weather" if word == "loop" else "picky"
         return ModelResponse(parts=[ToolCallPart(name, {"city": rest}, tool_call_id=f"call-{rest}-{len(messages)}")])
+    if word == "ask" and not results:
+        question = {"header": "Color", "question": "Which color?", "options": [{"label": "Blue"}, {"label": "Red"}]}
+        return ModelResponse(
+            parts=[ToolCallPart("ask_user_question", {"questions": [question]}, tool_call_id=f"call-{rest}")]
+        )
     names = {"weather": "get_weather", "crash": "flaky", "wait": "blocking", "wrong": "get_weather"}
     names |= {"unknown": "nonexistent", "forbidden": "forbidden", "deferred": "refund_order"}
     if word in names and not results:
@@ -141,8 +141,7 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[ToolCallPart(names[word], args, tool_call_id=f"call-{rest}")])
     if results:
         result = results[-1]
-        said = result.model_response() if isinstance(result, RetryPromptPart) else result.model_response_str()
-        return ModelResponse(parts=[TextPart(f"tool said: {said}")])
+        return ModelResponse(parts=[TextPart(f"tool said: {result.model_response_str()}")])
     return ModelResponse(parts=[TextPart(f"echo: {text}")])
 
 
@@ -250,16 +249,112 @@ async def clash(ctx: sessions.SessionContext, text: str) -> str:
     return await pydantic_ai.prompt(ctx, text, agent=mine)
 
 
-@assistant.handler
-async def approval(ctx: sessions.SessionContext, text: str) -> str:
-    """An Agent of your own with a tool that needs an approval, whose run stops with the call for its caller."""
-    mine: Any = Agent(FunctionModel(reply), output_type=[str, DeferredToolRequests])
+refunds: collections.Counter[str] = collections.Counter()
+"""How often each refund ran, by its city."""
+
+
+def desk_agent() -> Any:
+    """An Agent of your own with a tool that needs an approval, and the harness's ``AskUser`` with no answerer."""
+    from pydantic_ai_harness.ask_user import AskUser  # pylint: disable=import-outside-toplevel
+
+    mine: Any = Agent(FunctionModel(reply), capabilities=[AskUser(answerer=None)])
 
     @mine.tool_plain(requires_approval=True)
     def refund_order(city: str) -> str:
+        refunds[city] += 1
         return f"refunded in {city}"
 
-    return await pydantic_ai.prompt(ctx, text, agent=mine)
+    return mine
+
+
+desk = pydantic_ai.agent("pai_desk", agent=desk_agent())
+
+memories = pydantic_ai.memory("pai_memories")
+"""Memory across conversations: one key per user."""
+
+
+def user_of(ctx: sessions.SessionContext) -> str:
+    """The user of a conversation, whose key is ``<user>.<topic>``."""
+    return ctx.key.split(".")[0]
+
+
+crashed_writes: set[str] = set()
+
+
+class CrashAfterWrite(AbstractCapability[Any]):
+    """Crashes the attempt once, after a ``write_memory`` call of content that says so, before its result is stored."""
+
+    async def after_tool_execute(
+        self, ctx: RunContext[Any], *, call: Any, tool_def: Any, args: Any, result: Any
+    ) -> Any:
+        content = str(call.args_as_dict().get("content", ""))
+        if call.tool_name == "write_memory" and "crash" in content and content not in crashed_writes:
+            crashed_writes.add(content)
+            raise RuntimeError("the process crashed after writing")
+        return result
+
+
+def memorizer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """A model that writes what it is told to remember to ``facts.md``, and reads it back when asked to recall."""
+    last = messages[-1]
+    results = [p for p in last.parts if isinstance(p, ToolReturnPart)] if isinstance(last, ModelRequest) else []
+    if results:
+        return ModelResponse(parts=[TextPart(f"tool said: {results[-1].model_response_str()}")])
+    text = _prompts(messages)[-1]
+    word, _, rest = text.partition(" ")
+    if word == "remember":
+        args: dict[str, Any] = {"content": rest, "file": "facts.md"}
+        return ModelResponse(parts=[ToolCallPart("write_memory", args, tool_call_id=f"call-{len(messages)}")])
+    if word == "replace":
+        old, new = rest.split("|")
+        args = {"content": new, "file": "facts.md", "old_text": old}
+        return ModelResponse(parts=[ToolCallPart("write_memory", args, tool_call_id=f"call-{len(messages)}")])
+    return ModelResponse(
+        parts=[ToolCallPart("read_memory", {"file": "facts.md"}, tool_call_id=f"call-{len(messages)}")]
+    )
+
+
+def remembering_agent() -> Any:
+    from pydantic_ai_harness.memory import Memory  # pylint: disable=import-outside-toplevel
+
+    store = pydantic_ai.memory_store(memories, user_of)
+    return Agent(FunctionModel(memorizer), capabilities=[Memory(store=store, inject_memory=False), CrashAfterWrite()])
+
+
+remembering = pydantic_ai.agent("pai_remembering", agent=remembering_agent())
+
+
+@remembering.handler
+async def conflict(ctx: sessions.SessionContext, path: str) -> list[str]:
+    """Two writes of a new file: the second expects it to be new too, and is refused."""
+    from pydantic_ai_harness.memory import MemoryConflictError  # pylint: disable=import-outside-toplevel
+
+    from restate.agents._tools import tools_in  # pylint: disable=import-outside-toplevel
+
+    store = pydantic_ai.memory_store(memories, user_of)
+    outcomes: list[str] = []
+    with tools_in(ctx):
+        for content in ("first", "second"):
+            try:
+                written = await store.write(path, content, expected_version=None)
+                outcomes.append(f"written {written.version}")
+            except MemoryConflictError:
+                outcomes.append("refused")
+        found = await store.read(path, max_chars=100)
+    assert found is not None
+    return [*outcomes, found.content]
+
+
+@remembering.handler
+async def listing(ctx: sessions.SessionContext, _: Any = None) -> list[list[str]]:
+    """The paths under a prefix, at most a limit, and all of them."""
+    from restate.agents._tools import tools_in  # pylint: disable=import-outside-toplevel
+
+    store = pydantic_ai.memory_store(memories, user_of)
+    with tools_in(ctx):
+        for path in ("notes/b.md", "other.md", "notes/a.md", "notes/c.md"):
+            await store.write(path, "x", expected_version=None)
+        return [await store.list_paths("notes/", limit=2), await store.list_paths(limit=10)]
 
 
 @assistant.handler
@@ -365,7 +460,7 @@ trimmed = pydantic_ai.agent("pai_trimmed", agent=trimmed_agent())
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, trimmed, shop]), restate_image=RESTATE_IMAGE
+        restate.app([assistant, per_user, trimmed, shop, desk, remembering, memories]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -485,13 +580,14 @@ def test_a_model_whose_provider_cannot_run_is_refused_with_what_to_install(monke
     with pytest.raises(restate.TerminalError, match="OPENAI_API_KEY") as no_key:
         _agent._model("openai/gpt-6-sol")  # pyright: ignore[reportPrivateUsage]
     assert no_key.value.status_code == 424
-    with pytest.raises(restate.TerminalError, match="Unknown provider"):
+    with pytest.raises(restate.TerminalError, match="Unknown model: nope:x") as unknown:
         _agent._model("nope/x")  # pyright: ignore[reportPrivateUsage]
+    assert unknown.value.status_code == 424
 
 
 def test_a_model_that_cannot_be_made_is_refused_whatever_its_error(monkeypatch: pytest.MonkeyPatch):
-    """Making a model makes no request: before Pydantic AI 2.15, a provider's SDK raised its own error for a missing
-    key, which is refused as any other."""
+    """Making a model makes no request: a provider's SDK whose client cannot be made raises its own error, which is
+    refused as Pydantic AI's own (``UserError``) is."""
     from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
 
     class OpenAIError(Exception):
@@ -634,69 +730,152 @@ async def test_a_response_that_the_model_could_not_read_is_retried(harness: Harn
     assert garbled[f"garbled {k}"] == 2
 
 
-async def test_a_run_stopped_for_a_deferred_tool_call_fails_and_the_call_is_closed(harness: HarnessEnvironment):
-    """Nothing gives its approval: the turn fails rather than answer with the call, and the next message is answered,
-    with the call closed (a provider refuses calls without results; the scripted model too)."""
+async def desk_post(harness: HarnessEnvironment, path: str, **kwargs: Any) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        return await ingress.post(f"{harness.ingress_url}/pai_desk/{path}", **kwargs)
+
+
+async def desk_chat(harness: HarnessEnvironment, k: str, text: str) -> httpx2.Response:
+    return await desk_post(harness, f"{k}/chat", content=text, headers=TEXT)
+
+
+async def waits(harness: HarnessEnvironment, k: str) -> list[dict[str, Any]]:
+    return typing.cast(list[dict[str, Any]], (await desk_post(harness, f"{k}/pending")).json())
+
+
+async def until_waiting(harness: HarnessEnvironment, k: str) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+
+    async def waiting() -> bool:
+        found[:] = await waits(harness, k)
+        return bool(found)
+
+    await until(waiting)
+    return found
+
+
+async def test_a_tool_that_needs_an_approval_waits_for_its_signal_and_runs_once(harness: HarnessEnvironment):
     k = key()
-    failed = await post(harness, f"{k}/approval", json=f"deferred {k}")
-    assert failed.status_code == 500 and "wait_for_signal" in failed.text, failed.text
-    assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"deferred {k}"))
+    [wait] = await until_waiting(harness, k)
+    assert wait["name"] == "approval" and wait["input"] == {"tool": "refund_order", "args": {"city": k}}
+    status = (await desk_post(harness, f"{k}/status", json=None)).json()
+    assert status["answering"] is not None
+    assert refunds[k] == 0
+    await desk_post(harness, f"{k}/signal", json={"name": "approval", "value": "approved"})
+    assert (await answering).json() == f"tool said: refunded in {k}"
+    assert refunds[k] == 1 and await waits(harness, k) == []
+
+
+async def test_a_denied_approval_reaches_the_model_with_its_reason(harness: HarnessEnvironment):
+    k = key()
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"deferred {k}"))
+    [wait] = await until_waiting(harness, k)
+    await desk_post(harness, f"{k}/signal", json={"id": wait["id"], "value": "no refunds on Sundays"})
+    assert (await answering).json() == "tool said: no refunds on Sundays"
+    assert refunds[k] == 0
+
+
+async def test_a_crash_while_waiting_for_an_approval_joins_the_same_wait(
+    harness: HarnessEnvironment, monkeypatch: pytest.MonkeyPatch
+):
+    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
+    from restate.agents.internal import wait_for as real  # pylint: disable=import-outside-toplevel
+
+    k = key()
+    crashed: list[str] = []
+
+    async def open_then_crash(ctx: Any, call_id: str, signal: str, input: Any = None, **options: Any) -> Any:
+        if call_id != f"call-{k}" or crashed:
+            return await real(ctx, call_id, signal, input, **options)
+        crashed.append(call_id)
+        # Open the wait, as the attempt does, then crash while it waits: the wait goes on.
+        opened = asyncio.ensure_future(real(ctx, call_id, signal, input, **options))
+        await until_waiting(harness, k)
+        opened.cancel()
+        raise RuntimeError("the process crashed while waiting")
+
+    monkeypatch.setattr(_agent, "wait_for", open_then_crash)
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"deferred {k}"))
+
+    async def retried() -> bool:
+        return bool(crashed)
+
+    await until(retried)
+    await asyncio.sleep(0.5)  # the retry's attempt waits again
+    [wait] = await until_waiting(harness, k)
+    await desk_post(harness, f"{k}/signal", json={"id": wait["id"], "value": True})
+    assert (await answering).json() == f"tool said: refunded in {k}"
+    assert refunds[k] == 1
+
+
+async def test_stop_forgets_the_wait_and_cancels_the_turn(harness: HarnessEnvironment):
+    k = key()
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"deferred {k}"))
+    await until_waiting(harness, k)
+    await desk_post(harness, f"{k}/stop", json=None)
+    assert (await answering).status_code == 409
+    assert await waits(harness, k) == []
+    assert (await desk_chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+    assert refunds[k] == 0
+
+
+async def test_ask_user_without_an_answerer_waits_for_the_answer(harness: HarnessEnvironment):
+    k = key()
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"ask {k}"))
+    [wait] = await until_waiting(harness, k)
+    assert wait["name"] == "ask_user_question"
+    answer = {"answers": [{"header": "Color", "selected": ["Blue"]}]}
+    await desk_post(harness, f"{k}/signal", json={"name": "ask_user_question", "value": answer})
+    assert (await answering).json() == 'tool said: {"Color":["Blue"]}'
+
+
+class StopBeforeTheNextRequest(AbstractCapability[Any]):
+    """Stops the turn once a call has its result, before the next model request stores it, as ``stop`` may."""
+
+    async def before_model_request(self, ctx: RunContext[Any], request_context: Any) -> Any:
+        if any(isinstance(p, ToolReturnPart) for m in ctx.messages if isinstance(m, ModelRequest) for p in m.parts):
+            raise restate.TerminalError("stopped", status_code=409)
+        return request_context
+
+
+async def test_a_turn_stopped_after_a_denial_is_stored_does_not_report_the_denied_call_done():
+    """The approval returned, but the call never ran: the model must not be told it did."""
+    from agents_pydantic_ai_snapshots import ANSWERS, Chat  # pylint: disable=import-outside-toplevel,import-error
+    from sessions_object import Host, request  # pylint: disable=import-outside-toplevel,import-error
+
+    from restate.agents._conversation import STEPS  # pylint: disable=import-outside-toplevel
+    from restate.agents.pydantic_ai._agent import ITEMS  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    mine: Any = Agent(FunctionModel(reply), capabilities=[StopBeforeTheNextRequest()])
+
+    @mine.tool_plain(requires_approval=True)
+    def refund_order(city: str) -> str:
+        refunds[city] += 1
+        return f"refunded in {city}"
+
+    chat = Chat(pydantic_ai.agent("pai_denied_then_stopped", agent=mine))
+
+    @chat.obj.handler(name="results")
+    async def results(ctx: Any, _: Any = None) -> list[str]:
+        """The results of the tool calls, as stored."""
+        stored = [ITEMS.load(str(item)) for [item] in await ctx.db.values(f"SELECT item FROM {STEPS} ORDER BY n")]
+        requests = [m for m in stored if isinstance(m, ModelRequest)]
+        return [p.model_response_str() for m in requests for p in m.parts if isinstance(p, ToolReturnPart)]
+
+    k = key()
+    host = Host(chat.backend, service=chat.name, answers={**ANSWERS, "wait": b'"no refunds today"'})
+    with pytest.raises(restate.TerminalError):
+        await invoke(chat.obj, "chat", host, request(), f"deferred {k}")
+    assert await invoke(chat.obj, "results", chat.host(), request(), None) == [CANCELLED]
+    assert refunds[k] == 0
 
 
 async def test_an_agent_of_your_own_runs_with_its_own_capabilities(harness: HarnessEnvironment):
     k = key()
     assert (await post(harness, f"{k}/watched", json=f"hi {k}")).json() == f"echo: hi {k}"
     assert spied[f"hi {k}"] == 1
-
-
-def kinds(own: Any, model: Any) -> list[type]:
-    """The kinds of the capabilities that a run of ``own`` (an Agent of your own, or None) on ``model`` gets."""
-    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
-
-    return [type(c) for c in _agent._capabilities(own, model)]  # pyright: ignore[reportPrivateUsage]
-
-
-def test_the_built_in_agent_gets_the_compaction_of_its_models_provider():
-    """OpenAI's for its Responses API, which openai/... models use, and none for a provider without one; and each
-    run reinjects the system prompt, which the conversation does not store."""
-    from pydantic_ai.models.openai import (  # pylint: disable=import-outside-toplevel
-        OpenAIChatModel,
-        OpenAICompaction,
-        OpenAIResponsesModel,
-    )
-    from pydantic_ai.providers.openai import OpenAIProvider  # pylint: disable=import-outside-toplevel
-
-    provider = OpenAIProvider(api_key="sk-test")
-    assert kinds(None, OpenAIResponsesModel("gpt-6-sol", provider=provider)) == [OpenAICompaction, ReinjectSystemPrompt]
-    assert kinds(None, OpenAIChatModel("gpt-6-sol", provider=provider)) == [ReinjectSystemPrompt]
-    assert kinds(None, FunctionModel(reply)) == [ReinjectSystemPrompt]
-
-
-def test_the_built_in_agent_on_anthropic_gets_its_compaction():
-    pytest.importorskip("anthropic")
-    from pydantic_ai.models.anthropic import (  # pylint: disable=import-outside-toplevel
-        AnthropicCompaction,
-        AnthropicModel,
-    )
-    from pydantic_ai.providers.anthropic import AnthropicProvider  # pylint: disable=import-outside-toplevel
-
-    model = AnthropicModel("claude-sonnet-5-5", provider=AnthropicProvider(api_key="sk-test"))
-    assert kinds(None, model) == [AnthropicCompaction, ReinjectSystemPrompt]
-
-
-def test_an_agent_of_your_own_runs_as_configured_with_the_system_prompt_reinjected():
-    """No compaction is added to it, whether it has its own or not; the system prompt is reinjected, unless the agent
-    reinjects it itself (with replace_existing=True, say)."""
-    from pydantic_ai.models.openai import OpenAICompaction, OpenAIResponsesModel  # pylint: disable=import-outside-toplevel
-    from pydantic_ai.providers.openai import OpenAIProvider  # pylint: disable=import-outside-toplevel
-
-    model = OpenAIResponsesModel("gpt-6-sol", provider=OpenAIProvider(api_key="sk-test"))
-    plain: Any = Agent(model)
-    assert kinds(plain, model) == [ReinjectSystemPrompt]
-    compacting: Any = Agent(model, capabilities=[OpenAICompaction(token_threshold=100_000)])
-    assert kinds(compacting, model) == [ReinjectSystemPrompt]
-    reinjecting: Any = Agent(model, capabilities=[ReinjectSystemPrompt(replace_existing=True)])
-    assert kinds(reinjecting, model) == []
 
 
 async def test_an_agent_of_your_own_gets_its_deps(harness: HarnessEnvironment):
@@ -722,7 +901,8 @@ async def test_an_error_of_the_agents_own_code_is_retried_whatever_its_name(harn
 
 
 def test_the_openai_sdks_error_for_a_missing_key_is_a_refusal(monkeypatch: pytest.MonkeyPatch):
-    """As the SDK words it now: a provider's SDK may raise it, before Pydantic AI 2.15 checks the key itself."""
+    """As the SDK words it now: an OpenAI client made outside Pydantic AI's check of the key (in an Agent of your
+    own, say) raises it."""
     openai = pytest.importorskip("openai")
     from restate.agents.internal import refusal  # pylint: disable=import-outside-toplevel
 
@@ -784,3 +964,91 @@ def test_a_tool_result_of_bytes_is_stored_as_pydantic_ai_stores_it():
     [expected] = ModelMessagesTypeAdapter.validate_json(ModelMessagesTypeAdapter.dump_json([message]))
     assert isinstance(read, ModelRequest) and isinstance(expected, ModelRequest)
     assert read.parts[0].content == expected.parts[0].content  # type: ignore[union-attr]
+
+
+def test_an_approvals_signal_approves_only_what_says_so():
+    from pydantic_ai import ToolApproved, ToolDenied  # pylint: disable=import-outside-toplevel
+
+    from restate.agents.pydantic_ai._agent import approval_of  # pylint: disable=import-outside-toplevel
+
+    for approving in (True, "approved", "Yes", " OK ", {"approved": True}):
+        assert approval_of(approving) == ToolApproved()
+    assert approval_of({"approved": True, "args": {"city": "Oslo"}}) == ToolApproved(override_args={"city": "Oslo"})
+    assert approval_of(False) == ToolDenied()
+    assert approval_of("not today") == ToolDenied("not today")
+    assert approval_of({"approved": False, "reason": "too much"}) == ToolDenied("too much")
+    for anything in (None, 1, ["yes"], {"approved": "yes"}):
+        assert isinstance(approval_of(anything), ToolDenied)
+
+
+async def remember(harness: HarnessEnvironment, k: str, text: str) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        return await ingress.post(f"{harness.ingress_url}/pai_remembering/{k}/chat", content=text, headers=TEXT)
+
+
+async def test_two_conversations_of_a_user_share_memory(harness: HarnessEnvironment):
+    user = key()
+    written = await remember(harness, f"{user}.trip", "remember likes tea")
+    assert written.status_code == 200, written.text
+    assert "likes tea" in (await remember(harness, f"{user}.support", "recall")).json()
+    # Another user's memory is their own.
+    assert "likes tea" not in (await remember(harness, f"{key()}.trip", "recall")).json()
+
+
+async def test_a_conflicting_memory_write_is_refused(harness: HarnessEnvironment):
+    user = key()
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        outcomes = await ingress.post(f"{harness.ingress_url}/pai_remembering/{user}.x/conflict", json="notes.md")
+    assert outcomes.json()[1:] == ["refused", "first"]
+
+
+async def test_memory_lists_the_paths_under_a_prefix_in_order_up_to_a_limit(harness: HarnessEnvironment):
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        listed = await ingress.post(f"{harness.ingress_url}/pai_remembering/{key()}.x/listing", json=None)
+    assert listed.json() == [["notes/a.md", "notes/b.md"], ["notes/a.md", "notes/b.md", "notes/c.md", "other.md"]]
+
+
+async def test_a_memory_write_of_a_tool_call_that_runs_again_is_applied_once(harness: HarnessEnvironment):
+    user = key()
+    fact = f"crash {user}"
+    assert (await remember(harness, f"{user}.a", f"remember {fact}")).status_code == 200
+    assert fact in crashed_writes
+    recalled = (await remember(harness, f"{user}.b", "recall")).json()
+    assert recalled.count(fact) == 1, recalled
+
+
+async def test_a_memory_edit_of_a_tool_call_that_runs_again_is_reported_as_made(harness: HarnessEnvironment):
+    """The edit was made, then the process crashed: the call that runs again finds its receipt, rather than look
+    for the text it replaced (which is gone)."""
+    user = key()
+    assert (await remember(harness, f"{user}.a", f"remember likes tea {user}")).status_code == 200
+    edited = await remember(harness, f"{user}.a", f"replace likes tea {user}|crash likes coffee {user}")
+    assert edited.status_code == 200, edited.text
+    assert f"crash likes coffee {user}" in crashed_writes
+    assert '"status":"updated"' in edited.json() and "not found" not in edited.json(), edited.json()
+    recalled = (await remember(harness, f"{user}.b", "recall")).json()
+    assert recalled.count(f"likes coffee {user}") == 1 and f"likes tea {user}" not in recalled, recalled
+
+
+def test_without_pydantic_ai_harness_the_import_names_the_extra(monkeypatch: pytest.MonkeyPatch):
+    import importlib  # pylint: disable=import-outside-toplevel
+    import sys  # pylint: disable=import-outside-toplevel
+
+    for name in [n for n in sys.modules if n.split(".")[:3] == ["restate", "agents", "pydantic_ai"]]:
+        monkeypatch.delitem(sys.modules, name)
+    # As if it were not installed: its modules imported so far, too, which an import would otherwise find.
+    for name in ["pydantic_ai_harness", *(n for n in sys.modules if n.startswith("pydantic_ai_harness."))]:
+        monkeypatch.setitem(sys.modules, name, None)
+    with pytest.raises(ImportError, match=r"Pydantic AI Harness.*restate-sdk\[pydantic_ai\]"):
+        importlib.import_module("restate.agents.pydantic_ai")
+
+
+def test_a_tool_call_asked_for_again_is_read_as_an_error():
+    """Pydantic AI 2.66 answers such a call with its own ToolReturnPart (outcome "retried"), no RetryPromptPart."""
+    from restate.agents.pydantic_ai._agent import ITEMS  # pylint: disable=import-outside-toplevel
+
+    retried = ToolReturnPart("lookup", "not like that", tool_call_id="c1", outcome="retried")
+    returned = ToolReturnPart("lookup", "found", tool_call_id="c2")
+    [again, found] = ITEMS.read(ModelRequest(parts=[retried, returned])).results
+    assert (again.id, again.output, again.failed) == ("c1", '{"error":"not like that"}', True)
+    assert (found.id, found.output, found.failed) == ("c2", "found", False)

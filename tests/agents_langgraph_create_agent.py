@@ -27,8 +27,9 @@ import pytest
 pytest.importorskip("langchain.agents")
 
 from langchain.agents import create_agent  # noqa: E402
-from langchain.agents.middleware import ModelRequest, dynamic_prompt  # noqa: E402
+from langchain.agents.middleware import AgentState, ModelRequest, before_model, dynamic_prompt  # noqa: E402
 from langchain.agents.structured_output import ToolStrategy  # noqa: E402
+from langgraph.runtime import Runtime  # noqa: E402
 from langchain_core.language_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
@@ -88,10 +89,37 @@ class Scripted(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=reply)])
 
 
+@before_model(can_jump_to=["end"])
+def guard(state: AgentState[Any], runtime: Runtime[Any]) -> dict[str, Any] | None:
+    """Answer "blocked ..." itself, without the model: the run ends before the model writes the structured response.
+
+    (LangChain clears the structured response at each model request, and asks
+    the model again while it answers without one, if the agent has no tools.)
+    """
+    asked = str(state["messages"][-1].text)
+    if asked.startswith("blocked"):
+        return {"messages": [AIMessage(f"refused: {asked}")], "jump_to": "end"}
+    return None
+
+
 tools = langgraph.tools([call(add, name="add", description="Add to the ledger.", key=lambda ctx: ctx.key)])
 desk = langgraph.agent("ca_desk", graph=create_agent(Scripted(), tools=tools))
 planner = langgraph.agent("ca_planner", graph=create_agent(Scripted(), response_format=ToolStrategy(Plan)), output=Plan)
-plain = langgraph.agent("ca_plain", graph=create_agent(Scripted(), response_format=ToolStrategy(Plan)))
+plain = langgraph.agent(
+    "ca_plain", graph=create_agent(Scripted(), response_format=ToolStrategy(Plan), middleware=[guard])
+)
+
+asked: list[list[BaseMessage]] = []
+"""What the model of ``ca_seen`` was asked with, request by request."""
+
+
+class Seen(Scripted):
+    def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
+        asked.append(list(messages))
+        return super()._generate(messages, *args, **kwargs)
+
+
+seen = langgraph.agent("ca_seen", graph=create_agent(Seen(), response_format=ToolStrategy(Plan)))
 
 
 @dataclass
@@ -122,7 +150,7 @@ def anyio_backend():
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([ledger, desk, planner, plain, accounts]), restate_image=RESTATE_IMAGE
+        restate.app([ledger, desk, planner, plain, seen, accounts]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -155,10 +183,21 @@ async def test_a_structured_response_is_the_answer_only_of_the_run_that_wrote_it
     # The same structured response again is the answer again: the run wrote it.
     assert (await chat(harness, "ca_plain", key, "plan a")).json() == '{"title": "a"}'
     # A run that writes none answers with its text, not with the one an earlier run left in the state.
-    assert (await chat(harness, "ca_plain", key, "hi")).json() == "echo: hi"
+    assert (await chat(harness, "ca_plain", key, "blocked hi")).json() == "refused: blocked hi"
 
 
 async def test_create_agent_has_its_own_context_and_calls_restate_through_the_tools(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     assert (await chat(harness, "ca_accounts", key, "system")).json() == "system: Amounts are in EUR."
     assert (await chat(harness, "ca_accounts", key, "refund 7")).json() == f"done: {key} owes $7"
+
+
+async def test_a_turn_answered_with_a_structured_response_gives_the_graph_nothing_more_next(
+    harness: HarnessEnvironment,
+):
+    key = uuid.uuid4().hex
+    assert (await chat(harness, "ca_seen", key, f"plan {key}")).json() == f'{{"title": "{key}"}}'
+    assert (await chat(harness, "ca_seen", key, "plan next")).json() == '{"title": "next"}'
+    # The graph ended its run with a tool's message, and the conversation the turn with its answer: that answer
+    # is the conversation's, not the graph's, which has its own messages of the turn.
+    assert not [m for m in asked[-1] if str(m.id or "").startswith("closed:")]

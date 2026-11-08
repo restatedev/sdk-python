@@ -30,6 +30,7 @@ pytest.importorskip("agents")
 from agents import (  # noqa: E402
     Agent,
     GuardrailFunctionOutput,
+    Handoff,
     Model,
     ModelResponse,
     OpenAIChatCompletionsModel,
@@ -208,12 +209,18 @@ def desk(model: Model) -> Agent[Any]:
 
 
 triage = openai.agent("oai_desk", agent=desk(model))
+forgetful = openai.agent("oai_desk_window_0", agent=desk(model), window=0)
+"""The same desk, whose model sees no earlier turn whole: the handoff is carried from turn to turn."""
+remembering = Scripted(reply)
+"""The model of an agent with a small budget, whose requests the tests read."""
+summarizing = openai.agent("oai_summarizing", model=remembering, budget=10)
+"""An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
 
 
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, triage]), restate_image=RESTATE_IMAGE
+        restate.app([assistant, per_user, triage, forgetful, summarizing]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -344,6 +351,36 @@ async def test_a_handoff_holds_for_the_next_messages(harness: HarnessEnvironment
     assert (await chat(harness, k, f"weather {k}", "oai_desk")).json() == f"tool said: sunny in {k}"
 
 
+async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
+    k = key()
+    for word in ("one", "two", "three", "four", "five"):
+        assert (await chat(harness, k, f"hi {word}", "oai_summarizing")).json() == f"echo: hi {word}"
+    # Once the fourth turn was answered, the three before it (out of the next window) outgrew the budget: the model
+    # summarized them, in a request of its own.
+    summaries = [
+        _prompts(items)[-1] for _, items in remembering.requests if _prompts(items)[-1].startswith("Summarize")
+    ]
+    assert len(summaries) == 1
+    assert "User: hi one" in summaries[0] and "User: hi three" in summaries[0] and "hi four" not in summaries[0]
+    # The fifth turn's request has the summary in their place, then the fourth turn (the window), and the prompt.
+    latest = _prompts(remembering.requests[-1][1])
+    assert latest[0].startswith("A summary of our conversation so far:") and "User: hi one" in latest[0]
+    assert latest[1:] == ["hi four", "hi five"]
+    # The summary is one user message, which the fourth turn's prompt follows: no reply is made up after it.
+    request = remembering.requests[-1][1]
+    assert request[0]["role"] == "user" and request[1] == {"role": "user", "content": "hi four"}
+    # The conversation itself keeps every turn.
+    page = (await post(harness, f"oai_summarizing/{k}/messages", json={})).json()
+    assert len(page["messages"]) == 10
+
+
+async def test_a_handoff_holds_when_the_model_sees_no_earlier_turn_whole(harness: HarnessEnvironment):
+    k = key()
+    await chat(harness, k, f"handoff {k}", "oai_desk_window_0")
+    assert (await chat(harness, k, f"system {k}", "oai_desk_window_0")).json() == "system: You handle refunds."
+    assert (await chat(harness, k, f"system {k}", "oai_desk_window_0")).json() == "system: You handle refunds."
+
+
 # --- In process -----------------------------------------------------------------------------------
 
 PUBLISHED = {"publish": b"null"}
@@ -385,6 +422,89 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
     # The retry (the same invocation) returns the answer that was stored, without asking the model again.
     assert await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), invocation, "hi") == "answer 1"
     assert len(answering.requests) == 1
+
+
+async def test_a_turn_closed_after_its_handoff_carries_the_agent_it_handed_off_to():
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents import AgentObject  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    def failing(system: str | None, items: list[Item]) -> list[Output]:
+        word = _prompts(items)[-1].split(" ")[0]
+        if word == "handfail" and system == "You triage.":
+            return [calls("call-h", "transfer_to_refunds", "{}")]
+        if word == "handfail":
+            # The agent handed off to fails for good, before its first reply: the turn closes with the error.
+            raise restate.TerminalError("the refunds model is down")
+        return reply(system, items)
+
+    # A window of 0: the next turn loads no reply of this one, only what it carried.
+    obj = AgentObject("asker", window=0)
+    desk_agent = desk(Scripted(failing))
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await openai.prompt(ctx, text, agent=desk_agent)
+
+    backend = Backend()
+    with pytest.raises(restate.TerminalError, match="refunds model is down"):
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), "handfail x")
+    answer = await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), "system x")
+    assert answer == "system: You handle refunds."
+
+
+@pytest.mark.parametrize("ends", ["killed, then settled", "crashed, then failed"])
+async def test_a_turn_that_ends_after_its_handoff_another_way_carries_the_agent_it_handed_off_to(ends: str):
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents import AgentObject  # pylint: disable=import-outside-toplevel
+    from restate.agents._conversation import settle  # pylint: disable=import-outside-toplevel
+    from restate.agents.openai._agent import ITEMS  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    asked_refunds: list[str] = []
+
+    def dying(system: str | None, items: list[Item]) -> list[Output]:
+        word = _prompts(items)[-1].split(" ")[0]
+        if word == "handgone" and system == "You triage.":
+            return [calls("call-g", "transfer_to_refunds", "{}")]
+        if word == "handgone":
+            asked_refunds.append("asked")
+            if ends == "crashed, then failed" and len(asked_refunds) > 1:
+                raise restate.TerminalError("the refunds model is down")
+            # The invocation is gone (or crashed) after the handoff, before the refunds agent replies.
+            raise RuntimeError("the invocation is gone")
+        return reply(system, items)
+
+    obj = AgentObject("asker", window=0)
+    desk_agent = desk(Scripted(dying))
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await openai.prompt(ctx, text, agent=desk_agent)
+
+    @obj.handler(name="settle_as_the_companion_has_it")
+    async def settling(ctx: sessions.SessionContext, invocation_id: str) -> bool:
+        return await settle(ctx, ITEMS, invocation_id)
+
+    backend = Backend()
+
+    def host() -> Host:
+        return Host(backend, service="asker", answers=PUBLISHED)
+
+    gone = request()
+    with pytest.raises(RuntimeError, match="gone"):
+        await invoke(obj, "ask", host(), gone, "handgone x")
+    if ends == "killed, then settled":
+        assert await invoke(obj, "settle_as_the_companion_has_it", host(), request(), gone.id) is True
+    else:
+        # The retry starts with the refunds agent, which fails for good: the turn closes with its error.
+        with pytest.raises(restate.TerminalError, match="model is down"):
+            await invoke(obj, "ask", host(), gone, "handgone x")
+    assert await invoke(obj, "ask", host(), request(), "system x") == "system: You handle refunds."
 
 
 async def test_a_handoff_cut_off_by_a_crash_is_asked_again_and_hands_off_once(monkeypatch: pytest.MonkeyPatch):
@@ -493,6 +613,44 @@ async def test_an_agent_of_your_own_gets_its_context_and_its_run_config():
     assert [len(items) for _, items in scripted.requests] == [1, 3, 3, 3]
 
 
+async def test_the_sdks_tool_output_trimmer_trims_what_the_model_sees_not_what_is_stored():
+    from agents.extensions import ToolOutputTrimmer  # pylint: disable=import-outside-toplevel
+
+    from restate.agents import AgentObject  # pylint: disable=import-outside-toplevel
+
+    @function_tool(name_override="get_weather")
+    def wordy_weather(city: str) -> str:
+        """The weather in a city, at length."""
+        return f"sunny in {city}. " * 20
+
+    def outputs() -> list[str]:
+        return [str(i["output"]) for i in scripted.requests[-1][1] if i.get("type") == "function_call_output"]
+
+    scripted = Scripted(reply)
+    mine = Agent(name="mine", model=scripted, tools=[wordy_weather])
+    trimmer = ToolOutputTrimmer(recent_turns=1, max_output_chars=50, preview_chars=10)
+    # The two latest turns whole: the second and third turns' requests have the first turn's tool output.
+    obj = AgentObject("asker", window=2)
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        trimming = text.startswith("trim")
+        config = RunConfig(call_model_input_filter=trimmer) if trimming else None
+        return await openai.prompt(ctx, text, agent=mine, run_config=config)
+
+    send = invoker(obj)
+    full = "sunny in Rome. " * 20
+    assert await send("weather Rome") == f"tool said: {full}"
+    assert outputs() == [full]
+    # The next turn's request has that output trimmed, by the trimmer that runs after this package's filter.
+    assert await send("trim now") == "echo: trim now"
+    [trimmed] = outputs()
+    assert len(trimmed) < len(full)
+    # The conversation keeps it whole: a run without the trimmer gets it as the tool gave it.
+    assert await send("hi there") == "echo: hi there"
+    assert outputs() == [full]
+
+
 # --- In process: an Agent of your own's options ---------------------------------------------------
 
 
@@ -529,6 +687,59 @@ def crash_once_after(monkeypatch: pytest.MonkeyPatch, hook: str, when: Callable[
     monkeypatch.setattr(_agent._Hooks, hook, then_crash)  # pyright: ignore[reportPrivateUsage]
 
 
+async def test_a_turn_answered_by_the_tool_of_an_agent_handed_off_to_carries_that_agent():
+    @tool
+    async def book(city: str) -> str:
+        """Book a trip."""
+        return f"booked {city}"
+
+    def booking(system: str | None, items: list[Item]) -> list[Output]:
+        word = _prompts(items)[-1].split(" ")[0]
+        if word == "handbook" and system == "You triage.":
+            return [calls("call-h", "transfer_to_booker", "{}")]
+        if word == "handbook" and not any(i.get("name") == "book" for i in items):
+            return [calls("call-b", "book", '{"city": "Rome"}')]
+        return reply(system, items)
+
+    scripted = Scripted(booking)
+    booker = Agent(
+        name="booker",
+        instructions="You book.",
+        model=scripted,
+        tools=openai.tools([book]),
+        tool_use_behavior="stop_on_first_tool",
+    )
+    triage = Agent(name="triage", instructions="You triage.", model=scripted, handoffs=[booker])
+    ask = invoker(asker(agent=triage))
+    # The booker answers with its tool's output, and no reply of its own: the turn stores the answer as its reply.
+    assert await ask("handbook Rome") == "booked Rome"
+    # The next turn is with the booker still.
+    assert await ask("system x") == "system: You book."
+
+
+async def test_a_handoff_built_by_hand_runs():
+    scripted = Scripted(reply)
+    refunds = Agent(name="refunds", instructions="You handle refunds.", model=scripted)
+
+    async def to_refunds(context: Any, arguments: str) -> Agent[Any]:
+        return refunds
+
+    # Built by hand, not with handoff(): it names no agent until the SDK invokes it.
+    by_hand = Handoff(
+        tool_name="transfer_to_refunds",
+        tool_description="Hand off to the refunds agent.",
+        input_json_schema={},
+        on_invoke_handoff=to_refunds,
+        agent_name="refunds",
+    )
+    ask = invoker(asker(agent=Agent(name="triage", instructions="You triage.", model=scripted, handoffs=[by_hand])))
+    # The refunds agent answers, with the handoff's output as the latest item.
+    assert await ask("handoff x") == 'tool said: {"assistant": "refunds"}'
+    assert [system for system, _ in scripted.requests] == ["You triage.", "You handle refunds."]
+    # It is not followed from turn to turn: the next message goes back to the agent given.
+    assert await ask("system x") == "system: You triage."
+
+
 async def test_a_tool_that_ends_the_turn_is_stored_and_not_run_again():
     runs: list[str] = []
 
@@ -545,7 +756,15 @@ async def test_a_tool_that_ends_the_turn_is_stored_and_not_run_again():
     assert await ask("hi there") == "echo: hi there"
     assert runs == ["Rome"]
     _, items = scripted.requests[-1]
-    assert [i.get("type", "message") for i in items] == ["message", "function_call", "function_call_output", "message"]
+    # The tool's output was the answer: the turn ends with it as its message, which the next turn's model sees.
+    assert [i.get("type", "message") for i in items] == [
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+        "message",
+    ]
+    assert items[-2] == {"role": "assistant", "content": "booked Rome"}
 
 
 @output_guardrail
@@ -634,13 +853,38 @@ def test_a_tool_output_of_any_kind_is_stored_once():
 
     shell = {"type": "shell_call_output", "call_id": "s1", "output": "ok"}
     function = {"type": "function_call_output", "call_id": "f1", "output": "ok"}
-    stored = Conversation(typing.cast(Any, None), _agent.ITEMS, [Entry(0, shell), Entry(1, function)])
+    prompt = Entry(0, _agent.ITEMS.prompt("go"), prompt="p0")
+    stored = Conversation(typing.cast(Any, None), _agent.ITEMS, [prompt, Entry(1, shell), Entry(2, function)])
     # The SDK hands the stored outputs back with the next request: none of them is new.
     new = {"type": "computer_call_output", "call_id": "c1", "output": "ok"}
     assert stored.new_results([shell, function, new]) == [new]
 
 
 # --- In process: a conversation that lives long --------------------------------------------------
+
+
+def test_the_summary_is_one_user_message_that_both_apis_take():
+    from agents.models.chatcmpl_converter import Converter  # pylint: disable=import-outside-toplevel
+    from openai.types.responses import ResponseInputParam  # pylint: disable=import-outside-toplevel
+    from pydantic import TypeAdapter  # pylint: disable=import-outside-toplevel
+
+    from restate.agents._conversation import SUMMARY, summary_items  # pylint: disable=import-outside-toplevel
+    from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
+
+    items = _agent.ITEMS
+    summary = summary_items(items, "We spoke of Rome.")
+    # One user message, as Codex sends its summary: no reply made up after it.
+    assert summary == [{"role": "user", "content": SUMMARY + "We spoke of Rome."}]
+    # The earlier turns follow it, from their prompts: a user message right after the summary.
+    history = [*summary, items.prompt("hi"), items.reply("hello"), items.prompt("and now?")]
+    assert TypeAdapter(ResponseInputParam).validate_python(history) == history
+    messages = Converter.items_to_messages(typing.cast(Any, history))
+    assert [(m["role"], m.get("content")) for m in messages] == [
+        ("user", SUMMARY + "We spoke of Rome."),
+        ("user", "hi"),
+        ("assistant", "hello"),
+        ("user", "and now?"),
+    ]
 
 
 class ResponsesScripted(OpenAIResponsesModel):

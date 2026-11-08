@@ -21,7 +21,8 @@ message as a new ``HumanMessage``:
   (``_context.py``). LangGraph's run context is the graph's own
   (``context=``), else the handler's. A retried attempt resumes the run it
   cut off. A run that finishes prunes the thread to the latest checkpoint
-  of each namespace (LangGraph's ``aprune``).
+  of each namespace (LangGraph's ``aprune``), and what LangGraph rebuilds
+  its delta channels (``DeltaChannel``) from, if it has any.
 - Any error of the run fails the attempt, and Restate retries it: none is
   taken for a model provider's refusal, as the built-in agent's model's can
   be, since a graph's models, tools and nodes are all its own (a tool or a
@@ -33,7 +34,11 @@ message as a new ``HumanMessage``:
 - After each step, the AI and tool messages the step added are copied into
   the agent's conversation, by their ids, so that the ``messages``, ``sync``
   and ``watch`` views show the run as it goes, as they do for the built-in
-  agent.
+  agent. They are the messages after the run's prompt: the graph's state
+  holds the earlier turns too, whose messages the conversation has, but
+  does not load (it loads the previous turn whole, at least). A graph that
+  trims the prompt away has the messages it keeps copied if their ids are
+  not the loaded turns', as a graph that trims keeps the latest messages.
 
   The conversation never gets ahead of the checkpoints: with
   ``durability="sync"``, LangGraph streams a step's state only once its
@@ -68,6 +73,28 @@ message as a new ``HumanMessage``:
   (a model provider refuses such a history), and the note that ends it (such
   as "Cancelled: ..."), so that the graph's model knows, as the built-in
   agent's does. So does that run's message, if the graph never stored it.
+
+The graph's state is its own. Its models read the state, not the
+conversation: the agent's ``window`` and ``budget`` do not reach them, and
+the agent summarizes nothing (its conversation only loads the previous turn
+whole, for what closed it). The latest checkpoint holds every message the
+state keeps, and each turn's prune deletes the older checkpoints, so what
+grows is the state itself, unless the graph trims it. Trimming it is the
+graph's job. LangChain's ``SummarizationMiddleware`` replaces the earlier
+messages in the state with a summary::
+
+    graph = create_agent(model, tools, middleware=[SummarizationMiddleware(model, trigger=("tokens", 4000))])
+
+A graph of your own can return a ``RemoveMessage`` for each message to drop::
+
+    def forget(state: MessagesState) -> dict[str, Any]:
+        # Keep the latest 10 prompts and what followed each: no tool call is cut from its result.
+        prompts = [i for i, m in enumerate(state["messages"]) if isinstance(m, HumanMessage)]
+        old = state["messages"][: prompts[-10]] if len(prompts) > 10 else []
+        return {"messages": [RemoveMessage(id=m.id) for m in old]}
+
+Once the turn's prune has run, a removed message is gone from the key's
+checkpoints (``restate_langgraph_*``); the conversation, a log, keeps it.
 """
 
 from __future__ import annotations
@@ -88,7 +115,7 @@ from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
 from restate.agents._common import from_tool
-from restate.agents._conversation import Conversation, Entry, Run
+from restate.agents._conversation import Conversation, Run, Turn
 from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
 from restate.agents.langgraph._context import running as running_graph
@@ -157,7 +184,7 @@ async def _structured_version(app: Any) -> str:
     return str(versions.get(_STRUCTURED, ""))
 
 
-async def _answer(app: Any, conversation: Conversation, running: Entry, state: dict[str, Any], before: str) -> str:
+async def _answer(app: Any, turn: Turn, state: dict[str, Any], before: str) -> str:
     """Return the run's answer: the JSON of the ``structured_response`` it wrote, else its last AI message's text.
 
     A ``structured_response`` counts only if the run wrote it (its channel's
@@ -170,24 +197,28 @@ async def _answer(app: Any, conversation: Conversation, running: Entry, state: d
         return json.dumps(to_jsonable_python(structured))
     copied = [
         item
-        for e in conversation.entries
-        if e.n > running.n and isinstance(item := typing.cast(BaseMessage, e.item), AIMessage) and item.id is not None
+        for e in turn.items
+        if isinstance(item := typing.cast(BaseMessage, e.item), AIMessage) and item.id is not None
     ]
     return str(copied[-1].text) if copied else ""
 
 
 async def _copied(
-    ctx: SessionContext, conversation: Conversation, known: set[str], messages: Sequence[BaseMessage]
+    ctx: SessionContext, turn: Turn, known: set[str], messages: Sequence[BaseMessage], prompt: str
 ) -> None:
     """Copy the AI and tool messages of ``messages`` (the graph's state) that the conversation does not have yet.
 
-    ``known`` is the ids the conversation has, which this adds to; the
-    messages the conversation gave the graph are not copied back. Then
-    publish.
+    Those are the messages after the run's prompt (whose id is ``prompt``),
+    as the graph's state holds the earlier turns too, which the conversation
+    may not have loaded. If the graph trimmed the prompt away, they are the
+    messages whose ids are not ``known``. ``known`` is the ids the
+    conversation has, which this adds to; the messages the conversation gave
+    the graph are not copied back. Then publish.
     """
+    at = next((i for i, m in enumerate(messages) if m.id == prompt), None)
     new = [
         m
-        for m in messages
+        for m in (messages if at is None else messages[at + 1 :])
         if isinstance(m, AIMessage | ToolMessage)
         and m.id is not None
         and m.id not in known
@@ -195,20 +226,20 @@ async def _copied(
     ]
     for message in new:
         if isinstance(message, AIMessage):
-            await conversation.append_reply(message)
+            await turn.append_reply(message)
         else:
-            await conversation.append(message)
+            await turn.append(message)
         known.add(typing.cast(str, message.id))
     if new:
         await stepped(ctx)
 
 
-def _prompt_id(entry: Entry) -> str:
-    """Return the id of a prompt's ``HumanMessage`` in the graph: the conversation's id of the prompt."""
-    return f"prompt:{entry.prompt}"
+def _prompt_id(turn: Turn) -> str:
+    """Return the id of a turn's prompt, as a ``HumanMessage`` in the graph: the conversation's id of the turn."""
+    return f"prompt:{turn.id}"
 
 
-def _closing(conversation: Conversation, running: Entry, messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+def _closing(conversation: Conversation, turn: Turn, messages: Sequence[BaseMessage]) -> list[BaseMessage]:
     """Return what the conversation has of the previous prompt's run that the graph does not.
 
     That is what closed the run, if it was stopped, refused or failed: the
@@ -220,20 +251,24 @@ def _closing(conversation: Conversation, running: Entry, messages: Sequence[Base
     history, say) is not brought back. Each gets an id of its own, so that
     it is carried once.
     """
-    earlier = [e for e in conversation.entries if e.prompt is not None and e.n < running.n]
-    if not earlier:
+    turns = list(conversation.turns)
+    at = turns.index(turn)
+    if at == 0:
         return []
-    previous = earlier[-1]
+    previous = turns[at - 1]
     known = {m.id for m in messages}
-    between = [e for e in conversation.entries if previous.n <= e.n < running.n]
-    copied = any(e.prompt is None and typing.cast(BaseMessage, e.item).id is not None for e in between)
+    copied = any(typing.cast(BaseMessage, e.item).id is not None for e in previous.items)
+    # Only a turn closed by the conversation (stopped, refused, failed, ended) has messages the graph lacks: its
+    # closing record. An answered turn's own are the graph's; the answer it ends with, if the conversation added it
+    # (the graph ended with a tool's message, say), is the conversation's.
+    closed = previous.status not in (None, "answered")
     carried: list[BaseMessage] = []
-    for entry in between:
+    for entry in previous.entries:
         item = typing.cast(BaseMessage, entry.item)
         if entry.prompt is not None:
-            if not copied and _prompt_id(entry) not in known:
-                carried.append(HumanMessage(str(item.text), id=_prompt_id(entry)))
-        elif item.id is None and f"closed:{entry.n}" not in known:
+            if not copied and _prompt_id(previous) not in known:
+                carried.append(HumanMessage(str(item.text), id=_prompt_id(previous)))
+        elif closed and not isinstance(item, HumanMessage) and item.id is None and f"closed:{entry.n}" not in known:
             carried.append(item.model_copy(update={"id": f"closed:{entry.n}"}))
     return carried
 
@@ -242,39 +277,41 @@ INTERRUPT = "interrupt"
 """The name of the signal that answers LangGraph's ``interrupt()``."""
 
 
-def _interrupts(snapshot: StateSnapshot, resumes: dict[str, int]) -> list[tuple[Any, int]]:
-    """Return the pending interrupts of the run, with how often each was resumed (``resumes``, by interrupt id).
+def _interrupts(snapshot: StateSnapshot) -> list[Any]:
+    """Return the pending interrupts of the run, each once.
 
     LangGraph keeps each pending interrupt on the graph's task whose step
     raised it, a subgraph's interrupt included, even one of a node's second
     subgraph call, whose state LangGraph's subgraph snapshots do not show.
-    How often it was resumed is counted at the task that raised it, in
-    whichever namespace that ran (``SqlCheckpointSaver._resumes``), not at
-    the tasks of the graphs above it, which list it too.
+    Each graph above the task that raised it lists it again, under the same
+    id. That id is the raiser's namespace and the number of resume values
+    its task already has: each ``interrupt()`` of a node that interrupts
+    twice has an id of its own.
     """
-    return [(pending, resumes.get(pending.id, 0)) for task in snapshot.tasks for pending in task.interrupts]
+    pending: dict[str, Any] = {}
+    for task in snapshot.tasks:
+        for interrupted in task.interrupts:
+            pending.setdefault(interrupted.id, interrupted)
+    return list(pending.values())
 
 
-async def _resumed(ctx: SessionContext, saver: SqlCheckpointSaver, snapshot: StateSnapshot) -> dict[str, Any] | None:
+async def _resumed(ctx: SessionContext, snapshot: StateSnapshot) -> dict[str, Any] | None:
     """Wait for a signal for each pending interrupt of ``snapshot``, the state of the run's graph.
 
     Return their values by interrupt id, or ``None`` if no interrupt is
-    pending. Each wait's id is the turn's
-    invocation id (the same in each attempt), the interrupt's id, and the
-    number of resume values its task already has: a node that interrupts
-    twice has the same interrupt id both times, and each time is a wait of
-    its own. A retried attempt joins the same waits; a turn that ends without
-    them (killed, say) has its waits closed with it, as the companion closes
-    the waits whose ids start with the turn's.
+    pending. Each wait's id is the turn's invocation id (the same in each
+    attempt) and the interrupt's id, which LangGraph gives each
+    ``interrupt()`` of a run (see ``_interrupts``). A retried attempt joins
+    the same waits; a turn that ends without them (killed, say) has its
+    waits closed with it, as the companion closes the waits whose ids start
+    with the turn's.
     """
-    if not any(task.interrupts for task in snapshot.tasks):
+    pending = _interrupts(snapshot)
+    if not pending:
         return None
-    pending = _interrupts(snapshot, await saver._resumes(THREAD_ID))  # pyright: ignore[reportPrivateUsage]
     waits: dict[str, Any] = {}
-    for interrupted, times in pending:
-        if interrupted.id in waits:
-            continue
-        wait_id = f"{ctx.request.id}:interrupt:{interrupted.id}:{times}"
+    for interrupted in pending:
+        wait_id = f"{ctx.request.id}:interrupt:{interrupted.id}"
         request: _signals.WaitRequest = {
             "id": wait_id,
             "name": INTERRUPT,
@@ -325,9 +362,11 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
             return await _run(conversation)
 
     async def _run(conversation: Conversation) -> str:
-        running = conversation.running()
-        assert running is not None and running.prompt is not None
-        prompt_id = _prompt_id(running)
+        turn = conversation.turn
+        # The run's input: the turn's prompt, or the message that asked again within the turn, under an id of its
+        # own that no prompt has (``next_prompt_id`` makes ``<id>:<k>`` only).
+        step = turn.latest_ask()
+        prompt_id = _prompt_id(turn) if step is turn.prompt else f"{_prompt_id(turn)}:again:{step.n}"
         saver = SqlCheckpointSaver(ctx.db)
         app = _compiled(graph, saver)
         snapshot = await _stored(app)
@@ -342,24 +381,27 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         config: RunnableConfig = {**THREAD, "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before}}
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
-            await _copied(ctx, conversation, known, messages)
+            await _copied(ctx, turn, known, messages, prompt_id)
             await saver.aprune([THREAD_ID])
-            return await _answer(app, conversation, running, values, before)
+            return await _answer(app, turn, values, before)
         # A run cut off by a crash is resumed: first by the signals its pending interrupts wait for, if any. A new
         # message (or one after a stopped run) starts a run, after what closed the previous run.
         start: Any
         if asked:
-            resumes = await _resumed(ctx, saver, await _stored(app))
+            resumes = await _resumed(ctx, await _stored(app))
             start = Command(resume=resumes) if resumes is not None else None
         else:
-            prompt = HumanMessage(str(typing.cast(BaseMessage, running.item).text), id=prompt_id)
-            start = {"messages": [*_closing(conversation, running, messages), prompt]}
+            prompt = HumanMessage(str(typing.cast(BaseMessage, step.item).text), id=prompt_id)
+            closing = _closing(conversation, turn, messages) if step is turn.prompt else []
+            start = {"messages": [*closing, prompt]}
         while True:
             states = app.astream(start, config, context=run_context, durability="sync", stream_mode="values")
             try:
                 async for state in states:
                     values = typing.cast(dict[str, Any], state)
-                    await _copied(ctx, conversation, known, typing.cast(list[BaseMessage], values.get("messages", [])))
+                    await _copied(
+                        ctx, turn, known, typing.cast(list[BaseMessage], values.get("messages", [])), prompt_id
+                    )
             except Exception as error:
                 if (terminal := terminal_of(error)) is not None:
                     # LangGraph's own error, which a retry would meet again: a run past its recursion limit, say.
@@ -369,7 +411,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
                 raise
             # The run stops at its interrupts: it goes on with the signals that answer them.
             paused = await _stored(app)
-            resumes = await _resumed(ctx, saver, paused)
+            resumes = await _resumed(ctx, paused)
             if resumes is None:
                 if at_breakpoint(paused):
                     # At a subgraph's static breakpoint, which check() does not look for. Fail, rather than
@@ -377,7 +419,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
                     raise TerminalError(BREAKPOINTS)
                 # Only the latest checkpoint of each namespace is read again; a paused or cut-off run keeps it too.
                 await saver.aprune([THREAD_ID])
-                return await _answer(app, conversation, running, values, before)
+                return await _answer(app, turn, values, before)
             start = Command(resume=resumes)
 
     return run

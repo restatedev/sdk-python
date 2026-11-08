@@ -165,10 +165,30 @@ def desk() -> LlmAgent:
 
 triage = adk.agent("adk_desk", agent=desk())
 
+requests: list[list[types.Content]] = []
+"""The requests of the agent with a small budget."""
+
+
+class Remembering(Scripted):
+    """The scripted model, keeping each request's contents."""
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        requests.append(list(llm_request.contents))
+        async for response in super().generate_content_async(llm_request, stream):
+            yield response
+
+
+summarizing = adk.agent("adk_summarizing", model=Remembering(), budget=10)
+"""An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
+
 
 @pytest.fixture(scope="session")
 async def harness():
-    async with restate.create_test_harness(restate.app([assistant, triage]), restate_image=RESTATE_IMAGE) as harness:
+    async with restate.create_test_harness(
+        restate.app([assistant, triage, summarizing]), restate_image=RESTATE_IMAGE
+    ) as harness:
         yield harness
 
 
@@ -423,7 +443,7 @@ async def test_an_app_of_your_own_keeps_its_plugins_and_gets_this_packages_tools
     assert requests == ["mine", "mine", "mine"]
 
 
-def asking(agent: Any = None, **options: Any) -> Callable[..., Awaitable[Any]]:
+def asking(agent: Any = None, backend: Any = None, **options: Any) -> Callable[..., Awaitable[Any]]:
     """Return how to ask, in process, an object whose handler answers with ``adk.prompt`` (in one backend)."""
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
     from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
@@ -439,12 +459,13 @@ def asking(agent: Any = None, **options: Any) -> Callable[..., Awaitable[Any]]:
     async def ask(ctx: sessions.SessionContext, text: str) -> str:
         return await adk.prompt(ctx, text, **options)
 
-    backend = Backend()
+    backend = backend or Backend()
 
     async def asked(text: str, invocation: Any = None) -> Any:
         host = Host(backend, service="asker", answers={"publish": b"null"})
         return await invoke(asker, "ask", host, invocation or request(), text)
 
+    asked.backend = backend  # type: ignore[attr-defined]
     return asked
 
 
@@ -510,8 +531,84 @@ async def test_a_workflows_first_step_stored_before_a_crash_is_not_its_answer(mo
     assert await ask("system x", invocation) == "system: Step two."
 
 
-async def test_the_built_in_agent_compacts_a_long_conversation():
-    from restate.agents.adk._agent import COMPACT_EVERY  # pylint: disable=import-outside-toplevel
+async def test_a_workflow_nodes_first_step_stored_before_a_crash_is_not_its_answer(monkeypatch: pytest.MonkeyPatch):
+    from google.adk.apps import App  # pylint: disable=import-outside-toplevel
+    from google.adk.workflow import Workflow  # pylint: disable=import-outside-toplevel
+    from sessions_object import request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents.adk import _agent  # pylint: disable=import-outside-toplevel
+
+    append_event = _agent._Sessions.append_event  # pyright: ignore[reportPrivateUsage]
+    crashed: list[bool] = []
+
+    async def crash_after_the_first_step(self: Any, session: Any, event: Any) -> Any:
+        stored = await append_event(self, session, event)
+        if event.author == "first" and final_response(event) and not crashed:
+            crashed.append(True)
+            raise RuntimeError("the process crashed after the first step")
+        return stored
+
+    monkeypatch.setattr(_agent._Sessions, "append_event", crash_after_the_first_step)  # pyright: ignore[reportPrivateUsage]
+    first = LlmAgent(name="first", model=Scripted(), instruction="Step one.")
+    second = LlmAgent(name="second", model=Scripted(), instruction="Step two.")
+    # The root of an App may be a node of ADK's that is no agent: a Workflow, whose steps take the previous output.
+    pipeline = App(name="pipeline", root_agent=Workflow(name="pipeline", edges=[("START", first, second)]))
+    ask, invocation = asking(pipeline), request()
+    with pytest.raises(RuntimeError, match="crashed after the first step"):
+        await ask("system x", invocation)
+    # The retry goes on with the second step, whose response is the answer.
+    assert await ask("system x", invocation) == "echo: system: Step one."
+
+
+async def test_a_workflow_nodes_last_step_stored_before_a_crash_is_its_answer(monkeypatch: pytest.MonkeyPatch):
+    from google.adk.apps import App  # pylint: disable=import-outside-toplevel
+    from google.adk.workflow import Workflow  # pylint: disable=import-outside-toplevel
+    from sessions_object import request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents.adk import _agent  # pylint: disable=import-outside-toplevel
+
+    append_event = _agent._Sessions.append_event  # pyright: ignore[reportPrivateUsage]
+    crashed: list[bool] = []
+
+    async def crash_after_the_last_step(self: Any, session: Any, event: Any) -> Any:
+        stored = await append_event(self, session, event)
+        if event.author == "second" and final_response(event) and not crashed:
+            crashed.append(True)
+            raise RuntimeError("the process crashed after the last step")
+        return stored
+
+    monkeypatch.setattr(_agent._Sessions, "append_event", crash_after_the_last_step)  # pyright: ignore[reportPrivateUsage]
+    first = LlmAgent(name="first", model=Scripted(), instruction="Step one.")
+    second = LlmAgent(name="second", model=Scripted(), instruction="Step two.")
+    pipeline = App(name="pipeline", root_agent=Workflow(name="pipeline", edges=[("START", first, second)]))
+    ask, invocation = asking(pipeline), request()
+    with pytest.raises(RuntimeError, match="crashed after the last step"):
+        await ask("system x", invocation)
+    # The workflow had stored its last step's response, but not the root's end: that response is the answer.
+    assert await ask("system x", invocation) == "echo: system: Step one."
+
+
+async def test_an_agent_that_adk_retries_after_a_tools_error_answers_once_it_recovers():
+    from google.adk.workflow import RetryConfig  # pylint: disable=import-outside-toplevel
+
+    # ADK runs the agent again, in the same attempt: the tool's error, which it reports first, does not fail the turn.
+    retried = RetryConfig(max_attempts=2, initial_delay=0.01, jitter=0)
+    mine = LlmAgent(name="mine", model=Scripted(), tools=adk.tools([flaky]), retry_config=retried)
+    k = key()
+    assert await asking(mine)(f"crash {k}") == f"tool said: recovered in {k}"
+    assert crashes[k] == 2
+
+
+async def test_an_apps_events_compaction_is_off_and_the_conversation_keeps_its_order(
+    caplog: pytest.LogCaptureFixture,
+):
+    from google.adk.apps import App  # pylint: disable=import-outside-toplevel
+    from google.adk.apps.app import EventsCompactionConfig  # pylint: disable=import-outside-toplevel
+    from google.adk.apps.base_events_summarizer import BaseEventsSummarizer  # pylint: disable=import-outside-toplevel
+    from google.adk.events import Event  # pylint: disable=import-outside-toplevel
+    from google.adk.events.event_actions import EventActions, EventCompaction  # pylint: disable=import-outside-toplevel
+
+    from restate.agents.adk import _agent  # pylint: disable=import-outside-toplevel
 
     seen: list[list[types.Content]] = []
 
@@ -523,40 +620,116 @@ async def test_the_built_in_agent_compacts_a_long_conversation():
             async for response in super().generate_content_async(llm_request, stream):
                 yield response
 
-    asked = asking(model=Seeing())
-    for n in range(1, COMPACT_EVERY + 2):
-        assert await asked(f"hi {n}") == f"echo: hi {n}"
-    # After the first COMPACT_EVERY invocations, ADK had the model summarize them (a request of its own) ...
-    summarized = seen[-2]
-    assert len(summarized) == 1 and "hi 1" in str(summarized[0].parts)
-    # ... and the next request has the summary (as ADK shows an event of another author) in place of their events.
-    latest = seen[-1]
-    assert len(latest) == 2
-    assert "said: echo: The following is a conversation history" in str(latest[0].parts)
-    assert latest[-1].parts and latest[-1].parts[0].text == f"hi {COMPACT_EVERY + 1}"
+    class Summarizing(BaseEventsSummarizer):
+        """ADK's events compaction, with a summary of the events it is given."""
+
+        async def maybe_summarize_events(self, *, events: list[Event]) -> Event | None:
+            summary = types.Content(role="model", parts=[types.Part(text=f"a summary of {len(events)} events")])
+            ranged = EventCompaction(
+                start_timestamp=events[0].timestamp, end_timestamp=events[-1].timestamp, compacted_content=summary
+            )
+            return Event(author="user", invocation_id=Event.new_id(), actions=EventActions(compaction=ranged))
+
+    every_turn = EventsCompactionConfig(summarizer=Summarizing(), compaction_interval=1, overlap_size=0)
+    mine = App(name="mine", root_agent=LlmAgent(name="mine", model=Seeing()), events_compaction_config=every_turn)
+    _agent._without_compaction.cache_clear()  # pyright: ignore[reportPrivateUsage]
+    asked = asking(mine)
+    with caplog.at_level("WARNING", logger=_agent.__name__):
+        for n in (1, 2, 3):
+            assert await asked(f"hi {n}") == f"echo: hi {n}"
+        # The built-in agent has no events compaction to turn off.
+        assert await asking(model=Scripted())("hi there") == "echo: hi there"
+    # ADK's compaction would sort the events by time, and put the earlier turn's answer (made as the turn loads)
+    # after the prompt: the model sees the conversation in its order instead.
+    assert [part.text for content in seen[-1] for part in content.parts or []] == [
+        "hi 1",
+        "echo: hi 1",
+        "hi 2",
+        "echo: hi 2",
+        "hi 3",
+    ]
+    # Said once per process.
+    warnings = [record for record in caplog.records if "events_compaction_config" in record.getMessage()]
+    assert len(warnings) == 1
 
 
-class BadRequestError(Exception):
-    """As a model's SDK names a request it refuses: the model's provider refusing, if it ended the turn."""
+async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
+    k = key()
+    for word in ("one", "two", "three", "four", "five"):
+        assert (await chat(harness, k, f"hi {word}", "adk_summarizing")).json() == f"echo: hi {word}"
+    summaries = [_prompts(contents)[-1] for contents in requests if _prompts(contents)[-1].startswith("Summarize")]
+    assert len(summaries) == 1 and "User: hi one" in summaries[0] and "hi four" not in summaries[0]
+    latest = _prompts(requests[-1])
+    assert latest[0].startswith("A summary of our conversation so far:") and latest[1:] == ["hi four", "hi five"]
+    # The summary is a message of the user's, which the model acknowledges: the roles alternate, as every provider takes them.
+    said = [(content.role, "".join(part.text or "" for part in content.parts or [])) for content in requests[-1]]
+    assert [role for role, _ in said] == ["user", "model", "user", "model", "user"]
+    assert said[1] == ("model", "Understood.")
 
 
-async def test_a_compaction_that_fails_leaves_the_turn_answered():
-    from restate.agents.adk._agent import COMPACT_EVERY  # pylint: disable=import-outside-toplevel
+async def test_the_state_a_killed_turn_set_holds_after_it_ended():
+    from google.adk.tools.tool_context import ToolContext  # pylint: disable=import-outside-toplevel
 
-    summaries: list[str] = []
+    def get_weather(city: str, tool_context: ToolContext) -> str:  # pylint: disable=redefined-outer-name
+        """Remember the city."""
+        tool_context.state["city"] = city
+        return "noted"
 
-    class NoSummaries(Scripted):
+    class Dying(Scripted):
+        """Gone after the tool's result is stored, as a killed invocation is."""
+
         async def generate_content_async(
             self, llm_request: LlmRequest, stream: bool = False
         ) -> AsyncGenerator[LlmResponse, None]:
-            if "The following is a conversation history" in str(llm_request.contents):
-                summaries.append("refused")
-                raise BadRequestError("the summary's request is refused")
+            if any(part.function_response for part in llm_request.contents[-1].parts or []):
+                raise RuntimeError("the invocation is gone")
             async for response in super().generate_content_async(llm_request, stream):
                 yield response
 
-    asked = asking(model=NoSummaries())
-    for n in range(1, COMPACT_EVERY + 2):
-        assert await asked(f"hi {n}") == f"echo: hi {n}"
-    # ADK tried to compact after the last two turns, which were answered all the same.
-    assert summaries == ["refused", "refused"]
+    dying = LlmAgent(name="mine", model=Dying(), instruction="City: {city?}", tools=[get_weather])
+    mine = LlmAgent(name="mine", model=Scripted(), instruction="City: {city?}", tools=[get_weather])
+    backend_asked = asking(dying)
+    assert await backend_asked("hi 0") == "echo: hi 0"
+    with pytest.raises(RuntimeError, match="gone"):
+        await backend_asked("weather Lisbon")
+    # Another invocation ends the killed turn, and the city its tool stored holds.
+    asked = asking(mine, backend=backend_asked.backend)  # type: ignore[attr-defined]
+    assert await asked("hi 2") == "echo: hi 2"
+    assert await asked("system x") == "system: City: Lisbon"
+
+
+async def test_earlier_turns_are_their_messages_and_answers():
+    seen: list[list[types.Content]] = []
+
+    class Seeing(Scripted):
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            seen.append(list(llm_request.contents))
+            async for response in super().generate_content_async(llm_request, stream):
+                yield response
+
+    asked = asking(model=Seeing(), tools=[get_weather])
+    assert await asked("weather Lisbon") == "tool said: sunny in Lisbon"
+    assert await asked("hi 2") == "echo: hi 2"
+    assert await asked("hi 3") == "echo: hi 3"
+    # The first turn is its message and answer; the previous one is whole (here, the same); then the prompt.
+    texts = [part.text for content in seen[-1] for part in content.parts or []]
+    assert texts == ["weather Lisbon", "tool said: sunny in Lisbon", "hi 2", "echo: hi 2", "hi 3"]
+
+
+async def test_the_session_state_holds_across_turns_that_are_not_loaded():
+    from google.adk.tools.tool_context import ToolContext  # pylint: disable=import-outside-toplevel
+
+    def get_weather(city: str, tool_context: ToolContext) -> str:  # pylint: disable=redefined-outer-name
+        """Remember the city."""
+        tool_context.state["city"] = city
+        return "noted"
+
+    mine = LlmAgent(name="mine", model=Scripted(), instruction="City: {city?}", tools=[get_weather])
+    asked = asking(mine)
+    assert await asked("weather Lisbon") == "tool said: noted"
+    assert await asked("hi 2") == "echo: hi 2"
+    assert await asked("hi 3") == "echo: hi 3"
+    # The first turn's events are not loaded any more: its state is, as the latest turn carried it.
+    assert await asked("system x") == "system: City: Lisbon"

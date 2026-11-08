@@ -48,7 +48,7 @@ agent = AgentObject("keyed")
 
 async def answer(ctx: sessions.SessionContext, text: str) -> str:
     async def run(conversation: Conversation) -> str:
-        await conversation.append_reply({"role": "assistant", "text": ctx.key})
+        await conversation.turn.append_reply({"role": "assistant", "text": ctx.key})
         return ctx.key
 
     return await answer_once(ctx, text, ITEMS, run)

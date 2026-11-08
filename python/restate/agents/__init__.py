@@ -68,6 +68,7 @@ the ``client`` extra (``pip install "restate-sdk[client]"``).
 """
 
 from restate.agents._api import (
+    Answering,
     ChatMessage,
     Messages,
     MessagesRequest,
@@ -79,7 +80,7 @@ from restate.agents._api import (
     Stopped,
     TextPart,
     ToolPart,
-    Turn,
+    View,
     Waiting,
     Watch,
 )
@@ -91,6 +92,7 @@ from restate.agents._webhook import Event, webhook, webhook_message
 __all__ = [
     "AgentObject",
     "AgentOptions",
+    "Answering",
     "ChatMessage",
     "Event",
     "Messages",
@@ -108,7 +110,7 @@ __all__ = [
     "Tool",
     "ToolCall",
     "ToolPart",
-    "Turn",
+    "View",
     "Waiting",
     "Watch",
     "call",

@@ -32,6 +32,10 @@ start, and the run resumes from the last step stored:
   turn that reaches it ends for good, with a terminal error: a retry would
   carry on from where it stopped, with a fresh limit, and so would never end
   a model that keeps calling tools.
+- The model sees the earlier turns as their messages and answers, and the
+  latest turns whole (the agent's ``window``), as many as its ``budget``
+  holds; the built-in agent has its model summarize the earliest once they
+  outgrow it, after a turn's answer (``_conversation.py``).
 - The model sees the latest messages of a conversation that lives long: as
   many as fit in ``WINDOW`` of its context window, by LangChain's
   ``trim_messages`` (starting with a prompt, counted by
@@ -43,7 +47,9 @@ start, and the run resumes from the last step stored:
   LangChain's ``SummarizationMiddleware``.
 
 For a graph of your own, ``SqlCheckpointSaver`` stores LangGraph's checkpoints
-in the object's database instead.
+in the object's database instead. Its state is the graph's own: its models
+read the state, which the agent's ``window``, ``budget`` and summaries do not
+reach, and which grows unless the graph trims it (``_graph.py`` shows how).
 """
 
 from __future__ import annotations
@@ -76,8 +82,10 @@ from pydantic import BaseModel, PrivateAttr
 
 from restate.agents._common import (
     MODEL_ENV,
+    Check,
     ModelError,
     PerSession,
+    Summarize,
     check_built_in,
     check_own,
     configured,
@@ -89,7 +97,7 @@ from restate.agents._conversation import Call, Conversation, Item, Parsed, Resul
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with, asking
 from restate.agents._tools import Tool, ToolCall
-from restate.agents._turn import tool_call_ended, tool_call_started
+from restate.agents._turn import settings_of, tool_call_ended, tool_call_started
 from restate.agents.langgraph._context import handler_context
 from restate.agents.langgraph._errors import terminal_of
 from restate.agents.langgraph._graph import AnyGraph, check, run_of
@@ -236,7 +244,7 @@ class _Items:
     def prompt(self, text: str) -> Item:
         return HumanMessage(text)
 
-    def reply(self, text: str) -> Item:
+    def reply(self, text: str, agent: str | None = None) -> Item:
         return AIMessage(text)
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
@@ -272,13 +280,10 @@ def _window(model: BaseChatModel) -> int | None:
     """Return how many tokens of the conversation ``model`` sees: ``WINDOW`` of its context window, if its profile has it.
 
     LangChain's integrations give their chat models a profile, for the models
-    they know (``langchain-core`` 1.1 and later); one without it sees all of
-    the conversation.
+    they know; one without it sees all of the conversation.
     """
-    # A ModelProfile (a TypedDict) where langchain-core has one, which older versions do not.
-    profile = typing.cast(dict[str, object] | None, getattr(model, "profile", None))
-    limit = profile.get("max_input_tokens") if isinstance(profile, dict) else None
-    return int(limit * WINDOW) if isinstance(limit, int) and limit > 0 else None
+    limit = model.profile.get("max_input_tokens") if model.profile is not None else None
+    return int(limit * WINDOW) if limit is not None and limit > 0 else None
 
 
 def _latest(messages: Sequence[BaseMessage], window: int | None) -> list[BaseMessage]:
@@ -318,7 +323,7 @@ def _graph(
     async def call_model(state: State) -> dict[str, Any]:
         messages = _latest(state["messages"], window)
         reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
-        await conversation.append_reply(reply)
+        await conversation.turn.append_reply(reply)
         return {"messages": [reply]}
 
     async def run_tools(state: State, config: RunnableConfig) -> Any:
@@ -329,12 +334,12 @@ def _graph(
             # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
             from_tool(ctx, error)
             raise
-        await conversation.append(*_tool_messages(ran))
+        await conversation.turn.append(*_tool_messages(ran))
         await tool_call_ended(ctx)
         return ran
 
     def start(state: State) -> str:
-        return "tools" if conversation.unanswered() else "model"
+        return "tools" if conversation.turn.open_calls() else "model"
 
     graph = StateGraph(State)
     graph.add_node("model", call_model)
@@ -351,10 +356,10 @@ def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given
     tools = [_native(t, ctx) if isinstance(t, Tool) else t for t in given]
 
     async def run(conversation: Conversation) -> str:
-        if (final := conversation.final_reply()) is not None:
+        if (final := conversation.turn.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
-        messages = typing.cast(list[BaseMessage], [entry.item for entry in conversation.entries])
+        messages = typing.cast(list[BaseMessage], conversation.history())
         graph = _graph(ctx, conversation, chat_model, tools, system)
         try:
             state = typing.cast(State, await graph.ainvoke({"messages": messages}))
@@ -470,17 +475,20 @@ async def prompt(
         check_own(graph, "graph", model=model, system=system, tools=tools)
         check(graph)
         run = run_of(ctx, graph, context)
+        # The graph's run reads the previous turn whole, to give the graph what closed it (see ``_closing``).
+        window = settings_of(ctx).window
+        whole = window if window == "all" else max(window, 1)
 
-        def ask(text: str) -> Awaitable[str]:
-            return answer_once(ctx, text, ITEMS, run)
+        def ask(text: str, check: Check | None = None) -> Awaitable[str]:
+            return answer_once(ctx, text, ITEMS, run, whole, check=check)
 
     else:
         check_built_in(graph, "graph", context=context)
         # Without a way to ask for ``output`` natively with any provider's model, the system prompt asks for it.
         asked = system if output is None else asking(system, output)
 
-        def ask(text: str) -> Awaitable[str]:
-            return answer_once(ctx, text, ITEMS, _run(ctx, model, asked, tools))
+        def ask(text: str, check: Check | None = None) -> Awaitable[str]:
+            return answer_once(ctx, text, ITEMS, _run(ctx, model, asked, tools), check=check)
 
     if output is None:
         return await ask(text)
@@ -602,8 +610,19 @@ def agent(
             output=output,
         )
 
-    obj.chat(answer, items=ITEMS, output=output)
+    obj.chat(answer, items=ITEMS, output=output, summarize=_summarizer(model))
     return obj
+
+
+def _summarizer(model: PerSession[ChatModel | None]) -> Summarize:
+    """Return how the built-in agent summarizes its earlier turns: with its own model, in a request of its own."""
+
+    async def summarize(ctx: SessionContext, request: str) -> str:
+        chosen = await configured(model, ctx)
+        chat_model = chosen if isinstance(chosen, BaseChatModel) else _chat_model(model_of(chosen))
+        return _text(await chat_model.ainvoke([HumanMessage(request)]))
+
+    return summarize
 
 
 def _graph_agent(

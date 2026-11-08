@@ -175,9 +175,31 @@ per_user = langgraph.agent(
 )
 
 
+summarized_prompts: list[list[str]] = []
+"""The prompts of each request of the agent with a small budget."""
+
+
+class Remembering(Scripted):
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        summarized_prompts.append([str(m.content) for m in messages if isinstance(m, HumanMessage)])
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+summarizing = langgraph.agent("lg_summarizing", model=Remembering(), budget=10)
+"""An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
+
+
 @pytest.fixture(scope="session")
 async def harness():
-    async with restate.create_test_harness(restate.app([assistant, per_user]), restate_image=RESTATE_IMAGE) as harness:
+    async with restate.create_test_harness(
+        restate.app([assistant, per_user, summarizing]), restate_image=RESTATE_IMAGE
+    ) as harness:
         yield harness
 
 
@@ -371,8 +393,6 @@ def asking(**options: Any) -> Callable[..., Awaitable[Any]]:
 
 
 async def test_the_built_in_agent_sees_the_latest_messages_that_fit_in_its_context_window():
-    if "profile" not in BaseChatModel.model_fields:
-        pytest.skip("chat models have a profile since langchain-core 1.1")
     seen: list[list[BaseMessage]] = []
 
     class Seeing(Scripted):
@@ -418,21 +438,21 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
     from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
 
-    from restate.agents._conversation import Conversation  # pylint: disable=import-outside-toplevel
+    from restate.agents._conversation import Turn  # pylint: disable=import-outside-toplevel
     from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
 
     k = key()
-    stored = Conversation.append_reply
+    stored = Turn.append_reply
     crashed: list[bool] = []
 
-    async def store_then_crash_once(self: Conversation, *items: Any, **kwargs: Any) -> Any:
+    async def store_then_crash_once(self: Turn, *items: Any, **kwargs: Any) -> Any:
         result = await stored(self, *items, **kwargs)
         if not crashed and not any(getattr(item, "tool_calls", None) for item in items):
             crashed.append(True)
             raise RuntimeError("the process crashed after storing the answer")
         return result
 
-    monkeypatch.setattr(Conversation, "append_reply", store_then_crash_once)
+    monkeypatch.setattr(Turn, "append_reply", store_then_crash_once)
     asker = sessions.SessionObject("lg_asker")
 
     @asker.handler
@@ -445,3 +465,17 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatc
     # The retry (the same invocation) returns the answer that was stored, without asking the model again.
     assert await invoke(asker, "ask", Host(backend, service="lg_asker"), invocation, f"hi {k}") == f"echo: hi {k}"
     assert asked[k] == 1
+
+
+async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
+    k = key()
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        for word in ("one", "two", "three", "four", "five"):
+            answer = await ingress.post(
+                f"{harness.ingress_url}/lg_summarizing/{k}/chat", content=f"hi {word}", headers=TEXT
+            )
+            assert answer.json() == f"echo: hi {word}"
+    summaries = [prompts[-1] for prompts in summarized_prompts if prompts[-1].startswith("Summarize")]
+    assert len(summaries) == 1 and "User: hi one" in summaries[0] and "hi four" not in summaries[0]
+    latest = summarized_prompts[-1]
+    assert latest[0].startswith("A summary of our conversation so far:") and latest[1:] == ["hi four", "hi five"]

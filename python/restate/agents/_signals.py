@@ -33,7 +33,7 @@ from typing import Any, TypedDict
 
 import restate
 from restate import ObjectContext, ObjectSharedContext, TerminalError
-from restate.agents._api import Notifications, Resolved, Signal, Status, Turn, Waiting, Watch
+from restate.agents._api import Answering, Notifications, Resolved, Signal, Status, Waiting, Watch
 from restate.sessions import SessionContext, ViewContext
 from restate.sessions._link import Link
 from restate.sessions.internal import definition_of
@@ -87,6 +87,20 @@ class _Watching(TypedDict):
 Context = ObjectContext | ObjectSharedContext
 
 
+class Started(Answering, total=False):
+    """A turn as its agent starts it: and whether the agent closes it itself once its invocation is gone."""
+
+    settles: bool
+    """Whether the agent has the private ``settle`` handler, which the companion sends a turn whose invocation is
+    gone. An agent of another SDK, whose turns this companion may hold too (its handler names are shared), does
+    not say so, and is sent nothing: its next message closes such a turn."""
+
+
+def _shown(turn: Started | None) -> Answering | None:
+    """Return ``turn`` as ``status`` shows it: without what only the companion reads."""
+    return None if turn is None else {"invocationId": turn["invocationId"], "since": turn["since"]}
+
+
 async def _get(ctx: Context, key: str, default: T) -> T:
     """Return the state ``key``, or ``default`` if it is unset."""
     value = await ctx.get(key, type_hint=object)
@@ -118,17 +132,24 @@ async def _publish(ctx: ObjectContext) -> Notifications:
     return notified
 
 
-async def _closed(ctx: ObjectContext, turn: str) -> None:
+async def _closed(ctx: ObjectContext, turn: str, gone: bool = False) -> None:
     """Close ``turn`` (an invocation id): forget it and its tools' waits, and publish the change.
 
     The waits are rejected, which ends their ``wait`` calls. A turn that ends
     normally has no waits left, but a killed one can leave some behind.
     Closing a turn twice changes nothing and publishes nothing.
+
+    If the turn's invocation is ``gone`` and the turn did not close itself, the
+    agent is sent ``settle``, which closes the turn in its conversation too: if
+    it said it has that handler as it started the turn.
     """
-    answering = await _get(ctx, "turn", typing.cast(Turn | None, None))
+    answering = await _get(ctx, "turn", typing.cast(Started | None, None))
     is_answered = answering is not None and answering["invocationId"] == turn
     if is_answered:
         ctx.clear("turn")
+        if gone and typing.cast(Started, answering).get("settles", False):
+            agent, key = ctx.key().split(":", 1)
+            ctx.generic_send(agent, "settle", json.dumps(turn).encode(), key=key)
     waiting = await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))
     # A wait's id starts with the invocation id of the turn whose tool waits.
     over = [wait for wait in waiting if wait["id"].startswith(f"{turn}:")]
@@ -202,7 +223,7 @@ async def listen(ctx: ObjectContext, waiting: _WaitingOn) -> None:
 
 
 @signals.handler(ingress_private=True)
-async def start(ctx: ObjectContext, turn: Turn) -> None:
+async def start(ctx: ObjectContext, turn: Started) -> None:
     """Record that the agent's ``chat`` started answering ``turn``.
 
     A retry of the same invocation keeps the original start time. A previous
@@ -210,11 +231,11 @@ async def start(ctx: ObjectContext, turn: Turn) -> None:
     closed now. ``awaitTurn`` then watches the new turn, so that it is closed
     even if no other turn follows it.
     """
-    before = await _get(ctx, "turn", typing.cast(Turn | None, None))
+    before = await _get(ctx, "turn", typing.cast(Started | None, None))
     if before is not None and before["invocationId"] == turn["invocationId"]:
         return
     if before is not None:
-        await _closed(ctx, before["invocationId"])
+        await _closed(ctx, before["invocationId"], gone=True)
     ctx.set("turn", turn)
     ctx.object_send(await_turn, ctx.key(), turn["invocationId"])
 
@@ -246,9 +267,9 @@ async def await_turn(ctx: ObjectSharedContext, turn: str) -> None:
         try:
             await attached
         except TerminalError:
-            ctx.object_send(close, ctx.key(), turn)
+            ctx.object_send(ended, ctx.key(), turn)
         return
-    answering = await _get(ctx, "turn", typing.cast(Turn | None, None))
+    answering = await _get(ctx, "turn", typing.cast(Answering | None, None))
     if answering is not None and answering["invocationId"] == turn:
         ctx.object_send(await_turn, ctx.key(), turn)
 
@@ -257,7 +278,7 @@ async def await_turn(ctx: ObjectSharedContext, turn: str) -> None:
 async def status(ctx: ObjectSharedContext) -> Status:
     """Return what the agent is doing: the message it is answering, if any, and its tools' waits."""
     return {
-        "answering": await _get(ctx, "turn", typing.cast(Turn | None, None)),
+        "answering": _shown(await _get(ctx, "turn", typing.cast(Started | None, None))),
         "waiting": [_public(wait) for wait in await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))],
     }
 
@@ -286,6 +307,12 @@ async def watch(ctx: ObjectSharedContext, request: Watch) -> Notifications:
 async def close(ctx: ObjectContext, turn: str) -> None:
     """Close ``turn`` (an invocation id), which has been answered or ended otherwise."""
     await _closed(ctx, turn)
+
+
+@signals.handler(ingress_private=True)
+async def ended(ctx: ObjectContext, turn: str) -> None:
+    """Close ``turn`` (an invocation id), which failed: if it did not close itself, the agent closes it too."""
+    await _closed(ctx, turn, gone=True)
 
 
 @signals.handler(ingress_private=True)

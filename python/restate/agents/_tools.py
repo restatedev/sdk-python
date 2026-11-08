@@ -27,6 +27,7 @@ imported when the tool is created. Each framework extra installs it.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import inspect
@@ -163,6 +164,12 @@ class Tool:
             # cancelled).
             stop = stop_signal_of(call.ctx)
             if stop is not None and stop.reason is not None:
+                task = asyncio.current_task()
+                if isinstance(error, asyncio.CancelledError) and task is not None and task.cancelling():
+                    # Its own task is being cancelled (by the framework, as the turn stopped): it ends as
+                    # cancelled, since a framework that cancels a task and waits for it (ADK's runner) expects
+                    # nothing else. The turn still stops with its reason, from the stop signal.
+                    raise
                 raise stop.reason from error
             if isinstance(error, TerminalError):
                 # A terminal error is the tool's result, which the model can act on.
@@ -293,13 +300,22 @@ def tool(
 # --- The tools that are Restate itself ------------------------------------------------------------
 
 
-async def _once(name: str, input: object, call: ToolCall, body: Callable[[ToolCall], Awaitable[T]]) -> T:
+async def _once(
+    name: str,
+    input: object,
+    call: ToolCall,
+    body: Callable[[ToolCall], Awaitable[T]],
+    *,
+    rejoin: bool = True,
+    approval: bool = False,
+) -> T:
     """Run ``body``, a Restate call of tool ``name``, so that it is made once however often the tool call runs.
 
     ``body`` gets the id under which the call was first made, possibly by an
-    earlier attempt, and so the same idempotency key (see ``_calls.py``).
+    earlier attempt, and so the same idempotency key (see ``_calls.py``);
+    ``rejoin`` and ``approval`` are ``call_of``'s.
     """
-    made = await call_of(call.ctx, name, input, call.call_id)
+    made = await call_of(call.ctx, name, input, call.call_id, rejoin=rejoin, approval=approval)
     try:
         result = await body(ToolCall(call.ctx, made.id))
     except TerminalError as error:
@@ -642,14 +658,7 @@ def wait_for_signal(signal: str, *, description: str, input: Any = None, name: s
     shape = _input_of(input, None)
 
     async def run(arguments: dict[str, Any], tool_call: ToolCall) -> Any:
-        async def made(c: ToolCall) -> Any:
-            wait_id = c.idempotency_key
-            request: _signals.WaitRequest = {"id": wait_id, "name": signal}
-            if input is not None:
-                request["input"] = arguments["raw"]
-            return await c.ctx.call(_signals.wait, request, key=_signals.signals_of(c.ctx), idempotency_key=wait_id)
-
-        return await _once(f"signal/{signal}", arguments["raw"], tool_call, made)
+        return await _wait(tool_call, signal, arguments["raw"], shown=input is not None)
 
     return Tool(
         name=name or f"wait_for_{signal}",
@@ -658,3 +667,50 @@ def wait_for_signal(signal: str, *, description: str, input: Any = None, name: s
         _run=run,
         _validate=lambda args: _split(shape, args),
     )
+
+
+async def _wait(
+    call: ToolCall, signal: str, input: object, *, shown: bool, rejoin: bool = True, approval: bool = False
+) -> Any:
+    """Wait for signal ``signal`` as tool call ``call``, once however often it runs; ``pending`` shows ``input`` if
+    ``shown``. ``rejoin`` and ``approval`` are ``call_of``'s."""
+
+    async def made(c: ToolCall) -> Any:
+        wait_id = c.idempotency_key
+        request: _signals.WaitRequest = {"id": wait_id, "name": signal}
+        if shown:
+            request["input"] = input
+        return await c.ctx.call(_signals.wait, request, key=_signals.signals_of(c.ctx), idempotency_key=wait_id)
+
+    return await _once(f"signal/{signal}", input, call, made, rejoin=rejoin, approval=approval)
+
+
+async def wait_for(ctx: SessionContext, call_id: str, signal: str, input: Any = None, *, approval: bool = False) -> Any:
+    """Wait for signal ``signal`` to the agent, for the model's tool call ``call_id``, and return its value.
+
+    It is what a ``wait_for_signal`` tool does, for a framework whose own
+    tool calls wait for something outside (Pydantic AI's deferred tool
+    calls, say): the wait's id is ``<invocation id>:<call id>``, the agent's
+    ``pending`` view lists it, and its ``signal`` view resolves it. The wait
+    is opened once however often the tool call runs, and a crash carries on
+    waiting on the same one.
+
+    The wait is the tool call's alone: the framework stores its tool call
+    before it waits, so a retried attempt waits again under the same id. A
+    new call with the same input (the model asking again, after the first's
+    answer) waits anew, as its answer is not the earlier call's.
+
+    Args:
+        ctx: The agent's context.
+        call_id: The id of the model's tool call.
+        signal: The signal's name.
+        input: What the call waits for (the tool call's arguments, say), as JSON, which ``pending`` shows; None
+            to show nothing.
+        approval: Whether the tool call runs only after the wait (an approval), so that the wait's returning is
+            not the call's: a turn stopped before the call's result is stored reports the call as not done,
+            rather than as done.
+
+    Returns:
+        The value the signal resolves the wait with.
+    """
+    return await _wait(ToolCall(ctx, call_id), signal, input, shown=input is not None, rejoin=False, approval=approval)

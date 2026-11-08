@@ -68,6 +68,15 @@ class ChatMessage(Said):
     """The message's id, which increases through the conversation and stays the same when the message changes."""
 
 
+View = Literal["full", "summary"]
+"""How much of each turn the ``messages`` view shows.
+
+``"full"``: every message, the tool calls with their outputs. ``"summary"``:
+the user's message and the answer, one each per turn, with the same ids as in
+the full view.
+"""
+
+
 class MessagesRequest(TypedDict, total=False):
     """The request of the ``messages`` view.
 
@@ -81,6 +90,8 @@ class MessagesRequest(TypedDict, total=False):
     """Return the messages before the one with this ``id``, for scrolling back."""
     cursor: int
     """Return the messages that are new or changed since this cursor, in the order they changed."""
+    view: View
+    """How much of each turn to show: ``"full"`` (the default) or ``"summary"``."""
 
 
 class _Messages(TypedDict):
@@ -105,8 +116,12 @@ class Messages(_Messages, total=False):
     """The id of the first message after the conversation was cleared; a client drops the messages it kept from before."""
 
 
-class Turn(TypedDict):
-    """The message a ``chat`` handler is answering: its invocation and when it started."""
+class Answering(TypedDict):
+    """The message a ``chat`` handler is answering: its invocation and when it started.
+
+    Its wire format is shared with Restate's other SDKs. The conversation's turns (one per prompt) are
+    ``restate.agents.internal.Turn``; an invocation of a handler of your own can hold several.
+    """
 
     invocationId: str
     """The invocation's id; ``/restate/invocation/<id>/attach`` waits for its answer."""
@@ -180,7 +195,7 @@ class Watch(_Watch, total=False):
 class Status(TypedDict):
     """What an agent is doing: the message it is answering, if any, and what its tools wait for, oldest first."""
 
-    answering: Turn | None
+    answering: Answering | None
     waiting: list[Waiting]
 
 

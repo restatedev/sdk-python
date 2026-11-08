@@ -28,8 +28,7 @@ For example::
 
 ``agent`` creates an agent, and ``prompt`` answers a prompt from a handler of
 your own. Either takes the common options of a built-in agent (``model``,
-``system``, ``tools``), which compacts a long conversation with its
-provider's compaction, or an ``Agent`` of your own, configured as Pydantic
+``system``, ``tools``), or an ``Agent`` of your own, configured as Pydantic
 AI does (capabilities, instructions functions, history processors...), with
 its runs' ``deps`` and ``usage_limits``::
 
@@ -37,7 +36,17 @@ its runs' ``deps`` and ``usage_limits``::
     desk = pydantic_ai.agent("desk", agent=mine)
 
 ``toolset`` gives an ``Agent`` of your own this package's tools. The
-conversation is stored one step at a time.
+conversation is stored one step at a time, and the model gets it since the
+latest compaction, whole: Pydantic AI Harness's ``TieredCompaction``
+(``compaction``) unless your ``Agent`` has a compaction of its own. A tool
+call that needs an approval (``requires_approval``) or a result from outside
+waits for a signal (``APPROVAL``, or the tool's name). ``plan_store``,
+``overflow_store`` and ``history_source`` give the harness's ``Planning``,
+``ToolOutputLimits`` and ``ConversationSearch`` the key's database, and
+``memory`` and ``memory_store`` keep ``Memory`` on a session object of its own,
+across conversations::
+
+    mine = Agent(model, capabilities=[Planning(store=pydantic_ai.plan_store())])
 
 This differs from the older ``restate.ext.pydantic`` integration, whose
 ``RestateAgent`` wraps a Pydantic AI ``Agent`` so that it runs durably inside
@@ -48,19 +57,49 @@ services; pick this module for a ready-made agent per key, whose conversation
 lives in a database and which comes with built-in handlers to chat, read the
 conversation, watch its progress and stop a turn.
 
-Install the ``pydantic_ai`` extra (``pip install restate-sdk[pydantic_ai]``).
+Install the ``pydantic_ai`` extra (``pip install restate-sdk[pydantic_ai]``),
+which brings Pydantic AI Harness.
 Each model provider also needs Pydantic AI's extra for it, such as
 ``pydantic-ai-slim[openai]`` for ``openai/...`` models. Alternatively, pass
 any Pydantic AI model as ``model``.
 """
 
 try:
+    import pydantic_ai_harness  # noqa: F401  # pyright: ignore[reportUnusedImport]
+
     import pydantic_ai  # noqa: F401  # pyright: ignore[reportUnusedImport]
 except ImportError as error:
     raise ImportError(
-        "restate.agents.pydantic_ai needs Pydantic AI: install the pydantic_ai extra, pip install restate-sdk[pydantic_ai]"
+        "restate.agents.pydantic_ai needs Pydantic AI and Pydantic AI Harness: install the pydantic_ai extra, "
+        "pip install restate-sdk[pydantic_ai]"
     ) from error
 
-from restate.agents.pydantic_ai._agent import AnyModel, AnyTool, agent, prompt, toolset
+from restate.agents.pydantic_ai._agent import (
+    APPROVAL,
+    AnyModel,
+    AnyTool,
+    agent,
+    approval_of,
+    compaction,
+    history_source,
+    prompt,
+    toolset,
+)
+from restate.agents.pydantic_ai._memory import memory, memory_store
+from restate.agents.pydantic_ai._stores import overflow_store, plan_store
 
-__all__ = ["AnyModel", "AnyTool", "agent", "prompt", "toolset"]
+__all__ = [
+    "APPROVAL",
+    "AnyModel",
+    "AnyTool",
+    "agent",
+    "approval_of",
+    "compaction",
+    "history_source",
+    "memory",
+    "memory_store",
+    "overflow_store",
+    "plan_store",
+    "prompt",
+    "toolset",
+]

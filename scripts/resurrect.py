@@ -43,7 +43,12 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 AGENTS = "python/restate/agents"
 
 OPENAI = ("tests/agents_openai.py", "tests/agents_output.py")
-PYDANTIC_AI = ("tests/agents_pydantic_ai.py", "tests/agents_output.py")
+PYDANTIC_AI = (
+    "tests/agents_pydantic_ai.py",
+    "tests/agents_pydantic_ai_snapshots.py",
+    "tests/agents_pydantic_ai_stores.py",
+    "tests/agents_output.py",
+)
 LANGGRAPH = (
     "tests/agents_langgraph.py",
     "tests/agents_langgraph_graph.py",
@@ -62,6 +67,8 @@ EVERY_FRAMEWORK = (
     "tests/agents_langgraph_graph.py",
 )
 OBJECT = ("tests/agents_object.py", "tests/agents_signals.py")
+SNAPSHOTS = ("tests/agents_snapshots.py", "tests/agents_pydantic_ai_snapshots.py")
+WAITS = (*EVERY_FRAMEWORK, "tests/agents_snapshots.py")
 
 # The tests that each fix commit added: a bug's own regression tests.
 OWN: dict[str, tuple[str, ...]] = {
@@ -84,11 +91,7 @@ OWN: dict[str, tuple[str, ...]] = {
         "test_usage_limits_set_a_runs_limit",
         "test_a_tool_whose_retries_run_out_ends_the_turn",
         "test_a_response_that_the_model_could_not_read_is_retried",
-        "test_a_run_stopped_for_a_deferred_tool_call_fails_and_the_call_is_closed",
         "test_an_agent_of_your_own_runs_with_its_own_capabilities",
-        "test_the_built_in_agent_gets_the_compaction_of_its_models_provider",
-        "test_the_built_in_agent_on_anthropic_gets_its_compaction",
-        "test_an_agent_of_your_own_runs_as_configured_with_the_system_prompt_reinjected",
         "test_an_agent_of_your_own_gets_its_deps",
         "test_a_setup_error_of_pydantic_ai_ends_the_turn",
         "test_an_error_of_the_agents_own_code_is_retried_whatever_its_name",
@@ -107,7 +110,7 @@ OWN: dict[str, tuple[str, ...]] = {
         "test_prune_deletes_threads_and_knows_no_other_strategy",
         "test_a_subgraph_paused_and_pruned_resumes_whole_and_each_namespace_keeps_its_latest",
         "test_a_run_paused_below_a_subgraph_with_its_own_history_resumes_after_a_prune",
-        "test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_raised_it",
+        "test_langgraph_gives_each_interrupt_of_a_run_an_id_of_its_own",
         "test_create_agent_has_its_own_context_and_calls_restate_through_the_tools",
         "test_each_interrupt_below_a_node_that_interrupts_itself_waits_for_its_own_signal",
         "test_a_static_breakpoint_in_a_subgraph_fails_the_turn_and_the_next_message_starts_afresh",
@@ -131,6 +134,25 @@ OWN: dict[str, tuple[str, ...]] = {
     "c8ff842": (
         "test_an_openai_model_is_on_the_responses_api_where_reasoning_models_take_tools",
         "test_the_views_without_input_take_a_request_with_a_json_content_type",
+    ),
+    # The fixes from the review of the storage work (docs/agents/learnings.md, "Bugs a review found").
+    "bd06b49": (
+        "test_a_delta_channel_graph_is_pruned_turn_after_turn_until_its_snapshot",
+        "test_a_checkpoint_of_more_than_a_hundred_channels_is_read_back",
+    ),
+    "2657e60": (
+        "test_a_framework_waits_for_a_signal_for_its_own_tool_call_once",
+        "test_a_stopped_turn_does_not_report_a_call_done_because_its_approval_returned",
+        "test_a_stopped_turn_reports_a_call_done_once_the_result_it_waited_for_returned",
+        "test_an_approval_and_the_restate_call_of_its_tool_call_keep_records_of_their_own",
+        "test_a_snapshot_takes_the_place_of_the_earlier_ones",
+    ),
+    "191d096": (
+        "test_a_turn_stopped_after_a_denial_is_stored_does_not_report_the_denied_call_done",
+        "test_a_status_change_that_runs_again_after_some_of_its_writes_makes_the_rest",
+        "test_a_memory_edit_of_a_tool_call_that_runs_again_is_reported_as_made",
+        "test_memory_lists_the_paths_under_a_prefix_in_order_up_to_a_limit",
+        "test_without_pydantic_ai_harness_the_import_names_the_extra",
     ),
     "": (),
 }
@@ -170,7 +192,7 @@ MUTANTS = [
         "openai-approval-run",
         "a run stopped for approvals answers (null), and the next message runs the call",
         f"{AGENTS}/openai/_agent.py",
-        '    if getattr(result, "interruptions", None):',
+        "    if result.interruptions:",
         "    if False:",
         OPENAI,
         "0c7e03a",
@@ -216,8 +238,8 @@ MUTANTS = [
         "openai-tool-timeout",
         "a resumed call bypasses its tool's timeout",
         f"{AGENTS}/openai/_agent.py",
-        "    if _INVOKE is None:\n        return await tool.on_invoke_tool(context, arguments)",
-        "    if True:\n        return await tool.on_invoke_tool(context, arguments)",
+        "    return await invoke_function_tool(function_tool=tool, context=context, arguments=arguments)",
+        "    return await tool.on_invoke_tool(context, arguments)",
         OPENAI,
         "0c7e03a",
     ),
@@ -225,7 +247,7 @@ MUTANTS = [
         "openai-tool-guardrails",
         "a cut-off call to a tool with guardrails is resumed directly, bypassing them",
         f"{AGENTS}/openai/_agent.py",
-        '    return any(getattr(tool, name, None) for name in ("tool_input_guardrails", "tool_output_guardrails"))',
+        "    return bool(tool.tool_input_guardrails or tool.tool_output_guardrails)",
         "    return False",
         OPENAI,
         "0c7e03a",
@@ -235,7 +257,8 @@ MUTANTS = [
         "pydantic-system-prompt",
         "an Agent of your own loses its system prompt on every turn",
         f"{AGENTS}/pydantic_ai/_agent.py",
-        "    if ReinjectSystemPrompt not in have:\n        chosen.append(ReinjectSystemPrompt())",
+        "    if not any(isinstance(capability, ReinjectSystemPrompt) for capability in leaves):\n"
+        "        chosen.append(ReinjectSystemPrompt())",
         "    pass",
         PYDANTIC_AI,
         "2a351ed",
@@ -285,15 +308,9 @@ MUTANTS = [
         PYDANTIC_AI,
         "2a351ed",
     ),
-    Mutant(
-        "pydantic-deferred",
-        "a run stopped for a deferred tool call answers with the requests' repr",
-        f"{AGENTS}/pydantic_ai/_agent.py",
-        "        if isinstance(result.output, DeferredToolRequests):",
-        "        if False:",
-        PYDANTIC_AI,
-        "2a351ed",
-    ),
+    # "pydantic-deferred" (a run stopped for a deferred tool call answered with the requests' repr) is retired:
+    # deferred calls now wait for a signal (handle_deferred_tool_calls), so no run stops for them, and the guard
+    # that the mutant removed is left only as a safety net.
     Mutant(
         "pydantic-deps",
         "an Agent of your own with a deps_type gets no deps",
@@ -416,23 +433,129 @@ MUTANTS = [
         LANGGRAPH,
         "c8ff842",
     ),
+    # --- The review of the storage plan's implementation (bd06b49, 2657e60, 191d096) ---
+    Mutant(
+        "langgraph-prune-or-chain",
+        "the prune matches the kept versions with an OR of each: a graph with a DeltaChannel fails every turn "
+        "from about its eleventh",
+        f"{AGENTS}/langgraph/_checkpointer.py",
+        'f"WHERE thread_id = ? AND checkpoint_ns = ? AND (channel, version) NOT IN {pairs}",',
+        "f\"WHERE thread_id = ? AND checkpoint_ns = ? AND NOT ({' OR '.join('(channel = ? AND version = ?)' "
+        'for _ in versions)})",',
+        LANGGRAPH,
+        "bd06b49",
+    ),
+    Mutant(
+        "langgraph-values-or-chain",
+        "a checkpoint's values are read with an OR of each channel: one of more than about 95 channels fails",
+        f"{AGENTS}/langgraph/_checkpointer.py",
+        'f"WHERE thread_id = ? AND checkpoint_ns = ? AND (channel, version) IN {pairs}",',
+        "f\"WHERE thread_id = ? AND checkpoint_ns = ? AND ({' OR '.join('(channel = ? AND version = ?)' "
+        'for _ in versions)})",',
+        LANGGRAPH,
+        "bd06b49",
+    ),
+    Mutant(
+        "wait-rejoins-another-call",
+        "a framework's new call with the same input as an earlier attempt's joins its wait, and gets its "
+        "approval or denial without asking",
+        f"{AGENTS}/_tools.py",
+        "shown=input is not None, rejoin=False, approval=approval)",
+        "shown=input is not None, rejoin=True, approval=approval)",
+        WAITS,
+        "2657e60",
+    ),
+    Mutant(
+        "approval-is-the-calls-outcome",
+        "a turn stopped after a call's approval returned reports the call as done, a denied one included",
+        f"{AGENTS}/_calls.py",
+        'if call.get("done") and not call.get("approval")',
+        'if call.get("done")',
+        WAITS,
+        "2657e60",
+    ),
+    Mutant(
+        "call-matched-by-id-alone",
+        "an approved tool's own Restate call shares its approval's record, and its outcome is lost",
+        f"{AGENTS}/_calls.py",
+        'if call_id in c["ids"] and c["tool"] == tool), None)',
+        'if call_id in c["ids"]), None)',
+        WAITS,
+        "2657e60",
+    ),
+    Mutant(
+        "snapshots-kept",
+        "every snapshot is kept, though only the latest is read: the key's database grows with every compaction",
+        f"{AGENTS}/_conversation.py",
+        '            await tx.execute(f"DELETE FROM {SNAPSHOTS}")\n',
+        "",
+        SNAPSHOTS,
+        "2657e60",
+    ),
+    Mutant(
+        "pydantic-approval-not-marked",
+        "a Pydantic AI approval is taken for the call: a turn stopped after a denial reports the call as done",
+        f"{AGENTS}/pydantic_ai/_agent.py",
+        "APPROVAL, shown(call), approval=True)",
+        "APPROVAL, shown(call))",
+        PYDANTIC_AI,
+        "191d096",
+    ),
+    Mutant(
+        "pydantic-plan-reads-live",
+        "a tool call that runs again reads the plan as its first run left it: its writes no longer line up, "
+        "and a step stays blocked",
+        f"{AGENTS}/pydantic_ai/_stores.py",
+        "    if call is None:\n        if not writes:\n            return await op(ctx.db)\n",
+        "    if call is None or not writes:\n        if not writes:\n            return await op(ctx.db)\n",
+        PYDANTIC_AI,
+        "191d096",
+    ),
+    Mutant(
+        "pydantic-memory-run-ids",
+        "a memory change is named by the harness's id, new in every attempt: a replayed edit misses its receipt "
+        "and reports failure",
+        f"{AGENTS}/pydantic_ai/_memory.py",
+        '    if call is None:\n        return {"id": operation.id, "fingerprint": operation.fingerprint}\n',
+        '    if True:\n        return {"id": operation.id, "fingerprint": operation.fingerprint}\n',
+        PYDANTIC_AI,
+        "191d096",
+    ),
+    Mutant(
+        "pydantic-memory-paths-unlimited",
+        "list_paths returns every path under the prefix, whatever its limit",
+        f"{AGENTS}/pydantic_ai/_memory.py",
+        'ORDER BY path LIMIT ?",\n            [len(prefix), prefix, int(request["limit"])],',
+        'ORDER BY path",\n            [len(prefix), prefix],',
+        PYDANTIC_AI,
+        "191d096",
+    ),
+    Mutant(
+        "pydantic-import-without-harness",
+        "without Pydantic AI Harness, the import fails with no word of the extra",
+        f"{AGENTS}/pydantic_ai/__init__.py",
+        "    import pydantic_ai_harness  # noqa: F401  # pyright: ignore[reportUnusedImport]\n",
+        "",
+        PYDANTIC_AI,
+        "191d096",
+    ),
     # --- Durability: the contract of a turn, from no fix ---
     Mutant(
         "langgraph-reask-stored-reply",
         "after a crash, the model is asked again for a final reply that was already stored",
         f"{AGENTS}/langgraph/_agent.py",
-        "        if (final := conversation.final_reply()) is not None:\n"
+        "        if (final := conversation.turn.final_reply()) is not None:\n"
         "            # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.\n"
         "            return final\n"
-        "        messages = typing.cast(list[BaseMessage], [entry.item for entry in conversation.entries])",
-        "        messages = typing.cast(list[BaseMessage], [entry.item for entry in conversation.entries])",
+        "        messages = ",
+        "        messages = ",
         LANGGRAPH,
     ),
     Mutant(
         "pydantic-reask-stored-reply",
         "after a crash, the model is asked again for a final reply that was already stored",
         f"{AGENTS}/pydantic_ai/_agent.py",
-        "        if (final := conversation.final_reply()) is not None:\n"
+        "        if (final := conversation.turn.final_reply()) is not None:\n"
         "            # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.\n"
         "            return final\n"
         "        history = ",
@@ -462,6 +585,73 @@ MUTANTS = [
         f"{AGENTS}/_calls.py",
         """(c for c in state.calls if c["attempt"] != attempt.id and c["tool"] == tool and c["input"] == encoded),""",
         """(c for c in state.calls if False),""",
+        EVERY_FRAMEWORK,
+    ),
+    Mutant(
+        "snapshot-rows-twice",
+        "the rows a snapshot stands for reach the model again after it: the compacted history grows back",
+        f"{AGENTS}/_conversation.py",
+        "for entry in turn.entries if entry.n > covers]",
+        "for entry in turn.entries]",
+        SNAPSHOTS,
+    ),
+    Mutant(
+        "snapshot-results-unknown",
+        "the tool results inside a snapshot are taken for new ones: the framework stores them again",
+        f"{AGENTS}/_conversation.py",
+        "        if snapshot is not None and call_id in snapshot.results:",
+        "        if False:",
+        SNAPSHOTS,
+    ),
+    Mutant(
+        "snapshot-loads-everything",
+        "a turn loads the whole conversation rather than from the latest snapshot",
+        f"{AGENTS}/_conversation.py",
+        "            first = max(first, snapshot.turn if snapshot.turn is not None else snapshot.covers + 1)",
+        "            pass",
+        SNAPSHOTS,
+    ),
+    Mutant(
+        "snapshot-hides-unanswered-turn",
+        "compacting between turns covers a turn left without an answer: the next message never closes it",
+        f"{AGENTS}/_conversation.py",
+        "    if conversation.running() is not None:\n"
+        "        # A turn left without an answer (its invocation gone): the next message closes it first.\n"
+        "        return False\n",
+        "",
+        SNAPSHOTS,
+    ),
+    Mutant(
+        "snapshot-compacted-every-turn",
+        "an agent with snapshots compacts after every turn, not only when its framework asks",
+        f"{AGENTS}/_conversation.py",
+        "due = settings.compact_history is not None and conversation.compaction_asked",
+        "due = settings.compact_history is not None",
+        SNAPSHOTS,
+    ),
+    Mutant(
+        "pydantic-compaction-not-snapshotted",
+        "the harness's compaction is not stored: every turn, and every retried attempt, summarizes again",
+        f"{AGENTS}/pydantic_ai/_agent.py",
+        "        if not _extends(prints, self.sent):\n            await self.conversation.turn.snapshot(",
+        "        if False:\n            await self.conversation.turn.snapshot(",
+        PYDANTIC_AI,
+    ),
+    Mutant(
+        "pydantic-denial-approves",
+        "a deferred call's approval signal with any text runs the tool, a denial's reason included",
+        f"{AGENTS}/pydantic_ai/_agent.py",
+        "        return ToolApproved() if value.strip().lower() in _APPROVED else ToolDenied(value)",
+        "        return ToolApproved()",
+        PYDANTIC_AI,
+    ),
+    Mutant(
+        "tool-cancellation-swallowed",
+        "a tool whose task the framework cancels as the turn stops raises the stop's reason instead: "
+        "ADK's runner, which waits for the cancelled task, hangs",
+        f"{AGENTS}/_tools.py",
+        "if isinstance(error, asyncio.CancelledError) and task is not None and task.cancelling():",
+        "if False:",
         EVERY_FRAMEWORK,
     ),
 ]

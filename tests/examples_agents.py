@@ -306,7 +306,7 @@ async def test_intermediate_loop(monkeypatch: pytest.MonkeyPatch):
     after the refund ran retries the turn, which asks the model again without refunding again; and a crash after
     the final reply was stored retries the turn, which answers with it, without asking the model again."""
     pytest.importorskip("pydantic")
-    from restate.agents._conversation import Conversation  # pylint: disable=import-outside-toplevel
+    from restate.agents._conversation import Status, Turn  # pylint: disable=import-outside-toplevel
 
     asked: list[str] = []
     looked_up: list[str] = []
@@ -337,16 +337,16 @@ async def test_intermediate_loop(monkeypatch: pytest.MonkeyPatch):
         text = {"type": "output_text", "text": f"Done: {last['output']}", "annotations": []}
         return [{"type": "message", "role": "assistant", "content": [text]}]
 
-    answered = Conversation.answered
+    answered = Turn.answered
     unanswered: list[bool] = []
 
-    async def answered_once_crashing(conversation: Conversation, prompt_id: str, answer: str) -> None:
+    async def answered_once_crashing(turn: Turn, answer: str, status: Status = "answered") -> None:
         if not unanswered:
             unanswered.append(True)
             raise ConnectionError("lost before the answer was stored")  # after the final reply was
-        await answered(conversation, prompt_id, answer)
+        await answered(turn, answer, status)
 
-    monkeypatch.setattr(Conversation, "answered", answered_once_crashing)
+    monkeypatch.setattr(Turn, "answered", answered_once_crashing)
 
     def setup(module: ModuleType) -> None:
         async def at_once(order: str) -> str:

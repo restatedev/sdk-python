@@ -47,7 +47,6 @@ from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     TextPart,
     UserPromptPart,
 )
@@ -109,19 +108,25 @@ async def get_weather(city: str) -> str:
 # --- Pydantic AI: NativeOutput, or PromptedOutput for a model without a JSON schema mode ---
 
 
+def _pai_feedback(part: object) -> bool:
+    """Whether ``part`` is Pydantic AI's feedback on an answer that did not validate, as a model gets it: a user's
+    prompt that says it is the application's (``RetryFeedbackPart``, which a model gets as such a prompt)."""
+    return isinstance(part, UserPromptPart) and "this is automated feedback" in str(part.content)
+
+
 def _pai_prompts(messages: list[ModelMessage]) -> list[str]:
     return [
         str(part.content)
         for m in messages
         if isinstance(m, ModelRequest)
         for part in m.parts
-        if isinstance(part, UserPromptPart)
+        if isinstance(part, UserPromptPart) and not _pai_feedback(part)
     ]
 
 
 def pai_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     last = messages[-1]
-    retried = isinstance(last, ModelRequest) and any(isinstance(p, RetryPromptPart) for p in last.parts)
+    retried = isinstance(last, ModelRequest) and any(_pai_feedback(p) for p in last.parts)
     mode = info.model_request_parameters.output_mode
     return ModelResponse(parts=[TextPart(_reply(_pai_prompts(messages), mode, retried))])
 
@@ -176,6 +181,31 @@ class LangGraphModel(BaseChatModel):
 
 
 lg = langgraph.agent("lg_planner", model=LangGraphModel(), system="Plan.", output=Plan)
+
+
+def _planning_graph() -> Any:
+    """A graph of your own: one node, which asks the scripted model with the graph's messages."""
+    from langgraph.graph import START, MessagesState, StateGraph  # pylint: disable=import-outside-toplevel
+
+    model = LangGraphModel()
+
+    async def plan(state: MessagesState) -> dict[str, Any]:
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("plan", plan)
+    builder.add_edge(START, "plan")
+    return builder
+
+
+planning = _planning_graph()
+lg_graph = langgraph.agent("lg_graph_planner", graph=planning, output=Plan)
+
+
+@lg_graph.handler
+async def twice(ctx: sessions.SessionContext, texts: list[str]) -> list[Any]:
+    """Two prompts of one invocation, each its own turn, the first of which may ask again within itself."""
+    return [(await langgraph.prompt(ctx, text, graph=planning, output=Plan)).model_dump() for text in texts]
 
 
 # --- The OpenAI Agents SDK: the output type of the agent the run starts with ---
@@ -273,7 +303,7 @@ def anyio_backend():
 
 @pytest.fixture(scope="session")
 async def harness():
-    served = [pai_native, pai_prompted, pai_gemini_2, lg, oai, oai_desk, adk_native, adk_tools]
+    served = [pai_native, pai_prompted, pai_gemini_2, lg, lg_graph, oai, oai_desk, adk_native, adk_tools]
     async with restate.create_test_harness(restate.app(served), restate_image=RESTATE_IMAGE) as harness:
         yield harness
 
@@ -342,6 +372,33 @@ async def test_langgraph_asks_again_for_a_reply_in_prose_with_the_schema(harness
     assert again.startswith(f"{AGAIN}: it is not JSON") and '"title"' in again
 
 
+async def summary_of(harness: HarnessEnvironment, agent: str, key: str) -> list[tuple[str, str]]:
+    page = typing.cast(Messages, (await post(harness, f"{agent}/{key}/messages", json={"view": "summary"})).json())
+    return [
+        (message["role"], " ".join(str(part.get("text", "")) for part in message["parts"]))
+        for message in page["messages"]
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("agent", "mode"), [("lg_planner", "system"), ("lg_graph_planner", "none"), ("adk_native", "native")]
+)
+async def test_a_reply_that_is_not_the_answer_is_asked_again_within_its_turn(
+    harness: HarnessEnvironment, agent: str, mode: str
+):
+    key = uuid.uuid4().hex
+    assert (await chat(harness, agent, f"prose {key}", key)).json() == {"title": key, "mode": mode}
+    # One turn: the person's message and the answer. The ask again is a step of it, which the full view shows.
+    [(asked, said), (answering, answer)] = await summary_of(harness, agent, key)
+    assert (asked, said, answering) == ("user", f"prose {key}", "assistant")
+    assert json.loads(answer) == {"title": key, "mode": mode}
+    first, again = await user_messages(harness, agent, key)
+    assert first == f"prose {key}" and again.startswith(f"{AGAIN}: it is not JSON")
+    # The next message is a turn of its own, answered from its own prompt.
+    assert (await chat(harness, agent, f"plan {key}2", key)).json() == {"title": f"{key}2", "mode": mode}
+
+
 @pytest.mark.anyio
 async def test_an_agent_handed_off_to_that_answers_in_text_is_asked_again(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
@@ -364,3 +421,13 @@ async def test_a_reply_that_is_wrong_after_asking_again_fails_the_message_and_th
 async def test_a_prompt_of_an_agent_of_your_own_answers_with_a_plan(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     assert (await post(harness, f"pai_native/{key}/own", json=f"plan {key}")).json() == {"title": key, "mode": "native"}
+
+
+@pytest.mark.anyio
+async def test_a_graph_asked_again_within_a_turn_runs_the_next_prompt_of_the_invocation_as_its_own(
+    harness: HarnessEnvironment,
+):
+    key = uuid.uuid4().hex
+    # On a new key, the first prompt asks again at position 2; the invocation's second prompt is `<id>:2`.
+    answers = (await post(harness, f"lg_graph_planner/{key}/twice", json=[f"prose {key}", f"plan {key}2"])).json()
+    assert answers == [{"title": key, "mode": "none"}, {"title": f"{key}2", "mode": "none"}]

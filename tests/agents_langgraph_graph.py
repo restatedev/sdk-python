@@ -45,7 +45,7 @@ import restate  # noqa: E402
 from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
-from restate.agents.internal import CANCELLED  # noqa: E402
+from restate.agents.internal import CANCELLED, ENDED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
 from restate.agents.langgraph._errors import terminal_of  # noqa: E402
 from restate.agents.langgraph._graph import at_breakpoint  # noqa: E402
@@ -69,7 +69,7 @@ def route(state: Desk) -> str | list[str]:
     routes |= {"history": "history", "trim": "trim", "humans": "humans", "ask": "ask", "twice": "twice"}
     routes |= {"deep": "deep", "pause": "pause", "again": "again", "lookup": "call_lookup", "fetch": "fetch"}
     routes |= {"consult": "call_lookup", "count": "call_lookup", "refuse": "refuse", "nested": "nested"}
-    routes |= {"give_up": "give_up", "stops": "stops", "loop": "loop"}
+    routes |= {"give_up": "give_up", "stops": "stops", "loop": "loop", "forget": "forget"}
     if word == "both":
         return ["ask", "side"]  # two branches at once
     if word == "clash":
@@ -135,6 +135,13 @@ def trim(state: Desk) -> dict[str, Any]:
     return {"messages": [*removed, AIMessage("trimmed")]}
 
 
+def forget(state: Desk) -> dict[str, Any]:
+    """Keep the latest prompt and what followed it, as the graph that trims its state in ``_graph.py`` does."""
+    prompts = [i for i, m in enumerate(state["messages"]) if isinstance(m, HumanMessage)]
+    old = state["messages"][: prompts[-1]] if len(prompts) > 1 else []
+    return {"messages": [*(RemoveMessage(id=typing.cast(str, m.id)) for m in old), AIMessage("forgot")]}
+
+
 def humans(state: Desk) -> dict[str, Any]:
     """The messages the graph has from the user."""
     said = [str(m.text) for m in state["messages"] if isinstance(m, HumanMessage)]
@@ -166,7 +173,7 @@ def plan(state: Desk) -> dict[str, Any]:
 
 builder = StateGraph(Desk)
 steps = {"greet": greet, "confirm": confirm, "first": first, "second": second, "plan": plan, "history": history}
-steps |= {"trim": trim, "humans": humans, "ask": asking, "twice": twice, "side": side}
+steps |= {"trim": trim, "forget": forget, "humans": humans, "ask": asking, "twice": twice, "side": side}
 deep = StateGraph(Desk)  # a subgraph whose node interrupts twice
 deep.add_node("twice", typing.cast(Any, twice))
 deep.add_edge(START, "twice")
@@ -337,6 +344,7 @@ branches = [
     "history",
     "call_tool",
     "trim",
+    "forget",
     "humans",
     "ask",
     "twice",
@@ -368,6 +376,7 @@ for last in (
     "history",
     "tools",
     "trim",
+    "forget",
     "humans",
     "ask",
     "twice",
@@ -408,6 +417,23 @@ async def checkpoints(ctx: sessions.SessionContext) -> dict[str, int]:
         "SELECT checkpoint_ns, count(*) FROM restate_langgraph_checkpoints GROUP BY checkpoint_ns"
     )
     return {str(ns): int(typing.cast(int, n)) for ns, n in rows}
+
+
+@desk.handler()
+async def holding(ctx: sessions.SessionContext, text: str) -> list[str]:
+    """The checkpointer's tables that hold ``text`` in any of their values."""
+    columns = {
+        "restate_langgraph_checkpoints": "checkpoint, metadata",
+        "restate_langgraph_channel_values": "value",
+        "restate_langgraph_writes": "value",
+    }
+    found: list[str] = []
+    for table, selected in columns.items():
+        rows = await ctx.db.values(f"SELECT {selected} FROM {table}")
+        stored = [value if isinstance(value, bytes) else str(value).encode() for row in rows for value in row]
+        if any(text.encode() in value for value in stored):
+            found.append(table)
+    return found
 
 
 compiled = langgraph.agent("graph_compiled", graph=builder.compile())
@@ -485,11 +511,15 @@ async def test_chat_runs_the_graph_and_the_conversation_goes_on(harness: Harness
     key = uuid.uuid4().hex
     assert (await chat(harness, agent, key, f"hi {key}")).json() == f"hello {key}"
     assert (await chat(harness, agent, key, "hi again")).json() == "hello again"
+    # The graph's state holds every turn; the conversation loads only the latest whole, and copies each message once.
+    assert (await chat(harness, agent, key, "hi there")).json() == "hello there"
     assert await messages(harness, agent, key) == [
         ("user", f"hi {key}"),
         ("assistant", f"hello {key}"),
         ("user", "hi again"),
         ("assistant", "hello again"),
+        ("user", "hi there"),
+        ("assistant", "hello there"),
     ]
 
 
@@ -565,6 +595,19 @@ async def test_a_message_the_graph_trimmed_is_not_brought_back(harness: HarnessE
     key = uuid.uuid4().hex
     assert (await chat(harness, "graph_desk", key, f"trim {key}")).json() == "trimmed"
     assert (await chat(harness, "graph_desk", key, "humans")).json() == "humans"
+
+
+async def test_a_message_the_graph_removed_is_gone_from_its_checkpoints_once_the_turn_ends(
+    harness: HarnessEnvironment,
+):
+    """The graph's state is its own to trim: once a run removes a message, the turn's prune deletes what held it."""
+    key = uuid.uuid4().hex
+    assert (await chat(harness, "graph_desk", key, f"hi {key}")).json() == f"hello {key}"
+    assert "restate_langgraph_channel_values" in (await post(harness, f"graph_desk/{key}/holding", json=key)).json()
+    assert (await chat(harness, "graph_desk", key, "forget")).json() == "forgot"
+    assert (await post(harness, f"graph_desk/{key}/holding", json=key)).json() == []
+    # The conversation is a log: it keeps the messages the graph removed.
+    assert (await messages(harness, "graph_desk", key))[:2] == [("user", f"hi {key}"), ("assistant", f"hello {key}")]
 
 
 async def test_an_interrupt_waits_for_a_signal_and_resumes_with_its_value(harness: HarnessEnvironment):
@@ -652,6 +695,12 @@ async def test_a_killed_turn_leaves_no_wait_behind(harness: HarnessEnvironment, 
             break
         await asyncio.sleep(0.05)
     assert (await post(harness, f"graph_desk/{key}/pending")).json() == []
+    # The companion has the agent close the killed turn in the conversation, before any next message.
+    for _ in range(200):
+        if (await messages(harness, "graph_desk", key))[-1] == ("assistant", ENDED):
+            break
+        await asyncio.sleep(0.05)
+    assert (await messages(harness, "graph_desk", key))[-1] == ("assistant", ENDED)
 
 
 async def test_a_turn_suspended_while_it_waits_resumes_on_the_same_wait(harness: HarnessEnvironment):
