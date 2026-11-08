@@ -335,5 +335,9 @@ run --report before.jsonl after.jsonl fix.jsonl before-heavy.jsonl after-heavy.j
 
 The writes per turn are the averages of the warm rows (`set_bytes`, and
 `by_kind` for the tail entries); the statements behind a cold turn are its
-row's `by_statement`. The numbers are deterministic for a given checkout,
-up to the random names of packs.
+row's `by_statement`. All of it runs in about three minutes. A rerun gives
+the same rows, statements and gets; bytes within a fraction of a percent
+(the names of packs are random) and round trips within two (which reads the
+native side issues together depends on its scheduling): run as written, the
+commands above gave every number in these tables but a few round trips
+(53 for the 55 of the cold turn after turn 1,000, say).
