@@ -32,7 +32,6 @@ from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     SystemPromptPart,
     TextPart,
     ToolCallPart,
@@ -87,7 +86,7 @@ def _unanswered(messages: list[ModelMessage]) -> set[str]:
         for m in messages
         if isinstance(m, ModelRequest)
         for p in m.parts
-        if isinstance(p, ToolReturnPart | RetryPromptPart)
+        if isinstance(p, ToolReturnPart)
     }
     return calls - answered
 
@@ -100,11 +99,7 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     text = _prompts(messages)[-1]
     asked[_prompts(messages)[0].split(" ")[-1]] += 1
     last = messages[-1]
-    results = (
-        [p for p in last.parts if isinstance(p, ToolReturnPart | RetryPromptPart)]
-        if isinstance(last, ModelRequest)
-        else []
-    )
+    results = [p for p in last.parts if isinstance(p, ToolReturnPart)] if isinstance(last, ModelRequest) else []
     word, _, rest = text.partition(" ")
     if word == "system":
         return ModelResponse(parts=[TextPart(f"system: {info.instructions}")])
@@ -141,8 +136,7 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[ToolCallPart(names[word], args, tool_call_id=f"call-{rest}")])
     if results:
         result = results[-1]
-        said = result.model_response() if isinstance(result, RetryPromptPart) else result.model_response_str()
-        return ModelResponse(parts=[TextPart(f"tool said: {said}")])
+        return ModelResponse(parts=[TextPart(f"tool said: {result.model_response_str()}")])
     return ModelResponse(parts=[TextPart(f"echo: {text}")])
 
 
@@ -498,8 +492,9 @@ def test_a_model_whose_provider_cannot_run_is_refused_with_what_to_install(monke
     with pytest.raises(restate.TerminalError, match="OPENAI_API_KEY") as no_key:
         _agent._model("openai/gpt-6-sol")  # pyright: ignore[reportPrivateUsage]
     assert no_key.value.status_code == 424
-    with pytest.raises(restate.TerminalError, match="Unknown provider"):
+    with pytest.raises(restate.TerminalError, match="Unknown model: nope:x") as unknown:
         _agent._model("nope/x")  # pyright: ignore[reportPrivateUsage]
+    assert unknown.value.status_code == 424
 
 
 def test_a_model_that_cannot_be_made_is_refused_whatever_its_error(monkeypatch: pytest.MonkeyPatch):

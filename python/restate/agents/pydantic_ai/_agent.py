@@ -77,7 +77,6 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -162,9 +161,9 @@ _MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(
 )
 
 
-def _result(part: ToolReturnPart | RetryPromptPart) -> str:
-    """Return a tool call's result as the model sees it: the return value, or the retry prompt."""
-    return part.model_response() if isinstance(part, RetryPromptPart) else part.model_response_str()
+def _result(part: ToolReturnPart) -> str:
+    """Return a tool call's result as the model sees it: the return value, or why to call it again."""
+    return part.model_response_str()
 
 
 def _text(response: ModelMessage) -> str:
@@ -200,9 +199,9 @@ class _Items:
             return Parsed(said, calls)
         prompts = [p.content for p in message.parts if isinstance(p, UserPromptPart)]
         results = [
-            Result(part.tool_call_id, _result(part), isinstance(part, RetryPromptPart))
+            Result(part.tool_call_id, _result(part), part.outcome != "success")
             for part in message.parts
-            if isinstance(part, ToolReturnPart | RetryPromptPart) and part.tool_call_id
+            if isinstance(part, ToolReturnPart) and part.tool_call_id
         ]
         said = ("user", "".join(p if isinstance(p, str) else "" for p in prompts)) if prompts else None
         return Parsed(said, results=results)
@@ -215,7 +214,7 @@ def _result_ids(message: ModelMessage) -> set[str]:
     """Return the ids of the tool calls whose results ``message`` holds."""
     if not isinstance(message, ModelRequest):
         return set()
-    return {p.tool_call_id for p in message.parts if isinstance(p, ToolReturnPart | RetryPromptPart) and p.tool_call_id}
+    return {p.tool_call_id for p in message.parts if isinstance(p, ToolReturnPart) and p.tool_call_id}
 
 
 class _Restate(AbstractCapability[Any]):
