@@ -17,17 +17,18 @@ the tests' fake context (``tests/sessions_object.py``'s ``Host``), and meters
 every request the key's database makes to the object's state: the reads
 (``get``, in round trips), the writes (``set``, ``clear``) and the syncs,
 classified by the storage's key kinds (head, tail, manifest, pack). It meters
-the SQL too: statements, and the rows and bytes they read. After each turn, a
-client following the conversation reads what changed (the ``messages`` view
-from its cursor), metered the same way.
+the SQL too: statements, and the rows and bytes they read. With ``--follow``,
+after each turn a client following the conversation reads what changed (the
+``messages`` view from its cursor), metered the same way.
 
 It measures any checkout of this repository with the same API, so that two
 versions can be compared. Each turn runs warm, in one process, as a key
-answered by the same container turn after turn; ``--cold-at`` measures the
-turn after each of those, and a client following it, each in a new process
-(an empty page cache, the conversation as stored), as a key's first
-invocation in a new container; ``--probe`` costs a statement alone, the
-same way::
+answered by the same container turn after turn. ``--cold-at`` measures the
+turn after each of the given turns in a new process (an empty page cache,
+the conversation as stored), as a key's first invocation in a new
+container; with ``--follow``, a client reading the given turn, the latest
+stored, from the cursor before it, in a process of its own; and
+``--probe`` costs a statement alone, the same way::
 
     git worktree add ../before <commit>       # and copy the built python/restate/_internal*.so there
     python scripts/access_patterns.py --tree ../before --turns 1000 --follow --cold-at 100,500,1000 > before.jsonl
@@ -45,6 +46,7 @@ which also re-reads within a session, unlike a new process.
 
 import argparse
 import asyncio
+import itertools
 import json
 import pickle
 import random
@@ -126,7 +128,8 @@ def _word(i: int) -> str:
 
 
 _WORDS = [_word(i) for i in range(5000)]
-_WORD_WEIGHTS = [1 / rank for rank in range(1, 5001)]
+# Cumulative, once: given weights, random.choices would add up all 5,000 for every word.
+_WORD_WEIGHTS = list(itertools.accumulate(1 / rank for rank in range(1, 5001)))
 
 
 def text(seed: str, chars: int) -> str:
@@ -140,7 +143,7 @@ def text(seed: str, chars: int) -> str:
     words: list[str] = []
     size = 0
     while size < chars:
-        words.append(pick.choices(_WORDS, _WORD_WEIGHTS)[0])
+        words.append(pick.choices(_WORDS, cum_weights=_WORD_WEIGHTS)[0])
         size += len(words[-1]) + 1
     return " ".join(words)
 
@@ -350,7 +353,8 @@ def report(paths: list[str]) -> None:
                     continue
                 print(f"\n{path}: {handler}, {'cold (a new process)' if cold else 'warm'}")
                 print("turn".rjust(5) + "".join(c.rjust(11) for c in columns) + "  model_items stored_bytes")
-                for row in mine if cold else [row for row in mine if row["turn"] in sampled]:
+                last = mine[-1]["turn"]
+                for row in mine if cold else [row for row in mine if row["turn"] in sampled | {last}]:
                     extra = f"  {row.get('model_items', ''):>11} {row.get('stored_bytes', ''):>12}"
                     print(str(row["turn"]).rjust(5) + "".join(str(row[c]).rjust(11) for c in columns) + extra)
                 if not cold:

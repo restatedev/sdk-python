@@ -207,8 +207,10 @@ It then asks: which tests fail?
 - **Regression only:** only the tests that the fix commit added fail.
 - **Survived:** nothing fails.
 
-The run was against Restate 1.8.1 on 7 November 2026. The baseline was 283
-passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
+The first run was against Restate 1.8.1 on 7 November 2026. The baseline was
+283 passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
+The table holds its verdicts, and those of the mutants added since, whose
+runs are described after it.
 
 | Mutant | Kind | Bug brought back | Verdict |
 | --- | --- | --- | --- |
@@ -281,6 +283,12 @@ history mutants are all caught, `approval-is-the-calls-outcome` by the Pydantic
 AI agent's test too, the other 10 by their own tests only.
 `calls-new-id-not-matched` is still caught by `agents_tools`, now that
 `wait_for` no longer rejoins an earlier attempt's call.
+
+**The access patterns' fix**, on 8 November: `last-of-scans`, run on its own
+against the two test files that use `last_of` (`agents_conversation.py` and
+`agents_messages.py`, which need no server; the baseline had no failures),
+is caught by its own test only. No other test measures what a statement
+reads: the scan returns the same values.
 
 What it says (the run of 7 November):
 

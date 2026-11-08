@@ -297,20 +297,43 @@ In order of value for effort:
 
 ## Reproducing
 
+Every table above, from checkouts of the three commits (each needs the built
+extension, `python/restate/_internal*.so`, copied into it):
+
 ```sh
-# Each checkout needs the built extension: copy python/restate/_internal*.so into it.
 git worktree add ../before 19fe21c && cp python/restate/_internal*.so ../before/python/restate/
 git worktree add ../after 434bb6f && cp python/restate/_internal*.so ../after/python/restate/
-A="--turns 1000 --follow --cold-at 10,50,100,200,500,1000"
-python scripts/access_patterns.py --tree ../before $A > before.jsonl
-python scripts/access_patterns.py --tree ../after $A > after.jsonl
-python scripts/access_patterns.py --tree . $A > fix.jsonl
-python scripts/access_patterns.py --tree ../after --turns 300 --calls 8 --result 4000 --follow --cold-at 100,300 > heavy.jsonl
-python scripts/access_patterns.py --tree ../after --turns 500 --cold-at 500 \
-  --probe "SELECT MAX(n), MAX(seq), MAX(answered_seq) FROM restate_agent_turns" > probes.jsonl
-python scripts/access_patterns.py --report before.jsonl after.jsonl fix.jsonl heavy.jsonl probes.jsonl
+run() { python scripts/access_patterns.py "$@"; }
+CHAT="--turns 1000 --follow --cold-at 10,50,100,200,500,1000"
+HEAVY="--turns 300 --calls 8 --result 4000 --follow --cold-at 100,300"
+run --tree ../before $CHAT > before.jsonl && run --tree ../before $HEAVY > before-heavy.jsonl
+run --tree ../after $CHAT > after.jsonl && run --tree ../after $HEAVY > after-heavy.jsonl
+run --tree . $CHAT > fix.jsonl && run --tree . $HEAVY > fix-heavy.jsonl
+
+# The statements, each alone in a new process after turn 500.
+T=restate_agent_turns I=restate_agent_items C=restate_agent_conversation
+run --tree ../after --turns 500 --cold-at 500 \
+  --probe "SELECT MAX(n), MAX(seq), MAX(answered_seq) FROM $T" \
+  --probe "SELECT (SELECT MAX(n) FROM $T), (SELECT MAX(seq) FROM $T), (SELECT MAX(answered_seq) FROM $T)" \
+  --probe "SELECT MAX(n), MAX(seq) FROM $I" \
+  --probe "SELECT (SELECT MAX(n) FROM $I), (SELECT MAX(seq) FROM $I)" \
+  --probe "SELECT COUNT(*) FROM $I" \
+  --probe "SELECT n, prompt, item, status, answer, agent, carried, answered_at, answered_seq, asked_at FROM $T WHERE n >= 0 AND n < 9000000000000000000 ORDER BY n DESC LIMIT 64" \
+  --probe "SELECT n, item, reply, agent FROM $I WHERE n > (SELECT MAX(n) FROM $T) - 6 ORDER BY n" \
+  --probe "SELECT answer FROM $T WHERE prompt = 'none'" \
+  --probe "SELECT n, seq, summary, summarized FROM restate_agent_conversation_start" \
+  --probe "SELECT MIN(n) FROM $T WHERE seq > (SELECT MAX(seq) FROM $T) - 3" \
+  --probe "SELECT MIN(turn) FROM $I WHERE seq > (SELECT MAX(seq) FROM $I) - 3" > after-probes.jsonl
+run --tree ../before --turns 500 --cold-at 500 \
+  --probe "SELECT n, seq, item, prompt, answer, reply, agent FROM $C ORDER BY n" \
+  --probe "SELECT MAX(n), MAX(seq) FROM $C" \
+  --probe "SELECT MIN(n) FROM $C WHERE seq > (SELECT MAX(seq) FROM $C) - 3" > before-probes.jsonl
+
+run --report before.jsonl after.jsonl fix.jsonl before-heavy.jsonl after-heavy.jsonl fix-heavy.jsonl \
+  after-probes.jsonl before-probes.jsonl
 ```
 
-A run of 1,000 turns takes a few minutes, most of it the cold processes.
-The numbers are deterministic for a given checkout, up to the random names
-of packs.
+The writes per turn are the averages of the warm rows (`set_bytes`, and
+`by_kind` for the tail entries); the statements behind a cold turn are its
+row's `by_statement`. The numbers are deterministic for a given checkout,
+up to the random names of packs.
