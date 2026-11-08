@@ -68,6 +68,7 @@ EVERY_FRAMEWORK = (
 )
 OBJECT = ("tests/agents_object.py", "tests/agents_signals.py")
 SNAPSHOTS = ("tests/agents_snapshots.py", "tests/agents_pydantic_ai_snapshots.py")
+WAITS = (*EVERY_FRAMEWORK, "tests/agents_snapshots.py")
 
 # The tests that each fix commit added: a bug's own regression tests.
 OWN: dict[str, tuple[str, ...]] = {
@@ -133,6 +134,25 @@ OWN: dict[str, tuple[str, ...]] = {
     "c8ff842": (
         "test_an_openai_model_is_on_the_responses_api_where_reasoning_models_take_tools",
         "test_the_views_without_input_take_a_request_with_a_json_content_type",
+    ),
+    # The fixes from the review of the storage plan's implementation (docs/conversation-storage/).
+    "bd06b49": (
+        "test_a_delta_channel_graph_is_pruned_turn_after_turn_until_its_snapshot",
+        "test_a_checkpoint_of_more_than_a_hundred_channels_is_read_back",
+    ),
+    "2657e60": (
+        "test_a_framework_waits_for_a_signal_for_its_own_tool_call_once",
+        "test_a_stopped_turn_does_not_report_a_call_done_because_its_approval_returned",
+        "test_a_stopped_turn_reports_a_call_done_once_the_result_it_waited_for_returned",
+        "test_an_approval_and_the_restate_call_of_its_tool_call_keep_records_of_their_own",
+        "test_a_snapshot_takes_the_place_of_the_earlier_ones",
+    ),
+    "191d096": (
+        "test_a_turn_stopped_after_a_denial_is_stored_does_not_report_the_denied_call_done",
+        "test_a_status_change_that_runs_again_after_some_of_its_writes_makes_the_rest",
+        "test_a_memory_edit_of_a_tool_call_that_runs_again_is_reported_as_made",
+        "test_memory_lists_the_paths_under_a_prefix_in_order_up_to_a_limit",
+        "test_without_pydantic_ai_harness_the_import_names_the_extra",
     ),
     "": (),
 }
@@ -412,6 +432,112 @@ MUTANTS = [
         "_OPTIONS: dict[str, dict[str, Any]] = {}",
         LANGGRAPH,
         "c8ff842",
+    ),
+    # --- The review of the storage plan's implementation (bd06b49, 2657e60, 191d096) ---
+    Mutant(
+        "langgraph-prune-or-chain",
+        "the prune matches the kept versions with an OR of each: a graph with a DeltaChannel fails every turn "
+        "from about its eleventh",
+        f"{AGENTS}/langgraph/_checkpointer.py",
+        'f"WHERE thread_id = ? AND checkpoint_ns = ? AND (channel, version) NOT IN {pairs}",',
+        "f\"WHERE thread_id = ? AND checkpoint_ns = ? AND NOT ({' OR '.join('(channel = ? AND version = ?)' "
+        'for _ in versions)})",',
+        LANGGRAPH,
+        "bd06b49",
+    ),
+    Mutant(
+        "langgraph-values-or-chain",
+        "a checkpoint's values are read with an OR of each channel: one of more than about 95 channels fails",
+        f"{AGENTS}/langgraph/_checkpointer.py",
+        'f"WHERE thread_id = ? AND checkpoint_ns = ? AND (channel, version) IN {pairs}",',
+        "f\"WHERE thread_id = ? AND checkpoint_ns = ? AND ({' OR '.join('(channel = ? AND version = ?)' "
+        'for _ in versions)})",',
+        LANGGRAPH,
+        "bd06b49",
+    ),
+    Mutant(
+        "wait-rejoins-another-call",
+        "a framework's new call with the same input as an earlier attempt's joins its wait, and gets its "
+        "approval or denial without asking",
+        f"{AGENTS}/_tools.py",
+        "shown=input is not None, rejoin=False, approval=approval)",
+        "shown=input is not None, rejoin=True, approval=approval)",
+        WAITS,
+        "2657e60",
+    ),
+    Mutant(
+        "approval-is-the-calls-outcome",
+        "a turn stopped after a call's approval returned reports the call as done, a denied one included",
+        f"{AGENTS}/_calls.py",
+        'if call.get("done") and not call.get("approval")',
+        'if call.get("done")',
+        WAITS,
+        "2657e60",
+    ),
+    Mutant(
+        "call-matched-by-id-alone",
+        "an approved tool's own Restate call shares its approval's record, and its outcome is lost",
+        f"{AGENTS}/_calls.py",
+        'if call_id in c["ids"] and c["tool"] == tool), None)',
+        'if call_id in c["ids"]), None)',
+        WAITS,
+        "2657e60",
+    ),
+    Mutant(
+        "snapshots-kept",
+        "every snapshot is kept, though only the latest is read: the key's database grows with every compaction",
+        f"{AGENTS}/_conversation.py",
+        '            await tx.execute(f"DELETE FROM {SNAPSHOTS}")\n',
+        "",
+        SNAPSHOTS,
+        "2657e60",
+    ),
+    Mutant(
+        "pydantic-approval-not-marked",
+        "a Pydantic AI approval is taken for the call: a turn stopped after a denial reports the call as done",
+        f"{AGENTS}/pydantic_ai/_agent.py",
+        "APPROVAL, shown(call), approval=True)",
+        "APPROVAL, shown(call))",
+        PYDANTIC_AI,
+        "191d096",
+    ),
+    Mutant(
+        "pydantic-plan-reads-live",
+        "a tool call that runs again reads the plan as its first run left it: its writes no longer line up, "
+        "and a step stays blocked",
+        f"{AGENTS}/pydantic_ai/_stores.py",
+        "    if call is None:\n        if not writes:\n            return await op(ctx.db)\n",
+        "    if call is None or not writes:\n        if not writes:\n            return await op(ctx.db)\n",
+        PYDANTIC_AI,
+        "191d096",
+    ),
+    Mutant(
+        "pydantic-memory-run-ids",
+        "a memory change is named by the harness's id, new in every attempt: a replayed edit misses its receipt "
+        "and reports failure",
+        f"{AGENTS}/pydantic_ai/_memory.py",
+        '    if call is None:\n        return {"id": operation.id, "fingerprint": operation.fingerprint}\n',
+        '    if True:\n        return {"id": operation.id, "fingerprint": operation.fingerprint}\n',
+        PYDANTIC_AI,
+        "191d096",
+    ),
+    Mutant(
+        "pydantic-memory-paths-unlimited",
+        "list_paths returns every path under the prefix, whatever its limit",
+        f"{AGENTS}/pydantic_ai/_memory.py",
+        'ORDER BY path LIMIT ?",\n            [len(prefix), prefix, int(request["limit"])],',
+        'ORDER BY path",\n            [len(prefix), prefix],',
+        PYDANTIC_AI,
+        "191d096",
+    ),
+    Mutant(
+        "pydantic-import-without-harness",
+        "without Pydantic AI Harness, the import fails with no word of the extra",
+        f"{AGENTS}/pydantic_ai/__init__.py",
+        "    import pydantic_ai_harness  # noqa: F401  # pyright: ignore[reportUnusedImport]\n",
+        "",
+        PYDANTIC_AI,
+        "191d096",
     ),
     # --- Durability: the contract of a turn, from no fix ---
     Mutant(

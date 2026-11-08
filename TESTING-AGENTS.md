@@ -59,6 +59,7 @@ contract.
 | `call` / `send` / `workflow` / `subagent` through the framework | **—** | **—** | **—** | `call` only | through nodes, not `agent(graph=)` |
 | History from snapshots, compacted by the framework | n/a | P (the harness's `TieredCompaction`) | n/a | n/a | n/a |
 | A deferred tool call waits for a signal (`wait_for`) | n/a | H | n/a | n/a | H (interrupts) |
+| A stopped turn doesn't report a call done because its approval returned | n/a | P | n/a | n/a | n/a |
 | The summary in the framework's own form (`Items.summary`) | H (one user message) | n/a | H | H | n/a |
 | `background=` | **—** | **—** | **—** | **—** | **—** |
 | `clear` / cursors / `sync` with this framework's items | **—** | **—** | **—** | **—** | **—** |
@@ -71,8 +72,9 @@ plain dicts (`agents_conversation.ITEMS`):
 - `agents_object`: the views (`status`, `stop`, `signal`, `sync`).
 - `agents_tools`: `call`, `wait_for_signal` and `subagent`.
 - `agents_snapshots`: history from snapshots (loading, `history()`, known
-  results, crashes, `compact` between turns), each turn's `asked_at`, and
-  `wait_for`.
+  results, crashes, `compact` between turns, only the latest kept), each
+  turn's `asked_at`, and `wait_for` (a wait per tool call, and an approval
+  that is not the call's outcome).
 
 ## Gaps
 
@@ -173,9 +175,9 @@ would catch.
 
 `scripts/resurrect.py` measures the suite against bugs that really happened.
 
-- **27 history mutants** (28 until one was retired, below). Each brings back,
+- **38 history mutants** (39 until one was retired, below). Each brings back,
   on today's code, one bug that a fix commit describes (#276, #278, #290,
-  #291, #292, #294).
+  #291, #292, #294, and the review of the storage plan's implementation).
 - **13 durability mutants.** Each breaks the contract of a turn without
   matching any past fix.
 
@@ -220,6 +222,17 @@ passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
 | `cli-ctrl-c` | #278 | Ctrl-C waits for a line of input | regression only |
 | `views-optional-body` | #276 | a view refuses the TypeScript client's request | **caught** |
 | `langgraph-responses-api` | #276 | OpenAI models run on Chat Completions | regression only |
+| `langgraph-prune-or-chain` | review | the prune matches the kept versions with an `OR` of each: a `DeltaChannel` graph fails every turn from about its eleventh | regression only |
+| `langgraph-values-or-chain` | review | a checkpoint of more than about 95 channels can't be read | regression only |
+| `wait-rejoins-another-call` | review | a framework's new call with the same input joins an earlier call's wait, and gets its approval or denial | regression only |
+| `approval-is-the-calls-outcome` | review | a turn stopped after a denial reports the denied call as done | **caught** |
+| `call-matched-by-id-alone` | review | an approved tool's own Restate call shares its approval's record | regression only |
+| `snapshots-kept` | review | every snapshot is kept, though only the latest is read | regression only |
+| `pydantic-approval-not-marked` | review | a Pydantic AI approval is taken for the call | regression only |
+| `pydantic-plan-reads-live` | review | a tool call that runs again reads the plan as its first run left it, and a step stays blocked | regression only |
+| `pydantic-memory-run-ids` | review | a replayed memory edit misses its receipt and reports failure | regression only |
+| `pydantic-memory-paths-unlimited` | review | `list_paths` ignores its limit | regression only |
+| `pydantic-import-without-harness` | review | without Pydantic AI Harness, the import names no extra | regression only |
 | `pydantic-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **caught** |
 | `calls-new-id-not-matched` | durability | a call asked again under a new id makes its Restate call again | **caught** |
 | `langgraph-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **SURVIVED**, now caught |
@@ -243,6 +256,12 @@ releases (`docs/conversation-storage/`), against Restate 1.8.1:
     the Pydantic AI agent;
   - `tool-cancellation-swallowed`, for a tool whose task the framework
     cancels.
+
+**The review's fixes**, on 8 November, against Restate 1.8.1: the 11 new
+history mutants are all caught, `approval-is-the-calls-outcome` by the Pydantic
+AI agent's test too, the other 10 by their own tests only.
+`calls-new-id-not-matched` is still caught by `agents_tools`, now that
+`wait_for` no longer rejoins an earlier attempt's call.
 
 What it says (the run of 7 November):
 

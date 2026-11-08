@@ -560,6 +560,42 @@ said this beyond their files:
   override for `prompt()` in an object that isn't an agent, and a public
   accessor for the running handler's context.
 
+## After review
+
+A review of phases 0 to 3 found these bugs, each now fixed with a test that
+fails without its fix, and a mutant in `scripts/resurrect.py`:
+
+- **LangGraph:** the prune matched the kept channel versions with one `OR`
+  term per pair, and the database refuses an expression more than 100 deep:
+  a graph with a `DeltaChannel` failed every turn from about its eleventh.
+  Reading a checkpoint of more than about 95 channels failed the same way
+  (older code). Both now match against a list of rows.
+- **Waits and approvals** (core, used by Pydantic AI):
+  - a framework's wait (`wait_for`) is its tool call's alone. A new call with
+    the same input, in a later attempt, could join an earlier call's wait,
+    and get its approval or denial without asking;
+  - an approval is not the call: a turn stopped after a denial reported the
+    denied call as done;
+  - a tool call's own Restate call and its approval keep records of their
+    own (they were matched by the tool call's id alone).
+- **Pydantic AI stores:**
+  - a tool call that runs again reads the plan as it read it the first time
+    (a journal per tool call, of reads and writes). It used to read the
+    writes of its first run, so its writes no longer lined up with those it
+    had made, and a step stayed blocked;
+  - a memory change is named by its tool call, as the harness's names change
+    with every attempt: a replayed edit was reported as failed;
+  - the memory's reads are views, and `list_paths` filters and limits in SQL;
+  - a missing Pydantic AI Harness names the extra to install.
+- **Snapshots:** only the latest is kept. Each item stays a string in the
+  row's JSON array, escaped once more, as `Items.dump` needn't return JSON.
+
+D1 stands: a database that released 1.4.x made has a table of the same name
+as one the schema creates, but no such database is in use.
+
+**Checks:** the full suite, 554 passed; ruff, pyright and mypy clean; the 11
+new mutants are all caught (TESTING-AGENTS.md).
+
 ## Running the tests
 
 - **Without a server:** `uv run --no-sync -m pytest tests/<module>.py -m "not server"`.

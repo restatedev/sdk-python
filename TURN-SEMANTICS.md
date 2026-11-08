@@ -309,7 +309,12 @@ sequenceDiagram
   turn is still answered meanwhile. A framework's own tool call that waits
   for something outside (Pydantic AI's deferred tool calls, say) waits the
   same way, through `wait_for(ctx, call_id, signal, input)` in
-  `restate.agents.internal`.
+  `restate.agents.internal`. Such a wait is its tool call's alone: the
+  framework stored the call before it waits, so a new call with the same
+  input (the model asking again after the first's answer) waits anew, and
+  never gets an earlier call's approval. An approval (`approval=True`) is
+  not the call: a turn stopped before the call's result is stored reports
+  the call as not done, whatever its approval returned.
 - **A dead attempt stops.** An attempt that ends while its process lives on
   (Restate suspended it, gave up on it, or lost its connection) stops its
   work, a model's request included: it can store nothing more, and the next
@@ -441,7 +446,7 @@ restate_agent_turns  (n, seq, prompt, item, status, answer, agent, carried,
                       answered_at, answered_seq, asked_at)          -- the transcript: one row per turn
 restate_agent_items  (n, turn, seq, item, reply, agent)              -- the trajectories
 restate_agent_conversation_start (n, seq, summary, summarized)       -- the first position, the last seq, the summary
-restate_agent_snapshots (id, covers, turn, items)                    -- the history as a framework compacted it
+restate_agent_snapshots (id, covers, turn, items)                    -- the history as a framework compacted it, the latest only
 ```
 
 The schema is written for new databases only: there are no migrations, and
@@ -531,6 +536,8 @@ compaction left it, which the framework stores in its turn with
   as known (`knows_result`), so the framework doesn't store them again.
 - **Crashes.** A snapshot is one write, under the turn's ownership rule: a
   retried attempt loads it, and carries on from it.
+- **Only the latest is kept.** A snapshot takes the place of the earlier
+  ones in the same write, as nothing reads them again.
 - **Drops.** A reply that a snapshot covers can't be dropped.
 - **What clients see doesn't change.** The views read turn rows and items
   only, so they never show a snapshot. `clear` drops snapshots with every
@@ -666,7 +673,11 @@ What each integration does on top of the turn model:
   the harness's `AskUser` included) is a durable wait in the companion, on
   the signal `approval` or on the tool's name (`wait_for`). The harness's
   plan, spill and history stores can keep their data in the key's database,
-  and its memory in a session object of its own.
+  and its memory in a session object of its own. A tool call that runs again
+  after a crash reads the plan as it read it the first time, and each of its
+  writes is done once (a journal per tool call); a memory change is named by
+  its tool call, so the call finds the receipt of the change it made, rather
+  than make it again.
 - **ADK.** ADK 2 reports an agent's exception as an error event before it
   raises it: the run lets the exception decide (retried, refused, or the
   limit of model calls), and only an error event that ends the run fails the
