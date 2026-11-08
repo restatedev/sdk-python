@@ -26,7 +26,7 @@ import pytest
 pytest.importorskip("pydantic_ai")
 
 from pydantic_ai import Agent, DeferredToolRequests, ModelRetry, RunContext  # noqa: E402
-from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt  # noqa: E402
+from pydantic_ai.capabilities import AbstractCapability  # noqa: E402
 from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
@@ -356,23 +356,10 @@ def trimmed_agent() -> Any:
 trimmed = pydantic_ai.agent("pai_trimmed", agent=trimmed_agent())
 
 
-summarized_prompts: list[list[str]] = []
-"""The prompts of each request of the agent with a small budget."""
-
-
-def remembering(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-    summarized_prompts.append(_prompts(messages))
-    return reply(messages, info)
-
-
-summarizing = pydantic_ai.agent("pai_summarizing", model=FunctionModel(remembering), budget=10)
-"""An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
-
-
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, trimmed, shop, summarizing]), restate_image=RESTATE_IMAGE
+        restate.app([assistant, per_user, trimmed, shop]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -657,56 +644,6 @@ async def test_an_agent_of_your_own_runs_with_its_own_capabilities(harness: Harn
     assert spied[f"hi {k}"] == 1
 
 
-def kinds(own: Any, model: Any) -> list[type]:
-    """The kinds of the capabilities that a run of ``own`` (an Agent of your own, or None) on ``model`` gets."""
-    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
-
-    return [type(c) for c in _agent._capabilities(own, model)]  # pyright: ignore[reportPrivateUsage]
-
-
-def test_the_built_in_agent_gets_the_compaction_of_its_models_provider():
-    """OpenAI's for its Responses API, which openai/... models use, and none for a provider without one; and each
-    run reinjects the system prompt, which the conversation does not store."""
-    from pydantic_ai.models.openai import (  # pylint: disable=import-outside-toplevel
-        OpenAIChatModel,
-        OpenAICompaction,
-        OpenAIResponsesModel,
-    )
-    from pydantic_ai.providers.openai import OpenAIProvider  # pylint: disable=import-outside-toplevel
-
-    provider = OpenAIProvider(api_key="sk-test")
-    assert kinds(None, OpenAIResponsesModel("gpt-6-sol", provider=provider)) == [OpenAICompaction, ReinjectSystemPrompt]
-    assert kinds(None, OpenAIChatModel("gpt-6-sol", provider=provider)) == [ReinjectSystemPrompt]
-    assert kinds(None, FunctionModel(reply)) == [ReinjectSystemPrompt]
-
-
-def test_the_built_in_agent_on_anthropic_gets_its_compaction():
-    pytest.importorskip("anthropic")
-    from pydantic_ai.models.anthropic import (  # pylint: disable=import-outside-toplevel
-        AnthropicCompaction,
-        AnthropicModel,
-    )
-    from pydantic_ai.providers.anthropic import AnthropicProvider  # pylint: disable=import-outside-toplevel
-
-    model = AnthropicModel("claude-sonnet-5-5", provider=AnthropicProvider(api_key="sk-test"))
-    assert kinds(None, model) == [AnthropicCompaction, ReinjectSystemPrompt]
-
-
-def test_an_agent_of_your_own_runs_as_configured_with_the_system_prompt_reinjected():
-    """No compaction is added to it, whether it has its own or not; the system prompt is reinjected, unless the agent
-    reinjects it itself (with replace_existing=True, say)."""
-    from pydantic_ai.models.openai import OpenAICompaction, OpenAIResponsesModel  # pylint: disable=import-outside-toplevel
-    from pydantic_ai.providers.openai import OpenAIProvider  # pylint: disable=import-outside-toplevel
-
-    model = OpenAIResponsesModel("gpt-6-sol", provider=OpenAIProvider(api_key="sk-test"))
-    plain: Any = Agent(model)
-    assert kinds(plain, model) == [ReinjectSystemPrompt]
-    compacting: Any = Agent(model, capabilities=[OpenAICompaction(token_threshold=100_000)])
-    assert kinds(compacting, model) == [ReinjectSystemPrompt]
-    reinjecting: Any = Agent(model, capabilities=[ReinjectSystemPrompt(replace_existing=True)])
-    assert kinds(reinjecting, model) == []
-
-
 async def test_an_agent_of_your_own_gets_its_deps(harness: HarnessEnvironment):
     k = key()
     async with httpx2.AsyncClient(timeout=60) as ingress:
@@ -792,17 +729,3 @@ def test_a_tool_result_of_bytes_is_stored_as_pydantic_ai_stores_it():
     [expected] = ModelMessagesTypeAdapter.validate_json(ModelMessagesTypeAdapter.dump_json([message]))
     assert isinstance(read, ModelRequest) and isinstance(expected, ModelRequest)
     assert read.parts[0].content == expected.parts[0].content  # type: ignore[union-attr]
-
-
-async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
-    k = key()
-    async with httpx2.AsyncClient(timeout=60) as ingress:
-        for word in ("one", "two", "three", "four", "five"):
-            answer = await ingress.post(
-                f"{harness.ingress_url}/pai_summarizing/{k}/chat", content=f"hi {word}", headers=TEXT
-            )
-            assert answer.json() == f"echo: hi {word}"
-    summaries = [prompts[-1] for prompts in summarized_prompts if prompts[-1].startswith("Summarize")]
-    assert len(summaries) == 1 and "User: hi one" in summaries[0] and "hi four" not in summaries[0]
-    latest = summarized_prompts[-1]
-    assert latest[0].startswith("A summary of our conversation so far:") and latest[1:] == ["hi four", "hi five"]

@@ -66,17 +66,23 @@ stored:
 
 from __future__ import annotations
 
+import collections
+import dataclasses
+import json
+import sys
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
-from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, ReinjectSystemPrompt
 from pydantic_ai.exceptions import ContentFilterError, UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    RetryFeedbackPart,
+    SystemPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -86,17 +92,32 @@ from pydantic_ai.models import Model, ModelRequestContext, infer_model
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
-from pydantic_core import to_json
+from pydantic_ai_harness.compaction import (
+    DEFAULT_CONTEXT_WINDOW,
+    ClampOversizedMessages,
+    ClearToolResults,
+    CompactOnRequest,
+    DeduplicateFileReads,
+    FallbackCompaction,
+    RelevanceCompaction,
+    SlidingWindowCompaction,
+    SummarizingCompaction,
+    TieredCompaction,
+    compact_now,
+    estimate_context_tokens,
+    resolve_context_window,
+)
+from pydantic_core import to_json, to_jsonable_python
 
 from pydantic_ai import Agent, DeferredToolRequests, NativeOutput, PromptedOutput, RunContext
 from pydantic_ai import Tool as PydanticTool
 from restate.agents._common import (
     CANCELLATION,
     Check,
+    CompactHistory,
     ErrorSet,
     ModelError,
     PerSession,
-    Summarize,
     check_built_in,
     check_own,
     configured,
@@ -111,6 +132,7 @@ from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
+from restate.sessions.internal import definition_of
 
 M = typing.TypeVar("M", bound=BaseModel)
 
@@ -210,6 +232,12 @@ class _Items:
 ITEMS = _Items()
 
 
+def _feedback(message: ModelMessage) -> bool:
+    """Return whether ``message`` is Pydantic AI's feedback on a reply it could not use (an answer that does not
+    validate, say), which answers no tool call."""
+    return isinstance(message, ModelRequest) and any(isinstance(p, RetryFeedbackPart) for p in message.parts)
+
+
 def _result_ids(message: ModelMessage) -> set[str]:
     """Return the ids of the tool calls whose results ``message`` holds."""
     if not isinstance(message, ModelRequest):
@@ -227,23 +255,33 @@ class _Restate(AbstractCapability[Any]):
     errors of model requests, the only ones that can be a refusal.
     """
 
-    def __init__(self, ctx: SessionContext, conversation: Conversation) -> None:
+    def __init__(self, ctx: SessionContext, conversation: Conversation, history: Sequence[ModelMessage]) -> None:
         self.ctx = ctx
         self.conversation = conversation
         self.model_errors = ErrorSet()
         """The errors that the run's model requests failed with."""
+        self.feedback = {_MESSAGE.dump_json(m) for m in history if _feedback(m)}
+        """Pydantic AI's feedback requests that the conversation has (``RetryFeedbackPart``), as JSON."""
+
+    def _new(self, message: ModelMessage) -> bool:
+        if any(not self.conversation.knows_result(i) for i in _result_ids(message)):
+            return True
+        return _feedback(message) and _MESSAGE.dump_json(message) not in self.feedback
 
     async def store(self, messages: Sequence[ModelMessage]) -> None:
-        """Store the tools' results in ``messages`` (the run's) that the conversation does not have yet.
+        """Store the requests in ``messages`` (the run's) that the conversation does not have yet.
 
-        The rest of what a run adds, its responses, is stored as each arrives.
-        Results are found by their call ids, not by their place: a history
-        processor (``ProcessHistory``) may have trimmed the run's messages, and
-        what it makes of them is the model's to see, not the conversation's.
+        Those are the tools' results, and Pydantic AI's feedback on a reply it
+        could not use (``RetryFeedbackPart``): the rest of what a run adds, its
+        responses, is stored as each arrives. Results are found by their call
+        ids, not by their place: a history processor (``ProcessHistory``) may
+        have trimmed the run's messages, and what it makes of them is the
+        model's to see, not the conversation's.
         """
-        new = [m for m in messages if any(not self.conversation.knows_result(i) for i in _result_ids(m))]
+        new = [m for m in messages if self._new(m)]
         if new:
             await self.conversation.turn.append(*new)
+            self.feedback.update(_MESSAGE.dump_json(m) for m in new if _feedback(m))
 
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
@@ -323,42 +361,213 @@ def _output_spec(output: type[BaseModel], model: Model) -> NativeOutput[Any] | P
     return PromptedOutput(output)
 
 
-def _compaction(model: Model) -> _Capability | None:
-    """Return the compaction of ``model``'s provider, if Pydantic AI has one: Anthropic's, and the Responses API's."""
-    try:
-        if model.system == "anthropic":
-            from pydantic_ai.models.anthropic import (  # pylint: disable=import-outside-toplevel
-                AnthropicCompaction,
-                AnthropicModel,
-            )
-
-            return AnthropicCompaction() if isinstance(model, AnthropicModel) else None
-        if model.system == "openai":
-            from pydantic_ai.models.openai import (  # pylint: disable=import-outside-toplevel
-                OpenAICompaction,
-                OpenAIResponsesModel,
-            )
-
-            return OpenAICompaction() if isinstance(model, OpenAIResponsesModel) else None
-    except ImportError:
-        pass
-    return None
+def _compacts(capability: _Capability) -> bool:
+    """Return whether ``capability`` compacts the history: one of the harness's strategies (or any with its
+    ``compact``), or a provider's compaction."""
+    # A provider's compaction is in its model's module, which needs the provider's SDK: an agent has one only if the
+    # module is loaded.
+    providers: tuple[type[Any], ...] = tuple(
+        getattr(module, name)
+        for module_name, name in _PROVIDER_COMPACTIONS
+        if (module := sys.modules.get(module_name)) is not None
+    )
+    kinds: tuple[type[Any], ...] = (*_STRATEGIES, *providers)
+    return isinstance(capability, kinds) or callable(getattr(capability, "compact", None))
 
 
-def _capabilities(own: Agent[Any, Any] | None, model: Model) -> list[_Capability]:
+_PROVIDER_COMPACTIONS = (
+    ("pydantic_ai.models.anthropic", "AnthropicCompaction"),
+    ("pydantic_ai.models.openai", "OpenAICompaction"),
+)
+"""The compactions of model providers that Pydantic AI has, by module."""
+
+
+_STRATEGIES = (
+    ClampOversizedMessages,
+    ClearToolResults,
+    CompactOnRequest,
+    DeduplicateFileReads,
+    FallbackCompaction,
+    RelevanceCompaction,
+    SlidingWindowCompaction,
+    SummarizingCompaction,
+    TieredCompaction,
+)
+"""The harness's capabilities that compact the history."""
+
+TARGET = 0.8
+"""The share of the model's context window that the default compaction keeps the history within."""
+
+BETWEEN = 0.7
+"""The share of the model's context window past which a turn has the history compacted after its answer, so that the
+next turns start compacted rather than compact before a model request (``TARGET``)."""
+
+
+def compaction(context_window: int | None = None, *, target: float = TARGET) -> TieredCompaction[Any]:
+    """Return the compaction a Pydantic AI agent gets by default: the harness's recommended ``TieredCompaction``.
+
+    Before each model request whose history is over 80% of the model's
+    context window, it clamps oversized parts, then clears old tool results
+    (keeping the last three), and only then has the model summarize the
+    history but its latest 20 messages, stopping as soon as the history fits.
+
+    Args:
+        context_window: The model's context window, in tokens, for a model whose window neither its profile nor
+            the registry of ``genai-prices`` knows (or knows wrong). By default, the model's, else 200,000.
+        target: The share of the context window to keep the history within.
+    """
+    return TieredCompaction(
+        tiers=[
+            ClampOversizedMessages(max_part_tokens=50_000),
+            ClearToolResults(max_tokens=1, keep_pairs=3),
+            SummarizingCompaction(max_messages=1, keep_messages=20),
+        ],
+        target_fraction=target,
+        context_window=context_window,
+    )
+
+
+def _leaves(own: Agent[Any, Any] | None) -> list[_Capability]:
+    """Return the capabilities of ``own``, an Agent of your own, nested ones included."""
+    leaves: list[_Capability] = []
+    if own is not None:
+        own.root_capability.apply(leaves.append)
+    return leaves
+
+
+def _capabilities(own: Agent[Any, Any] | None, context_window: int | None) -> list[_Capability]:
     """Return the capabilities that a run gets beside the agent's own.
 
-    The built-in agent (``own`` is ``None``) gets the compaction of its
-    model's provider, for a conversation that lives long; an Agent of your
-    own runs as you configured it. Either gets ``ReinjectSystemPrompt``,
-    unless the agent has one: the conversation stores no system prompt,
-    which Pydantic AI keeps in the history it is given.
+    The built-in agent (``own`` is ``None``) gets the default compaction
+    (``compaction``), and so does an Agent of your own that has none of its
+    own: either history then stays within the model's context window. Either
+    gets ``ReinjectSystemPrompt``, unless the agent has one: the conversation
+    stores no system prompt, which Pydantic AI keeps in the history it is
+    given.
     """
-    have = {type(capability) for capability in (own.root_capability.capabilities if own is not None else ())}
-    chosen = [compaction] if own is None and (compaction := _compaction(model)) is not None else []
-    if ReinjectSystemPrompt not in have:
+    leaves = _leaves(own)
+    chosen: list[_Capability] = [] if any(map(_compacts, leaves)) else [compaction(context_window)]
+    if not any(isinstance(capability, ReinjectSystemPrompt) for capability in leaves):
         chosen.append(ReinjectSystemPrompt())
     return chosen
+
+
+def _part_print(part: Any) -> str:
+    dumped: object = to_jsonable_python(part, bytes_mode="base64")
+    if isinstance(dumped, dict):
+        dumped = {k: v for k, v in typing.cast(dict[str, object], dumped).items() if k != "timestamp"}
+    return json.dumps(dumped, sort_keys=True)
+
+
+def _prints(messages: Sequence[ModelMessage]) -> list[tuple[str, list[str]]]:
+    """Return what of ``messages`` a rewrite of the history changes: their parts but system prompts, without times.
+
+    Consecutive messages of one side are one, their parts in any order: a
+    run starts by merging consecutive requests (and putting tool results
+    first), which changes the shape of the history it was given, not what
+    it says.
+    """
+    printed: list[tuple[str, list[str]]] = []
+    for message in messages:
+        parts = [_part_print(p) for p in message.parts if not isinstance(p, SystemPromptPart)]
+        if printed and printed[-1][0] == message.kind:
+            printed[-1] = (message.kind, sorted([*printed[-1][1], *parts]))
+        else:
+            printed.append((message.kind, sorted(parts)))
+    return printed
+
+
+def _extends(now: list[tuple[str, list[str]]], before: list[tuple[str, list[str]]]) -> bool:
+    """Return whether the history ``now`` extends ``before`` (both as ``_prints`` has them), rather than rewrites it.
+
+    It extends it if it starts with it, the last message of ``before``
+    perhaps with more parts: Pydantic AI records state in the latest request
+    (the instructions in force, say).
+    """
+    if not before:
+        return True
+    if len(now) < len(before) or now[: len(before) - 1] != before[:-1]:
+        return False
+    (kind, parts), (then, had) = now[len(before) - 1], before[-1]
+    return kind == then and not collections.Counter(had) - collections.Counter(parts)
+
+
+def _unprompted(message: ModelMessage) -> ModelMessage:
+    """Return ``message`` without its system prompts, which ``ReinjectSystemPrompt`` gives each run as it is now."""
+    if isinstance(message, ModelRequest) and any(isinstance(p, SystemPromptPart) for p in message.parts):
+        return dataclasses.replace(message, parts=[p for p in message.parts if not isinstance(p, SystemPromptPart)])
+    return message
+
+
+def _unanchored(message: ModelMessage) -> ModelMessage:
+    """Return ``message`` without what its usage says of its request's input, if it is a response.
+
+    The harness estimates a history's tokens from the latest response's input
+    tokens, which measured the request it answered: in a compacted history,
+    that is the history before the compaction, until a response comes after
+    it. Without them, the history is measured as it is now (an attempt that
+    carries on from the snapshot, or the turn after ``compact``), rather than
+    compacted again.
+    """
+    if not isinstance(message, ModelResponse) or not message.usage.input_tokens:
+        return message
+    usage = dataclasses.replace(
+        message.usage,
+        input_tokens=0,
+        cache_write_tokens=0,
+        cache_write_1h_tokens=0,
+        cache_read_tokens=0,
+        input_audio_tokens=0,
+        cache_audio_read_tokens=0,
+    )
+    return dataclasses.replace(message, usage=usage)
+
+
+def _snapshot_of(messages: Sequence[ModelMessage]) -> list[ModelMessage]:
+    """Return ``messages``, compacted, as a snapshot keeps them: without system prompts, nor input usage (see
+    ``_unanchored``)."""
+    return [_unanchored(_unprompted(m)) for m in messages]
+
+
+class _Snapshots(AbstractCapability[Any]):
+    """Store the history as a snapshot of the turn when a compaction rewrote it, before the request goes out.
+
+    It runs after every other capability's ``before_model_request`` (it is
+    innermost), so it sees the messages as they are sent. The history was
+    rewritten, rather than extended, if the messages sent before (or, for a
+    run's first request, the history the run was given) do not start them:
+    the next turn, or a retried attempt, then starts from the snapshot.
+    """
+
+    def __init__(self, conversation: Conversation, history: Sequence[ModelMessage]) -> None:
+        self.conversation = conversation
+        self.sent = _prints(history)
+        """What the model was given last (at first, the history the run was given), as ``_prints`` has it."""
+
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position="innermost")
+
+    async def before_model_request(
+        self, ctx: RunContext[Any], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        messages = request_context.messages
+        prints = _prints(messages)
+        if not _extends(prints, self.sent):
+            await self.conversation.turn.snapshot(_snapshot_of(messages))
+        self.sent = prints
+        return request_context
+
+
+def _due(messages: list[ModelMessage], model: Model, context_window: int | None) -> bool:
+    """Return whether ``messages`` are near the default compaction's target for ``model`` (past ``BETWEEN``)."""
+    window = context_window or resolve_context_window(model) or DEFAULT_CONTEXT_WINDOW
+    return estimate_context_tokens(messages) > window * BETWEEN
+
+
+def conversation_id_of(ctx: SessionContext) -> str:
+    """Return the id of the conversation of ``ctx``'s key for Pydantic AI: ``<agent>/<key>``."""
+    definition = definition_of(ctx)
+    return f"{definition.name}/{ctx.key}" if definition is not None else ctx.key
 
 
 def _run(
@@ -370,24 +579,30 @@ def _run(
     output: type[BaseModel] | None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
+    context_window: int | None = None,
 ) -> Run:
     """Return the run of a prompt: Pydantic AI's, from the conversation to the prompt's answer (``output``'s JSON).
 
     ``deps`` is the run's dependencies (Pydantic AI's ``deps``), and ``usage_limits`` its limits: options of a run,
-    which an ``Agent`` cannot hold.
+    which an ``Agent`` cannot hold. ``context_window`` is the default compaction's (``compaction``).
     """
     # Resolve the model of an Agent of your own here as well, so that a missing key or package fails the same way.
     model = _model(named if named is not None else own.model if own is not None else None)
     agent: Agent[Any, Any] = own or Agent(instructions=system)
     toolsets = [toolset(given)] if given else []
-    chosen = _capabilities(own, model)
+    chosen = _capabilities(own, context_window)
+    compacted = any(isinstance(capability, TieredCompaction) for capability in chosen)
+    conversation_id = conversation_id_of(ctx)
 
     async def run(conversation: Conversation) -> str:
         if (final := conversation.turn.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
         history = typing.cast(list[ModelMessage], conversation.history())
-        restate = _Restate(ctx, conversation)
+        restate = _Restate(ctx, conversation, history)
+        # The snapshots of an agent that takes its history from them (the agent's ``chat``); a prompt of a session
+        # object that is no Pydantic AI agent takes the turn projection, which never reads one.
+        snapshots = [_Snapshots(conversation, history)] if conversation.snapshots else []
         spec = _output_spec(output, model) if output is not None else None
         try:
             # The tools of ``toolset`` find their call and the handler's context in the run.
@@ -396,10 +611,11 @@ def _run(
                     message_history=history,
                     model=model,
                     toolsets=toolsets,
-                    capabilities=[restate, *chosen],
+                    capabilities=[restate, *chosen, *snapshots],
                     output_type=spec,
                     deps=deps,
                     usage_limits=usage_limits,
+                    conversation_id=conversation_id,
                 )
         except UnexpectedModelBehavior as error:
             if error in restate.model_errors and not isinstance(error, ContentFilterError):
@@ -429,6 +645,9 @@ def _run(
             # Calls that wait for an approval or for a result from outside the run, which nothing gives: fail rather
             # than answer with them. The conversation closes them, as a provider refuses calls without results.
             raise TerminalError(DEFERRED)
+        if compacted and conversation.snapshots and _due(result.all_messages(), model, context_window):
+            # Near the target: compact after the answer (``compact``), rather than before a later model request.
+            conversation.compact_after()
         return result.output if isinstance(result.output, str) else to_json(result.output).decode()
 
     return run
@@ -444,6 +663,7 @@ async def prompt(
     tools: Sequence[AnyTool] = (),
     output: None = None,
     usage_limits: UsageLimits | None = None,
+    context_window: int | None = None,
 ) -> str: ...
 
 
@@ -457,6 +677,7 @@ async def prompt(
     tools: Sequence[AnyTool] = (),
     output: type[M],
     usage_limits: UsageLimits | None = None,
+    context_window: int | None = None,
 ) -> M: ...
 
 
@@ -469,6 +690,7 @@ async def prompt(
     output: None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
+    context_window: int | None = None,
 ) -> str: ...
 
 
@@ -481,6 +703,7 @@ async def prompt(
     output: type[M],
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
+    context_window: int | None = None,
 ) -> M: ...
 
 
@@ -495,6 +718,7 @@ async def prompt(
     output: type[BaseModel] | None = None,
     deps: Any = None,
     usage_limits: UsageLimits | None = None,
+    context_window: int | None = None,
 ) -> Any:
     """Answer a prompt with a Pydantic AI agent, exactly once.
 
@@ -532,6 +756,10 @@ async def prompt(
         usage_limits: The run's limits (Pydantic AI's ``UsageLimits``),
             past which the turn fails. Defaults to Pydantic AI's: 50 model
             requests.
+        context_window: The model's context window, in tokens, for the
+            default compaction (``compaction``), if neither the model's
+            profile nor the registry of ``genai-prices`` knows it (or knows
+            it wrong). Without it, an unknown window is taken as 200,000.
 
     Returns:
         The agent's answer: its text, or a value of ``output``.
@@ -544,7 +772,7 @@ async def prompt(
     """
     check_own(agent, "agent", model=model, system=system, tools=tools)
     check_built_in(agent, "agent", deps=deps)
-    return await _prompt(ctx, text, agent, model, system, tools, output, deps, usage_limits)
+    return await _prompt(ctx, text, agent, model, system, tools, output, deps, usage_limits, context_window)
 
 
 async def _prompt(
@@ -557,13 +785,13 @@ async def _prompt(
     output: type[BaseModel] | None,
     deps: Any,
     usage_limits: UsageLimits | None,
+    context_window: int | None,
 ) -> Any:
     """Answer ``text`` as ``prompt`` does, with its options checked."""
+    run = _run(ctx, own, model, system, tools, output, deps, usage_limits, context_window)
 
     def ask(text: str, check: Check | None = None) -> Awaitable[str]:
-        return answer_once(
-            ctx, text, ITEMS, _run(ctx, own, model, system, tools, output, deps, usage_limits), check=check
-        )
+        return answer_once(ctx, text, ITEMS, run, check=check)
 
     if output is None:
         return await ask(text)
@@ -579,6 +807,7 @@ def agent(
     tools: PerSession[Sequence[AnyTool]] = (),
     output: type[BaseModel] | None = None,
     usage_limits: UsageLimits | None = None,
+    context_window: int | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject: ...
 
@@ -591,6 +820,7 @@ def agent(
     output: type[BaseModel] | None = None,
     deps: PerSession[Any] = None,
     usage_limits: UsageLimits | None = None,
+    context_window: int | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject: ...
 
@@ -605,6 +835,7 @@ def agent(
     output: type[BaseModel] | None = None,
     deps: PerSession[Any] = None,
     usage_limits: UsageLimits | None = None,
+    context_window: int | None = None,
     **options: Unpack[AgentOptions],
 ) -> AgentObject:
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
@@ -652,8 +883,14 @@ def agent(
         usage_limits: Each run's limits (Pydantic AI's ``UsageLimits``),
             past which its turn fails. Defaults to Pydantic AI's: 50 model
             requests.
+        context_window: The model's context window, in tokens, for the
+            default compaction (``compaction``), if neither the model's
+            profile nor the registry of ``genai-prices`` knows it (or knows
+            it wrong). Without it, an unknown window is taken as 200,000.
         **options: The object's options, such as ``description``,
-            ``background`` or ``invocation_retry_policy``: see ``AgentOptions``.
+            ``background`` or ``invocation_retry_policy``: see
+            ``AgentOptions``. ``window`` and ``budget`` do not apply: the
+            model gets the history since the latest compaction, whole.
 
     Returns:
         The agent, to serve with ``restate.serve(restate.app([agent]))``, or any ASGI server.
@@ -678,17 +915,33 @@ def agent(
             output,
             await configured(deps, ctx),
             usage_limits,
+            context_window,
         )
 
-    obj.chat(answer, items=ITEMS, output=output, summarize=_summarizer(model) if own is None else None)
+    compact_history = None if any(map(_compacts, _leaves(own))) else _compactor(own, model, context_window)
+    obj.chat(answer, items=ITEMS, output=output, snapshots=True, compact_history=compact_history)
     return obj
 
 
-def _summarizer(model: PerSession[AnyModel | None]) -> Summarize:
-    """Return how the built-in agent summarizes its earlier turns: with its own model, in a run of its own."""
+def _compactor(
+    own: Agent[Any, Any] | None, model: PerSession[AnyModel | None], context_window: int | None
+) -> CompactHistory:
+    """Return how an agent with the default compaction compacts its history between turns: with ``compact_now``.
 
-    async def summarize(ctx: SessionContext, request: str) -> str:
-        result = await Agent(_model(await configured(model, ctx))).run(request)
-        return str(result.output)
+    A turn asks for it once its history is near the compaction's target
+    (``BETWEEN``), so that the next turns start compacted rather than compact
+    before a model request (``_run``). It compacts to ``BETWEEN``.
+    """
 
-    return summarize
+    async def compact_history(ctx: SessionContext, history: list[Any]) -> list[Any] | None:
+        named = await configured(model, ctx) if own is None else own.model
+        messages = typing.cast(list[ModelMessage], history)
+        compacted = await compact_now(
+            compaction(context_window, target=BETWEEN),
+            messages,
+            model=_model(named),
+            conversation_id=conversation_id_of(ctx),
+        )
+        return None if compacted == messages else _snapshot_of(compacted)
+
+    return compact_history
