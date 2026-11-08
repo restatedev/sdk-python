@@ -1,6 +1,6 @@
 # Google ADK
 
-> **Status:** not started. This plan is for one agent. Read
+> **Status:** done on branch `phase2-adk` (A0 to A4), awaiting phase 3. This plan is for one agent. Read
 > [`README.md`](README.md) first: the core contract, the rules for framework
 > agents, and how to run the tests.
 

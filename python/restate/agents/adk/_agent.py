@@ -34,6 +34,14 @@ its stored events:
   default) fails its prompt for good: a retry would carry on with a fresh count.
 - An agent or ``App`` of your own runs as you configured it, with the
   ``run_config`` you give. An ``App``'s root may be a ``Workflow`` of ADK's.
+- Except for an ``App``'s events compaction (``events_compaction_config``),
+  which is turned off, with a warning: the conversation's summary and window
+  give the model its earlier turns instead (``_conversation.py``). Once the
+  session held a summary of ADK's, ADK would sort its events by time, and put
+  the events the conversation makes as the session loads (its summary, and
+  the earlier turns' answers) after the turns they come before; and the two
+  summaries would cover the same turns. ADK's ``token_threshold`` compacts
+  within a turn too, before each model call: a long turn is not compacted.
 - The session is the conversation as the model sees it: the earlier turns'
   messages and answers, and the latest turns' events (``_conversation.py``).
   Its state is carried from turn to turn: each turn stores it with its
@@ -45,6 +53,7 @@ its stored events:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -342,9 +351,20 @@ def _app(
             # A clone, which also re-parents the sub-agents.
             schema = app.root_agent.clone(update={"output_schema": output})
             app = app.model_copy(update={"root_agent": schema})
+        if app.events_compaction_config is not None:
+            _without_compaction()
     resumable = ResumabilityConfig(is_resumable=True)
-    return app.model_copy(
-        update={"name": _APP, "plugins": [*app.plugins, _Restate(ctx)], "resumability_config": resumable}
+    update = {"name": _APP, "plugins": [*app.plugins, _Restate(ctx)], "resumability_config": resumable}
+    # The conversation's summary and window stand in for ADK's events compaction (see the module's docstring).
+    return app.model_copy(update={**update, "events_compaction_config": None})
+
+
+@functools.cache
+def _without_compaction() -> None:
+    """Warn, once per process, that an ``App``'s events compaction is turned off."""
+    logger.warning(
+        "restate.agents.adk turns off the events compaction of your App (events_compaction_config): "
+        "the conversation's summary and window give the model its earlier turns instead"
     )
 
 

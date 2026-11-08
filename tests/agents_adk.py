@@ -571,6 +571,60 @@ async def test_an_agent_that_adk_retries_after_a_tools_error_answers_once_it_rec
     assert crashes[k] == 2
 
 
+async def test_an_apps_events_compaction_is_off_and_the_conversation_keeps_its_order(
+    caplog: pytest.LogCaptureFixture,
+):
+    from google.adk.apps import App  # pylint: disable=import-outside-toplevel
+    from google.adk.apps.app import EventsCompactionConfig  # pylint: disable=import-outside-toplevel
+    from google.adk.apps.base_events_summarizer import BaseEventsSummarizer  # pylint: disable=import-outside-toplevel
+    from google.adk.events import Event  # pylint: disable=import-outside-toplevel
+    from google.adk.events.event_actions import EventActions, EventCompaction  # pylint: disable=import-outside-toplevel
+
+    from restate.agents.adk import _agent  # pylint: disable=import-outside-toplevel
+
+    seen: list[list[types.Content]] = []
+
+    class Seeing(Scripted):
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            seen.append(list(llm_request.contents))
+            async for response in super().generate_content_async(llm_request, stream):
+                yield response
+
+    class Summarizing(BaseEventsSummarizer):
+        """ADK's events compaction, with a summary of the events it is given."""
+
+        async def maybe_summarize_events(self, *, events: list[Event]) -> Event | None:
+            summary = types.Content(role="model", parts=[types.Part(text=f"a summary of {len(events)} events")])
+            ranged = EventCompaction(
+                start_timestamp=events[0].timestamp, end_timestamp=events[-1].timestamp, compacted_content=summary
+            )
+            return Event(author="user", invocation_id=Event.new_id(), actions=EventActions(compaction=ranged))
+
+    every_turn = EventsCompactionConfig(summarizer=Summarizing(), compaction_interval=1, overlap_size=0)
+    mine = App(name="mine", root_agent=LlmAgent(name="mine", model=Seeing()), events_compaction_config=every_turn)
+    _agent._without_compaction.cache_clear()  # pyright: ignore[reportPrivateUsage]
+    asked = asking(mine)
+    with caplog.at_level("WARNING", logger=_agent.__name__):
+        for n in (1, 2, 3):
+            assert await asked(f"hi {n}") == f"echo: hi {n}"
+        # The built-in agent has no events compaction to turn off.
+        assert await asking(model=Scripted())("hi there") == "echo: hi there"
+    # ADK's compaction would sort the events by time, and put the earlier turn's answer (made as the turn loads)
+    # after the prompt: the model sees the conversation in its order instead.
+    assert [part.text for content in seen[-1] for part in content.parts or []] == [
+        "hi 1",
+        "echo: hi 1",
+        "hi 2",
+        "echo: hi 2",
+        "hi 3",
+    ]
+    # Said once per process.
+    warnings = [record for record in caplog.records if "events_compaction_config" in record.getMessage()]
+    assert len(warnings) == 1
+
+
 async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
     k = key()
     for word in ("one", "two", "three", "four", "five"):
@@ -579,6 +633,10 @@ async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harnes
     assert len(summaries) == 1 and "User: hi one" in summaries[0] and "hi four" not in summaries[0]
     latest = _prompts(requests[-1])
     assert latest[0].startswith("A summary of our conversation so far:") and latest[1:] == ["hi four", "hi five"]
+    # The summary is a message of the user's, which the model acknowledges: the roles alternate, as every provider takes them.
+    said = [(content.role, "".join(part.text or "" for part in content.parts or [])) for content in requests[-1]]
+    assert [role for role, _ in said] == ["user", "model", "user", "model", "user"]
+    assert said[1] == ("model", "Understood.")
 
 
 async def test_the_state_a_killed_turn_set_holds_after_it_ended():
