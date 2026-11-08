@@ -254,39 +254,41 @@ INTERRUPT = "interrupt"
 """The name of the signal that answers LangGraph's ``interrupt()``."""
 
 
-def _interrupts(snapshot: StateSnapshot, resumes: dict[str, int]) -> list[tuple[Any, int]]:
-    """Return the pending interrupts of the run, with how often each was resumed (``resumes``, by interrupt id).
+def _interrupts(snapshot: StateSnapshot) -> list[Any]:
+    """Return the pending interrupts of the run, each once.
 
     LangGraph keeps each pending interrupt on the graph's task whose step
     raised it, a subgraph's interrupt included, even one of a node's second
     subgraph call, whose state LangGraph's subgraph snapshots do not show.
-    How often it was resumed is counted at the task that raised it, in
-    whichever namespace that ran (``SqlCheckpointSaver._resumes``), not at
-    the tasks of the graphs above it, which list it too.
+    Each graph above the task that raised it lists it again, under the same
+    id. That id is the raiser's namespace and the number of resume values
+    its task already has: each ``interrupt()`` of a node that interrupts
+    twice has an id of its own.
     """
-    return [(pending, resumes.get(pending.id, 0)) for task in snapshot.tasks for pending in task.interrupts]
+    pending: dict[str, Any] = {}
+    for task in snapshot.tasks:
+        for interrupted in task.interrupts:
+            pending.setdefault(interrupted.id, interrupted)
+    return list(pending.values())
 
 
-async def _resumed(ctx: SessionContext, saver: SqlCheckpointSaver, snapshot: StateSnapshot) -> dict[str, Any] | None:
+async def _resumed(ctx: SessionContext, snapshot: StateSnapshot) -> dict[str, Any] | None:
     """Wait for a signal for each pending interrupt of ``snapshot``, the state of the run's graph.
 
     Return their values by interrupt id, or ``None`` if no interrupt is
-    pending. Each wait's id is the turn's
-    invocation id (the same in each attempt), the interrupt's id, and the
-    number of resume values its task already has: a node that interrupts
-    twice has the same interrupt id both times, and each time is a wait of
-    its own. A retried attempt joins the same waits; a turn that ends without
-    them (killed, say) has its waits closed with it, as the companion closes
-    the waits whose ids start with the turn's.
+    pending. Each wait's id is the turn's invocation id (the same in each
+    attempt) and the interrupt's id, which LangGraph gives each
+    ``interrupt()`` of a run (see ``_interrupts``). A retried attempt joins
+    the same waits; a turn that ends without them (killed, say) has its
+    waits closed with it, as the companion closes the waits whose ids start
+    with the turn's.
     """
-    if not any(task.interrupts for task in snapshot.tasks):
+    pending = _interrupts(snapshot)
+    if not pending:
         return None
-    pending = _interrupts(snapshot, await saver._resumes(THREAD_ID))  # pyright: ignore[reportPrivateUsage]
     waits: dict[str, Any] = {}
-    for interrupted, times in pending:
-        if interrupted.id in waits:
-            continue
-        wait_id = f"{ctx.request.id}:interrupt:{interrupted.id}:{times}"
+    for interrupted in pending:
+        wait_id = f"{ctx.request.id}:interrupt:{interrupted.id}"
         request: _signals.WaitRequest = {
             "id": wait_id,
             "name": INTERRUPT,
@@ -363,7 +365,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         # message (or one after a stopped run) starts a run, after what closed the previous run.
         start: Any
         if asked:
-            resumes = await _resumed(ctx, saver, await _stored(app))
+            resumes = await _resumed(ctx, await _stored(app))
             start = Command(resume=resumes) if resumes is not None else None
         else:
             prompt = HumanMessage(str(typing.cast(BaseMessage, step.item).text), id=prompt_id)
@@ -386,7 +388,7 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
                 raise
             # The run stops at its interrupts: it goes on with the signals that answer them.
             paused = await _stored(app)
-            resumes = await _resumed(ctx, saver, paused)
+            resumes = await _resumed(ctx, paused)
             if resumes is None:
                 if at_breakpoint(paused):
                     # At a subgraph's static breakpoint, which check() does not look for. Fail, rather than

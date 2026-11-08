@@ -278,15 +278,14 @@ def twice(_: State) -> dict[str, list[str]]:
     return {"log": [f"{interrupt('one')},{interrupt('two')}"]}
 
 
-async def test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_raised_it():
-    """What the waits of ``interrupt()`` count on (``SqlCheckpointSaver._resumes``).
+async def test_langgraph_gives_each_interrupt_of_a_run_an_id_of_its_own():
+    """What the waits of ``interrupt()`` count on (``_graph._resumed``): a wait per interrupt id.
 
-    A node that interrupts again raises an interrupt of the same id, so its
-    waits are told apart by how many resume values its task has. LangGraph
-    stores those on the task that raised the interrupt, in the namespace of
-    the graph that ran it (here, a subgraph that a node calls). That node
-    lists the interrupt again, with its own resume values: the count is the
-    raiser's.
+    A node that interrupts again, after it was resumed, raises an interrupt
+    of an id of its own: LangGraph makes it of the namespace of the task
+    that raised it and the number of resume values that task has. That
+    holds in a subgraph that a node calls after interrupting itself: the
+    node lists the subgraph's interrupt again, under the raiser's id.
     """
     inner = StateGraph(State)
     inner.add_node("twice", typing.cast(Any, twice))
@@ -303,7 +302,7 @@ async def test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_rais
     outer.add_edge(START, "approve")
     outer.add_edge("approve", END)
     backend = Backend()
-    seen: list[tuple[str, Any, int]] = []
+    seen: list[tuple[str, Any]] = []
     final: dict[str, Any] = {}
 
     async def go(ctx: sessions.SessionContext) -> None:
@@ -312,15 +311,14 @@ async def test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_rais
         await app.ainvoke({"log": []}, THREAD, durability="sync")
         for value in ("yes", "1", "2"):
             snapshot = await app.aget_state(THREAD)
-            [pending] = [found for task in snapshot.tasks for found in task.interrupts]
-            resumes = await saver._resumes("t")  # pyright: ignore[reportPrivateUsage]
-            seen.append((pending.id, pending.value, resumes[pending.id]))
+            [pending] = {found.id: found for task in snapshot.tasks for found in task.interrupts}.values()
+            seen.append((pending.id, pending.value))
             await app.ainvoke(Command(resume={pending.id: value}), THREAD, durability="sync")
         final["log"] = (await app.aget_state(THREAD)).values["log"]
 
     await attempt(backend, go)
-    assert [(value, count) for _, value, count in seen] == [("approve?", 0), ("one", 0), ("two", 1)]
-    assert seen[0][0] != seen[1][0] == seen[2][0]
+    assert [value for _, value in seen] == ["approve?", "one", "two"]
+    assert len({interrupt_id for interrupt_id, _ in seen}) == 3
     assert final["log"] == ["yes:1,2"]
 
 

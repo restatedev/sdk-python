@@ -61,7 +61,6 @@ from langgraph.checkpoint.base import (
     get_checkpoint_metadata,
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
-from langgraph.checkpoint.serde.types import INTERRUPT, RESUME
 
 from restate.sessions import Database, DatabaseWriter, SqlParam, SqlValue
 from restate.sessions.internal import Schema
@@ -337,46 +336,6 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
                         "task_path, idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         row,
                     )
-
-    async def _resumes(self, thread_id: str) -> dict[str, int]:
-        """Return, by interrupt id, how many resume values the task that raised each interrupt has.
-
-        A task that raises ``interrupt()`` again after it was resumed raises
-        one of the same id; the count tells the times apart. A task's
-        interrupt and its resume values are pending writes of the same
-        checkpoint, in the namespace of the graph that ran it: the thread's
-        own, or a subgraph's (``node:task_id``, or ``node:task_id|1`` for a
-        node's second subgraph call, which LangGraph's subgraph snapshots
-        do not show). This reads them in every namespace. Each graph above
-        the raiser lists the interrupt again, on its own task with that
-        task's own resume values: the raiser's is the deepest namespace.
-        """
-        async with self._lock:
-            await self._setup()
-            rows = await self.db.values(
-                "SELECT checkpoint_ns, checkpoint_id, task_id, channel, type, value FROM restate_langgraph_writes "
-                "WHERE thread_id = ? AND channel IN (?, ?)",
-                [thread_id, INTERRUPT, RESUME],
-            )
-        raised: dict[tuple[str, str, str], list[str]] = {}
-        resumed: dict[tuple[str, str, str], int] = {}
-        for ns, checkpoint_id, task_id, channel, type_, value in rows:
-            task = (str(ns), str(checkpoint_id), str(task_id))
-            loaded = self._load(type_, value)
-            if channel == INTERRUPT:
-                interrupts = typing.cast(Sequence[Any], loaded) if isinstance(loaded, list | tuple) else ()
-                raised[task] = [str(i.id) for i in interrupts if getattr(i, "id", None) is not None]
-            else:
-                resumed[task] = len(typing.cast(list[Any], loaded)) if isinstance(loaded, list) else 1
-        # Each graph above the task that raised an interrupt lists it again, on its own task, with that task's own
-        # resume values (a node that interrupts itself, then runs a subgraph that interrupts): the count is the
-        # raiser's, in the deepest namespace that lists the interrupt.
-        counts: dict[str, tuple[int, int]] = {}
-        for task, ids in raised.items():
-            found = (len(task[0]), resumed.get(task, 0))
-            for interrupt_id in ids:
-                counts[interrupt_id] = max(counts.get(interrupt_id, (-1, 0)), found)
-        return {interrupt_id: count for interrupt_id, (_, count) in counts.items()}
 
     async def adelete_thread(self, thread_id: str) -> None:
         await self.aprune([thread_id], strategy="delete")
