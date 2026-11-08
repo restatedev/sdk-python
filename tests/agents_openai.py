@@ -30,6 +30,7 @@ pytest.importorskip("agents")
 from agents import (  # noqa: E402
     Agent,
     GuardrailFunctionOutput,
+    Handoff,
     Model,
     ModelResponse,
     OpenAIChatCompletionsModel,
@@ -673,6 +674,29 @@ async def test_a_turn_answered_by_the_tool_of_an_agent_handed_off_to_carries_tha
     assert await ask("handbook Rome") == "booked Rome"
     # The next turn is with the booker still.
     assert await ask("system x") == "system: You book."
+
+
+async def test_a_handoff_built_by_hand_runs():
+    scripted = Scripted(reply)
+    refunds = Agent(name="refunds", instructions="You handle refunds.", model=scripted)
+
+    async def to_refunds(context: Any, arguments: str) -> Agent[Any]:
+        return refunds
+
+    # Built by hand, not with handoff(): it names no agent until the SDK invokes it.
+    by_hand = Handoff(
+        tool_name="transfer_to_refunds",
+        tool_description="Hand off to the refunds agent.",
+        input_json_schema={},
+        on_invoke_handoff=to_refunds,
+        agent_name="refunds",
+    )
+    ask = invoker(asker(agent=Agent(name="triage", instructions="You triage.", model=scripted, handoffs=[by_hand])))
+    # The refunds agent answers, with the handoff's output as the latest item.
+    assert await ask("handoff x") == 'tool said: {"assistant": "refunds"}'
+    assert [system for system, _ in scripted.requests] == ["You triage.", "You handle refunds."]
+    # It is not followed from turn to turn: the next message goes back to the agent given.
+    assert await ask("system x") == "system: You triage."
 
 
 async def test_a_tool_that_ends_the_turn_is_stored_and_not_run_again():
