@@ -1,6 +1,7 @@
 # OpenAI Agents SDK
 
-> **Status:** not started. This plan is for one agent. Read
+> **Status:** done in phase 2, on branch `phase2-openai` (O1 to O4): the summary
+> is one user message, and no guard for older SDKs is left. This plan is for one agent. Read
 > [`README.md`](README.md) first: the core contract, the rules for framework
 > agents, and how to run the tests.
 

@@ -38,6 +38,9 @@ start, and the run resumes from the last step stored:
   The stored conversation is the full transcript: a handoff passes it on as it
   is, rather than collapsed into one message (``nest_handoff_history`` is off),
   and a handoff's ``input_filter`` changes only what the next agent sees.
+  That takes a handoff to an ``Agent``, or one made with the SDK's
+  ``handoff()``: a ``Handoff`` built by hand names no agent until it is
+  invoked, so the next message goes back to the ``Agent`` you gave.
 - A tool's error fails the attempt, and Restate retries it. A
   ``restate.TerminalError``, which a retry would only repeat, is instead the
   tool's answer to the model.
@@ -59,29 +62,34 @@ start, and the run resumes from the last step stored:
 - An ``Agent`` of your own runs as you configured it, with the ``context``
   (the SDK's run context) and the ``run_config`` you give: its
   ``call_model_input_filter`` runs after this package's, which stores the
-  tools' outputs.
+  tools' outputs: the SDK's ``ToolOutputTrimmer`` there trims old tool
+  outputs in the model's input, not in the conversation.
 - The model sees the earlier turns as their messages and answers, and the
   latest turns whole (the agent's ``window``), as many as its ``budget``
   holds; the built-in agent has its model summarize the earliest once they
-  outgrow it, after a turn's answer (``_conversation.py``).
-- The built-in agent gets OpenAI's server-side compaction, for a conversation
-  that lives long (``ModelSettings.context_management``, on versions of the
-  SDK that have it): the Responses API summarizes the history as it nears the
-  model's context window, which a long conversation would otherwise outgrow,
-  failing each turn. Its compaction item is stored like any reply, and a
-  request starts with the latest one: it stands for the items before it,
-  which OpenAI's guide says need not be sent again (as the SDK's own
-  compacting session drops them), so that requests stop growing with the
-  conversation, which is stored whole. A model of the Chat Completions API,
-  or of another provider, gets
-  none, and a model that OpenAI does not compact refuses such requests: run
-  it as an ``Agent`` of your own, configured as you need.
+  outgrow it, after a turn's answer (``_conversation.py``). The summary is
+  one user message (``SUMMARY`` and its text), with no reply made up after
+  it, as Codex sends its own: the Responses API, and Chat Completions
+  through the SDK's converter, take the user message that follows it.
+- The SDK's ``Session`` stores are not used: only the turns write the
+  conversation. ``OpenAIResponsesCompactionSession``, which rewrites the
+  stored items, does not fit it; OpenAI's server-side compaction does.
+- The built-in agent gets OpenAI's server-side compaction, for a
+  conversation that lives long (``ModelSettings.context_management``): the
+  Responses API summarizes the history as it nears the model's context
+  window, which a long conversation would otherwise outgrow, failing each
+  turn. Its compaction item is stored like any reply, and a request starts
+  with the latest one: it stands for the items before it, which OpenAI's
+  guide says need not be sent again (as the SDK's own compacting session
+  drops them), so that requests stop growing with the conversation, which
+  is stored whole. A model of the Chat Completions API, or of another
+  provider, gets none, and a model that OpenAI does not compact refuses such
+  requests: run it as an ``Agent`` of your own, configured as you need.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import importlib
 import inspect
 import json
 import typing
@@ -108,6 +116,7 @@ from agents import (
 )
 from agents import Tool as SdkTool
 from agents.run import CallModelData, ModelInputData
+from agents.tool import invoke_function_tool
 from agents.tool_context import ToolContext
 from pydantic import BaseModel
 from pydantic_core import to_json
@@ -124,7 +133,7 @@ from restate.agents._common import (
     model_of,
     raised_by_tool,
 )
-from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
+from restate.agents._conversation import SUMMARY, Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._tools import Tool, current_call, tools_in
@@ -173,6 +182,14 @@ class _Items:
     def reply(self, text: str, agent: str | None = None) -> Item:
         return {"role": "assistant", "content": text}
 
+    def summary(self, text: str) -> list[Item]:
+        """Return the summary of the earliest turns as one user message, with no reply made up after it.
+
+        As Codex sends its own: the Responses API, and Chat Completions
+        through the SDK's converter, take consecutive user messages.
+        """
+        return [{"role": "user", "content": SUMMARY + text}]
+
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         return [{"type": "function_call_output", "call_id": call.id, "output": text} for call, text in results]
 
@@ -203,7 +220,11 @@ ITEMS = _Items()
 
 
 def _agents(root: Agent[Any]) -> dict[str, Agent[Any]]:
-    """Return the agents that ``root`` and its handoffs reach, by name."""
+    """Return the agents that ``root`` and its handoffs reach, by name.
+
+    A ``Handoff`` made with the SDK's ``handoff()`` keeps its agent; one
+    built by hand names none until it is invoked, and is not followed.
+    """
     found: dict[str, Agent[Any]] = {}
     waiting = [root]
     while waiting:
@@ -212,7 +233,11 @@ def _agents(root: Agent[Any]) -> dict[str, Agent[Any]]:
             continue
         found[agent.name] = agent
         for handoff in agent.handoffs:
-            target = handoff if isinstance(handoff, Agent) else getattr(handoff, "_agent_ref", lambda: None)()
+            if isinstance(handoff, Agent):
+                target: object = handoff
+            else:
+                ref = handoff._agent_ref  # pyright: ignore[reportPrivateUsage]
+                target = ref() if ref is not None else None
             if isinstance(target, Agent):
                 waiting.append(typing.cast(Agent[Any], target))
     return found
@@ -366,23 +391,16 @@ def _runner_only(tool: SdkTool | None) -> bool:
 
     That is so for any tool but a function tool (a handoff has none), and for
     a function tool with guardrails, which the runner applies around it, and
-    calling the tool itself would bypass. (Older versions of the SDK have no
-    tool guardrails.)
+    calling the tool itself would bypass.
     """
     if not isinstance(tool, FunctionTool):
         return True
-    return any(getattr(tool, name, None) for name in ("tool_input_guardrails", "tool_output_guardrails"))
-
-
-_INVOKE: Any = getattr(importlib.import_module("agents.tool"), "invoke_function_tool", None)
-"""The SDK's invocation of a function tool, which applies its timeout (versions of the SDK with tool timeouts)."""
+    return bool(tool.tool_input_guardrails or tool.tool_output_guardrails)
 
 
 async def _invoke(tool: FunctionTool, context: ToolContext[Any], arguments: str) -> Any:
     """Run a call to ``tool`` as the SDK's runner does, with its timeout, though not its guardrails or approval."""
-    if _INVOKE is None:
-        return await tool.on_invoke_tool(context, arguments)
-    return await _INVOKE(function_tool=tool, context=context, arguments=arguments)
+    return await invoke_function_tool(function_tool=tool, context=context, arguments=arguments)
 
 
 SETUP = "the agent is not set up right"
@@ -499,7 +517,7 @@ async def _go(
     # The turn is with the agent it starts with until a handoff (``_Hooks.on_handoff``): carried if it ends first.
     turn.carry(agent=current.name)
     filtered = dataclasses.replace(config, call_model_input_filter=hooks.model_input)
-    # The SDK's default, unless given: older versions take no None.
+    # The SDK's default, unless given: the SDK takes None for no limit at all.
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:
         agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
@@ -521,7 +539,7 @@ async def _go(
     # The outputs that no model request stored: those of a tool that ends the turn, say.
     if outputs := conversation.new_results(result.to_input_list()):
         await turn.append(*outputs)
-    if getattr(result, "interruptions", None):
+    if result.interruptions:
         # Calls that wait for an approval, which nothing gives: fail rather than answer without them. The
         # conversation closes them, so that they never run.
         raise TerminalError(APPROVALS)
@@ -576,11 +594,9 @@ def _long_lived(model: str | Model) -> ModelSettings:
 
     A model of the Responses API (a model id, which the SDK's default
     provider makes one of, or such a model) gets OpenAI's server-side
-    compaction, on versions of the SDK that have it (``context_management``);
-    any other model, none.
+    compaction (``context_management``); any other model, none.
     """
-    has_it = "context_management" in {field.name for field in dataclasses.fields(ModelSettings)}
-    if has_it and isinstance(model, str | OpenAIResponsesModel):
+    if isinstance(model, str | OpenAIResponsesModel):
         return ModelSettings(context_management=COMPACTION)
     return ModelSettings()
 

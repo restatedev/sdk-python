@@ -30,6 +30,7 @@ pytest.importorskip("agents")
 from agents import (  # noqa: E402
     Agent,
     GuardrailFunctionOutput,
+    Handoff,
     Model,
     ModelResponse,
     OpenAIChatCompletionsModel,
@@ -365,6 +366,9 @@ async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harnes
     latest = _prompts(remembering.requests[-1][1])
     assert latest[0].startswith("A summary of our conversation so far:") and "User: hi one" in latest[0]
     assert latest[1:] == ["hi four", "hi five"]
+    # The summary is one user message, which the fourth turn's prompt follows: no reply is made up after it.
+    request = remembering.requests[-1][1]
+    assert request[0]["role"] == "user" and request[1] == {"role": "user", "content": "hi four"}
     # The conversation itself keeps every turn.
     page = (await post(harness, f"oai_summarizing/{k}/messages", json={})).json()
     assert len(page["messages"]) == 10
@@ -609,6 +613,44 @@ async def test_an_agent_of_your_own_gets_its_context_and_its_run_config():
     assert [len(items) for _, items in scripted.requests] == [1, 3, 3, 3]
 
 
+async def test_the_sdks_tool_output_trimmer_trims_what_the_model_sees_not_what_is_stored():
+    from agents.extensions import ToolOutputTrimmer  # pylint: disable=import-outside-toplevel
+
+    from restate.agents import AgentObject  # pylint: disable=import-outside-toplevel
+
+    @function_tool(name_override="get_weather")
+    def wordy_weather(city: str) -> str:
+        """The weather in a city, at length."""
+        return f"sunny in {city}. " * 20
+
+    def outputs() -> list[str]:
+        return [str(i["output"]) for i in scripted.requests[-1][1] if i.get("type") == "function_call_output"]
+
+    scripted = Scripted(reply)
+    mine = Agent(name="mine", model=scripted, tools=[wordy_weather])
+    trimmer = ToolOutputTrimmer(recent_turns=1, max_output_chars=50, preview_chars=10)
+    # The two latest turns whole: the second and third turns' requests have the first turn's tool output.
+    obj = AgentObject("asker", window=2)
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        trimming = text.startswith("trim")
+        config = RunConfig(call_model_input_filter=trimmer) if trimming else None
+        return await openai.prompt(ctx, text, agent=mine, run_config=config)
+
+    send = invoker(obj)
+    full = "sunny in Rome. " * 20
+    assert await send("weather Rome") == f"tool said: {full}"
+    assert outputs() == [full]
+    # The next turn's request has that output trimmed, by the trimmer that runs after this package's filter.
+    assert await send("trim now") == "echo: trim now"
+    [trimmed] = outputs()
+    assert len(trimmed) < len(full)
+    # The conversation keeps it whole: a run without the trimmer gets it as the tool gave it.
+    assert await send("hi there") == "echo: hi there"
+    assert outputs() == [full]
+
+
 # --- In process: an Agent of your own's options ---------------------------------------------------
 
 
@@ -673,6 +715,29 @@ async def test_a_turn_answered_by_the_tool_of_an_agent_handed_off_to_carries_tha
     assert await ask("handbook Rome") == "booked Rome"
     # The next turn is with the booker still.
     assert await ask("system x") == "system: You book."
+
+
+async def test_a_handoff_built_by_hand_runs():
+    scripted = Scripted(reply)
+    refunds = Agent(name="refunds", instructions="You handle refunds.", model=scripted)
+
+    async def to_refunds(context: Any, arguments: str) -> Agent[Any]:
+        return refunds
+
+    # Built by hand, not with handoff(): it names no agent until the SDK invokes it.
+    by_hand = Handoff(
+        tool_name="transfer_to_refunds",
+        tool_description="Hand off to the refunds agent.",
+        input_json_schema={},
+        on_invoke_handoff=to_refunds,
+        agent_name="refunds",
+    )
+    ask = invoker(asker(agent=Agent(name="triage", instructions="You triage.", model=scripted, handoffs=[by_hand])))
+    # The refunds agent answers, with the handoff's output as the latest item.
+    assert await ask("handoff x") == 'tool said: {"assistant": "refunds"}'
+    assert [system for system, _ in scripted.requests] == ["You triage.", "You handle refunds."]
+    # It is not followed from turn to turn: the next message goes back to the agent given.
+    assert await ask("system x") == "system: You triage."
 
 
 async def test_a_tool_that_ends_the_turn_is_stored_and_not_run_again():
@@ -796,6 +861,30 @@ def test_a_tool_output_of_any_kind_is_stored_once():
 
 
 # --- In process: a conversation that lives long --------------------------------------------------
+
+
+def test_the_summary_is_one_user_message_that_both_apis_take():
+    from agents.models.chatcmpl_converter import Converter  # pylint: disable=import-outside-toplevel
+    from openai.types.responses import ResponseInputParam  # pylint: disable=import-outside-toplevel
+    from pydantic import TypeAdapter  # pylint: disable=import-outside-toplevel
+
+    from restate.agents._conversation import SUMMARY, summary_items  # pylint: disable=import-outside-toplevel
+    from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
+
+    items = _agent.ITEMS
+    summary = summary_items(items, "We spoke of Rome.")
+    # One user message, as Codex sends its summary: no reply made up after it.
+    assert summary == [{"role": "user", "content": SUMMARY + "We spoke of Rome."}]
+    # The earlier turns follow it, from their prompts: a user message right after the summary.
+    history = [*summary, items.prompt("hi"), items.reply("hello"), items.prompt("and now?")]
+    assert TypeAdapter(ResponseInputParam).validate_python(history) == history
+    messages = Converter.items_to_messages(typing.cast(Any, history))
+    assert [(m["role"], m.get("content")) for m in messages] == [
+        ("user", SUMMARY + "We spoke of Rome."),
+        ("user", "hi"),
+        ("assistant", "hello"),
+        ("user", "and now?"),
+    ]
 
 
 class ResponsesScripted(OpenAIResponsesModel):

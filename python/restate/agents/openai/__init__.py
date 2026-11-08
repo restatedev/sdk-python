@@ -38,6 +38,23 @@ and ``RunConfig``::
 ``tools`` gives an ``Agent`` of your own this package's tools. The
 conversation is stored one step at a time.
 
+The conversation lives in the key's database, and only its turns write it,
+so the SDK's ``Session`` stores are not used. Don't use
+``OpenAIResponsesCompactionSession`` with these agents: it rewrites stored
+items. The model sees the summary of the earliest turns (as one user
+message), the earlier turns as their prompts and answers, and the latest
+turns whole (``window``, ``budget``); the built-in agent also gets OpenAI's
+server-side compaction. To trim old tool outputs within the window, give
+your ``Agent``'s run the SDK's ``ToolOutputTrimmer`` as its input filter: it
+runs after this package's, so it changes what the model sees, not what is
+stored::
+
+    from agents.extensions import ToolOutputTrimmer
+
+    desk = openai.agent(
+        "desk", agent=triage, run_config=RunConfig(call_model_input_filter=ToolOutputTrimmer())
+    )
+
 This differs from the older ``restate.ext.openai`` integration, whose
 ``DurableRunner`` runs an agent durably inside any regular Restate handler,
 journaling its model calls with ``ctx.run_typed``. Pick ``restate.ext.openai`` to
