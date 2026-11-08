@@ -764,9 +764,9 @@ async def test_a_crash_while_waiting_for_an_approval_joins_the_same_wait(
     harness: HarnessEnvironment, monkeypatch: pytest.MonkeyPatch
 ):
     from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
+    from restate.agents.internal import wait_for as real  # pylint: disable=import-outside-toplevel
 
     k = key()
-    real = _agent.wait_for
     crashed: list[str] = []
 
     async def open_then_crash(ctx: Any, call_id: str, signal: str, input: Any = None) -> Any:
