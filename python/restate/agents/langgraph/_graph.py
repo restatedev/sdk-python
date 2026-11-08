@@ -21,7 +21,8 @@ message as a new ``HumanMessage``:
   (``_context.py``). LangGraph's run context is the graph's own
   (``context=``), else the handler's. A retried attempt resumes the run it
   cut off. A run that finishes prunes the thread to the latest checkpoint
-  of each namespace (LangGraph's ``aprune``).
+  of each namespace (LangGraph's ``aprune``), and what LangGraph rebuilds
+  its delta channels (``DeltaChannel``) from, if it has any.
 - Any error of the run fails the attempt, and Restate retries it: none is
   taken for a model provider's refusal, as the built-in agent's model's can
   be, since a graph's models, tools and nodes are all its own (a tool or a

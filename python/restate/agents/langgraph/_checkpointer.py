@@ -36,7 +36,8 @@ A thread keeps every checkpoint, which LangGraph needs for ``alist``, time
 travel and forks, until ``aprune`` (LangGraph's API) deletes them: with
 ``strategy="keep_latest"``, all but the latest checkpoint of each namespace
 (the thread's own, and each subgraph run's), with their writes and the channel
-values that only they referenced. A message list stored again at each step
+values that only they referenced. A graph with a ``DeltaChannel`` keeps the
+checkpoints that LangGraph rebuilds that channel from too. A message list stored again at each step
 grows with the square of its length: prune a thread between its runs, as
 ``langgraph.agent`` does after each turn.
 """
@@ -348,6 +349,13 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         keeps its pending writes, so a paused run still resumes. A namespace
         is the thread's own (``""``) or a subgraph run's, which keeps its
         latest checkpoint too.
+
+        A graph with a ``DeltaChannel`` (LangGraph's beta) stores only the
+        writes of such a channel at most steps, and its whole value now and
+        then (a snapshot): LangGraph rebuilds the value from the latest
+        snapshot and the writes after it. The latest checkpoint of such a
+        graph keeps its ancestors back to the snapshot of each of its delta
+        channels, with their writes (see ``_kept``).
         """
         if strategy not in ("keep_latest", "delete"):
             raise ValueError(f'unknown strategy {strategy!r}: use "keep_latest" or "delete"')
@@ -360,15 +368,44 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
                             await tx.execute(f"DELETE FROM {table} WHERE thread_id = ?", [thread_id])
                         continue
                     latest = await tx.values(
-                        "SELECT c.checkpoint_ns, c.checkpoint_id, c.type, c.checkpoint "
-                        "FROM restate_langgraph_checkpoints c WHERE c.thread_id = ? AND c.checkpoint_id = ("
+                        "SELECT c.checkpoint_ns, c.checkpoint_id FROM restate_langgraph_checkpoints c "
+                        "WHERE c.thread_id = ? AND c.checkpoint_id = ("
                         "SELECT max(l.checkpoint_id) FROM restate_langgraph_checkpoints l "
                         "WHERE l.thread_id = c.thread_id AND l.checkpoint_ns = c.checkpoint_ns)",
                         [thread_id],
                     )
-                    for ns, checkpoint_id, type_, stored in latest:
-                        checkpoint = typing.cast(Checkpoint, self._load(type_, stored))
-                        await _drop_earlier(tx, thread_id, str(ns), str(checkpoint_id), checkpoint)
+                    for ns, checkpoint_id in latest:
+                        kept = await self._kept(tx, thread_id, str(ns), str(checkpoint_id))
+                        await _drop_earlier(tx, thread_id, str(ns), kept)
+
+    async def _kept(self, tx: DatabaseWriter, thread_id: str, ns: str, checkpoint_id: str) -> dict[str, Checkpoint]:
+        """Return the checkpoints of namespace ``ns`` that its latest, ``checkpoint_id``, needs, by id.
+
+        That is the latest itself, and the ancestors that LangGraph reads to
+        rebuild its delta channels (``get_delta_channel_history``): back to
+        the snapshot of each. The metadata of a checkpoint counts, for each
+        delta channel, the steps since its snapshot
+        (``counters_since_delta_snapshot``); a channel that has no count
+        there was snapshotted at that checkpoint, or not written yet.
+        """
+        kept: dict[str, Checkpoint] = {}
+        waiting: set[str] | None = None
+        at: SqlValue = checkpoint_id
+        while at is not None and waiting != set():
+            rows = await tx.values(
+                "SELECT parent_checkpoint_id, type, checkpoint, metadata FROM restate_langgraph_checkpoints "
+                "WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?",
+                [thread_id, ns, at],
+            )
+            if not rows:
+                break
+            parent, type_, stored, metadata = rows[0]
+            kept[str(at)] = typing.cast(Checkpoint, self._load(type_, stored))
+            loaded = typing.cast(dict[str, Any], self._load(type_, metadata))
+            counted = set(typing.cast(dict[str, Any], loaded.get("counters_since_delta_snapshot") or {}))
+            waiting = counted if waiting is None else waiting & counted
+            at = parent
+        return kept
 
 
 def _thread(config: RunnableConfig) -> tuple[str, str]:
@@ -395,19 +432,18 @@ def _matches(actual: object, expected: object) -> bool:
     return actual == expected
 
 
-async def _drop_earlier(
-    tx: DatabaseWriter, thread_id: str, ns: str, checkpoint_id: str, checkpoint: Checkpoint
-) -> None:
-    """Delete the checkpoints, writes and channel values of namespace ``ns`` that its checkpoint ``checkpoint_id``
-    (``checkpoint``) does not use."""
+async def _drop_earlier(tx: DatabaseWriter, thread_id: str, ns: str, kept: dict[str, Checkpoint]) -> None:
+    """Delete the checkpoints, writes and channel values of namespace ``ns`` that its ``kept`` checkpoints do not
+    use."""
+    ids = ", ".join("?" for _ in kept)
     for table in ("restate_langgraph_checkpoints", "restate_langgraph_writes"):
         await tx.execute(
-            f"DELETE FROM {table} WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id <> ?",
-            [thread_id, ns, checkpoint_id],
+            f"DELETE FROM {table} WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id NOT IN ({ids})",
+            [thread_id, ns, *kept],
         )
-    versions = list(checkpoint.get("channel_versions", {}).items())
-    kept = " OR ".join("(channel = ? AND version = ?)" for _ in versions) or "0"
+    versions = {(channel, str(version)) for c in kept.values() for channel, version in c["channel_versions"].items()}
+    used = " OR ".join("(channel = ? AND version = ?)" for _ in versions) or "0"
     await tx.execute(
-        f"DELETE FROM restate_langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND NOT ({kept})",
-        [thread_id, ns, *(item for channel, version in versions for item in (channel, str(version)))],
+        f"DELETE FROM restate_langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND NOT ({used})",
+        [thread_id, ns, *(item for pair in versions for item in pair)],
     )
