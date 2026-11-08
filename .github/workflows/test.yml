@@ -56,8 +56,6 @@ jobs:
               extra = tomllib.load(f)["project"]["optional-dependencies"]["langgraph"]
           print("\n".join(r for r in extra if r.startswith(("langgraph", "langchain"))))
           EOF
-          # LangChain's create_agent needs a newer langchain-core than the extra's oldest: its tests skip here.
-          uv pip uninstall langchain
           # Only these packages change, to their oldest, and what they need with them.
           uv pip install --resolution lowest-direct \
             $(sed -E 's/^([A-Za-z0-9_.-]+).*/--upgrade-package \1/' "$RUNNER_TEMP/oldest.txt") \
