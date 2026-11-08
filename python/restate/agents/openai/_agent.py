@@ -62,22 +62,29 @@ start, and the run resumes from the last step stored:
 - An ``Agent`` of your own runs as you configured it, with the ``context``
   (the SDK's run context) and the ``run_config`` you give: its
   ``call_model_input_filter`` runs after this package's, which stores the
-  tools' outputs.
+  tools' outputs: the SDK's ``ToolOutputTrimmer`` there trims old tool
+  outputs in the model's input, not in the conversation.
 - The model sees the earlier turns as their messages and answers, and the
   latest turns whole (the agent's ``window``), as many as its ``budget``
   holds; the built-in agent has its model summarize the earliest once they
-  outgrow it, after a turn's answer (``_conversation.py``).
-- The built-in agent gets OpenAI's server-side compaction, for a conversation
-  that lives long (``ModelSettings.context_management``): the Responses API summarizes the history as it nears the
-  model's context window, which a long conversation would otherwise outgrow,
-  failing each turn. Its compaction item is stored like any reply, and a
-  request starts with the latest one: it stands for the items before it,
-  which OpenAI's guide says need not be sent again (as the SDK's own
-  compacting session drops them), so that requests stop growing with the
-  conversation, which is stored whole. A model of the Chat Completions API,
-  or of another provider, gets
-  none, and a model that OpenAI does not compact refuses such requests: run
-  it as an ``Agent`` of your own, configured as you need.
+  outgrow it, after a turn's answer (``_conversation.py``). The summary is
+  one user message (``SUMMARY`` and its text), with no reply made up after
+  it, as Codex sends its own: the Responses API, and Chat Completions
+  through the SDK's converter, take the user message that follows it.
+- The SDK's ``Session`` stores are not used: only the turns write the
+  conversation. ``OpenAIResponsesCompactionSession``, which rewrites the
+  stored items, does not fit it; OpenAI's server-side compaction does.
+- The built-in agent gets OpenAI's server-side compaction, for a
+  conversation that lives long (``ModelSettings.context_management``): the
+  Responses API summarizes the history as it nears the model's context
+  window, which a long conversation would otherwise outgrow, failing each
+  turn. Its compaction item is stored like any reply, and a request starts
+  with the latest one: it stands for the items before it, which OpenAI's
+  guide says need not be sent again (as the SDK's own compacting session
+  drops them), so that requests stop growing with the conversation, which
+  is stored whole. A model of the Chat Completions API, or of another
+  provider, gets none, and a model that OpenAI does not compact refuses such
+  requests: run it as an ``Agent`` of your own, configured as you need.
 """
 
 from __future__ import annotations
@@ -126,7 +133,7 @@ from restate.agents._common import (
     model_of,
     raised_by_tool,
 )
-from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
+from restate.agents._conversation import SUMMARY, Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._tools import Tool, current_call, tools_in
@@ -174,6 +181,14 @@ class _Items:
 
     def reply(self, text: str, agent: str | None = None) -> Item:
         return {"role": "assistant", "content": text}
+
+    def summary(self, text: str) -> list[Item]:
+        """Return the summary of the earliest turns as one user message, with no reply made up after it.
+
+        As Codex sends its own: the Responses API, and Chat Completions
+        through the SDK's converter, take consecutive user messages.
+        """
+        return [{"role": "user", "content": SUMMARY + text}]
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         return [{"type": "function_call_output", "call_id": call.id, "output": text} for call, text in results]
