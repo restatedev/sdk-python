@@ -13,6 +13,7 @@ from restate.exceptions import RetryableError
 
 from contextlib import asynccontextmanager
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import (
     Context,
     HttpError,
@@ -38,6 +39,7 @@ def anyio_backend():
 
 pytestmark = [
     pytest.mark.anyio,
+    pytest.mark.server,
 ]
 
 
@@ -46,10 +48,10 @@ def ohoh():
 
 
 @asynccontextmanager
-async def simple_harness(service: Service | VirtualObject | Workflow) -> typing.AsyncIterator[restate.RestateClient]:
-    async with restate.create_test_harness(
-        restate.app([service]), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as restate_test_harness:
+async def simple_harness(
+    service: Service | VirtualObject | Workflow,
+) -> typing.AsyncGenerator[restate.RestateClient, None]:
+    async with restate.create_test_harness(restate.app([service]), restate_image=RESTATE_IMAGE) as restate_test_harness:
         yield restate_test_harness.client
 
 
@@ -90,7 +92,7 @@ async def test_retryable_exception():
         invocation_retry_policy=InvocationRetryPolicy(
             max_attempts=3,
             # Something really long to trigger a test timeout.
-            # Default httpx client timeout is 5 seconds.
+            # Default httpx2 client timeout is 5 seconds.
             initial_interval=timedelta(hours=1),
         ),
     )
@@ -120,7 +122,7 @@ async def test_accidentally_wrapped_retryable_exception():
         invocation_retry_policy=InvocationRetryPolicy(
             max_attempts=3,
             # Something really long to trigger a test timeout.
-            # Default httpx client timeout is 5 seconds.
+            # Default httpx2 client timeout is 5 seconds.
             initial_interval=timedelta(hours=1),
         ),
     )

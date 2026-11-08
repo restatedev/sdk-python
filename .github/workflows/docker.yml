@@ -7,6 +7,11 @@ on:
     tags:
       - v**
 
+# The GITHUB_TOKEN pushes the image to ghcr.io.
+permissions:
+  contents: read
+  packages: write
+
 env:
   REPOSITORY_OWNER: ${{ github.repository_owner }}
   GHCR_REGISTRY: "ghcr.io"

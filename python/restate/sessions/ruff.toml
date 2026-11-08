@@ -1,0 +1,15 @@
+# The project's ruff settings, and more rules for this package, which is
+# written to them: annotations everywhere, likely bugs, modern syntax for
+# Python 3.11, sorted imports, simpler code, async pitfalls.
+extend = "../../../pyproject.toml"
+
+[lint]
+extend-select = ["ANN", "B", "C4", "I", "UP", "SIM", "RUF", "ASYNC", "PIE", "RET"]
+extend-ignore = [
+  # Any is what a handler's input or a serialized value is; the type
+  # checkers (pyright strict) catch unknown types where they matter.
+  "ANN401",
+  # A serde instance as a default (input_serde=DefaultSerde()) is the
+  # SDK's API style, which SessionObject.handler mirrors.
+  "B008",
+]

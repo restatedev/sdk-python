@@ -11,12 +11,12 @@
 
 from datetime import timedelta
 
-import httpx
+import httpx2
 import pytest
 
 import restate
+from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import Context, ObjectContext, Service, VirtualObject, Workflow, WorkflowContext
-from restate._preview import explicit_recovery
 from restate.vm import VMWrapper
 
 
@@ -36,21 +36,22 @@ def test_is_off_by_default():
     assert not greeter.handlers["greet"].explicit_recovery
 
 
-def test_applies_to_every_handler_from_the_service():
-    counter = explicit_recovery(VirtualObject("counter"))
+def test_applies_to_every_handler_of_the_service():
+    counter = VirtualObject("counter", explicit_recovery=True)
 
     @counter.handler()
     async def add(ctx: ObjectContext, n: int) -> None:
         pass
 
     assert counter.explicit_recovery
+    assert Service("greeter", explicit_recovery=True).explicit_recovery
+    assert Workflow("flow", explicit_recovery=True).explicit_recovery
 
 
 def test_applies_to_a_single_handler():
     flow = Workflow("flow")
 
-    @explicit_recovery
-    @flow.main()
+    @flow.main(explicit_recovery=True)
     async def run(ctx: WorkflowContext) -> None:
         pass
 
@@ -63,14 +64,6 @@ def test_applies_to_a_single_handler():
     assert not flow.handlers["query"].explicit_recovery
 
 
-def test_must_be_applied_on_top_of_the_handler_decorator():
-    async def greet(ctx: Context, name: str) -> str:
-        return name
-
-    with pytest.raises(ValueError):
-        explicit_recovery(greet)
-
-
 def test_the_vm_takes_it():
     headers = [("content-type", "application/vnd.restate.invocation.v6")]
     VMWrapper(headers, explicit_recovery=True)
@@ -78,9 +71,10 @@ def test_the_vm_takes_it():
 
 
 @pytest.mark.anyio
+@pytest.mark.server
 async def test_a_retry_runs_the_handler_again_and_entries_are_named():
     calls = 0
-    counter = explicit_recovery(VirtualObject("counter"))
+    counter = VirtualObject("counter", explicit_recovery=True)
 
     def step() -> int:
         nonlocal calls
@@ -95,13 +89,11 @@ async def test_a_retry_runs_the_handler_again_and_entries_are_named():
             raise ValueError("retry me")
         return ctx.request().id
 
-    async with restate.create_test_harness(
-        restate.app([counter]), restate_image="ghcr.io/restatedev/restate:latest"
-    ) as harness:
+    async with restate.create_test_harness(restate.app([counter]), restate_image=RESTATE_IMAGE) as harness:
         invocation_id = await harness.client.object_call(add, key="a", arg=None)
         assert calls == 2
 
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             response = await http.post(
                 f"{harness.admin_api_url}/query",
                 json={"query": f"SELECT entry_type, name FROM sys_journal WHERE id = '{invocation_id}'"},

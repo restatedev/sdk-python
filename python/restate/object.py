@@ -21,7 +21,10 @@ from datetime import timedelta
 
 from restate.serde import Serde, DefaultSerde
 from restate.retry_policy import InvocationRetryPolicy
-from restate.handler import Handler, HandlerIO, ServiceTag, make_handler
+from restate.handler import Handler, HandlerIO, ServiceTag, check_state_preload_options, make_handler
+
+if typing.TYPE_CHECKING:
+    from restate.servable import Servable
 
 I = typing.TypeVar("I")
 O = typing.TypeVar("O")
@@ -63,21 +66,36 @@ class VirtualObject:
         idempotency_retention (timedelta, optional): The retention duration of idempotent requests to this service.
             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
             otherwise the service discovery will fail.
-        enable_lazy_state (bool, optional): When set to True, lazy state will be enabled for all invocations to this service.
-            NOTE: You can set this field only if you register this service against restate-server >= 1.4,
-            otherwise the service discovery will fail.
+        enable_lazy_state (bool, optional): Deprecated, use `state_preload` instead.
+        state_preload (bool | List[str], optional): Configures which state keys are preloaded ("eager state")
+            at the start of each invocation to this virtual object. Can be overridden per handler.
+            - `True`: preload all state (this is the default behavior).
+            - `False`: preload nothing (lazy state).
+            - `["key1", "key2"]`: preload only the listed keys eagerly.
+            NOTE: The list form is supported only by restate-server >= 1.8, otherwise the service discovery will fail.
         ingress_private (bool, optional): When set to True this service, with all its handlers, cannot be invoked from the restate-server
             HTTP and Kafka ingress, but only from other services.
             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
             otherwise the service discovery will fail.
         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this virtual object.
+        explicit_recovery (bool, optional): (Preview) Explicit recovery for all handlers of this virtual object:
+            see the handler option of the same name. NOTE: in preview, it might change without notice.
+        explicit_cancellation (bool, optional): (Preview) Explicit cancellation for all handlers of this virtual object:
+            see the handler option of the same name. NOTE: in preview, it might change without notice.
     """
 
     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
 
+    def __restate_services__(self) -> typing.Iterable["Servable"]:
+        """What ``restate.app`` serves for this (see ``restate.Servable``): itself.
+
+        A subclass may return what it brings along too: ``(self, *needs)``.
+        """
+        return (self,)
+
     def __init__(
         self,
-        name,
+        name: str,
         description: typing.Optional[str] = None,
         metadata: typing.Optional[typing.Dict[str, str]] = None,
         inactivity_timeout: typing.Optional[timedelta] = None,
@@ -85,11 +103,14 @@ class VirtualObject:
         journal_retention: typing.Optional[timedelta] = None,
         idempotency_retention: typing.Optional[timedelta] = None,
         enable_lazy_state: typing.Optional[bool] = None,
+        state_preload: typing.Optional[typing.Union[bool, typing.List[str]]] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_recovery: bool = False,
+        explicit_cancellation: bool = False,
     ):
         self.service_tag = ServiceTag("object", name, description, metadata)
         self.handlers = {}
@@ -97,11 +118,14 @@ class VirtualObject:
         self.abort_timeout = abort_timeout
         self.journal_retention = journal_retention
         self.idempotency_retention = idempotency_retention
+        check_state_preload_options(state_preload, enable_lazy_state)
         self.enable_lazy_state = enable_lazy_state
+        self.state_preload = state_preload
         self.ingress_private = ingress_private
         self.invocation_retry_policy = invocation_retry_policy
         self.context_managers = invocation_context_managers
-        self.explicit_recovery = False
+        self.explicit_recovery = explicit_recovery
+        self.explicit_cancellation = explicit_cancellation
 
     @property
     def name(self):
@@ -125,11 +149,14 @@ class VirtualObject:
         journal_retention: typing.Optional[timedelta] = None,
         idempotency_retention: typing.Optional[timedelta] = None,
         enable_lazy_state: typing.Optional[bool] = None,
+        state_preload: typing.Optional[typing.Union[bool, typing.List[str]]] = None,
         ingress_private: typing.Optional[bool] = None,
         invocation_retry_policy: typing.Optional[InvocationRetryPolicy] = None,
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_recovery: bool = False,
+        explicit_cancellation: bool = False,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -163,14 +190,27 @@ class VirtualObject:
             idempotency_retention: The retention duration of idempotent requests to this service.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
-            enable_lazy_state: When set to True, lazy state will be enabled for all invocations to this handler.
-                NOTE: You can set this field only if you register this service against restate-server >= 1.4,
-                otherwise the service discovery will fail.
+            enable_lazy_state: Deprecated, use `state_preload` instead.
+            state_preload: Configures which state keys are preloaded ("eager state") at the start of each
+                invocation to this handler. Overrides the value set on the service.
+                - `True`: preload all state (this is the default behavior).
+                - `False`: preload nothing (lazy state).
+                - `["key1", "key2"]`: preload only the listed keys eagerly.
+                NOTE: The list form is supported only by restate-server >= 1.8, otherwise the service discovery will fail.
             ingress_private: When set to True this handler cannot be invoked from the restate-server HTTP and Kafka ingress,
                 but only from other services.
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
+            explicit_recovery: (Preview) If true, a retried or resumed invocation does not replay its journal:
+                the handler runs again from the start, executing every context operation anew. So each
+                attempt's calls and sends are new requests (give them an idempotency key that is the same on
+                every attempt, such as one made from ``ctx.request().id``), ``ctx.run`` runs its action again
+                on every attempt, and awakeables are not supported.
+                NOTE: in preview, it might change without notice.
+            explicit_cancellation: (Preview) If true, Restate cancelling an invocation neither fails the handler's
+                awaits nor cancels its calls: the handler awaits `restate._preview.cancellation(ctx)` and decides
+                what to stop. NOTE: in preview, it might change without notice.
 
         Returns:
             Callable: The decorated function.
@@ -212,9 +252,12 @@ class VirtualObject:
                 idempotency_retention,
                 None,
                 enable_lazy_state,
+                state_preload,
                 ingress_private,
                 invocation_retry_policy,
                 combined_context_managers,
+                explicit_recovery=explicit_recovery,
+                explicit_cancellation=explicit_cancellation,
             )
             if handler.name in self.handlers:
                 raise ValueError(f"Handler {handler.name} already exists in {self.name}")

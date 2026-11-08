@@ -1,6 +1,6 @@
 [package]
 name = "restate-sdk-python-core"
-version = "1.2.0"
+version = "1.4.2"
 edition = "2021"
 
 [package.metadata.maturin]
@@ -13,5 +13,29 @@ doc = false
 
 [dependencies]
 pyo3 = { version = "0.30.1", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.30", features = ["tokio-runtime"] }
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-restate-sdk-shared-core = { version = "8.2.0", features = ["request_identity", "sha2_random_seed", "rust_crypto"] }
+# The feature `sql` is the sessions' storage: the SQLite-compatible database kept in an
+# object's state, with its page cache (foyer); `tunnel` is Restate Cloud's.
+restate-sdk-shared-core = { version = "8.3.1", features = [
+    "request_identity",
+    "sha2_random_seed",
+    "rust_crypto",
+    "tunnel",
+    "sql",
+] }
+
+# ASGI bridge for the tunnel
+bytes = "1.10"
+http = "1.3"
+http-body = "1.0"
+http-body-util = "0.1"
+hyper = { version = "1.8", default-features = false }
+percent-encoding = "2.3"
+tokio = { version = "1.49", default-features = false, features = ["sync", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+
+# Sessions (`src/sessions.rs`): the database's futures, polled on Python's event loop.
+futures = "0.3"

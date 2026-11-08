@@ -16,15 +16,22 @@ lint:
     uv run ruff format --check
     uv run ruff check
 
+# The native extension (src/): formatted, and clean of clippy's warnings.
+lint-rust:
+    cargo fmt --check
+    cargo clippy --all-targets -- -D warnings
+
 typecheck-pyright:
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright python/
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright examples/ 
+    PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright examples-agents/
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright tests
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright test-services/
 
 typecheck-mypy:
     uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional python/
     uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional examples/
+    uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional examples-agents/
     uv run -m mypy --check-untyped-defs --ignore-missing-imports --implicit-optional tests/
 
 typecheck: typecheck-pyright typecheck-mypy
@@ -32,9 +39,13 @@ typecheck: typecheck-pyright typecheck-mypy
 test:
     uv run -m pytest tests/*
 
+# The tests that need no Restate server (no Docker): in-process, in seconds.
+test-fast:
+    uv run -m pytest tests/* -m "not server"
+
 
 # Recipe to run both mypy and pylint
-verify: format lint typecheck test
+verify: format lint lint-rust typecheck test
     @echo "Type checking and linting completed successfully."
 
 # Recipe to build the project

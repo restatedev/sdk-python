@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterable, AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterable, Generator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
-from typing import Any, overload
+from typing import Any, Literal, overload
 
 from restate import RunOptions, TerminalError
 from restate.ext.pydantic._utils import state_context
 from restate.extensions import current_context
 
-from pydantic_ai import models
+from pydantic_ai import CancellationToken, Conversation, models
 from pydantic_ai._instructions import AgentInstructions
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.agent.abstract import (
@@ -32,6 +32,7 @@ from pydantic_ai.tools import DeferredToolResults, RunContext
 from pydantic_ai.toolsets.abstract import AbstractToolset
 from pydantic_ai.toolsets.function import FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
+from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 from ._model import RestateModelWrapper
 from ._toolset import RestateContextRunToolSet
 
@@ -133,7 +134,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         self._toolsets = [toolset.visit_and_replace(set_context) for toolset in wrapped.toolsets]
 
     @contextmanager
-    def _restate_overrides(self) -> Iterator[None]:
+    def _restate_overrides(self) -> Generator[None, None, None]:
         with (
             super().override(model=self._model, toolsets=self._toolsets, tools=[], native_tools=[]),
         ):
@@ -181,14 +182,18 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         user_prompt: str | Sequence[UserContent] | None = None,
         *,
         output_type: None = None,
+        conversation: Conversation | None = None,
         message_history: Sequence[ModelMessage] | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
         conversation_id: str | None = None,
+        run_id: str | None = None,
         model: models.Model | models.KnownModelName | str | None = None,
         instructions: AgentInstructions[AgentDepsT] = None,
         deps: AgentDepsT = None,
         model_settings: AgentModelSettings[AgentDepsT] | None = None,
         usage_limits: UsageLimits | None = None,
+        cancellation_token: CancellationToken | None = None,
+        timeout: float | None = None,
         usage: RunUsage | None = None,
         metadata: AgentMetadata[AgentDepsT] | None = None,
         retries: int | AgentRetries | None = None,
@@ -196,6 +201,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
+        workspace: WorkspaceBackend | WorkspaceRef | Literal["new"] | None = None,
         spec: dict[str, Any] | AgentSpec | None = None,
     ) -> AgentRunResult[OutputDataT]: ...
 
@@ -205,14 +211,18 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         user_prompt: str | Sequence[UserContent] | None = None,
         *,
         output_type: OutputSpec[RunOutputDataT],
+        conversation: Conversation | None = None,
         message_history: Sequence[ModelMessage] | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
         conversation_id: str | None = None,
+        run_id: str | None = None,
         model: models.Model | models.KnownModelName | str | None = None,
         instructions: AgentInstructions[AgentDepsT] = None,
         deps: AgentDepsT = None,
         model_settings: AgentModelSettings[AgentDepsT] | None = None,
         usage_limits: UsageLimits | None = None,
+        cancellation_token: CancellationToken | None = None,
+        timeout: float | None = None,
         usage: RunUsage | None = None,
         metadata: AgentMetadata[AgentDepsT] | None = None,
         retries: int | AgentRetries | None = None,
@@ -220,6 +230,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
+        workspace: WorkspaceBackend | WorkspaceRef | Literal["new"] | None = None,
         spec: dict[str, Any] | AgentSpec | None = None,
     ) -> AgentRunResult[RunOutputDataT]: ...
 
@@ -228,14 +239,18 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         user_prompt: str | Sequence[UserContent] | None = None,
         *,
         output_type: OutputSpec[RunOutputDataT] | None = None,
+        conversation: Conversation | None = None,
         message_history: Sequence[ModelMessage] | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
         conversation_id: str | None = None,
+        run_id: str | None = None,
         model: models.Model | models.KnownModelName | str | None = None,
         instructions: AgentInstructions[AgentDepsT] = None,
         deps: AgentDepsT = None,
         model_settings: AgentModelSettings[AgentDepsT] | None = None,
         usage_limits: UsageLimits | None = None,
+        cancellation_token: CancellationToken | None = None,
+        timeout: float | None = None,
         usage: RunUsage | None = None,
         metadata: AgentMetadata[AgentDepsT] | None = None,
         retries: int | AgentRetries | None = None,
@@ -243,6 +258,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
+        workspace: WorkspaceBackend | WorkspaceRef | Literal["new"] | None = None,
         spec: dict[str, Any] | AgentSpec | None = None,
     ) -> AgentRunResult[Any]:
         """Run the agent with a user prompt in async mode.
@@ -290,14 +306,18 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
             return await super(WrapperAgent, self).run(
                 user_prompt=user_prompt,
                 output_type=output_type,
+                conversation=conversation,
                 message_history=message_history,
                 instructions=instructions,
                 deferred_tool_results=deferred_tool_results,
                 conversation_id=conversation_id,
+                run_id=run_id,
                 model=model,
                 deps=deps,
                 model_settings=model_settings,
                 usage_limits=usage_limits,
+                cancellation_token=cancellation_token,
+                timeout=timeout,
                 usage=usage,
                 metadata=metadata,
                 retries=retries,
@@ -305,6 +325,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
                 toolsets=toolsets,
                 event_stream_handler=event_stream_handler,
                 capabilities=capabilities,
+                workspace=workspace,
                 spec=spec,
             )
 
@@ -314,14 +335,18 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         user_prompt: str | Sequence[UserContent] | None = None,
         *,
         output_type: None = None,
+        conversation: Conversation | None = None,
         message_history: Sequence[ModelMessage] | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
         conversation_id: str | None = None,
+        run_id: str | None = None,
         model: models.Model | models.KnownModelName | str | None = None,
         instructions: AgentInstructions[AgentDepsT] = None,
         deps: AgentDepsT = None,
         model_settings: AgentModelSettings[AgentDepsT] | None = None,
         usage_limits: UsageLimits | None = None,
+        cancellation_token: CancellationToken | None = None,
+        timeout: float | None = None,
         usage: RunUsage | None = None,
         metadata: AgentMetadata[AgentDepsT] | None = None,
         retries: int | AgentRetries | None = None,
@@ -329,6 +354,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
+        workspace: WorkspaceBackend | WorkspaceRef | Literal["new"] | None = None,
         spec: dict[str, Any] | AgentSpec | None = None,
     ) -> AbstractAsyncContextManager[StreamedRunResult[AgentDepsT, OutputDataT]]: ...
 
@@ -338,14 +364,18 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         user_prompt: str | Sequence[UserContent] | None = None,
         *,
         output_type: OutputSpec[RunOutputDataT],
+        conversation: Conversation | None = None,
         message_history: Sequence[ModelMessage] | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
         conversation_id: str | None = None,
+        run_id: str | None = None,
         model: models.Model | models.KnownModelName | str | None = None,
         instructions: AgentInstructions[AgentDepsT] = None,
         deps: AgentDepsT = None,
         model_settings: AgentModelSettings[AgentDepsT] | None = None,
         usage_limits: UsageLimits | None = None,
+        cancellation_token: CancellationToken | None = None,
+        timeout: float | None = None,
         usage: RunUsage | None = None,
         metadata: AgentMetadata[AgentDepsT] | None = None,
         retries: int | AgentRetries | None = None,
@@ -353,6 +383,7 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
+        workspace: WorkspaceBackend | WorkspaceRef | Literal["new"] | None = None,
         spec: dict[str, Any] | AgentSpec | None = None,
     ) -> AbstractAsyncContextManager[StreamedRunResult[AgentDepsT, RunOutputDataT]]: ...
 
@@ -362,14 +393,18 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         user_prompt: str | Sequence[UserContent] | None = None,
         *,
         output_type: OutputSpec[RunOutputDataT] | None = None,
+        conversation: Conversation | None = None,
         message_history: Sequence[ModelMessage] | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
         conversation_id: str | None = None,
+        run_id: str | None = None,
         model: models.Model | models.KnownModelName | str | None = None,
         instructions: AgentInstructions[AgentDepsT] = None,
         deps: AgentDepsT = None,
         model_settings: AgentModelSettings[AgentDepsT] | None = None,
         usage_limits: UsageLimits | None = None,
+        cancellation_token: CancellationToken | None = None,
+        timeout: float | None = None,
         usage: RunUsage | None = None,
         metadata: AgentMetadata[AgentDepsT] | None = None,
         retries: int | AgentRetries | None = None,
@@ -377,8 +412,9 @@ class RestateAgent(WrapperAgent[AgentDepsT, OutputDataT]):
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
         event_stream_handler: EventStreamHandler[AgentDepsT] | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
+        workspace: WorkspaceBackend | WorkspaceRef | Literal["new"] | None = None,
         spec: dict[str, Any] | AgentSpec | None = None,
-    ) -> AsyncIterator[StreamedRunResult[AgentDepsT, Any]]:
+    ) -> AsyncGenerator[StreamedRunResult[AgentDepsT, Any], None]:
         """Run the agent with a user prompt in async mode, returning a streamed response.
 
         Example:

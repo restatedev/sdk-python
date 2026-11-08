@@ -13,7 +13,9 @@ This is a basic remote client for the Restate service.
 """
 
 from datetime import timedelta
-import httpx
+import urllib.parse
+
+import httpx2
 import typing
 from contextlib import asynccontextmanager
 
@@ -28,6 +30,20 @@ I = typing.TypeVar("I")
 O = typing.TypeVar("O")
 
 
+TIMEOUT = httpx2.Timeout(None, connect=10.0)
+"""The timeouts of ``create_client``'s requests: none for the answer, which comes when the handler is done
+(an agent's, when its model is), and 10 seconds to connect."""
+
+
+def _segment(fragment: str) -> str:
+    """Return ``fragment`` as one segment of a URL path: percent-encoded, ``/`` included.
+
+    A segment of only dots, such as ``.`` or ``..``, is encoded too, or the URL would drop it (or the one before it).
+    """
+    encoded = urllib.parse.quote(fragment, safe="")
+    return encoded if encoded.strip(".") else encoded.replace(".", "%2E")
+
+
 class Client(RestateClient):
     """
     A basic client for connecting to the Restate service.
@@ -35,8 +51,8 @@ class Client(RestateClient):
 
     def __init__(
         self,
-        client: httpx.AsyncClient,
-        headers: typing.Optional[dict] = None,
+        client: httpx2.AsyncClient,
+        headers: typing.Optional[typing.Dict[str, str]] = None,
         journal_codec: typing.Optional[JournalValueCodec] = None,
     ):
         self.headers = headers or {}
@@ -155,21 +171,23 @@ class Client(RestateClient):
         """
         Send a POST request to the Restate service.
         """
+        # Each fragment percent-encoded, "/" too: a key such as "a/b" or "a?b" is one segment of the path.
+        service, handler = _segment(service), _segment(handler)
         if scope is not None:
             # Scoped invocations use the dedicated ingress path:
             #   restate/scope/{scope}/call/{service}[/{key}]/{handler}
             #   restate/scope/{scope}/send/{service}[/{key}]/{handler}
             verb = "send" if send else "call"
-            endpoint = f"restate/scope/{scope}/{verb}/{service}"
+            endpoint = f"restate/scope/{_segment(scope)}/{verb}/{service}"
             if key:
-                endpoint += f"/{key}"
+                endpoint += f"/{_segment(key)}"
             endpoint += f"/{handler}"
             if send and delay is not None:
                 endpoint = endpoint + f"?delay={delay}"
         else:
             endpoint = service
             if key:
-                endpoint += f"/{key}"
+                endpoint += f"/{_segment(key)}"
             endpoint += f"/{handler}"
             if send:
                 endpoint += "/send"
@@ -481,21 +499,48 @@ class ScopedClient(RestateScopedClient):
         return RestateClientSendHandle(send.get("invocationId", ""), 200)
 
 
+def resolve_ingress(
+    ingress: typing.Optional[str], headers: typing.Optional[typing.Dict[str, str]]
+) -> typing.Tuple[str, typing.Optional[typing.Dict[str, str]]]:
+    """
+    The ingress URL and default headers: the given ones, or the URL and bearer token of
+    ``RESTATE_INGRESS_KEY`` (an ingress key from the Cloud UI, Development → Configure Client).
+    """
+    if ingress:
+        return ingress, headers
+    # pylint: disable=import-error,no-name-in-module,import-outside-toplevel
+    from restate._internal import INGRESS_KEY_URL, ConnectError, IngressKey
+
+    key = IngressKey.from_env()
+    if key is None:
+        raise ConnectError(
+            "create_client(): ingress is required — pass the ingress URL, or set RESTATE_INGRESS_KEY "
+            f"with an ingress key from {INGRESS_KEY_URL}"
+        )
+    merged = dict(headers or {})
+    if not any(name.lower() == "authorization" for name in merged):
+        merged["Authorization"] = key.bearer()
+    return key.ingress_url(), merged
+
+
 @asynccontextmanager
 async def create_client(
-    ingress: str,
-    headers: typing.Optional[dict] = None,
+    ingress: typing.Optional[str] = None,
+    headers: typing.Optional[typing.Dict[str, str]] = None,
     journal_value_codec: typing.Optional[JournalValueCodec] = None,
 ) -> typing.AsyncGenerator[RestateClient, None]:
     """
     Create a new Restate client.
 
     Args:
-        ingress: The base URL of the Restate ingress.
+        ingress: The base URL of the Restate ingress. When omitted, the URL and the bearer
+            token come from ``RESTATE_INGRESS_KEY``, an ingress key from the Cloud UI
+            (Development → Configure Client).
         headers: Optional default headers to send with every request.
         journal_value_codec: Optional journal value codec. When set, request bodies are encoded and
             call responses decoded through it. It must match the codec configured on the endpoint.
             NOTE: This is experimental and may change in future releases.
     """
-    async with httpx.AsyncClient(base_url=ingress, headers=headers, http2=True) as http_client:
+    ingress, headers = resolve_ingress(ingress, headers)
+    async with httpx2.AsyncClient(base_url=ingress, headers=headers, http2=True, timeout=TIMEOUT) as http_client:
         yield Client(http_client, headers, journal_codec=journal_value_codec)

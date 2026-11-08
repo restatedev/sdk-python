@@ -14,7 +14,9 @@ import asyncio
 import functools
 import logging
 import signal
-from typing import Dict, Optional, Set, TypedDict, Literal
+import weakref
+from types import FrameType
+from typing import Callable, Dict, List, Optional, Set, TypedDict, Literal
 
 from restate.discovery import compute_discovery_json
 from restate.endpoint import Endpoint
@@ -28,6 +30,92 @@ from restate._internal import PyIdentityVerifier, IdentityVerificationException 
 from restate._internal import SDK_VERSION  # pylint: disable=import-error,no-name-in-module
 
 logger = logging.getLogger(__name__)
+
+# Shutdown hooks, keyed by event loop and signal. asyncio keeps one handler per signal, so
+# everything that wants to react to SIGTERM (the ASGI app, `python -m restate connect`)
+# registers a hook here and a single dispatcher is installed per loop.
+_shutdown_hooks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[int, List[Callable[[], None]]]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def install_shutdown_hook(
+    loop: asyncio.AbstractEventLoop,
+    hook: Callable[[], None],
+    signum: int = signal.SIGTERM,
+    *,
+    chain: bool = False,
+) -> None:
+    """
+    Run ``hook`` when ``signum`` (default SIGTERM) is received while ``loop`` runs.
+
+    All hooks of a loop and signal share one signal handler, which the first hook installs:
+
+    - By default, with ``loop.add_signal_handler``. That replaces whatever handler the process
+      had for ``signum``, which is right for a program that owns its signals, such as
+      ``restate.connect``.
+    - With ``chain=True``, as a handler that also calls the process's previous handler. That is
+      right for an app run by an ASGI server (uvicorn, hypercorn...): the server has installed
+      its own handler to shut down, and replacing it would keep the server running. Without a
+      previous handler to keep, it is installed as by default.
+
+    Raises what ``loop.add_signal_handler`` or ``signal.signal`` raise when signals cannot be
+    handled here (Windows, or a non-main thread).
+    """
+    hooks = _shutdown_hooks.setdefault(loop, {})
+    if signum not in hooks:
+        registered: List[Callable[[], None]] = []
+
+        def dispatch() -> None:
+            for registered_hook in list(registered):
+                try:
+                    registered_hook()
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception("Shutdown hook failed")
+
+        if chain and _handled_in_python(signum):
+            _install_chained_handler(loop, signum, dispatch)
+        else:
+            loop.add_signal_handler(signum, dispatch)
+        hooks[signum] = registered
+    hooks[signum].append(hook)
+
+
+def _handled_in_python(signum: int) -> bool:
+    """
+    Return whether a server has a Python-level handler for ``signum`` to keep.
+
+    Python's default SIGINT handler does not count: calling it would raise ``KeyboardInterrupt``
+    into whatever code happens to be running.
+    """
+    previous = signal.getsignal(signum)
+    return callable(previous) and previous is not signal.default_int_handler
+
+
+def _install_chained_handler(loop: asyncio.AbstractEventLoop, signum: int, dispatch: Callable[[], None]) -> None:
+    """
+    Install a ``signal.signal`` handler for ``signum`` that schedules ``dispatch`` on ``loop``, and then
+    calls the handler it replaced.
+
+    This keeps both kinds of server handler working:
+
+    - one installed with ``signal.signal`` (uvicorn's) is the previous handler, which this calls;
+    - one installed with ``loop.add_signal_handler`` (hypercorn's) keeps running regardless, because
+      asyncio delivers those through the loop's wakeup fd, not through the Python-level handler.
+
+    It is only installed over such a handler, which the server (or ``loop.close()``) restores when
+    it stops; so it never outlives the server.
+    """
+    previous = signal.getsignal(signum)
+
+    def handler(received: int, frame: Optional[FrameType]) -> None:
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(dispatch)
+        if callable(previous):
+            previous(received, frame)
+
+    signal.signal(signum, handler)
+
 
 X_RESTATE_SERVER = header_to_binary([("x-restate-server", f"restate-sdk-python/{SDK_VERSION}")])
 
@@ -71,14 +159,16 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
     # Negotiate discovery protocol version
     version = 2
     if accept_header:
-        if "application/vnd.restate.endpointmanifest.v4+json" in accept_header:
+        if "application/vnd.restate.endpointmanifest.v5+json" in accept_header:
+            version = 5
+        elif "application/vnd.restate.endpointmanifest.v4+json" in accept_header:
             version = 4
         elif "application/vnd.restate.endpointmanifest.v3+json" in accept_header:
             version = 3
         elif "application/vnd.restate.endpointmanifest.v2+json" in accept_header:
             version = 2
         else:
-            await send_status_with_error_text(send, 415, f"Unsupported discovery version ${accept_header}")
+            await send_status_with_error_text(send, 415, f"Unsupported discovery version {accept_header}")
             return
 
     try:
@@ -94,7 +184,7 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
             }
         )
     except ValueError as e:
-        await send_status_with_error_text(send, 500, f"Error when computing discovery ${e}")
+        await send_status_with_error_text(send, 500, f"Error when computing discovery {e}")
         return
 
 
@@ -261,7 +351,8 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
         if not sigterm_installed:
             loop = asyncio.get_running_loop()
             try:
-                loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+                # Chained: the ASGI server running this app has its own SIGTERM handler, to shut down.
+                install_shutdown_hook(loop, _on_sigterm, signal.SIGTERM, chain=True)
             except (NotImplementedError, RuntimeError, ValueError):
                 pass  # Windows or non-main thread
             sigterm_installed = True
@@ -324,6 +415,7 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
                         request_headers,
                         disable_payload_checks=disable_payload_checks,
                         explicit_recovery=handler.explicit_recovery or service.explicit_recovery,
+                        explicit_cancellation=handler.explicit_cancellation or service.explicit_cancellation,
                     ),
                     handler,
                     dict(request_headers),

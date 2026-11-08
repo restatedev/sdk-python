@@ -1,0 +1,334 @@
+#
+#  Copyright (c) 2023-2026 - Restate Software, Inc., Restate GmbH
+#
+#  This file is part of the Restate SDK for Python,
+#  which is released under the MIT license.
+#
+#  You can find a copy of the license in file LICENSE in the root
+#  directory of this repository or package, or at
+#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
+#
+"""The turn of a ``chat`` handler.
+
+A turn reports its status, handles its cancellation, and publishes each change
+to the clients that follow the conversation. The conversation itself is
+already in the key's database, where the ``messages`` view reads it; a
+publish only tells the clients to read again.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import time
+import typing
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+
+from restate.agents import _signals
+from restate.agents._api import Answering
+from restate.agents._calls import settle
+from restate.agents._common import BUDGET, WINDOW, CompactHistory, Summarize, Window, refusal_of
+from restate.exceptions import TerminalError
+from restate.sessions import SessionContext
+from restate.sessions._link import Link
+from restate.sessions.internal import ScopeKey, cancel_calls, cancelled, definition_of
+
+T = typing.TypeVar("T")
+
+Stored = Callable[[str, str | None], bool]
+"""Whether a tool call's result is stored: ``stored(call_id, failed)``, where ``failed`` is the error the call returned."""
+
+
+class AttemptEnded(Exception):
+    """Raised to stop a turn whose attempt ended before the turn did.
+
+    The attempt ends when Restate suspends it, gives up on it, or loses its
+    connection. Nothing the attempt does afterwards is stored, and the next
+    attempt carries on with the turn, so the turn stops without answering.
+    Unlike a cancellation, nothing is cancelled.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("the attempt ended before its turn did")
+
+
+def cancellation() -> TerminalError:
+    """Return the error a cancelled turn fails with: Restate's cancellation, status 409."""
+    return TerminalError("cancelled", status_code=409)
+
+
+class Stop:
+    """The stop signal of a turn, which a framework uses to cut its work short (a model request, for example).
+
+    It stops with Restate's cancellation (status 409) when Restate cancels the
+    invocation, and the turn then ends as cancelled. It stops with
+    ``AttemptEnded`` when the attempt ends first, and the work then stops
+    without answering.
+    """
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+        self.reason: BaseException | None = None
+        """Why it stopped, or ``None`` while it has not."""
+
+    @property
+    def stopped(self) -> bool:
+        """Whether it has stopped."""
+        return self.reason is not None
+
+    def stop(self, reason: BaseException) -> None:
+        """Stop with ``reason``, unless already stopped."""
+        if self.reason is None:
+            self.reason = reason
+            self._event.set()
+
+    async def wait(self) -> BaseException:
+        """Wait until it stops, and return the reason."""
+        await self._event.wait()
+        assert self.reason is not None
+        return self.reason
+
+    async def guard(self, work: Awaitable[T]) -> T:
+        """Await ``work`` and return its result, unless the turn stops first.
+
+        If it stops first, ``work`` is cancelled and the stop reason is
+        raised. Use it for a framework request that stopping the turn must cut
+        short.
+        """
+        task = asyncio.ensure_future(work)
+        stopping = asyncio.ensure_future(self._event.wait())
+        try:
+            await asyncio.wait({task, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopping.cancel()
+        if task.done():
+            return task.result()
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        assert self.reason is not None
+        raise self.reason
+
+
+_STOP: ScopeKey[Stop] = ScopeKey("stop_signal_of")
+
+
+def stop_signal_of(ctx: SessionContext) -> Stop | None:
+    """Return the ``Stop`` of the ``chat`` turn running on ``ctx``, or ``None`` outside one."""
+    return _STOP.get(ctx)
+
+
+@dataclass(frozen=True)
+class AgentInfo:
+    """An agent's settings: whether it works unwatched (``background``), what its ``clear`` also empties, and how
+    much of the conversation its model sees (``window`` and ``budget``, see ``_conversation.py``)."""
+
+    background: bool = False
+    clear: Callable[[SessionContext], Awaitable[None]] | None = None
+    window: Window = WINDOW
+    budget: int = BUDGET
+    summarize: Summarize | None = None
+    """How the agent summarizes the turns before the window, past ``budget``: without, they are only trimmed."""
+    snapshots: bool = False
+    """Whether the agent takes its history from snapshots (see ``Snapshot``): ``window``, ``budget`` and
+    ``summarize`` then do not apply."""
+    compact_history: CompactHistory | None = None
+    """With ``snapshots``, how the agent compacts its history between turns, when a turn asks for it."""
+
+
+AGENT: Link[AgentInfo] = Link("an agent")
+"""The agent's settings, attached to its definition."""
+
+
+def _agent_of(ctx: SessionContext) -> AgentInfo | None:
+    definition = definition_of(ctx)
+    return AGENT.of(definition) if definition is not None else None
+
+
+def settings_of(ctx: SessionContext) -> AgentInfo:
+    """Return the settings of the agent of ``ctx``: the defaults, for a session object that is no agent."""
+    return _agent_of(ctx) or AgentInfo()
+
+
+async def cleared(ctx: SessionContext) -> None:
+    """Clear whatever the agent of ``ctx`` keeps outside its database."""
+    agent = _agent_of(ctx)
+    if agent is not None and agent.clear is not None:
+        await agent.clear(ctx)
+
+
+def _unfollowed(ctx: SessionContext) -> bool:
+    """Return whether the agent of ``ctx`` runs in the background, publishing only when a turn ends."""
+    agent = _agent_of(ctx)
+    return agent is not None and agent.background
+
+
+_ANSWERING: ScopeKey[Stored] = ScopeKey("answering")
+"""What the attempt's turn has stored, while it answers."""
+
+_SETTLING: ScopeKey[asyncio.Future[None]] = ScopeKey("settling")
+"""The attempt's latest settling of calls; they run one after another, as parallel tool calls publish at once."""
+
+
+def _settled(ctx: SessionContext, stored: Stored) -> Awaitable[None]:
+    """Forget the calls whose results the conversation has stored (see ``_calls.py``), after any earlier settling."""
+    before = _SETTLING.get(ctx)
+
+    async def run() -> None:
+        if before is not None:
+            with contextlib.suppress(BaseException):
+                await before
+        await settle(ctx, stored)
+
+    done = asyncio.ensure_future(run())
+    _SETTLING.set(ctx, done)
+    return done
+
+
+async def publish(ctx: SessionContext) -> None:
+    """Publish a change to the conversation of ``ctx``: the revision increases, and the clients read it again.
+
+    While a framework is answering (inside ``answering``), the calls whose
+    results are stored are first forgotten.
+    """
+    stored = _ANSWERING.get(ctx)
+    if stored is not None:
+        await _settled(ctx, stored)
+    await ctx.call(_signals.publish, key=_signals.signals_of(ctx))
+
+
+async def stepped(ctx: SessionContext) -> None:
+    """Publish a step of the turn, unless the agent runs in the background."""
+    if not _unfollowed(ctx):
+        await publish(ctx)
+
+
+async def tool_call_started(ctx: SessionContext) -> None:
+    """Publish that a tool call of the turn is starting.
+
+    Publishing also forgets the earlier calls whose results are stored, before
+    the tool makes calls of its own. A background agent only forgets them,
+    without publishing.
+    """
+    if not _unfollowed(ctx):
+        await publish(ctx)
+        return
+    stored = _ANSWERING.get(ctx)
+    if stored is not None:
+        await _settled(ctx, stored)
+
+
+async def tool_call_ended(ctx: SessionContext) -> None:
+    """Publish that a tool call of the turn has ended, unless the agent runs in the background."""
+    await stepped(ctx)
+
+
+async def answering(ctx: SessionContext, stored: Stored, work: Callable[[], Awaitable[T]]) -> T:
+    """Run ``work``, a framework's turn, forgetting the calls whose results it stores as it goes.
+
+    Every publish while ``work`` runs (such as a tool call's start and end),
+    and the end of ``work``, forget the Restate calls of the tool calls whose
+    results ``stored`` says are stored (see ``_calls.py``).
+
+    Args:
+        ctx: The handler's context.
+        stored: Whether a tool call's result is stored, such as ``Conversation.stored``.
+        work: The work to run.
+
+    Returns:
+        What ``work`` returns.
+    """
+    outer = _ANSWERING.get(ctx)
+    _ANSWERING.set(ctx, stored)
+    failed = False
+    try:
+        return await work()
+    except BaseException as error:
+        failed = not isinstance(error, TerminalError)
+        raise
+    finally:
+        try:
+            # A failed attempt stores nothing more, as its retry runs again.
+            if not failed:
+                await _settled(ctx, stored)
+        finally:
+            if outer is not None:
+                _ANSWERING.set(ctx, outer)
+            else:
+                _ANSWERING.delete(ctx)
+
+
+def _now() -> str:
+    return _signals.iso(time.time())
+
+
+async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionContext, str], Awaitable[T]]) -> T:
+    """Run ``answer`` as the turn of a ``chat`` handler.
+
+    While it answers, the object's ``status`` reports the turn. Cancelling the
+    invocation stops the turn (through ``stop_signal_of``) whenever it comes,
+    and cancels the calls its tools made; the handler then fails with the
+    cancellation. If the attempt ends first, the turn stops with
+    ``AttemptEnded`` and the next attempt carries on. The turn publishes when
+    it starts and when it ends.
+
+    An error ends the turn for good if it is a ``TerminalError``, or a model
+    provider's refusal (``refusal_of``), as a 424. Any other error fails the
+    attempt, and Restate retries the turn. So each integration raises a
+    ``TerminalError`` for its framework's errors that a retry would meet
+    again: OpenAI's ``MaxTurnsExceeded``, guardrail tripwires, setup errors
+    and runs stopped for approvals, ADK's model error codes and limit of model
+    calls, LangGraph's recursion limit and invalid updates, Pydantic
+    AI's usage limits, retries that ran out and setup errors.
+    """
+    invocation_id = ctx.request.id
+    companion = _signals.signals_of(ctx)
+    turn: Answering = {"invocationId": invocation_id, "since": _now()}
+    # From here until the turn closes, the companion knows about it: `status` and `stop` ask it.
+    # The agent has ``settle`` (``chat()`` adds it), so the companion may send it this turn once it is gone.
+    started: _signals.Started = {**turn, "settles": True}
+    await ctx.call(_signals.start, started, key=companion)
+    await stepped(ctx)
+
+    async def end() -> None:
+        # Have the companion close the turn, which publishes its last change
+        # with it, as one revision. The close is a call, awaited so that it is
+        # done before the turn ends.
+        stored = _ANSWERING.get(ctx)
+        if stored is not None:
+            await _settled(ctx, stored)
+        await ctx.call(_signals.close, invocation_id, key=companion)
+
+    stop = Stop()
+    _STOP.set(ctx, stop)
+
+    async def on_cancel() -> None:
+        await cancelled(ctx)
+        stop.stop(cancellation())
+        await cancel_calls(ctx)
+
+    async def on_attempt_end() -> None:
+        await ctx.request.attempt_finished_event.wait()
+        stop.stop(AttemptEnded())
+
+    watchers = [asyncio.ensure_future(on_cancel()), asyncio.ensure_future(on_attempt_end())]
+    try:
+        try:
+            answered = await answer(ctx, text)
+            # A cancellation after the answer does not change it.
+        except TerminalError:
+            await end()
+            raise
+        except Exception as error:
+            # Any other error fails the attempt and Restate retries the turn, unless it is a refusal.
+            terminal = refusal_of(ctx, error)
+            if terminal is None:
+                raise
+            await end()
+            raise terminal from error
+        await end()
+        return answered
+    finally:
+        for watcher in watchers:
+            watcher.cancel()

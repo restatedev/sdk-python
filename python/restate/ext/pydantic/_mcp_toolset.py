@@ -68,13 +68,13 @@ class RestateMCPToolset(WrapperToolset[AgentDepsT]):
 
         try:
             tool_defs = await context.run_typed("get mcp tools", get_tools_in_context, self.get_tools_options)
-            return {name: self.tool_for_tool_def(tool_def) for name, tool_def in tool_defs.output.items()}
+            return {name: self.tool_for_tool_def(tool_def, ctx=ctx) for name, tool_def in tool_defs.output.items()}
         except SdkInternalBaseException as e:
             raise Exception("Internal error during get_tools call") from e
 
-    def tool_for_tool_def(self, tool_def: ToolDefinition) -> ToolsetTool[AgentDepsT]:
+    def tool_for_tool_def(self, tool_def: ToolDefinition, *, ctx: RunContext[AgentDepsT]) -> ToolsetTool[AgentDepsT]:
         assert isinstance(self.wrapped, MCPToolset)
-        return self.wrapped.tool_for_tool_def(tool_def)
+        return self.wrapped.tool_for_tool_def(tool_def, ctx=ctx)
 
     async def call_tool(
         self,

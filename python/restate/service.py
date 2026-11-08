@@ -24,6 +24,9 @@ from restate.serde import Serde, DefaultSerde
 from restate.retry_policy import InvocationRetryPolicy
 from .handler import Handler, HandlerIO, ServiceTag, make_handler
 
+if typing.TYPE_CHECKING:
+    from restate.servable import Servable
+
 I = typing.TypeVar("I")
 O = typing.TypeVar("O")
 T = typing.TypeVar("T")
@@ -69,7 +72,18 @@ class Service:
             otherwise the service discovery will fail.
         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this service.
         invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this service.
+        explicit_recovery (bool, optional): (Preview) Explicit recovery for all handlers of this service:
+            see the handler option of the same name. NOTE: in preview, it might change without notice.
+        explicit_cancellation (bool, optional): (Preview) Explicit cancellation for all handlers of this service:
+            see the handler option of the same name. NOTE: in preview, it might change without notice.
     """
+
+    def __restate_services__(self) -> typing.Iterable["Servable"]:
+        """What ``restate.app`` serves for this (see ``restate.Servable``): itself.
+
+        A subclass may return what it brings along too: ``(self, *needs)``.
+        """
+        return (self,)
 
     def __init__(
         self,
@@ -85,6 +99,8 @@ class Service:
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_recovery: bool = False,
+        explicit_cancellation: bool = False,
     ) -> None:
         self.service_tag = ServiceTag("service", name, description, metadata)
         self.handlers: typing.Dict[str, Handler] = {}
@@ -95,7 +111,8 @@ class Service:
         self.ingress_private = ingress_private
         self.invocation_retry_policy = invocation_retry_policy
         self.context_managers = invocation_context_managers
-        self.explicit_recovery = False
+        self.explicit_recovery = explicit_recovery
+        self.explicit_cancellation = explicit_cancellation
 
     @property
     def name(self):
@@ -121,6 +138,8 @@ class Service:
         invocation_context_managers: typing.Optional[
             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
         ] = None,
+        explicit_recovery: bool = False,
+        explicit_cancellation: bool = False,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -159,6 +178,15 @@ class Service:
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
             invocation_context_managers: List of context manager factories that will be applied to each invocation of this handler.
+            explicit_recovery: (Preview) If true, a retried or resumed invocation does not replay its journal:
+                the handler runs again from the start, executing every context operation anew. So each
+                attempt's calls and sends are new requests (give them an idempotency key that is the same on
+                every attempt, such as one made from ``ctx.request().id``), ``ctx.run`` runs its action again
+                on every attempt, and awakeables are not supported.
+                NOTE: in preview, it might change without notice.
+            explicit_cancellation: (Preview) If true, Restate cancelling an invocation neither fails the handler's
+                awaits nor cancels its calls: the handler awaits `restate._preview.cancellation(ctx)` and decides
+                what to stop. NOTE: in preview, it might change without notice.
 
         Returns:
             Callable: The decorated function.
@@ -203,9 +231,12 @@ class Service:
                 idempotency_retention,
                 None,
                 None,
+                None,
                 ingress_private,
                 invocation_retry_policy,
                 combined_context_managers,
+                explicit_recovery=explicit_recovery,
+                explicit_cancellation=explicit_cancellation,
             )
             if handler.name in self.handlers:
                 raise ValueError(f"Handler {handler.name} already exists in {self.name}")
