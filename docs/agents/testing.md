@@ -16,6 +16,23 @@ This document covers:
 TypeScript packages. Several of its tools carry over: the seeded crash
 campaign, the e2e bank of agents, and the nightly soak.
 
+## Running the tests
+
+- **All of them:** `just test` (`uv run -m pytest tests/*`). The tests that
+  need a Restate server start one in Docker (`restate.harness`, pinned in
+  `tests/support.py`; `RESTATE_IMAGE` overrides it).
+- **Without Docker:** `just test-fast` runs the in-process tests
+  (`-m "not server"`). The others can run against a local `restate-server`
+  (from npm, `@restatedev/restate-server`), through a pytest plugin that
+  starts the harness's server as a process instead of a container (none is
+  in the repository yet); `examples_agents.py` then registers its program
+  as `host.docker.internal`, which must point to 127.0.0.1.
+- **The mutants:** `uv run --no-sync python scripts/resurrect.py`, with the
+  same server; run it in a worktree of its own, as it edits the code (and
+  restores it).
+- **Lint and types:** `just lint` and `just typecheck`, per directory, as the
+  `Justfile` runs them (mypy works only that way).
+
 ## What is covered
 
 There are about 6,000 lines of tests in 19 files, for 9,000 lines of code. They
@@ -240,7 +257,7 @@ passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
 | `calls-never-settled` | durability | a call's record is never forgotten: the key's state grows with every call | **SURVIVED**, now caught |
 
 **The run of 8 November 2026**, after the frameworks moved to their latest
-releases (`docs/conversation-storage/`), against Restate 1.8.1:
+releases ([The frameworks](frameworks.md)), against Restate 1.8.1:
 
 - **History:** 6 caught, 21 regression only. `pydantic-system-prompt` and
   `langgraph-prune` are now caught by other tests too.

@@ -135,7 +135,7 @@ OWN: dict[str, tuple[str, ...]] = {
         "test_an_openai_model_is_on_the_responses_api_where_reasoning_models_take_tools",
         "test_the_views_without_input_take_a_request_with_a_json_content_type",
     ),
-    # The fixes from the review of the storage plan's implementation (docs/conversation-storage/).
+    # The fixes from the review of the storage work (docs/agents/learnings.md, "Bugs a review found").
     "bd06b49": (
         "test_a_delta_channel_graph_is_pruned_turn_after_turn_until_its_snapshot",
         "test_a_checkpoint_of_more_than_a_hundred_channels_is_read_back",

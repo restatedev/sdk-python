@@ -38,7 +38,7 @@ only the latest turn, while it has no answer, is written. It ends once, with a
 status (``answered``, or closed: ``cancelled``, ``failed``, ``refused``,
 ``ended``). ``Conversation`` holds the turns, and composes them into what the
 model gets (``history``): the one place where turns are made one flat list.
-See ``TURN-SEMANTICS.md`` at the repository's root.
+See ``docs/agents/`` at the repository's root: ``turns.md`` and ``conversation.md``.
 
 The model gets the transcript, and the whole trajectories of the latest
 ``window`` turns, and of any turn after them that another invocation ended
