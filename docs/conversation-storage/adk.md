@@ -8,9 +8,9 @@
 
 - **Package:** `python/restate/agents/adk/` (`_agent.py`).
 - **Tests:** `tests/agents_adk.py`.
-- **Versions:** the extra requires `google-adk>=1.20.0` (`pyproject.toml:30`).
-  The venv has 1.20 installed, and the latest is 2.14. Where the two differ, say
-  so in your report.
+- **Versions:** only the latest release (README, D4). Phase 1 moves the floor
+  from `google-adk>=1.20.0` (`pyproject.toml:30`) to 2.14. The research below
+  read 2.14; #296 was tested on 1.20.
 
 ## What ADK expects
 
@@ -154,8 +154,8 @@ Update the module docstring of `adk/_agent.py`:
 
 ## Acceptance
 
-- A1's reproduction fails before the fix and passes after it, on 1.20 and on the
-  latest version.
+- A1's reproduction fails before the fix and passes after it, on the latest
+  release.
 - A2's tests pass.
 - Nothing outside this file's scope changed.
 

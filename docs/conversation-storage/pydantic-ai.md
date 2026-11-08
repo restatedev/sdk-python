@@ -165,7 +165,7 @@ async def chat(store: SqlStore, conversation_id: str, prompt: str) -> str:
 
 ## Work items
 
-### P1. Usage across turns (decision O4)
+### P1. Usage across turns (decision Q4)
 
 - **Today** `usage_limits` limits a single turn (`_run`'s docstring,
   `_agent.py:373-376`).
@@ -173,7 +173,7 @@ async def chat(store: SqlStore, conversation_id: str, prompt: str) -> str:
   Pydantic AI's limits would cover the whole conversation. A `request_limit`
   would then eventually fail every turn of a long conversation.
 - **Recommendation:** keep limits per turn, and change nothing now.
-- **If O4 says per conversation:**
+- **If Q4 says per conversation:**
   - carry the cumulative `RunUsage` in the turn's state, in P3's JSON;
   - pass it as `usage=`, which works on every supported version;
   - say so in the docstring.
@@ -286,7 +286,7 @@ sequenceDiagram
 - P2, P3 and P5 pass on the latest version and on the oldest allowed, with any
   differences documented.
 - P4's checks pass.
-- If O4 chose conversation limits, P1's test passes.
+- If Q4 chose conversation limits, P1's test passes.
 - Nothing outside this file's scope changed.
 
 ## Out of scope

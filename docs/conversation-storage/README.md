@@ -2,7 +2,8 @@
 
 > **Status:** a plan. Nothing in this folder is implemented yet. It was written on
 > 2026-11-08 against PR restatedev/sdk-python#296 at commit `670445c`, and its line
-> numbers refer to that commit.
+> numbers refer to that commit. It was revised the same day: D1 was clarified,
+> and D4 and D5 were added.
 
 This folder holds the research behind three changes to `restate.agents`, and the
 plan for making them:
@@ -40,7 +41,7 @@ sequenceDiagram
   participant L as LangGraph agent
   participant O as OpenAI agent
   Note over C: Phase 0: decisions confirmed, tests runnable, baseline recorded
-  Note over C: Phase 1: the core (C1–C9), tested and committed
+  Note over C: Phase 1: the core (C0–C9), tested and committed
   par Phase 2, one worktree each, from phase 1's commit
     C->>P: brief: README.md + pydantic-ai.md
   and
@@ -226,34 +227,57 @@ sequenceDiagram
 
 **Taken:**
 
-- **D1. No backwards compatibility and no migrations** (decided 2026-11-08).
-  While #296 is unreleased, schema changes edit its `CREATE` statements. Once a
-  version has been released, schema changes have to be new migrations appended
-  after the existing ones, per the rule of `restate.sessions`
-  (`python/restate/sessions/_schema.py`).
+- **D1. Assume no existing databases** (decided 2026-11-08). The schema is
+  written as if every key's database were new:
+  - no `DROP TABLE`;
+  - no migrations;
+  - no compatibility code.
+
+  A schema change edits the `CREATE` statements directly. Phase 1 starts by
+  removing the two `DROP TABLE IF EXISTS` statements at the top of `SCHEMA`
+  (`_conversation.py:125-127`), which #296 added for databases from before it.
 - **D2. Turns are the record; steps expire.** This is the rule above.
 - **D3. Frameworks plug in through the hooks that already exist:**
   - `Items.summary(text)`, which is optional (`_conversation.py:233-278`);
   - `Turn.carry(agent=..., state=...)` (`_conversation.py:571-583`).
 
   Phase 1 adds no framework-facing API beyond the core contract below.
+- **D4. No version floor** (decided 2026-11-08). `restate.agents` is a new
+  integration, not announced yet, so it supports only the latest release of each
+  framework:
+  - Each extra's lower bound moves to the release that is latest when the work
+    starts. As of 2026-11-08 those are:
+    - `pydantic-ai-slim` 2.66, plus `pydantic-ai-harness` 0.66, which becomes a
+      dependency;
+    - `google-adk` 2.14;
+    - `langgraph` 1.2.20 and `langchain` 1.4.9;
+    - `openai-agents` 0.24.0.
+  - Code uses the newest APIs directly: no feature detection, and no guards kept
+    only for older versions. Each framework agent removes the guards it finds.
+  - CI's jobs for the oldest versions (`.github/workflows/test.yml:36-91`)
+    install the extras' lowest versions, which are then the latest. Keep them or
+    remove them; the coordinator decides.
+- **D5. Pydantic AI leans on Pydantic AI Harness.** Where a harness capability
+  does what our code does, the Pydantic AI integration uses the capability, and
+  `restate.agents` supplies what the capability needs (storage, durability). See
+  [`pydantic-ai.md`](pydantic-ai.md).
 
 **Open.** These should be answered before phase 1; if one isn't, its
 recommendation applies.
 
 | | Question | Recommendation |
 | --- | --- | --- |
-| O1 | The default `steps_retention` | `timedelta(0)` |
-| O2 | Should `chat`'s `journal_retention` default to at most `steps_retention`, so the journal's copy goes too? | No: document it. It is Restate's setting, and users opt in. |
-| O3 | Expose `prune` to apps ("delete steps now")? | No: it stays private, like `compact`. |
-| O4 | Pydantic AI's usage limits: per turn (today) or per conversation (what Pydantic AI does with `conversation=`)? | Per turn. See [`pydantic-ai.md`](pydantic-ai.md), P1. |
-| O5 | A LangGraph graph's own state: document how to trim it, or add an opt-in helper that trims it? | Document now; a helper later, if asked. |
-| O6 | Land this in #296, or in a follow-up PR on top of it? | Your call. #296 is already large, and approved by the review bot. |
-| O7 | Should the TypeScript SDK (sdk-sessions) follow? | Out of scope here; decide after this lands. |
+| Q1 | The default `steps_retention` | `timedelta(0)` |
+| Q2 | Should `chat`'s `journal_retention` default to at most `steps_retention`, so the journal's copy goes too? | No: document it. It is Restate's setting, and users opt in. |
+| Q3 | Expose `prune` to apps ("delete steps now")? | No: it stays private, like `compact`. |
+| Q4 | Pydantic AI's usage limits: per turn (today) or per conversation (what Pydantic AI does with `conversation=`)? | Per turn. See [`pydantic-ai.md`](pydantic-ai.md), P1. |
+| Q5 | A LangGraph graph's own state: document how to trim it, or add an opt-in helper that trims it? | Document now; a helper later, if asked. |
+| Q6 | Land this in #296, or in a follow-up PR on top of it? | Your call. #296 is already large, and approved by the review bot. |
+| Q7 | Should the TypeScript SDK (sdk-sessions) follow? | Out of scope here; decide after this lands. |
 
 ## Phase 0: preparation (coordinator)
 
-1. Confirm O1 to O6.
+1. Confirm Q1 to Q6.
 2. Make the server tests runnable. They use Docker: `restate.harness` starts
    `ghcr.io/restatedev/restate:1.8.1` (`tests/support.py:7`). Without Docker:
    - install restate-server 1.8.1 from npm (`@restatedev/restate-server`);
@@ -268,10 +292,24 @@ recommendation applies.
 
 ## Phase 1: the core (coordinator)
 
+### C0. Dependencies
+
+Per D4:
+
+- Raise the lower bounds of the extras in `pyproject.toml` (lines 30-35) to the
+  latest releases, and add `pydantic-ai-harness` to the `pydantic_ai` extra.
+- Run `uv lock` and `uv sync --all-extras --all-packages`.
+- Record the baseline again: it is the baseline the framework agents compare
+  against. Fix whatever the new versions break in the core. Breakage inside a
+  framework's package goes into that framework's brief.
+
 ### C1. Schema
 
-Changes to `SCHEMA` (`_conversation.py:122-160`), made in its `CREATE`
-statements, per D1:
+Changes to `SCHEMA` (`_conversation.py:122-160`), per D1:
+
+- **Remove the two `DROP TABLE IF EXISTS` statements** (`_conversation.py:125-127`)
+  and the comment above them. `SCHEMA` then holds only the `CREATE` statements.
+- **Add the new columns to the `CREATE` statements**, as follows.
 
 - **`restate_agent_turns.ended_at INTEGER`**: when the turn ended, in Unix
   milliseconds. `Turn.answered` writes it along with the status.
@@ -432,7 +470,7 @@ This work is independent of the rest, so it can run alongside phase 2.
 
 - **The journal.** Each turn's Restate journal holds its call results and its
   database writes, until `journal_retention` runs out. Document that a deletion
-  guarantee needs `journal_retention` no longer than `steps_retention` (see O2).
+  guarantee needs `journal_retention` no longer than `steps_retention` (see Q2).
 - **Freed pages.** Before storing a b-tree page, shared-core zeroes the space in
   it that no cell uses (`sdk-shared-core/src/sql/io.rs:101-107`). Whole pages
   added to the freelist have not been checked. Deleting a large tool output frees
@@ -504,9 +542,11 @@ Phase 2's agents may rely on the following:
    - your framework's tests;
    - `uv run ruff format --check`, `uv run ruff check`, pyright and mypy, on what
      you changed, per directory, as the `Justfile` does.
-5. **Versions.** The oldest version your extra allows must still pass. CI tests
-   the oldest Pydantic AI and LangGraph (`.github/workflows/test.yml:36-91`).
-   Detect newer APIs at run time instead of requiring them.
+5. **Versions.** Only the latest release is supported (D4), and phase 1 has
+   already moved the floor to it.
+   - Use the newest APIs directly.
+   - Remove any guard in your package that exists only for older versions. List
+     each one in your report.
 6. **Commits.** Commit in your worktree with clear messages, and don't push.
 7. **Your report covers:**
    - the files you changed;
@@ -522,7 +562,7 @@ Phase 2's agents may rely on the following:
 > Read `docs/conversation-storage/README.md` first: the core contract, the rules
 > for framework agents, and how to run the tests. For server tests, use the
 > plugin in `<plugin dir>` with `RESTATE_SERVER_BIN=<binary>`. Phase 1 is at
-> `<commit>`. Do work items `<list>`; the decisions taken are `<O1–O6 answers>`.
+> `<commit>`. Do work items `<list>`; the decisions taken are `<Q1–Q6 answers>`.
 > Report as the rules say.
 
 ## Phase 3: connecting the dots (coordinator)
@@ -534,9 +574,9 @@ Phase 2's agents may rely on the following:
    are any, the rules settle them: a framework owns its package.
 3. **Checks across the frameworks:**
    - the full suite against a server: `uv run --no-sync -m pytest tests/*`;
-   - the oldest Pydantic AI and LangGraph, installed as CI installs them
-     (`uv pip install --resolution lowest-direct ...`,
-     `.github/workflows/test.yml:51-91`);
+   - CI's jobs for the oldest versions (`.github/workflows/test.yml:36-91`).
+     With the floors at the latest releases, they test the same versions as the
+     rest. Keep them green, or remove them (D4).
    - `uv run ruff format --check`, `uv run ruff check`, pyright and mypy, per
      directory (`Justfile:15-37`);
    - `scripts/resurrect.py`: every mutant applies, and the new ones are caught;
@@ -550,7 +590,7 @@ Phase 2's agents may rely on the following:
 
    Each framework's module docstring is its agent's job.
 5. **Publish.** Push the commits to the branch in one push, and update the PR
-   description, or open a new PR (see O6).
+   description, or open a new PR (see Q6).
 
 ## Running the tests
 
@@ -576,8 +616,8 @@ Phase 2's agents may rely on the following:
 - **Idle keys.** With `steps_retention` above zero, an idle key's steps are gone
   within the retention plus the delay of the scheduled call.
 - **The framework files.** Each framework file's acceptance criteria hold.
-- **The checks.** The full suite, the oldest-version runs, lint, types and
-  `scripts/resurrect.py` all pass.
+- **The checks.** The full suite, lint, types and `scripts/resurrect.py` all
+  pass, on the latest framework releases.
 
 ## Risks
 

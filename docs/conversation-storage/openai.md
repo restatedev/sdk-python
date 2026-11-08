@@ -9,8 +9,9 @@
 - **Package:** `python/restate/agents/openai/` (`_agent.py`).
 - **Tests:** `tests/agents_openai.py`, plus the OpenAI cases in
   `tests/examples_agents.py`.
-- **Versions:** the extra requires `openai-agents>=0.6.1` (`pyproject.toml:31`).
-  The venv has 0.22.2 installed, and the latest is 0.24.0.
+- **Versions:** only the latest release (README, D4). Phase 1 moves the floor
+  from `openai-agents>=0.6.1` (`pyproject.toml:31`) to 0.24.0. #296 was tested on
+  0.22.2.
 
 ## What the OpenAI Agents SDK expects
 
@@ -98,7 +99,13 @@ Add these to the module docstring:
 - To clear old tool outputs within the window, add the SDK's `ToolOutputTrimmer`
   as an input filter. It runs after ours (`_agent.py:258-268`).
 
-### O4. Docs
+### O4. Guards for older SDKs (D4)
+
+- Remove the check for `context_management` (`_agent.py:575-584`). On 0.24 the
+  built-in agent always gets server-side compaction.
+- Remove any other guard that exists only for SDKs older than the floor.
+
+### O5. Docs
 
 - **The module docstring:** O2's choice, O3's notes, and what retention means
   here. The current agent is carried on the turn row; the steps of earlier turns
@@ -107,10 +114,8 @@ Add these to the module docstring:
 
 ## Acceptance
 
-- O1's tests pass on the installed version (0.22.2) and on the latest (0.24.0).
-- No CI job tests the oldest allowed version (0.6.1). Check instead that the code
-  paths guarded for SDKs without `context_management` still work
-  (`_agent.py:575-584`).
+- O1's tests pass on the latest release.
+- O4 is done: no guard for older SDKs is left.
 - O2's choice is made, and tested.
 - Nothing outside this file's scope changed.
 

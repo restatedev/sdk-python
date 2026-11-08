@@ -14,13 +14,12 @@
   - `tests/agents_langgraph_checkpointer.py`
   - `tests/agents_langgraph_create_agent.py`
   - `tests/agents_langgraph_nodes.py`
-- **Versions:**
-  - The extra requires `langgraph>=1.1.5,<2` and `langchain-core>=1.0.0,<2`
-    (`pyproject.toml:33-35`). CI tests the oldest versions they allow
-    (`.github/workflows/test.yml:36-68`).
-  - The venv has langgraph 1.1.9 and langchain 1.2.15 installed.
-  - The latest are langgraph 1.2.20, langchain 1.4.9, langgraph-checkpoint 4.3.1,
+- **Versions:** only the latest releases (README, D4).
+  - Phase 1 moves the floors from `langgraph>=1.1.5` and `langchain-core>=1.0.0`
+    (`pyproject.toml:33-35`) to langgraph 1.2.20 and langchain 1.4.9.
+  - The research also read langgraph-checkpoint 4.3.1,
     langgraph-checkpoint-sqlite 3.1.3 and langgraph-checkpoint-postgres 3.2.0.
+  - #296 was tested on langgraph 1.1.9 and langchain 1.2.15.
 
 ## What LangGraph expects
 
@@ -104,7 +103,7 @@ There are two agents:
   2's steps were not deleted before turn 3's run, because `window_from` counted
   the widened window.
 
-### L2. The graph's own state (decision O5)
+### L2. The graph's own state (decision Q5)
 
 - **Retention can't reach it.** The latest checkpoint holds every message the
   graph's state keeps.
@@ -117,7 +116,7 @@ There are two agents:
 - **Test** that a trimmed message is really gone: a graph that removes old messages
   with `RemoveMessage`. After the turn's prune, the bytes of the removed messages
   are not in `restate_langgraph_channel_values`.
-- **Later, if O5 asks for it:** an opt-in that removes the messages of pruned
+- **Later, if Q5 asks for it:** an opt-in that removes the messages of pruned
   turns from the state after each turn. It would work only on a `messages` channel
   that uses `add_messages`, by id, through `aupdate_state`. It changes what the
   graph's model sees, so it has to be the graph author's choice.
@@ -154,8 +153,7 @@ There are two agents:
 
 ## Acceptance
 
-- L1's test and L4's no-duplicates test pass on the oldest LangGraph allowed and
-  on the latest.
+- L1's test and L4's no-duplicates test pass on the latest releases.
 - L2's "trimmed means gone" test passes.
 - L3's tests pass.
 - Nothing outside this file's scope changed.
