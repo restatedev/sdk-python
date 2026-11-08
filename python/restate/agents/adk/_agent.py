@@ -52,7 +52,6 @@ its stored events:
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import json
 import logging
@@ -278,15 +277,9 @@ class _AdkTool(BaseTool):
         )
 
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
-        try:
-            return await self.tool.run(args, current_call(tool_context.function_call_id or ""))
-        except Exception as error:
-            task = asyncio.current_task()
-            if task is not None and task.cancelling():
-                # Stopped as its turn stopped: the tool's run says why (``Tool.run``), but ADK's runner cancels
-                # the agent's task and waits for it to end, which only a cancellation ends at once.
-                raise asyncio.CancelledError from error
-            raise
+        # Stopped as its turn stopped, the agent's task ends as cancelled (``Tool.run``): ADK's runner cancels
+        # it and waits for it to end.
+        return await self.tool.run(args, current_call(tool_context.function_call_id or ""))
 
 
 def tools(given: Sequence[AnyTool]) -> list[Any]:

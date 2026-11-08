@@ -27,9 +27,9 @@ run in two tiers.
 | Real server | `restate.create_test_harness`: Restate in Docker, with the app on a thread of the test process | each framework's file, `agents_object`, `agents_signals`, `agents_webhook`, `examples_agents` |
 
 Each framework's file runs its agent on a scripted model, which answers from
-the first word of the prompt (`weather`, `crash`, `wait`, `refuse`, ...). CI
-already tests the oldest LangGraph and Pydantic AI that the extras allow, and an
-install with no extras.
+the first word of the prompt (`weather`, `crash`, `wait`, `refuse`, ...). The
+extras' floors are each framework's latest release, so CI tests that release
+only, and an install with no extras.
 
 ### The contract, per framework
 
@@ -57,6 +57,9 @@ contract.
 | The framework's own `agent=` / `graph=` | P, H | H | P | H | H |
 | `wait_for_signal` through the framework | **—** | partial | **—** | **—** | H |
 | `call` / `send` / `workflow` / `subagent` through the framework | **—** | **—** | **—** | `call` only | through nodes, not `agent(graph=)` |
+| History from snapshots, compacted by the framework | n/a | P (the harness's `TieredCompaction`) | n/a | n/a | n/a |
+| A deferred tool call waits for a signal (`wait_for`) | n/a | H | n/a | n/a | H (interrupts) |
+| The summary in the framework's own form (`Items.summary`) | H (one user message) | n/a | H | H | n/a |
 | `background=` | **—** | **—** | **—** | **—** | **—** |
 | `clear` / cursors / `sync` with this framework's items | **—** | **—** | **—** | **—** | **—** |
 
@@ -67,6 +70,9 @@ plain dicts (`agents_conversation.ITEMS`):
 - `agents_messages`: pages, cursors, drops and `clear`.
 - `agents_object`: the views (`status`, `stop`, `signal`, `sync`).
 - `agents_tools`: `call`, `wait_for_signal` and `subagent`.
+- `agents_snapshots`: history from snapshots (loading, `history()`, known
+  results, crashes, `compact` between turns), each turn's `asked_at`, and
+  `wait_for`.
 
 ## Gaps
 
@@ -135,8 +141,8 @@ would catch.
    - Every test runs on a scripted model.
    - When OpenAI, Gemini or Anthropic change a response shape, the fakes keep
      passing until a user hits it.
-   - Only LangGraph and Pydantic AI are tested on their oldest allowed version.
-     None of the four is tested on its newest release before users get it.
+   - Only each framework's latest release is supported: the extras' floors
+     are it. A newer release is tested only once the floors move to it.
 8. **Most examples only load.**
    - `examples_agents.py` runs the tutorial, `refund_graph`, `loop` and
      `create_agent` end to end.

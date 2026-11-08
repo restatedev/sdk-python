@@ -43,7 +43,12 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 AGENTS = "python/restate/agents"
 
 OPENAI = ("tests/agents_openai.py", "tests/agents_output.py")
-PYDANTIC_AI = ("tests/agents_pydantic_ai.py", "tests/agents_output.py")
+PYDANTIC_AI = (
+    "tests/agents_pydantic_ai.py",
+    "tests/agents_pydantic_ai_snapshots.py",
+    "tests/agents_pydantic_ai_stores.py",
+    "tests/agents_output.py",
+)
 LANGGRAPH = (
     "tests/agents_langgraph.py",
     "tests/agents_langgraph_graph.py",
@@ -62,7 +67,7 @@ EVERY_FRAMEWORK = (
     "tests/agents_langgraph_graph.py",
 )
 OBJECT = ("tests/agents_object.py", "tests/agents_signals.py")
-SNAPSHOTS = ("tests/agents_snapshots.py", "tests/agents_pydantic_ai.py")
+SNAPSHOTS = ("tests/agents_snapshots.py", "tests/agents_pydantic_ai_snapshots.py")
 
 # The tests that each fix commit added: a bug's own regression tests.
 OWN: dict[str, tuple[str, ...]] = {
@@ -85,11 +90,7 @@ OWN: dict[str, tuple[str, ...]] = {
         "test_usage_limits_set_a_runs_limit",
         "test_a_tool_whose_retries_run_out_ends_the_turn",
         "test_a_response_that_the_model_could_not_read_is_retried",
-        "test_a_run_stopped_for_a_deferred_tool_call_fails_and_the_call_is_closed",
         "test_an_agent_of_your_own_runs_with_its_own_capabilities",
-        "test_the_built_in_agent_gets_the_compaction_of_its_models_provider",
-        "test_the_built_in_agent_on_anthropic_gets_its_compaction",
-        "test_an_agent_of_your_own_runs_as_configured_with_the_system_prompt_reinjected",
         "test_an_agent_of_your_own_gets_its_deps",
         "test_a_setup_error_of_pydantic_ai_ends_the_turn",
         "test_an_error_of_the_agents_own_code_is_retried_whatever_its_name",
@@ -108,7 +109,7 @@ OWN: dict[str, tuple[str, ...]] = {
         "test_prune_deletes_threads_and_knows_no_other_strategy",
         "test_a_subgraph_paused_and_pruned_resumes_whole_and_each_namespace_keeps_its_latest",
         "test_a_run_paused_below_a_subgraph_with_its_own_history_resumes_after_a_prune",
-        "test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_raised_it",
+        "test_langgraph_gives_each_interrupt_of_a_run_an_id_of_its_own",
         "test_create_agent_has_its_own_context_and_calls_restate_through_the_tools",
         "test_each_interrupt_below_a_node_that_interrupts_itself_waits_for_its_own_signal",
         "test_a_static_breakpoint_in_a_subgraph_fails_the_turn_and_the_next_message_starts_afresh",
@@ -236,7 +237,8 @@ MUTANTS = [
         "pydantic-system-prompt",
         "an Agent of your own loses its system prompt on every turn",
         f"{AGENTS}/pydantic_ai/_agent.py",
-        "    if ReinjectSystemPrompt not in have:\n        chosen.append(ReinjectSystemPrompt())",
+        "    if not any(isinstance(capability, ReinjectSystemPrompt) for capability in leaves):\n"
+        "        chosen.append(ReinjectSystemPrompt())",
         "    pass",
         PYDANTIC_AI,
         "2a351ed",
@@ -506,6 +508,31 @@ MUTANTS = [
         "due = settings.compact_history is not None and conversation.compaction_asked",
         "due = settings.compact_history is not None",
         SNAPSHOTS,
+    ),
+    Mutant(
+        "pydantic-compaction-not-snapshotted",
+        "the harness's compaction is not stored: every turn, and every retried attempt, summarizes again",
+        f"{AGENTS}/pydantic_ai/_agent.py",
+        "        if not _extends(prints, self.sent):\n            await self.conversation.turn.snapshot(",
+        "        if False:\n            await self.conversation.turn.snapshot(",
+        PYDANTIC_AI,
+    ),
+    Mutant(
+        "pydantic-denial-approves",
+        "a deferred call's approval signal with any text runs the tool, a denial's reason included",
+        f"{AGENTS}/pydantic_ai/_agent.py",
+        "        return ToolApproved() if value.strip().lower() in _APPROVED else ToolDenied(value)",
+        "        return ToolApproved()",
+        PYDANTIC_AI,
+    ),
+    Mutant(
+        "tool-cancellation-swallowed",
+        "a tool whose task the framework cancels as the turn stops raises the stop's reason instead: "
+        "ADK's runner, which waits for the cancelled task, hangs",
+        f"{AGENTS}/_tools.py",
+        "if isinstance(error, asyncio.CancelledError) and task is not None and task.cancelling():",
+        "if False:",
+        EVERY_FRAMEWORK,
     ),
 ]
 

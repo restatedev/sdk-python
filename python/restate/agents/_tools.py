@@ -27,6 +27,7 @@ imported when the tool is created. Each framework extra installs it.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import inspect
@@ -163,6 +164,12 @@ class Tool:
             # cancelled).
             stop = stop_signal_of(call.ctx)
             if stop is not None and stop.reason is not None:
+                task = asyncio.current_task()
+                if isinstance(error, asyncio.CancelledError) and task is not None and task.cancelling():
+                    # Its own task is being cancelled (by the framework, as the turn stopped): it ends as
+                    # cancelled, since a framework that cancels a task and waits for it (ADK's runner) expects
+                    # nothing else. The turn still stops with its reason, from the stop signal.
+                    raise
                 raise stop.reason from error
             if isinstance(error, TerminalError):
                 # A terminal error is the tool's result, which the model can act on.
