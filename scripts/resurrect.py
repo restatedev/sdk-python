@@ -154,6 +154,8 @@ OWN: dict[str, tuple[str, ...]] = {
         "test_memory_lists_the_paths_under_a_prefix_in_order_up_to_a_limit",
         "test_without_pydantic_ai_harness_the_import_names_the_extra",
     ),
+    # The fix that the access patterns' measurement found (docs/agents/access-patterns.md).
+    "869b5b8": ("test_the_last_position_and_seq_are_read_from_the_ends_of_the_tables_without_a_scan",),
     "": (),
 }
 
@@ -491,6 +493,21 @@ MUTANTS = [
         "",
         SNAPSHOTS,
         "2657e60",
+    ),
+    Mutant(
+        "last-of-scans",
+        "the last position and seq are asked for in one SELECT of several maxima per table: every turn scans "
+        "both tables, and a cold one reads the whole database",
+        f"{AGENTS}/_conversation.py",
+        "    [[turn, turn_seq, answered_seq, step, step_seq]] = await db.values(\n"
+        '        f"SELECT (SELECT MAX(n) FROM {TURNS}), (SELECT MAX(seq) FROM {TURNS}), '
+        '(SELECT MAX(answered_seq) FROM {TURNS}), "\n'
+        '        f"(SELECT MAX(n) FROM {STEPS}), (SELECT MAX(seq) FROM {STEPS})"\n'
+        "    )\n",
+        '    [[turn, turn_seq, answered_seq]] = await db.values(f"SELECT MAX(n), MAX(seq), MAX(answered_seq) FROM {TURNS}")\n'
+        '    [[step, step_seq]] = await db.values(f"SELECT MAX(n), MAX(seq) FROM {STEPS}")\n',
+        ("tests/agents_conversation.py", "tests/agents_messages.py"),
+        "869b5b8",
     ),
     Mutant(
         "pydantic-approval-not-marked",

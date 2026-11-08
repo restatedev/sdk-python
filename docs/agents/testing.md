@@ -192,9 +192,10 @@ would catch.
 
 `scripts/resurrect.py` measures the suite against bugs that really happened.
 
-- **38 history mutants** (39 until one was retired, below). Each brings back,
+- **39 history mutants** (40 until one was retired, below). Each brings back,
   on today's code, one bug that a fix commit describes (#276, #278, #290,
-  #291, #292, #294, and the review of the storage plan's implementation).
+  #291, #292, #294, the review of the storage plan's implementation, and the
+  measurement of [access patterns](access-patterns.md)).
 - **13 durability mutants.** Each breaks the contract of a turn without
   matching any past fix.
 
@@ -250,6 +251,7 @@ passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
 | `pydantic-memory-run-ids` | review | a replayed memory edit misses its receipt and reports failure | regression only |
 | `pydantic-memory-paths-unlimited` | review | `list_paths` ignores its limit | regression only |
 | `pydantic-import-without-harness` | review | without Pydantic AI Harness, the import names no extra | regression only |
+| `last-of-scans` | access patterns | every turn scans both tables for the last position and seq, and a cold one reads the whole database | regression only |
 | `pydantic-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **caught** |
 | `calls-new-id-not-matched` | durability | a call asked again under a new id makes its Restate call again | **caught** |
 | `langgraph-reask-stored-reply` | durability | after a crash, the model is asked again for a stored final reply | **SURVIVED**, now caught |
