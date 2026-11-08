@@ -47,7 +47,6 @@ from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     TextPart,
     UserPromptPart,
 )
@@ -109,19 +108,25 @@ async def get_weather(city: str) -> str:
 # --- Pydantic AI: NativeOutput, or PromptedOutput for a model without a JSON schema mode ---
 
 
+def _pai_feedback(part: object) -> bool:
+    """Whether ``part`` is Pydantic AI's feedback on an answer that did not validate, as a model gets it: a user's
+    prompt that says it is the application's (``RetryFeedbackPart``, which a model gets as such a prompt)."""
+    return isinstance(part, UserPromptPart) and "this is automated feedback" in str(part.content)
+
+
 def _pai_prompts(messages: list[ModelMessage]) -> list[str]:
     return [
         str(part.content)
         for m in messages
         if isinstance(m, ModelRequest)
         for part in m.parts
-        if isinstance(part, UserPromptPart)
+        if isinstance(part, UserPromptPart) and not _pai_feedback(part)
     ]
 
 
 def pai_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     last = messages[-1]
-    retried = isinstance(last, ModelRequest) and any(isinstance(p, RetryPromptPart) for p in last.parts)
+    retried = isinstance(last, ModelRequest) and any(_pai_feedback(p) for p in last.parts)
     mode = info.model_request_parameters.output_mode
     return ModelResponse(parts=[TextPart(_reply(_pai_prompts(messages), mode, retried))])
 

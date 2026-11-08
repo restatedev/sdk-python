@@ -1,10 +1,9 @@
 # Pydantic AI, on Pydantic AI Harness
 
-> **Status:** not started. Phase 1's C2 is done: snapshots, a time on each turn
-> row, and a helper for waits; the README's "Phase 1: what was built" has the
-> API as built. Read
-> [`README.md`](README.md) first: the core contract, the rules for framework
-> agents, and how to run the tests.
+> **Status:** done in phase 2, on branch `phase2-pydantic-ai` (from `88b3614`):
+> P0 to P9, each with its tests. Deviations and core notes are in the agent's
+> report. Read [`README.md`](README.md) first: the core contract, the rules for
+> framework agents, and how to run the tests.
 
 ## Scope
 
