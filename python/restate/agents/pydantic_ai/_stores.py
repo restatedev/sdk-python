@@ -69,21 +69,21 @@ class _Call:
     writes: int = 0
 
 
-_CALL: contextvars.ContextVar[_Call | None] = contextvars.ContextVar("restate_pydantic_ai_call", default=None)
+CALL: contextvars.ContextVar[_Call | None] = contextvars.ContextVar("restate_pydantic_ai_call", default=None)
 
 
 def calling(call_id: str | None) -> None:
     """Mark tool call ``call_id`` as running (``None``: none is): ``_Restate`` does, as each starts and ends."""
-    _CALL.set(_Call(call_id) if call_id is not None else None)
+    CALL.set(_Call(call_id) if call_id is not None else None)
 
 
-def _ctx() -> SessionContext:
-    """Return the context of the run in progress (``tools_in``)."""
+def running() -> SessionContext:
+    """Return the handler's context of the run in progress (``tools_in``)."""
     return current_call("").ctx
 
 
 async def _db() -> Any:
-    ctx = _ctx()
+    ctx = running()
     await SCHEMA.ensure(ctx.db)
     return ctx.db
 
@@ -99,9 +99,9 @@ async def _once(write: Callable[[Any], Awaitable[T]], dump: Callable[[T], str], 
     done already is read back. Outside a tool call, ``write`` is done as it
     comes.
     """
-    ctx = _ctx()
+    ctx = running()
     await SCHEMA.ensure(ctx.db)
-    call = _CALL.get()
+    call = CALL.get()
     if call is None:
         async with ctx.db.transaction() as tx:
             return await write(tx)
@@ -213,7 +213,7 @@ class KeyOverflowStore:
         # The harness's key is ``<run id>/<call id>.<retry><suffix>``: the run's id is the attempt's, so the handle
         # leaves it out, and a call that runs again (after a crash) writes over its own spill.
         handle = key.split("/", 1)[1] if "/" in key else key
-        ctx = _ctx()
+        ctx = running()
         await SCHEMA.ensure(ctx.db)
         await ctx.db.execute(
             f"INSERT OR REPLACE INTO {SPILLS} (handle, data) VALUES (?, ?)",
@@ -246,7 +246,7 @@ class TurnsHistorySource:
         self.items = items
 
     async def list_runs(self) -> list[RunRecord]:
-        ctx = _ctx()
+        ctx = running()
         db = await _turns(ctx)
         definition = definition_of(ctx)
         conversation = f"{definition.name}/{ctx.key}" if definition is not None else ctx.key
@@ -262,7 +262,7 @@ class TurnsHistorySource:
         ]
 
     async def run_history(self, *, run_id: str) -> list[ModelMessage]:
-        db = await _turns(_ctx())
+        db = await _turns(running())
         row = await db.get(f"SELECT n, item FROM {TURNS} WHERE prompt = ?", [run_id])
         if row is None:
             return []

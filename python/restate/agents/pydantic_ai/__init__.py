@@ -42,7 +42,9 @@ latest compaction, whole: Pydantic AI Harness's ``TieredCompaction``
 call that needs an approval (``requires_approval``) or a result from outside
 waits for a signal (``APPROVAL``, or the tool's name). ``plan_store``,
 ``overflow_store`` and ``history_source`` give the harness's ``Planning``,
-``ToolOutputLimits`` and ``ConversationSearch`` the key's database::
+``ToolOutputLimits`` and ``ConversationSearch`` the key's database, and
+``memory`` and ``memory_store`` keep ``Memory`` on a session object of its own,
+across conversations::
 
     mine = Agent(model, capabilities=[Planning(store=pydantic_ai.plan_store())])
 
@@ -80,6 +82,7 @@ from restate.agents.pydantic_ai._agent import (
     prompt,
     toolset,
 )
+from restate.agents.pydantic_ai._memory import memory, memory_store
 from restate.agents.pydantic_ai._stores import overflow_store, plan_store
 
 __all__ = [
@@ -90,6 +93,8 @@ __all__ = [
     "approval_of",
     "compaction",
     "history_source",
+    "memory",
+    "memory_store",
     "overflow_store",
     "plan_store",
     "prompt",

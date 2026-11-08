@@ -269,6 +269,77 @@ def desk_agent() -> Any:
 
 desk = pydantic_ai.agent("pai_desk", agent=desk_agent())
 
+memories = pydantic_ai.memory("pai_memories")
+"""Memory across conversations: one key per user."""
+
+
+def user_of(ctx: sessions.SessionContext) -> str:
+    """The user of a conversation, whose key is ``<user>.<topic>``."""
+    return ctx.key.split(".")[0]
+
+
+crashed_writes: set[str] = set()
+
+
+class CrashAfterWrite(AbstractCapability[Any]):
+    """Crashes the attempt once, after a ``write_memory`` call of content that says so, before its result is stored."""
+
+    async def after_tool_execute(
+        self, ctx: RunContext[Any], *, call: Any, tool_def: Any, args: Any, result: Any
+    ) -> Any:
+        content = str(call.args_as_dict().get("content", ""))
+        if call.tool_name == "write_memory" and "crash" in content and content not in crashed_writes:
+            crashed_writes.add(content)
+            raise RuntimeError("the process crashed after writing")
+        return result
+
+
+def memorizer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """A model that writes what it is told to remember to ``facts.md``, and reads it back when asked to recall."""
+    last = messages[-1]
+    results = [p for p in last.parts if isinstance(p, ToolReturnPart)] if isinstance(last, ModelRequest) else []
+    if results:
+        return ModelResponse(parts=[TextPart(f"tool said: {results[-1].model_response_str()}")])
+    text = _prompts(messages)[-1]
+    word, _, rest = text.partition(" ")
+    if word == "remember":
+        args: dict[str, Any] = {"content": rest, "file": "facts.md"}
+        return ModelResponse(parts=[ToolCallPart("write_memory", args, tool_call_id=f"call-{len(messages)}")])
+    return ModelResponse(
+        parts=[ToolCallPart("read_memory", {"file": "facts.md"}, tool_call_id=f"call-{len(messages)}")]
+    )
+
+
+def remembering_agent() -> Any:
+    from pydantic_ai_harness.memory import Memory  # pylint: disable=import-outside-toplevel
+
+    store = pydantic_ai.memory_store(memories, user_of)
+    return Agent(FunctionModel(memorizer), capabilities=[Memory(store=store, inject_memory=False), CrashAfterWrite()])
+
+
+remembering = pydantic_ai.agent("pai_remembering", agent=remembering_agent())
+
+
+@remembering.handler
+async def conflict(ctx: sessions.SessionContext, path: str) -> list[str]:
+    """Two writes of a new file: the second expects it to be new too, and is refused."""
+    from pydantic_ai_harness.memory import MemoryConflictError  # pylint: disable=import-outside-toplevel
+
+    from restate.agents._tools import tools_in  # pylint: disable=import-outside-toplevel
+
+    store = pydantic_ai.memory_store(memories, user_of)
+    outcomes: list[str] = []
+    with tools_in(ctx):
+        for content in ("first", "second"):
+            try:
+                written = await store.write(path, content, expected_version=None)
+                outcomes.append(f"written {written.version}")
+            except MemoryConflictError:
+                outcomes.append("refused")
+        found = await store.read(path, max_chars=100)
+    assert found is not None
+    return [*outcomes, found.content]
+
 
 @assistant.handler
 async def limited(ctx: sessions.SessionContext, text: str) -> str:
@@ -373,7 +444,7 @@ trimmed = pydantic_ai.agent("pai_trimmed", agent=trimmed_agent())
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, trimmed, shop, desk]), restate_image=RESTATE_IMAGE
+        restate.app([assistant, per_user, trimmed, shop, desk, remembering, memories]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -850,3 +921,33 @@ def test_an_approvals_signal_approves_only_what_says_so():
     assert approval_of({"approved": False, "reason": "too much"}) == ToolDenied("too much")
     for anything in (None, 1, ["yes"], {"approved": "yes"}):
         assert isinstance(approval_of(anything), ToolDenied)
+
+
+async def remember(harness: HarnessEnvironment, k: str, text: str) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        return await ingress.post(f"{harness.ingress_url}/pai_remembering/{k}/chat", content=text, headers=TEXT)
+
+
+async def test_two_conversations_of_a_user_share_memory(harness: HarnessEnvironment):
+    user = key()
+    written = await remember(harness, f"{user}.trip", "remember likes tea")
+    assert written.status_code == 200, written.text
+    assert "likes tea" in (await remember(harness, f"{user}.support", "recall")).json()
+    # Another user's memory is their own.
+    assert "likes tea" not in (await remember(harness, f"{key()}.trip", "recall")).json()
+
+
+async def test_a_conflicting_memory_write_is_refused(harness: HarnessEnvironment):
+    user = key()
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        outcomes = await ingress.post(f"{harness.ingress_url}/pai_remembering/{user}.x/conflict", json="notes.md")
+    assert outcomes.json()[1:] == ["refused", "first"]
+
+
+async def test_a_memory_write_of_a_tool_call_that_runs_again_is_applied_once(harness: HarnessEnvironment):
+    user = key()
+    fact = f"crash {user}"
+    assert (await remember(harness, f"{user}.a", f"remember {fact}")).status_code == 200
+    assert fact in crashed_writes
+    recalled = (await remember(harness, f"{user}.b", "recall")).json()
+    assert recalled.count(fact) == 1, recalled
