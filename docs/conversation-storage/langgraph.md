@@ -1,8 +1,10 @@
 # LangGraph and LangChain
 
-> **Status:** not started. This plan is for one agent. Read
-> [`README.md`](README.md) first: the core contract, the rules for framework
-> agents, and how to run the tests.
+> **Status:** done in phase 2, on branch `phase2-langgraph` (L0 to L5; L1
+> needed nothing, as the graph agent has no `summarize`; and, beyond the plan,
+> `aprune` keeps what a `DeltaChannel` is rebuilt from). This plan is for one
+> agent. Read [`README.md`](README.md) first: the core contract, the rules for
+> framework agents, and how to run the tests.
 
 ## Scope
 

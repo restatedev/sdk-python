@@ -14,7 +14,7 @@
 
 import operator
 import typing
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any, TypedDict
 
 import pytest
@@ -22,6 +22,7 @@ import pytest
 pytest.importorskip("langgraph")
 
 from langchain_core.runnables import RunnableConfig  # noqa: E402
+from langgraph.channels import DeltaChannel  # noqa: E402
 from langgraph.graph import END, START, StateGraph  # noqa: E402
 from langgraph.types import Command, interrupt  # noqa: E402
 
@@ -278,15 +279,14 @@ def twice(_: State) -> dict[str, list[str]]:
     return {"log": [f"{interrupt('one')},{interrupt('two')}"]}
 
 
-async def test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_raised_it():
-    """What the waits of ``interrupt()`` count on (``SqlCheckpointSaver._resumes``).
+async def test_langgraph_gives_each_interrupt_of_a_run_an_id_of_its_own():
+    """What the waits of ``interrupt()`` count on (``_graph._resumed``): a wait per interrupt id.
 
-    A node that interrupts again raises an interrupt of the same id, so its
-    waits are told apart by how many resume values its task has. LangGraph
-    stores those on the task that raised the interrupt, in the namespace of
-    the graph that ran it (here, a subgraph that a node calls). That node
-    lists the interrupt again, with its own resume values: the count is the
-    raiser's.
+    A node that interrupts again, after it was resumed, raises an interrupt
+    of an id of its own: LangGraph makes it of the namespace of the task
+    that raised it and the number of resume values that task has. That
+    holds in a subgraph that a node calls after interrupting itself: the
+    node lists the subgraph's interrupt again, under the raiser's id.
     """
     inner = StateGraph(State)
     inner.add_node("twice", typing.cast(Any, twice))
@@ -303,7 +303,7 @@ async def test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_rais
     outer.add_edge(START, "approve")
     outer.add_edge("approve", END)
     backend = Backend()
-    seen: list[tuple[str, Any, int]] = []
+    seen: list[tuple[str, Any]] = []
     final: dict[str, Any] = {}
 
     async def go(ctx: sessions.SessionContext) -> None:
@@ -312,16 +312,57 @@ async def test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_rais
         await app.ainvoke({"log": []}, THREAD, durability="sync")
         for value in ("yes", "1", "2"):
             snapshot = await app.aget_state(THREAD)
-            [pending] = [found for task in snapshot.tasks for found in task.interrupts]
-            resumes = await saver._resumes("t")  # pyright: ignore[reportPrivateUsage]
-            seen.append((pending.id, pending.value, resumes[pending.id]))
+            [pending] = {found.id: found for task in snapshot.tasks for found in task.interrupts}.values()
+            seen.append((pending.id, pending.value))
             await app.ainvoke(Command(resume={pending.id: value}), THREAD, durability="sync")
         final["log"] = (await app.aget_state(THREAD)).values["log"]
 
     await attempt(backend, go)
-    assert [(value, count) for _, value, count in seen] == [("approve?", 0), ("one", 0), ("two", 1)]
-    assert seen[0][0] != seen[1][0] == seen[2][0]
+    assert [value for _, value in seen] == ["approve?", "one", "two"]
+    assert len({interrupt_id for interrupt_id, _ in seen}) == 3
     assert final["log"] == ["yes:1,2"]
+
+
+def appended(log: list[str] | None, writes: Sequence[list[str]]) -> list[str]:
+    """A ``DeltaChannel``'s reducer: the writes, appended in order."""
+    return [*(log or []), *(entry for write in writes for entry in write)]
+
+
+@pytest.mark.parametrize("every", [2, 100])
+async def test_a_prune_keeps_what_a_delta_channel_is_rebuilt_from(every: int):
+    """A ``DeltaChannel`` (LangGraph's beta) is rebuilt from its latest snapshot and the writes after it.
+
+    Each run writes the log three times: with a snapshot every second write,
+    the latest checkpoint needs at most its parent; with one every hundredth,
+    every checkpoint since the first.
+    """
+
+    class Delta(TypedDict):
+        log: Annotated[list[str], DeltaChannel(appended, snapshot_frequency=every)]
+
+    graph = StateGraph(Delta)
+    graph.add_node("a", typing.cast(Any, lambda _: {"log": ["a"]}))
+    graph.add_node("b", typing.cast(Any, lambda _: {"log": ["b"]}))
+    graph.add_edge(START, "a")
+    graph.add_edge("a", "b")
+    graph.add_edge("b", END)
+    backend = Backend()
+    seen: list[tuple[list[str], int]] = []
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        saver = SqlCheckpointSaver(ctx.db)
+        app: Any = graph.compile(checkpointer=saver)
+        for n in range(3):
+            await app.ainvoke({"log": [str(n)]}, THREAD, durability="sync")
+            await saver.aprune(["t"])
+            [(stored,)] = await ctx.db.values("SELECT count(*) FROM restate_langgraph_checkpoints")
+            seen.append(((await app.aget_state(THREAD)).values["log"], int(typing.cast(int, stored))))
+
+    await attempt(backend, go)
+    runs = [[str(n), "a", "b"] for n in range(3)]
+    assert [log for log, _ in seen] == [runs[0], runs[0] + runs[1], runs[0] + runs[1] + runs[2]]
+    kept = [stored for _, stored in seen]
+    assert max(kept) <= 2 if every == 2 else kept == [4, 8, 12]
 
 
 async def test_a_fork_from_an_earlier_checkpoint_leaves_the_branch_it_forked_from():

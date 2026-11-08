@@ -393,8 +393,6 @@ def asking(**options: Any) -> Callable[..., Awaitable[Any]]:
 
 
 async def test_the_built_in_agent_sees_the_latest_messages_that_fit_in_its_context_window():
-    if "profile" not in BaseChatModel.model_fields:
-        pytest.skip("chat models have a profile since langchain-core 1.1")
     seen: list[list[BaseMessage]] = []
 
     class Seeing(Scripted):

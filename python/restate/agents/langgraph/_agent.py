@@ -47,7 +47,9 @@ start, and the run resumes from the last step stored:
   LangChain's ``SummarizationMiddleware``.
 
 For a graph of your own, ``SqlCheckpointSaver`` stores LangGraph's checkpoints
-in the object's database instead.
+in the object's database instead. Its state is the graph's own: its models
+read the state, which the agent's ``window``, ``budget`` and summaries do not
+reach, and which grows unless the graph trims it (``_graph.py`` shows how).
 """
 
 from __future__ import annotations
@@ -278,13 +280,10 @@ def _window(model: BaseChatModel) -> int | None:
     """Return how many tokens of the conversation ``model`` sees: ``WINDOW`` of its context window, if its profile has it.
 
     LangChain's integrations give their chat models a profile, for the models
-    they know (``langchain-core`` 1.1 and later); one without it sees all of
-    the conversation.
+    they know; one without it sees all of the conversation.
     """
-    # A ModelProfile (a TypedDict) where langchain-core has one, which older versions do not.
-    profile = typing.cast(dict[str, object] | None, getattr(model, "profile", None))
-    limit = profile.get("max_input_tokens") if isinstance(profile, dict) else None
-    return int(limit * WINDOW) if isinstance(limit, int) and limit > 0 else None
+    limit = model.profile.get("max_input_tokens") if model.profile is not None else None
+    return int(limit * WINDOW) if limit is not None and limit > 0 else None
 
 
 def _latest(messages: Sequence[BaseMessage], window: int | None) -> list[BaseMessage]:
