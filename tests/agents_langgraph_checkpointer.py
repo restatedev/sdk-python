@@ -396,6 +396,58 @@ async def test_a_prune_keeps_no_more_for_a_delta_channel_that_nothing_writes():
     assert max(stored for _, stored in seen) <= 2
 
 
+async def test_a_delta_channel_graph_is_pruned_turn_after_turn_until_its_snapshot():
+    """With a snapshot every hundredth write, the latest checkpoint keeps every checkpoint since the first, with
+    the versions of each: hundreds of pairs, which the database takes as one list (not as an expression of each,
+    which it refuses past 100 deep)."""
+
+    class Delta(TypedDict):
+        log: Annotated[list[str], DeltaChannel(appended, snapshot_frequency=100)]
+
+    graph = StateGraph(Delta)
+    graph.add_node("a", typing.cast(Any, lambda _: {"log": ["a"]}))
+    graph.add_node("b", typing.cast(Any, lambda _: {"log": ["b"]}))
+    graph.add_edge(START, "a")
+    graph.add_edge("a", "b")
+    graph.add_edge("b", END)
+    backend = Backend()
+    stored: list[int] = []
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        saver = SqlCheckpointSaver(ctx.db)
+        app: Any = graph.compile(checkpointer=saver)
+        for n in range(30):
+            await app.ainvoke({"log": [str(n)]}, THREAD, durability="sync")
+            await saver.aprune(["t"])
+            [(count,)] = await ctx.db.values("SELECT count(*) FROM restate_langgraph_checkpoints")
+            stored.append(int(typing.cast(int, count)))
+        assert (await app.aget_state(THREAD)).values["log"] == [e for n in range(30) for e in (str(n), "a", "b")]
+
+    await attempt(backend, go)
+    assert stored[-1] == 120
+
+
+async def test_a_checkpoint_of_more_than_a_hundred_channels_is_read_back():
+    """A checkpoint's values are read by its channels' versions, as one list."""
+    keys = [f"k{i}" for i in range(120)]
+    Wide = TypedDict("Wide", {key: int for key in keys})  # type: ignore[misc]  # noqa: UP013
+
+    graph = StateGraph(Wide)
+    graph.add_node("a", typing.cast(Any, lambda _: {key: n for n, key in enumerate(keys)}))
+    graph.add_edge(START, "a")
+    graph.add_edge("a", END)
+    backend = Backend()
+    seen: list[dict[str, Any]] = []
+
+    async def go(ctx: sessions.SessionContext) -> None:
+        app: Any = graph.compile(checkpointer=SqlCheckpointSaver(ctx.db))
+        await app.ainvoke({"k0": -1}, THREAD, durability="sync")
+        seen.append((await app.aget_state(THREAD)).values)
+
+    await attempt(backend, go)
+    assert seen == [{key: n for n, key in enumerate(keys)}]
+
+
 async def test_a_fork_from_an_earlier_checkpoint_leaves_the_branch_it_forked_from():
     backend = Backend()
     seen: dict[str, Any] = {}

@@ -47,7 +47,7 @@ from __future__ import annotations
 import asyncio
 import typing
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Collection, Sequence
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -164,15 +164,14 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
 
     async def _channel_values(self, thread_id: str, ns: str, checkpoint: Checkpoint) -> dict[str, Any]:
         """Return the values of ``checkpoint``'s channels at its channel versions."""
-        versions = list(checkpoint.get("channel_versions", {}).items())
+        versions = [(channel, str(version)) for channel, version in checkpoint.get("channel_versions", {}).items()]
         if not versions:
             return {}
+        pairs, params = _pairs(versions)
         rows = await self.db.values(
             "SELECT channel, type, value FROM restate_langgraph_channel_values "
-            "WHERE thread_id = ? AND checkpoint_ns = ? AND ("
-            + " OR ".join("(channel = ? AND version = ?)" for _ in versions)
-            + ")",
-            [thread_id, ns, *(item for channel, version in versions for item in (channel, str(version)))],
+            f"WHERE thread_id = ? AND checkpoint_ns = ? AND (channel, version) IN {pairs}",
+            [thread_id, ns, *params],
         )
         return {str(channel): self._load(type_, value) for channel, type_, value in rows if type_ != _EMPTY}
 
@@ -447,8 +446,26 @@ async def _drop_earlier(tx: DatabaseWriter, thread_id: str, ns: str, kept: dict[
             [thread_id, ns, *kept],
         )
     versions = {(channel, str(version)) for c in kept.values() for channel, version in c["channel_versions"].items()}
-    used = " OR ".join("(channel = ? AND version = ?)" for _ in versions) or "0"
+    if not versions:
+        await tx.execute(
+            "DELETE FROM restate_langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ?", [thread_id, ns]
+        )
+        return
+    pairs, params = _pairs(versions)
     await tx.execute(
-        f"DELETE FROM restate_langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND NOT ({used})",
-        [thread_id, ns, *(item for pair in versions for item in pair)],
+        "DELETE FROM restate_langgraph_channel_values "
+        f"WHERE thread_id = ? AND checkpoint_ns = ? AND (channel, version) NOT IN {pairs}",
+        [thread_id, ns, *params],
     )
+
+
+def _pairs(versions: Collection[tuple[str, str]]) -> tuple[str, list[str]]:
+    """Return ``versions``, pairs of a channel and its version, as SQL rows to match ``(channel, version)`` against,
+    ``(VALUES (?, ?), ...)``, and their parameters.
+
+    Rows, rather than an ``OR`` of each pair: the database refuses an
+    expression more than 100 deep, and a graph with a ``DeltaChannel`` keeps
+    many checkpoints' versions (``_kept``).
+    """
+    rows = ", ".join("(?, ?)" for _ in versions)
+    return f"(VALUES {rows})", [item for pair in versions for item in pair]
