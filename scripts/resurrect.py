@@ -288,15 +288,9 @@ MUTANTS = [
         PYDANTIC_AI,
         "2a351ed",
     ),
-    Mutant(
-        "pydantic-deferred",
-        "a run stopped for a deferred tool call answers with the requests' repr",
-        f"{AGENTS}/pydantic_ai/_agent.py",
-        "        if isinstance(result.output, DeferredToolRequests):",
-        "        if False:",
-        PYDANTIC_AI,
-        "2a351ed",
-    ),
+    # "pydantic-deferred" (a run stopped for a deferred tool call answered with the requests' repr) is retired:
+    # deferred calls now wait for a signal (handle_deferred_tool_calls), so no run stops for them, and the guard
+    # that the mutant removed is left only as a safety net.
     Mutant(
         "pydantic-deps",
         "an Agent of your own with a deps_type gets no deps",

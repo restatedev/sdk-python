@@ -173,9 +173,10 @@ would catch.
 
 `scripts/resurrect.py` measures the suite against bugs that really happened.
 
-- **28 history mutants.** Each brings back, on today's code, one bug that a fix
-  commit describes (#276, #278, #290, #291, #292, #294).
-- **5 durability mutants.** Each breaks the contract of a turn without
+- **27 history mutants** (28 until one was retired, below). Each brings back,
+  on today's code, one bug that a fix commit describes (#276, #278, #290,
+  #291, #292, #294).
+- **13 durability mutants.** Each breaks the contract of a turn without
   matching any past fix.
 
 For each mutant, the runner runs the test files that use the code it changes.
@@ -205,7 +206,7 @@ passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
 | `pydantic-unreadable-response` | #292 | one unreadable response ends the turn | regression only |
 | `pydantic-user-error` | #292 | `UserError` retried forever | regression only |
 | `pydantic-refusal-by-name` | #292 | an error of the agent's own code is a refusal by its name | regression only |
-| `pydantic-deferred` | #292 | a deferred tool call answers with its repr | regression only |
+| `pydantic-deferred` | #292 | a deferred tool call answers with its repr | regression only; retired on 8 November |
 | `pydantic-deps` | #292 | an Agent of your own gets no deps | regression only |
 | `pydantic-model-error` | #292 | a model that cannot be made is not a refusal | **caught** |
 | `langgraph-own-errors` | #291 | recursion limit and invalid update retried forever | regression only |
@@ -225,7 +226,25 @@ passed and 1 skipped, in 2m16s, and the mutants took about 40 minutes.
 | `calls-settled-early` | durability | a returned call is forgotten before its result is stored; after a crash, the model asking again under a new id makes it again | **SURVIVED**, now caught |
 | `calls-never-settled` | durability | a call's record is never forgotten: the key's state grows with every call | **SURVIVED**, now caught |
 
-What it says:
+**The run of 8 November 2026**, after the frameworks moved to their latest
+releases (`docs/conversation-storage/`), against Restate 1.8.1:
+
+- **History:** 6 caught, 21 regression only. `pydantic-system-prompt` and
+  `langgraph-prune` are now caught by other tests too.
+- **`pydantic-deferred` survived, and is retired.** Deferred tool calls now
+  wait for a signal (`handle_deferred_tool_calls`), so no run stops for them.
+  Its regression test went with the old behaviour, and the guard it removes
+  stays only as a safety net.
+- **Durability: all 13 caught.** That is the 5 above, plus 8 new ones:
+  - `snapshot-rows-twice`, `snapshot-results-unknown`,
+    `snapshot-loads-everything`, `snapshot-hides-unanswered-turn` and
+    `snapshot-compacted-every-turn`, for the core's snapshots;
+  - `pydantic-compaction-not-snapshotted` and `pydantic-denial-approves`, for
+    the Pydantic AI agent;
+  - `tool-cancellation-swallowed`, for a tool whose task the framework
+    cancels.
+
+What it says (the run of 7 November):
 
 - **Every past bug is caught today, but almost only by its own regression
   test.** 24 of 28 are caught only by the test that their fix added; 4 (14%)
