@@ -25,7 +25,7 @@ import pytest
 
 pytest.importorskip("pydantic_ai")
 
-from pydantic_ai import Agent, DeferredToolRequests, ModelRetry, RunContext  # noqa: E402
+from pydantic_ai import Agent, ModelRetry, RunContext  # noqa: E402
 from pydantic_ai.capabilities import AbstractCapability  # noqa: E402
 from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
@@ -129,6 +129,11 @@ def reply(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         # A model that keeps calling a tool, never answering.
         name = "get_weather" if word == "loop" else "picky"
         return ModelResponse(parts=[ToolCallPart(name, {"city": rest}, tool_call_id=f"call-{rest}-{len(messages)}")])
+    if word == "ask" and not results:
+        question = {"header": "Color", "question": "Which color?", "options": [{"label": "Blue"}, {"label": "Red"}]}
+        return ModelResponse(
+            parts=[ToolCallPart("ask_user_question", {"questions": [question]}, tool_call_id=f"call-{rest}")]
+        )
     names = {"weather": "get_weather", "crash": "flaky", "wait": "blocking", "wrong": "get_weather"}
     names |= {"unknown": "nonexistent", "forbidden": "forbidden", "deferred": "refund_order"}
     if word in names and not results:
@@ -244,16 +249,25 @@ async def clash(ctx: sessions.SessionContext, text: str) -> str:
     return await pydantic_ai.prompt(ctx, text, agent=mine)
 
 
-@assistant.handler
-async def approval(ctx: sessions.SessionContext, text: str) -> str:
-    """An Agent of your own with a tool that needs an approval, whose run stops with the call for its caller."""
-    mine: Any = Agent(FunctionModel(reply), output_type=[str, DeferredToolRequests])
+refunds: collections.Counter[str] = collections.Counter()
+"""How often each refund ran, by its city."""
+
+
+def desk_agent() -> Any:
+    """An Agent of your own with a tool that needs an approval, and the harness's ``AskUser`` with no answerer."""
+    from pydantic_ai_harness.ask_user import AskUser  # pylint: disable=import-outside-toplevel
+
+    mine: Any = Agent(FunctionModel(reply), capabilities=[AskUser(answerer=None)])
 
     @mine.tool_plain(requires_approval=True)
     def refund_order(city: str) -> str:
+        refunds[city] += 1
         return f"refunded in {city}"
 
-    return await pydantic_ai.prompt(ctx, text, agent=mine)
+    return mine
+
+
+desk = pydantic_ai.agent("pai_desk", agent=desk_agent())
 
 
 @assistant.handler
@@ -359,7 +373,7 @@ trimmed = pydantic_ai.agent("pai_trimmed", agent=trimmed_agent())
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, trimmed, shop]), restate_image=RESTATE_IMAGE
+        restate.app([assistant, per_user, trimmed, shop, desk]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -629,13 +643,104 @@ async def test_a_response_that_the_model_could_not_read_is_retried(harness: Harn
     assert garbled[f"garbled {k}"] == 2
 
 
-async def test_a_run_stopped_for_a_deferred_tool_call_fails_and_the_call_is_closed(harness: HarnessEnvironment):
-    """Nothing gives its approval: the turn fails rather than answer with the call, and the next message is answered,
-    with the call closed (a provider refuses calls without results; the scripted model too)."""
+async def desk_post(harness: HarnessEnvironment, path: str, **kwargs: Any) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        return await ingress.post(f"{harness.ingress_url}/pai_desk/{path}", **kwargs)
+
+
+async def desk_chat(harness: HarnessEnvironment, k: str, text: str) -> httpx2.Response:
+    return await desk_post(harness, f"{k}/chat", content=text, headers=TEXT)
+
+
+async def waits(harness: HarnessEnvironment, k: str) -> list[dict[str, Any]]:
+    return typing.cast(list[dict[str, Any]], (await desk_post(harness, f"{k}/pending")).json())
+
+
+async def until_waiting(harness: HarnessEnvironment, k: str) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+
+    async def waiting() -> bool:
+        found[:] = await waits(harness, k)
+        return bool(found)
+
+    await until(waiting)
+    return found
+
+
+async def test_a_tool_that_needs_an_approval_waits_for_its_signal_and_runs_once(harness: HarnessEnvironment):
     k = key()
-    failed = await post(harness, f"{k}/approval", json=f"deferred {k}")
-    assert failed.status_code == 500 and "wait_for_signal" in failed.text, failed.text
-    assert (await chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"deferred {k}"))
+    [wait] = await until_waiting(harness, k)
+    assert wait["name"] == "approval" and wait["input"] == {"tool": "refund_order", "args": {"city": k}}
+    status = (await desk_post(harness, f"{k}/status", json=None)).json()
+    assert status["answering"] is not None
+    assert refunds[k] == 0
+    await desk_post(harness, f"{k}/signal", json={"name": "approval", "value": "approved"})
+    assert (await answering).json() == f"tool said: refunded in {k}"
+    assert refunds[k] == 1 and await waits(harness, k) == []
+
+
+async def test_a_denied_approval_reaches_the_model_with_its_reason(harness: HarnessEnvironment):
+    k = key()
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"deferred {k}"))
+    [wait] = await until_waiting(harness, k)
+    await desk_post(harness, f"{k}/signal", json={"id": wait["id"], "value": "no refunds on Sundays"})
+    assert (await answering).json() == "tool said: no refunds on Sundays"
+    assert refunds[k] == 0
+
+
+async def test_a_crash_while_waiting_for_an_approval_joins_the_same_wait(
+    harness: HarnessEnvironment, monkeypatch: pytest.MonkeyPatch
+):
+    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
+
+    k = key()
+    real = _agent.wait_for
+    crashed: list[str] = []
+
+    async def open_then_crash(ctx: Any, call_id: str, signal: str, input: Any = None) -> Any:
+        if call_id != f"call-{k}" or crashed:
+            return await real(ctx, call_id, signal, input)
+        crashed.append(call_id)
+        # Open the wait, as the attempt does, then crash while it waits: the wait goes on.
+        opened = asyncio.ensure_future(real(ctx, call_id, signal, input))
+        await until_waiting(harness, k)
+        opened.cancel()
+        raise RuntimeError("the process crashed while waiting")
+
+    monkeypatch.setattr(_agent, "wait_for", open_then_crash)
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"deferred {k}"))
+
+    async def retried() -> bool:
+        return bool(crashed)
+
+    await until(retried)
+    await asyncio.sleep(0.5)  # the retry's attempt waits again
+    [wait] = await until_waiting(harness, k)
+    await desk_post(harness, f"{k}/signal", json={"id": wait["id"], "value": True})
+    assert (await answering).json() == f"tool said: refunded in {k}"
+    assert refunds[k] == 1
+
+
+async def test_stop_forgets_the_wait_and_cancels_the_turn(harness: HarnessEnvironment):
+    k = key()
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"deferred {k}"))
+    await until_waiting(harness, k)
+    await desk_post(harness, f"{k}/stop", json=None)
+    assert (await answering).status_code == 409
+    assert await waits(harness, k) == []
+    assert (await desk_chat(harness, k, f"hi {k}")).json() == f"echo: hi {k}"
+    assert refunds[k] == 0
+
+
+async def test_ask_user_without_an_answerer_waits_for_the_answer(harness: HarnessEnvironment):
+    k = key()
+    answering = asyncio.ensure_future(desk_chat(harness, k, f"ask {k}"))
+    [wait] = await until_waiting(harness, k)
+    assert wait["name"] == "ask_user_question"
+    answer = {"answers": [{"header": "Color", "selected": ["Blue"]}]}
+    await desk_post(harness, f"{k}/signal", json={"name": "ask_user_question", "value": answer})
+    assert (await answering).json() == 'tool said: {"Color":["Blue"]}'
 
 
 async def test_an_agent_of_your_own_runs_with_its_own_capabilities(harness: HarnessEnvironment):
@@ -729,3 +834,18 @@ def test_a_tool_result_of_bytes_is_stored_as_pydantic_ai_stores_it():
     [expected] = ModelMessagesTypeAdapter.validate_json(ModelMessagesTypeAdapter.dump_json([message]))
     assert isinstance(read, ModelRequest) and isinstance(expected, ModelRequest)
     assert read.parts[0].content == expected.parts[0].content  # type: ignore[union-attr]
+
+
+def test_an_approvals_signal_approves_only_what_says_so():
+    from pydantic_ai import ToolApproved, ToolDenied  # pylint: disable=import-outside-toplevel
+
+    from restate.agents.pydantic_ai._agent import approval_of  # pylint: disable=import-outside-toplevel
+
+    for approving in (True, "approved", "Yes", " OK ", {"approved": True}):
+        assert approval_of(approving) == ToolApproved()
+    assert approval_of({"approved": True, "args": {"city": "Oslo"}}) == ToolApproved(override_args={"city": "Oslo"})
+    assert approval_of(False) == ToolDenied()
+    assert approval_of("not today") == ToolDenied("not today")
+    assert approval_of({"approved": False, "reason": "too much"}) == ToolDenied("too much")
+    for anything in (None, 1, ["yes"], {"approved": "yes"}):
+        assert isinstance(approval_of(anything), ToolDenied)

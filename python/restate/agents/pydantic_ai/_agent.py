@@ -66,6 +66,7 @@ stored:
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import dataclasses
 import json
@@ -74,7 +75,7 @@ import typing
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, ReinjectSystemPrompt
 from pydantic_ai.exceptions import ContentFilterError, UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
@@ -92,6 +93,8 @@ from pydantic_ai.models import Model, ModelRequestContext, infer_model
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
+from pydantic_ai_harness.ask_user import TOOL_NAME as ASK_USER
+from pydantic_ai_harness.ask_user import AskUserRequest, AskUserResponse, ask_user_result
 from pydantic_ai_harness.compaction import (
     DEFAULT_CONTEXT_WINDOW,
     ClampOversizedMessages,
@@ -109,7 +112,16 @@ from pydantic_ai_harness.compaction import (
 )
 from pydantic_core import to_json, to_jsonable_python
 
-from pydantic_ai import Agent, DeferredToolRequests, NativeOutput, PromptedOutput, RunContext
+from pydantic_ai import (
+    Agent,
+    DeferredToolRequests,
+    DeferredToolResults,
+    NativeOutput,
+    PromptedOutput,
+    RunContext,
+    ToolApproved,
+    ToolDenied,
+)
 from pydantic_ai import Tool as PydanticTool
 from restate.agents._common import (
     CANCELLATION,
@@ -128,7 +140,7 @@ from restate.agents._common import (
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
-from restate.agents._tools import Tool, current_call, tools_in
+from restate.agents._tools import Tool, current_call, tools_in, wait_for
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
@@ -172,9 +184,55 @@ def toolset(given: Sequence[AnyTool]) -> FunctionToolset[Any]:
 
 DEFERRED = (
     "the run stopped for tool calls that need an approval or a result from outside it (Pydantic AI's deferred tools), "
-    "which nothing gives here: pause for a person with restate.agents' wait_for_signal tool instead"
+    "which a capability of the agent left unresolved"
 )
-"""Why a run that ends with Pydantic AI's ``DeferredToolRequests`` fails its turn."""
+"""Why a run that ends with Pydantic AI's ``DeferredToolRequests`` fails its turn: its deferred calls wait for a
+signal (``APPROVAL``, or the tool's name), unless a capability before resolves them otherwise."""
+
+APPROVAL = "approval"
+"""The signal that a tool call waits for when it needs an approval (Pydantic AI's ``requires_approval``,
+``ApprovalRequired``)."""
+
+_APPROVED = frozenset({"approved", "approve", "yes", "ok", "allow", "allowed"})
+"""The texts that approve a tool call, whatever their case; any other text denies it, with that reason."""
+
+
+def approval_of(value: Any) -> ToolApproved | ToolDenied:
+    """Return what the value of an ``approval`` signal decides about its tool call.
+
+    ``true``, or a text such as ``"approved"`` or ``"yes"``, approves it;
+    ``{"approved": true, "args": {...}}`` approves it with other arguments.
+    ``false`` or ``{"approved": false, "reason": "..."}`` denies it, and so
+    does any other text, which is the denial's reason for the model: a value
+    that does not say "approved" never runs the tool.
+    """
+    if value is True:
+        return ToolApproved()
+    if isinstance(value, str):
+        return ToolApproved() if value.strip().lower() in _APPROVED else ToolDenied(value)
+    if isinstance(value, dict):
+        decision = typing.cast(dict[str, Any], value)
+        if decision.get("approved") is True:
+            args = decision.get("args")
+            return ToolApproved(override_args=typing.cast(dict[str, Any], args) if isinstance(args, dict) else None)
+        reason = decision.get("reason", decision.get("message"))
+        return ToolDenied(str(reason)) if reason else ToolDenied()
+    return ToolDenied()
+
+
+def _answered(call: ToolCallPart, value: object) -> object:
+    """Return the value of a signal for ``call``, a deferred call, as its result: an answer to the harness's
+    ``AskUser`` question that fits it (an ``AskUserResponse``), as ``AskUser`` renders one."""
+    if call.tool_name != ASK_USER:
+        return value
+    try:
+        return ask_user_result(AskUserRequest.from_tool_call(call), _ASK_USER_RESPONSE.validate_python(value))
+    except (ValueError, ValidationError):
+        # Not an answer to the questions (a text, say): the model gets it as it is.
+        return value
+
+
+_ASK_USER_RESPONSE: TypeAdapter[AskUserResponse] = TypeAdapter(AskUserResponse)
 
 # ModelMessage is an Annotated union (discriminated), which TypeAdapter takes though its type says otherwise.
 # Bytes (a tool's binary result, say) as base64, as pydantic-ai's own ModelMessagesTypeAdapter stores them.
@@ -313,6 +371,33 @@ class _Restate(AbstractCapability[Any]):
     ) -> Any:
         await tool_call_ended(self.ctx)
         return result
+
+    async def handle_deferred_tool_calls(
+        self, ctx: RunContext[Any], *, requests: DeferredToolRequests
+    ) -> DeferredToolResults | None:
+        """Wait for each deferred call's signal (``wait_for``): ``approval``, or the result of a call that runs
+        outside, as a signal named after its tool.
+
+        The run waits without holding a process (a retried attempt joins the
+        same waits), the agent's ``pending`` view lists them, and ``signal``
+        resolves them; ``stop`` forgets them.
+        """
+
+        def shown(call: ToolCallPart) -> dict[str, Any]:
+            return {"tool": call.tool_name, "args": call.args_as_dict()}
+
+        async def approval(call: ToolCallPart) -> tuple[str, ToolApproved | ToolDenied]:
+            value = await wait_for(self.ctx, call.tool_call_id, APPROVAL, shown(call))
+            return call.tool_call_id, approval_of(value)
+
+        async def result(call: ToolCallPart) -> tuple[str, object]:
+            value = await wait_for(self.ctx, call.tool_call_id, call.tool_name, shown(call))
+            return call.tool_call_id, _answered(call, value)
+
+        approvals, calls = await asyncio.gather(
+            asyncio.gather(*map(approval, requests.approvals)), asyncio.gather(*map(result, requests.calls))
+        )
+        return DeferredToolResults(approvals=dict(approvals), calls=dict(calls))
 
     async def on_tool_execute_error(
         self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any, error: Exception
@@ -642,7 +727,7 @@ def _run(
         # The messages that no model request stored: an output tool's return, say.
         await restate.store(result.all_messages())
         if isinstance(result.output, DeferredToolRequests):
-            # Calls that wait for an approval or for a result from outside the run, which nothing gives: fail rather
+            # Calls that a capability left waiting for an approval or for a result from outside the run: fail rather
             # than answer with them. The conversation closes them, as a provider refuses calls without results.
             raise TerminalError(DEFERRED)
         if compacted and conversation.snapshots and _due(result.all_messages(), model, context_window):
