@@ -463,10 +463,15 @@ class _Ledger:
             raise RuntimeError("the run was stopped: it stores nothing more")
 
     async def store_snapshot(self, held: Sequence[Item], turn: int | None) -> Snapshot:
-        """Store ``held`` as a snapshot that covers every position given so far, in turn ``turn``; hold the lock."""
+        """Store ``held`` as the snapshot that covers every position given so far, in turn ``turn``; hold the lock.
+
+        It takes the place of the earlier snapshots: only the latest is read.
+        """
         covers = self.next - 1
         stored = json.dumps([self.items.dump(item) for item in held])
-        await self.db.execute(f"INSERT INTO {SNAPSHOTS} (covers, turn, items) VALUES (?, ?, ?)", [covers, turn, stored])
+        async with self.db.transaction() as tx:
+            await tx.execute(f"DELETE FROM {SNAPSHOTS}")
+            await tx.execute(f"INSERT INTO {SNAPSHOTS} (covers, turn, items) VALUES (?, ?, ?)", [covers, turn, stored])
         self.snapshot = _snapshot_of(self.items, covers, turn, held)
         return self.snapshot
 

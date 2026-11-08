@@ -21,6 +21,7 @@ row stored after it, whole. The items are the made-up framework's dicts of
 import asyncio
 import json
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -30,9 +31,11 @@ from sessions_object import Host, request
 
 from restate import sessions
 from restate.agents import AgentObject, _messages
-from restate.agents._common import CompactHistory
+from restate.agents._common import CANCELLED, RETURNED_UNRECORDED, CompactHistory
 from restate.agents._conversation import (
     SCHEMA,
+    SNAPSHOTS,
+    STEPS,
     TURNS,
     Conversation,
     Item,
@@ -42,8 +45,10 @@ from restate.agents._conversation import (
     next_start,
     restart,
 )
+from restate.agents._tools import ToolCall, _once
 from restate.agents._turn import AGENT, AgentInfo
 from restate.agents.internal import wait_for
+from restate.exceptions import TerminalError
 from restate.sessions.internal import invoke, reset
 
 
@@ -168,6 +173,31 @@ async def test_a_run_takes_its_history_from_the_latest_snapshot_then_every_row_a
         {"role": "assistant", "text": "answer 1"},
         {"role": "user", "text": "q2"},
     ]
+
+
+async def test_a_snapshot_takes_the_place_of_the_earlier_ones():
+    seen = _Seen()
+    snapshots = (0, 2)
+
+    async def run(conversation: Conversation) -> str:
+        seen.add(conversation)
+        n = len(seen) - 1
+        if n in snapshots:
+            await conversation.turn.snapshot([{"role": "user", "text": f"<summary>up to q{n}</summary>"}])
+        await conversation.turn.append_reply({"role": "assistant", "text": f"answer {n}"})
+        return f"answer {n}"
+
+    agent = _Agent(run)
+    for n in range(3):
+        await agent("ask", f"q{n}")
+
+    @agent.obj.handler(name="snapshots")
+    async def stored(ctx: sessions.SessionContext, _: Any = None) -> list[Any]:
+        return [list(row) for row in await ctx.db.values(f"SELECT turn, items FROM {SNAPSHOTS}")]
+
+    [(turn, items)] = await agent("snapshots")
+    assert json.loads(items) == [json.dumps({"role": "user", "text": "<summary>up to q2</summary>"})]
+    assert turn == seen[2].turn.n
 
 
 async def test_a_snapshot_counts_from_the_next_request_of_the_run_that_stored_it():
@@ -384,10 +414,15 @@ async def test_a_framework_waits_for_a_signal_for_its_own_tool_call_once():
     [(service, handler, arg, key, idempotency_key)] = first.calls
     assert (service, handler, key, idempotency_key) == ("signals", "wait", "waiter:alice", f"{invocation.id}:call-1")
     assert json.loads(arg) == {"id": f"{invocation.id}:call-1", "name": "approval", "input": {"refund": 5}}
-    # The model made the same call again under a new id (after a crash, say): it joins the same wait.
+    # The tool call runs again (after a crash, say): it joins the same wait.
     again = host()
-    assert await invoke(obj, "deferred", again, invocation, "call-2") == "approved"
+    assert await invoke(obj, "deferred", again, invocation, "call-1") == "approved"
     assert [call[4] for call in again.calls] == [f"{invocation.id}:call-1"]
+    # A new call with the same input, in a later attempt (the model asks again, after the first's answer): an
+    # approval is its own call's, so it waits anew.
+    later = host()
+    assert await invoke(obj, "deferred", later, invocation, "call-2") == "approved"
+    assert [call[4] for call in later.calls] == [f"{invocation.id}:call-2"]
 
 
 async def test_waits_opened_at_once_each_keep_their_record():
@@ -403,6 +438,76 @@ async def test_waits_opened_at_once_each_keep_their_record():
 
     host = Host(Backend(), service="waiter", key="alice", answers={"wait": b"true"})
     assert await invoke(obj, "deferred", host, request(), ["c1", "c2", "c3"]) == ["c1", "c2", "c3"]
+
+
+lookups = sessions.SessionObject("lookups")
+
+
+@lookups.handler(name="lookup")
+async def _lookup(ctx: sessions.SessionContext, _: Any = None) -> str:
+    """A Restate call that a tool makes: the test's host answers it."""
+    return "found"
+
+
+async def _closed_result(wait: Callable[[sessions.SessionContext], Awaitable[None]]) -> str:
+    """Return what a turn stopped right after ``wait`` stores as the result of its tool call ``c1``."""
+    obj = sessions.SessionObject("waiter")
+    AGENT.on(obj, AgentInfo())
+    contexts: list[sessions.SessionContext] = []
+
+    async def run(conversation: Conversation) -> str:
+        await conversation.turn.append_reply(_calling("c1"))
+        await wait(contexts[-1])
+        # The turn is stopped before the call's result is stored.
+        raise TerminalError("stopped", status_code=409)
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        contexts.append(ctx)
+        return await answer_once(ctx, text, ITEMS, run)
+
+    @obj.handler
+    async def results(ctx: sessions.SessionContext, _: Any = None) -> list[Any]:
+        steps = [json.loads(str(item)) for [item] in await ctx.db.values(f"SELECT item FROM {STEPS} ORDER BY n")]
+        return [step["output"] for step in steps if "result" in step]
+
+    backend = Backend()
+    answers = {**PUBLISHED, "wait": b'"no"', "lookup": b'"found"'}
+    with pytest.raises(TerminalError):
+        await invoke(obj, "ask", Host(backend, service="waiter", answers=answers), request(), "q")
+    [output] = await invoke(obj, "results", Host(backend, service="waiter", answers=answers), request(), None)
+    return output
+
+
+async def test_a_stopped_turn_does_not_report_a_call_done_because_its_approval_returned():
+    async def denied(ctx: sessions.SessionContext) -> None:
+        assert await wait_for(ctx, "c1", "approval", {"refund": 5}, approval=True) == "no"
+
+    assert await _closed_result(denied) == CANCELLED
+
+
+async def test_a_stopped_turn_reports_a_call_done_once_the_result_it_waited_for_returned():
+    """A deferred call's result came from outside: what made it did happen."""
+
+    async def answered(ctx: sessions.SessionContext) -> None:
+        assert await wait_for(ctx, "c1", "lookup", {"about": "x"}) == "no"
+
+    assert await _closed_result(answered) == RETURNED_UNRECORDED
+
+
+async def test_an_approval_and_the_restate_call_of_its_tool_call_keep_records_of_their_own():
+    """Once approved, the tool makes its own Restate call, under the same tool call id: that call returning is
+    the tool call's outcome, whatever the approval's."""
+
+    async def approved_then_called(ctx: sessions.SessionContext) -> None:
+        await wait_for(ctx, "c1", "approval", {"refund": 5}, approval=True)
+
+        async def lookup(call: ToolCall) -> Any:
+            return await call.ctx.call(_lookup, None, key="k", idempotency_key=call.idempotency_key)
+
+        await _once("lookup", {"about": "x"}, ToolCall(ctx, "c1"), lookup)
+
+    assert await _closed_result(approved_then_called) == RETURNED_UNRECORDED
 
 
 async def test_a_wait_with_nothing_to_show_shows_no_input():

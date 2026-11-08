@@ -26,6 +26,12 @@ A call is kept until the framework's transcript has its result under the
 latest id it was made with (``settle`` checks this at each publish and before
 each tool call). An error in the transcript does not count as the result,
 unless the call itself returned that error.
+
+A framework's own wait (``wait_for``) is its tool call's alone: the framework
+stored the tool call before it waits, so a retried attempt waits again under
+the same id, and a new call with the same input waits anew. An approval that a
+tool call waited for is not the call itself: a stopped turn does not report the
+call as done because its approval returned (``outcomes``).
 """
 
 from __future__ import annotations
@@ -68,6 +74,9 @@ class _Call(_Made, total=False):
     """Whether the call has returned; kept until the transcript has its result."""
     failed: str
     """The terminal error the call returned (``Error: <message>``), which is its result in the transcript."""
+    approval: bool
+    """Whether the call is an approval that its tool call waited for (``wait_for``): its returning is not the tool
+    call's."""
 
 
 @dataclass
@@ -133,25 +142,33 @@ class Call:
         await _store(self._ctx, self._state)
 
 
-async def call_of(ctx: SessionContext, tool: str, input: object, call_id: str) -> Call:
+async def call_of(
+    ctx: SessionContext, tool: str, input: object, call_id: str, *, rejoin: bool = True, approval: bool = False
+) -> Call:
     """Return the call that tool call ``call_id`` makes to ``tool`` with ``input``.
 
-    That is the call it made before (if it runs again), or else the call an
-    earlier attempt made with the same tool and input (if the model made it
-    again under a new id), or else a new call.
+    That is the call it made to ``tool`` before (if it runs again), or else,
+    if ``rejoin``, the call an earlier attempt made with the same tool and
+    input (if the model made it again under a new id), or else a new call. A
+    new call is an ``approval`` that its tool call waits for, if so.
     """
     attempt, state = await _calls_of(ctx)
     encoded = json.dumps(input, sort_keys=True)
-    call = next((c for c in state.calls if call_id in c["ids"]), None) or next(
-        (c for c in state.calls if c["attempt"] != attempt.id and c["tool"] == tool and c["input"] == encoded),
-        None,
-    )
+    # A tool call may make more than one call (an approval, then the tool's own), each to a tool of its own.
+    call = next((c for c in state.calls if call_id in c["ids"] and c["tool"] == tool), None)
+    if call is None and rejoin:
+        call = next(
+            (c for c in state.calls if c["attempt"] != attempt.id and c["tool"] == tool and c["input"] == encoded),
+            None,
+        )
     if call is not None:
         call["attempt"] = attempt.id
         if call_id not in call["ids"]:
             call["ids"].append(call_id)
     else:
         call = _Call(tool=tool, input=encoded, ids=[call_id], attempt=attempt.id)
+        if approval:
+            call["approval"] = True
         state.calls.append(call)
     await _store(ctx, state)
     return Call(id=call["ids"][0], _ctx=ctx, _state=state, _call=call)
@@ -178,7 +195,8 @@ async def outcomes(
     """Return which of ``call_ids`` made a Restate call that returned in this invocation, or in ``invocation``.
 
     Each such id maps to the terminal error the call returned (``Error: <message>``), or to ``None`` if
-    it succeeded. A tool call whose Restate call has not returned, or that made none, is left out.
+    it succeeded. A tool call whose Restate call has not returned, or that made none, is left out; so is
+    one whose only returned call is its approval, which the tool call ran (or was denied) after.
 
     An earlier ``invocation``'s calls are read only while they are still stored: until an invocation of
     the key makes calls of its own. They are read, never changed.
@@ -188,4 +206,10 @@ async def outcomes(
     else:
         _, state = await _calls_of(ctx)
     wanted = set(call_ids)
-    return {i: call.get("failed") for call in state.calls if call.get("done") for i in call["ids"] if i in wanted}
+    return {
+        i: call.get("failed")
+        for call in state.calls
+        if call.get("done") and not call.get("approval")
+        for i in call["ids"]
+        if i in wanted
+    }
