@@ -47,7 +47,9 @@ start, and the run resumes from the last step stored:
   LangChain's ``SummarizationMiddleware``.
 
 For a graph of your own, ``SqlCheckpointSaver`` stores LangGraph's checkpoints
-in the object's database instead.
+in the object's database instead. Its state is the graph's own: its models
+read the state, which the agent's ``window``, ``budget`` and summaries do not
+reach, and which grows unless the graph trims it (``_graph.py`` shows how).
 """
 
 from __future__ import annotations

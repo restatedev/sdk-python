@@ -73,6 +73,28 @@ message as a new ``HumanMessage``:
   (a model provider refuses such a history), and the note that ends it (such
   as "Cancelled: ..."), so that the graph's model knows, as the built-in
   agent's does. So does that run's message, if the graph never stored it.
+
+The graph's state is its own. Its models read the state, not the
+conversation: the agent's ``window`` and ``budget`` do not reach them, and
+the agent summarizes nothing (its conversation only loads the previous turn
+whole, for what closed it). The latest checkpoint holds every message the
+state keeps, and each turn's prune deletes the older checkpoints, so what
+grows is the state itself, unless the graph trims it. Trimming it is the
+graph's job. LangChain's ``SummarizationMiddleware`` replaces the earlier
+messages in the state with a summary::
+
+    graph = create_agent(model, tools, middleware=[SummarizationMiddleware(model, trigger=("tokens", 4000))])
+
+A graph of your own can return a ``RemoveMessage`` for each message to drop::
+
+    def forget(state: MessagesState) -> dict[str, Any]:
+        # Keep the latest 10 prompts and what followed each: no tool call is cut from its result.
+        prompts = [i for i, m in enumerate(state["messages"]) if isinstance(m, HumanMessage)]
+        old = state["messages"][: prompts[-10]] if len(prompts) > 10 else []
+        return {"messages": [RemoveMessage(id=m.id) for m in old]}
+
+Once the turn's prune has run, a removed message is gone from the key's
+checkpoints (``restate_langgraph_*``); the conversation, a log, keeps it.
 """
 
 from __future__ import annotations
