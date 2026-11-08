@@ -5,7 +5,9 @@
 > numbers refer to that commit. It was revised the same day:
 > - D1 was clarified, and D4 and D5 were added;
 > - steps retention moved to [future work](#future-work-steps-retention);
-> - the scope narrowed to sessions and agents.
+> - the scope narrowed to sessions and agents;
+> - the Pydantic AI plan was rewritten to lean on Pydantic AI Harness, with the
+>   core work it needs (C2).
 
 **Scope:** `restate.sessions` and `restate.agents` only. That means
 `python/restate/sessions/` and `python/restate/agents/`, with their tests and
@@ -89,6 +91,10 @@ Each turn, the model gets three things:
 - the last `window` turns whole.
 
 Nothing is deleted except by `clear`.
+
+This plan changes the model's input for Pydantic AI only. That agent takes its
+history the harness's way: everything since the latest compaction, which the
+harness performs (C2a and [`pydantic-ai.md`](pydantic-ai.md)).
 
 ## The research
 
@@ -211,10 +217,11 @@ recommendation applies.
 | --- | --- | --- |
 | Q1 | Pydantic AI's usage limits: per turn (today) or per conversation (what Pydantic AI does when it carries a `Conversation`)? | Per turn. See [`pydantic-ai.md`](pydantic-ai.md). |
 | Q2 | Land this in #296, or in a follow-up PR on top of it? | Your call. #296 is already large, and approved by the review bot. |
+| Q3 | Your own Pydantic AI `Agent` with no compaction capability: give it the harness's default compaction, or run it as configured, with a history that grows without bound? | Give it the default. See [`pydantic-ai.md`](pydantic-ai.md). |
 
 ## Phase 0: preparation (coordinator)
 
-1. Confirm Q1 and Q2.
+1. Confirm Q1 to Q3.
 2. Make the server tests runnable. They use Docker: `restate.harness` starts
    `ghcr.io/restatedev/restate:1.8.1` (`tests/support.py:7`). Without Docker:
    - install restate-server 1.8.1 from npm (`@restatedev/restate-server`);
@@ -252,26 +259,78 @@ Per D1:
 
 ### C2. What the frameworks need from the core
 
-These come from the framework files, and are made before phase 2 so that no
-framework agent edits shared files:
+These are made before phase 2, so that no framework agent edits shared files.
+All of them come from [`pydantic-ai.md`](pydantic-ai.md). ADK, LangGraph and
+OpenAI need nothing.
 
-- **Pydantic AI:** the core work its harness plan needs, listed in
-  [`pydantic-ai.md`](pydantic-ai.md) under "What the core provides". If that list
-  is empty, there is nothing to do here.
-- **ADK, LangGraph and OpenAI:** nothing.
+**C2a. Snapshots: a second way to give the model its history.**
+
+- **Today** every agent uses the *turn projection*: the summary, then earlier
+  turns as prompt and answer within `budget`, then the window whole.
+- **With snapshots instead:**
+  - the framework stores, in a turn, the history as its own compaction left it:
+    a *snapshot*;
+  - each run loads the latest snapshot, and every row after it, whole;
+  - the framework's compaction decides when to compact. `window`, `budget` and
+    our summaries don't apply.
+- **Schema** (per D1, in the `CREATE` statements): `restate_agent_snapshots`,
+  with these columns:
+  - `covers`: the last position the snapshot stands for;
+  - `turn`: the turn it was taken in, or NULL between turns;
+  - `items`: the framework's items, as stored.
+
+  Snapshots take no position of their own, so message ids and cursors are
+  unchanged.
+- **Writing.** `Turn.snapshot(items)` stores one in the running turn, under the
+  same ownership rule as any other write. `compact` may store one between turns,
+  as it writes the start row today.
+- **Reading.** `Conversation.load(..., snapshots=True)` reads the latest snapshot,
+  and every turn row and item after its `covers`.
+  - `history()` returns the snapshot's items, followed by those rows' items.
+  - Tool-result ids inside the snapshot count as known (`knows_result`), so a
+    framework doesn't store them again.
+- **Opting in.** Each agent opts in, through `chat(..., snapshots=True)`. The value
+  is kept in `AgentInfo`, so that `answer_once` and `compact` agree.
+- **The views** read only turn rows and items, so they never show a snapshot.
+  `clear` drops snapshots with every other table.
+- **Tests**, with the dict framework:
+  - loading from the latest snapshot;
+  - how `history()` composes;
+  - known ids;
+  - the views ignoring snapshots;
+  - an attempt that crashes after a snapshot is stored, and resumes from it;
+  - `clear`.
+
+**C2b. A time on each turn row.** Add `asked_at INTEGER` (Unix milliseconds) to
+`restate_agent_turns`, set when the turn's row is stored. `ConversationSearch`
+needs a start time for each run (`RunRecord.started_at`).
+
+**C2c. Waits from a framework package.** Add a helper to
+`restate.agents.internal` that opens a companion wait for a tool call, with the
+id `<invocation>:<call id>`, and returns the value a `signal` resolves it with.
+That is what `wait_for_signal` does inside it (`_tools.py`, `_signals.py`). The
+Pydantic AI agent uses it for deferred tool calls.
 
 ### Docs
 
-- TURN-SEMANTICS.md: whatever C2 changes.
-- The module docstrings are each framework agent's job.
+- **TURN-SEMANTICS.md:**
+  - snapshots, as the second way to give the model its history (C2a);
+  - the time on each turn row (C2b);
+  - the waits helper (C2c).
+- **The module docstrings** are each framework agent's job.
 
 ## The core contract
 
 Phase 2's agents may rely on the following:
 
-- **Earlier turns reach the model only from their rows.** `history()` gives them
-  as `turn.item` (the stored prompt) followed by `items.reply(answer, agent)`. A
+- **In the turn projection, earlier turns reach the model only from their rows.**
+  This covers ADK, LangGraph and OpenAI. `history()` gives each earlier turn as
+  `turn.item` (the stored prompt) followed by `items.reply(answer, agent)`. A
   framework must never depend on an earlier turn's steps outside its window.
+- **With snapshots, the model gets everything since the latest snapshot, whole.**
+  This covers Pydantic AI (C2a).
+- **Each turn row has a time** (C2b), and **framework packages can open waits**
+  (C2c).
 - **`Items.summary(text) -> list[Item]`, optional, renders the summary in the
   framework's own form.** By default, the summary is a user message with
   `SUMMARY` and the text, followed by an "Understood." reply
@@ -322,7 +381,7 @@ Phase 2's agents may rely on the following:
 > Read `docs/conversation-storage/README.md` first: the core contract, the rules
 > for framework agents, and how to run the tests. For server tests, use the
 > plugin in `<plugin dir>` with `RESTATE_SERVER_BIN=<binary>`. Phase 1 is at
-> `<commit>`. Do work items `<list>`; the decisions taken are `<Q1, Q2 answers>`.
+> `<commit>`. Do work items `<list>`; the decisions taken are `<Q1–Q3 answers>`.
 > Report as the rules say.
 
 ## Phase 3: connecting the dots (coordinator)
@@ -362,6 +421,7 @@ Phase 2's agents may rely on the following:
 
 - **The schema.** `SCHEMA` holds no `DROP TABLE`, and no agent schema keeps
   statements for databases from before (C1).
+- **The core.** C2a, C2b and C2c are done, each with its tests.
 - **The versions.** The extras' floors are the latest releases, and no guard for
   an older version is left in `restate.agents` (C0, rule 5).
 - **The framework files.** Each framework file's acceptance criteria hold.
@@ -375,6 +435,15 @@ Phase 2's agents may rely on the following:
 - **The harness changes fast.** It is at 0.x, and released in step with Pydantic
   AI (0.66 with 2.66). A dependency on its capabilities follows that pace, so pin
   what the tests cover.
+- **Pydantic AI turns read more.** With snapshots, a turn reads everything since
+  the latest compaction, up to the harness's target: 80% of the model's window.
+  The turn projection reads only up to `budget`. Snapshots also duplicate the
+  tail they keep.
+- **Summaries during a run add latency to that turn.** Compacting off the
+  answer's path, through `compact` (see [`pydantic-ai.md`](pydantic-ai.md)),
+  keeps most of them out of the turn.
+- **Wrong context windows.** The harness takes a model's window from its profile,
+  or from genai-prices. A wrong entry needs `context_window=`.
 
 ## Future work: steps retention
 
@@ -469,6 +538,9 @@ sequenceDiagram
     retention's reach, and the graph has to trim it itself, with
     `SummarizationMiddleware` or `RemoveMessage`.
   - OpenAI: handoffs at window 0, and compaction items inside deleted steps.
+- **With snapshots** (Pydantic AI), the cut would be the latest snapshot, since no
+  model reads the steps before it. `ConversationSearch` does read them, though,
+  so deleting them would trade away search over old tool details.
 - **Questions for then:**
   - the default retention;
   - whether apps may call `prune`;
