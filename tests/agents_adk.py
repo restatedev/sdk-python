@@ -531,6 +531,46 @@ async def test_a_workflows_first_step_stored_before_a_crash_is_not_its_answer(mo
     assert await ask("system x", invocation) == "system: Step two."
 
 
+async def test_a_workflow_nodes_first_step_stored_before_a_crash_is_not_its_answer(monkeypatch: pytest.MonkeyPatch):
+    from google.adk.apps import App  # pylint: disable=import-outside-toplevel
+    from google.adk.workflow import Workflow  # pylint: disable=import-outside-toplevel
+    from sessions_object import request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents.adk import _agent  # pylint: disable=import-outside-toplevel
+
+    append_event = _agent._Sessions.append_event  # pyright: ignore[reportPrivateUsage]
+    crashed: list[bool] = []
+
+    async def crash_after_the_first_step(self: Any, session: Any, event: Any) -> Any:
+        stored = await append_event(self, session, event)
+        if event.author == "first" and final_response(event) and not crashed:
+            crashed.append(True)
+            raise RuntimeError("the process crashed after the first step")
+        return stored
+
+    monkeypatch.setattr(_agent._Sessions, "append_event", crash_after_the_first_step)  # pyright: ignore[reportPrivateUsage]
+    first = LlmAgent(name="first", model=Scripted(), instruction="Step one.")
+    second = LlmAgent(name="second", model=Scripted(), instruction="Step two.")
+    # The root of an App may be a node of ADK's that is no agent: a Workflow, whose steps take the previous output.
+    pipeline = App(name="pipeline", root_agent=Workflow(name="pipeline", edges=[("START", first, second)]))
+    ask, invocation = asking(pipeline), request()
+    with pytest.raises(RuntimeError, match="crashed after the first step"):
+        await ask("system x", invocation)
+    # The retry goes on with the second step, whose response is the answer.
+    assert await ask("system x", invocation) == "echo: system: Step one."
+
+
+async def test_an_agent_that_adk_retries_after_a_tools_error_answers_once_it_recovers():
+    from google.adk.workflow import RetryConfig  # pylint: disable=import-outside-toplevel
+
+    # ADK runs the agent again, in the same attempt: the tool's error, which it reports first, does not fail the turn.
+    retried = RetryConfig(max_attempts=2, initial_delay=0.01, jitter=0)
+    mine = LlmAgent(name="mine", model=Scripted(), tools=adk.tools([flaky]), retry_config=retried)
+    k = key()
+    assert await asking(mine)(f"crash {k}") == f"tool said: recovered in {k}"
+    assert crashes[k] == 2
+
+
 async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harness: HarnessEnvironment):
     k = key()
     for word in ("one", "two", "three", "four", "five"):

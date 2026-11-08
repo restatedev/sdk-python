@@ -27,12 +27,13 @@ its stored events:
 - A tool's error fails the attempt, and Restate retries it. A
   ``restate.TerminalError``, which a retry would only repeat, is instead the
   tool's answer to the model, and so is a call to a tool the agent does not
-  have (which ADK fails the run for).
+  have (which ADK fails the run for). An agent with a ``retry_config`` of its
+  own is first run again by ADK, within the attempt.
 - A transfer to a sub-agent holds for the next messages, as ADK's sessions do.
 - A run of more model calls than its ``RunConfig``'s ``max_llm_calls`` (500 by
   default) fails its prompt for good: a retry would carry on with a fresh count.
 - An agent or ``App`` of your own runs as you configured it, with the
-  ``run_config`` you give.
+  ``run_config`` you give. An ``App``'s root may be a ``Workflow`` of ADK's.
 - The session is the conversation as the model sees it: the earlier turns'
   messages and answers, and the latest turns' events (``_conversation.py``).
   Its state is carried from turn to turn: each turn stores it with its
@@ -43,6 +44,7 @@ its stored events:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -62,6 +64,7 @@ from google.adk.sessions import BaseSessionService, Session
 from google.adk.sessions.base_session_service import GetSessionConfig, ListSessionsResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
+from google.adk.workflow import BaseNode
 from google.genai import types
 from pydantic import BaseModel
 
@@ -266,7 +269,15 @@ class _AdkTool(BaseTool):
         )
 
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
-        return await self.tool.run(args, current_call(tool_context.function_call_id or ""))
+        try:
+            return await self.tool.run(args, current_call(tool_context.function_call_id or ""))
+        except Exception as error:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                # Stopped as its turn stopped: the tool's run says why (``Tool.run``), but ADK's runner cancels
+                # the agent's task and waits for it to end, which only a cancellation ends at once.
+                raise asyncio.CancelledError from error
+            raise
 
 
 def tools(given: Sequence[AnyTool]) -> list[Any]:
@@ -337,14 +348,20 @@ def _app(
     )
 
 
-def _final(conversation: Conversation, root: BaseAgent) -> str | None:
+def _root(app: App) -> BaseNode:
+    """Return the root of ``app``: an agent, or a node of ADK's (a ``Workflow``), which an ``App`` always has."""
+    assert app.root_agent is not None
+    return app.root_agent
+
+
+def _final(conversation: Conversation, root: BaseNode) -> str | None:
     """Return the answer of the run that the conversation ends with, if its events already hold it.
 
     That is the case once the root agent is done (a resumable app stores an
     event marking it, after which ADK would end the invocation at once), and
     once an agent answered with no workflow agent above it to go on: then the
     final response is the answer. A step of a workflow (a ``SequentialAgent``
-    say) is not: ADK resumes the workflow's next step.
+    say, or a ``Workflow`` node) is not: ADK resumes the workflow's next step.
     """
     turn = conversation.running()
     if turn is None:
@@ -367,8 +384,13 @@ def _is_final(event: Event) -> bool:
     return event.author != "user" and event.content is not None and event.is_final_response()
 
 
-def _answers(root: BaseAgent, name: str) -> bool:
-    """Return whether agent ``name``'s final response ends its run: no workflow agent above it goes on."""
+def _answers(root: BaseNode, name: str) -> bool:
+    """Return whether agent ``name``'s final response ends its run: no workflow agent above it goes on.
+
+    A root that is a node of ADK's but not an agent (a ``Workflow``) goes on with its graph's next node.
+    """
+    if not isinstance(root, BaseAgent):
+        return False
     agent = root.find_agent(name)
     while agent is not None:
         if not isinstance(agent, LlmAgent):
@@ -381,25 +403,34 @@ def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
     """Return the run of a prompt: ADK's runner, resuming the prompt's invocation, with ``config`` (its ``RunConfig``)."""
 
     async def run(conversation: Conversation) -> str:
-        if (final := _final(conversation, app.root_agent)) is not None:
+        if (final := _final(conversation, _root(app))) is not None:
             # The run had stored its answer's events, but not its answer: that is the answer, rather than ask again.
             return final
         turn = conversation.running()
         invocation = typing.cast(Event, turn.latest_ask().item).invocation_id if turn is not None else None
         runner = Runner(app=app, session_service=_Sessions(conversation))
         answer = ""
+        error: Event | None = None
         events = runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation, run_config=config)
         try:
             with tools_in(ctx):
                 async for event in events:
                     if event.error_code:
-                        # The model would not answer (a safety block, say), as it would not again: the prompt fails.
-                        raise TerminalError(f"the model returned {event.error_code}: {event.error_message or ''}")
-                    if _is_final(event) and (text := _text(event)):
-                        answer = text
-        except LlmCallsLimitExceededError as error:
+                        # The model's error code (a safety block, say), or an error the agent raised (a tool's,
+                        # the model API's), which ADK reports as an event, then raises once the events are done:
+                        # then the error itself decides (a retry of the attempt, or a refusal).
+                        error = event
+                    elif event.content is not None:
+                        # The run went on after an error: ADK ran the agent that failed again (its ``retry_config``).
+                        error = None
+                        if _is_final(event) and (text := _text(event)):
+                            answer = text
+        except LlmCallsLimitExceededError as limit:
             # A retry would carry on with a fresh count, and so would never end an agent that keeps calling tools.
-            raise TerminalError(f"the run reached its limit of model calls: {error}") from error
+            raise TerminalError(f"the run reached its limit of model calls: {limit}") from limit
+        if error is not None:
+            # The model would not answer (a safety block, say), as it would not again: the prompt fails.
+            raise TerminalError(f"the model returned {error.error_code}: {error.error_message or ''}")
         return answer
 
     return run
@@ -526,7 +557,7 @@ async def _prompt(
     app = _app(ctx, own, model, system, tools, output)
 
     def ask(text: str, check: Check | None = None) -> Awaitable[str]:
-        return answer_once(ctx, text, _Items(app.root_agent.name), _run(ctx, app, config), check=check)
+        return answer_once(ctx, text, _Items(_root(app).name), _run(ctx, app, config), check=check)
 
     if output is None:
         return await ask(text)
