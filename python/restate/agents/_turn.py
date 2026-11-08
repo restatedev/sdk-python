@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from restate.agents import _signals
 from restate.agents._api import Answering
 from restate.agents._calls import settle
-from restate.agents._common import BUDGET, WINDOW, Summarize, Window, refusal_of
+from restate.agents._common import BUDGET, WINDOW, CompactHistory, Summarize, Window, refusal_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 from restate.sessions._link import Link
@@ -130,6 +130,11 @@ class AgentInfo:
     budget: int = BUDGET
     summarize: Summarize | None = None
     """How the agent summarizes the turns before the window, past ``budget``: without, they are only trimmed."""
+    snapshots: bool = False
+    """Whether the agent takes its history from snapshots (see ``Snapshot``): ``window``, ``budget`` and
+    ``summarize`` then do not apply."""
+    compact_history: CompactHistory | None = None
+    """With ``snapshots``, how the agent compacts its history between turns, when a turn asks for it."""
 
 
 AGENT: Link[AgentInfo] = Link("an agent")

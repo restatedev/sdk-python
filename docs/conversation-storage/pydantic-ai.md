@@ -1,7 +1,8 @@
 # Pydantic AI, on Pydantic AI Harness
 
-> **Status:** not started. This plan is for one agent, and it starts after phase
-> 1's C2: snapshots, a time on each turn row, and a helper for waits. Read
+> **Status:** not started. Phase 1's C2 is done: snapshots, a time on each turn
+> row, and a helper for waits; the README's "Phase 1: what was built" has the
+> API as built. Read
 > [`README.md`](README.md) first: the core contract, the rules for framework
 > agents, and how to run the tests.
 
@@ -276,8 +277,8 @@ sequenceDiagram
 
 **What is removed for Pydantic AI agents:**
 
-- `window` and `budget`. They don't apply to a Pydantic AI agent. Reject them if
-  given, or document that they're ignored; decide in phase 1.
+- `window` and `budget`. They don't apply to a Pydantic AI agent. Phase 1
+  decided: they're ignored with `snapshots=True`, not rejected. Document it.
 - The `compact` summarizer (`summarize=_summarizer(model)`, `_agent.py:684-695`).
 - The provider compaction the built-in agent gets by default (`_capabilities`
   and `_compaction`, `_agent.py:327-362`).
@@ -417,6 +418,14 @@ conversation, is the way to budgets per conversation, later.
 | P9 | Docs | S | — |
 
 Do P1 first, then P2 and P3. P4 to P7 are independent of each other.
+
+### P0. What the new releases broke (first)
+
+Phase 1 moved the floor to the latest release, and 3 of this framework's
+tests fail there, before any other change. The README's "Phase 1: what was
+built" lists them, with the type errors. Fix them first, in this package (or
+in its tests, where a test relied on how an older release behaved), and
+report each cause. A cause in the core is a core request (rule 3).
 
 ### Tests
 

@@ -306,7 +306,10 @@ sequenceDiagram
   ([`_calls.py`](python/restate/agents/_calls.py)).
 - **Waits survive.** A tool waiting for a signal waits in the companion
   (`wait`), by that key: the next attempt rejoins the same wait, and the
-  turn is still answered meanwhile.
+  turn is still answered meanwhile. A framework's own tool call that waits
+  for something outside (Pydantic AI's deferred tool calls, say) waits the
+  same way, through `wait_for(ctx, call_id, signal, input)` in
+  `restate.agents.internal`.
 - **A dead attempt stops.** An attempt that ends while its process lives on
   (Restate suspended it, gave up on it, or lost its connection) stops its
   work, a model's request included: it can store nothing more, and the next
@@ -425,15 +428,19 @@ shared with Restate's other SDKs).
 
 ### What a turn stores
 
-The conversation is two tables in the key's database, and a row of where it
-starts:
+The conversation is two tables in the key's database, a row of where it
+starts, and the snapshots of agents that take their history from them:
 
 ```sql
 restate_agent_turns  (n, seq, prompt, item, status, answer, agent, carried,
-                      answered_at, answered_seq)                    -- the transcript: one row per turn
+                      answered_at, answered_seq, asked_at)          -- the transcript: one row per turn
 restate_agent_items  (n, turn, seq, item, reply, agent)              -- the trajectories
 restate_agent_conversation_start (n, seq, summary, summarized)       -- the first position, the last seq, the summary
+restate_agent_snapshots (id, covers, turn, items)                    -- the history as a framework compacted it
 ```
+
+The schema is written for new databases only: there are no migrations, and
+nothing for databases from before.
 
 - **Positions.** The two tables share one sequence of positions (`n`), the
   ids of the messages that `messages` shows. A turn's prompt has the turn's
@@ -448,6 +455,9 @@ restate_agent_conversation_start (n, seq, summary, summarized)       -- the firs
   the start row, so cursors never go back.
 - **Each item is the framework's own** (a message, an event), stored and
   loaded by the framework (`Items.dump`, `Items.load`).
+- **`asked_at`** is when the turn's row was stored, in Unix milliseconds: a
+  run's start time, for a framework that lists runs (Pydantic AI Harness's
+  `ConversationSearch`, say).
 
 ### Which turns a turn loads
 
@@ -492,6 +502,53 @@ the previous turn whole, to give its graph what closed it.
 
 The model sees the earlier turns' messages, not their tool calls: those of
 the window only. The `messages` view shows every turn whole, as stored.
+
+This is the *turn projection*, which every agent gets unless its framework
+compacts the history itself.
+
+### History from snapshots
+
+An agent whose framework compacts the history itself (Pydantic AI, with
+Pydantic AI Harness) takes it from *snapshots* instead
+(`chat(..., snapshots=True)`). A snapshot is the history as the framework's
+compaction left it, which the framework stores in its turn with
+`Turn.snapshot(items)`. It stands for every position stored so far
+(`covers`), and takes no position of its own.
+
+- **What the model sees:** the latest snapshot's items, then every item
+  stored after `covers`, whole. Before the first snapshot, that is the whole
+  conversation. `window`, `budget` and our summaries don't apply.
+- **What a turn loads:** the latest snapshot, then every turn from the one
+  that stored it (or, for one stored between turns, the first turn after
+  it), whole. The latest turn is loaded whole too while it has no answer, so
+  that it is carried on or closed.
+- **Known results.** The ids of the tool results inside the snapshot count
+  as known (`knows_result`), so the framework doesn't store them again.
+- **Crashes.** A snapshot is one write, under the turn's ownership rule: a
+  retried attempt loads it, and carries on from it.
+- **Drops.** A reply that a snapshot covers can't be dropped.
+- **What clients see doesn't change.** The views read turn rows and items
+  only, so they never show a snapshot. `clear` drops snapshots with every
+  other table.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant R as Run (turn N)
+  participant DB as Key's database
+  participant K as Agent (compact)
+  R->>DB: load: the latest snapshot, then every row after it, whole
+  opt the framework compacted the history during the run
+    R->>DB: Turn.snapshot(the compacted history), covering every position so far
+  end
+  R->>DB: the turn's steps and answer, after the snapshot
+  opt the run asked for it (compact_after)
+    R-)K: compact
+    K->>DB: load as above, then compact_history(history)
+    K->>DB: a snapshot between turns, covering both turns
+  end
+  Note over DB: turn N+1 loads from the latest snapshot
+```
 
 ### What a turn carries
 
@@ -566,6 +623,12 @@ sequenceDiagram
 - Within a turn, the frameworks' own compaction still applies: OpenAI's
   server-side compaction, Pydantic AI's provider compaction, LangGraph's
   `trim_messages`.
+- **An agent with snapshots** doesn't summarize this way. Its framework
+  compacts during a run and stores a snapshot. To compact off the answer's
+  path, a run calls `compact_after()`, and `compact` hands the history to
+  the agent's `compact_history`, then stores what it returns as a snapshot
+  between turns. `compact` leaves a turn without an answer alone: the next
+  message closes it first.
 
 ## Several prompts in one handler
 

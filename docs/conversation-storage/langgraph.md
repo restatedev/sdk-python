@@ -83,6 +83,14 @@ There are two agents:
 
 ## Work items
 
+### L0. What the new releases broke (first)
+
+Phase 1 moved the floor to the latest release, and 3 or 4 of this framework's
+tests fail there, before any other change. The README's "Phase 1: what was
+built" lists them, with the type errors. Fix them first, in this package (or
+in its tests, where a test relied on how an older release behaved), and
+report each cause. A cause in the core is a core request (rule 3).
+
 ### L1. One window for the graph agent
 
 - **Today:**

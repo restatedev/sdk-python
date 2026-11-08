@@ -73,6 +73,14 @@
 
 ## Work items
 
+### A0. What the new releases broke (first)
+
+Phase 1 moved the floor to the latest release, and 6 of this framework's
+tests fail there, before any other change. The README's "Phase 1: what was
+built" lists them, with the type errors. Fix them first, in this package (or
+in its tests, where a test relied on how an older release behaved), and
+report each cause. A cause in the core is a core request (rule 3).
+
 ### A1. A user's `events_compaction_config` puts the session out of order (bug)
 
 **The cause:**

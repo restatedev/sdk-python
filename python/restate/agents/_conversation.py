@@ -66,6 +66,11 @@ conversation (``clear`` deletes the rows, and positions carry on), the last
 ``seq`` given (a drop deletes rows, and cursors must not go back), and the
 summary of the turns before position ``summarized``.
 
+An agent whose framework compacts the history itself takes it from
+snapshots instead (``restate_agent_snapshots``, see ``Snapshot``): the model
+gets the latest snapshot, then every row after it, whole; ``window``,
+``budget`` and summaries then do not apply. The views never show snapshots.
+
 On top of it, ``answer_once`` runs a prompt the same way for every framework:
 each prompt is answered once per invocation, and a stopped, refused or
 failed run is closed so that the next prompt starts afresh. A framework
@@ -78,7 +83,9 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import json
 import logging
+import time
 import typing
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -119,12 +126,12 @@ STEPS = "restate_agent_items"
 START = "restate_agent_conversation_start"
 """Where the conversation starts: its first position, the last ``seq`` given, and the summary of the earliest turns."""
 
+SNAPSHOTS = "restate_agent_snapshots"
+"""The history as a framework's own compaction left it, for agents that take their history from snapshots."""
+
 SCHEMA = Schema(
     "restate_agents.turns",
     [
-        # The conversation as one table, from before turns had their own: not kept.
-        "DROP TABLE IF EXISTS restate_agent_conversation",
-        f"DROP TABLE IF EXISTS {START}",
         f"""CREATE TABLE {TURNS} (
             n INTEGER PRIMARY KEY,
             seq INTEGER NOT NULL,
@@ -135,7 +142,8 @@ SCHEMA = Schema(
             agent TEXT,
             carried TEXT,
             answered_at INTEGER,
-            answered_seq INTEGER
+            answered_seq INTEGER,
+            asked_at INTEGER
         )""",
         f"CREATE INDEX {TURNS}_seq ON {TURNS} (seq)",
         f"CREATE INDEX {TURNS}_answered_seq ON {TURNS} (answered_seq)",
@@ -154,6 +162,12 @@ SCHEMA = Schema(
             seq INTEGER NOT NULL,
             summary TEXT,
             summarized INTEGER
+        )""",
+        f"""CREATE TABLE {SNAPSHOTS} (
+            id INTEGER PRIMARY KEY,
+            covers INTEGER NOT NULL,
+            turn INTEGER,
+            items TEXT NOT NULL
         )""",
     ],
 )
@@ -217,6 +231,8 @@ class Entry:
     """On a prompt: the position of its turn's answer, its last message of the assistant, once it has one."""
     answered_seq: int | None = None
     """On a prompt: the ``seq`` given as its turn was answered."""
+    asked_at: int | None = None
+    """On a prompt: when its turn's row was stored, in Unix milliseconds."""
 
 
 class Parsed(typing.NamedTuple):
@@ -321,6 +337,40 @@ async def restart(tx: DatabaseWriter, start: Start) -> None:
     )
 
 
+@dataclass(frozen=True)
+class Snapshot:
+    """The history as a framework's own compaction left it: it stands for every position up to ``covers``.
+
+    An agent that takes its history from snapshots (``Conversation.load``
+    with ``snapshots=True``) gives the model the latest snapshot's items, then
+    every item stored after ``covers``, whole. Snapshots are the model's only:
+    the views never show them, and they take no position of their own.
+    """
+
+    covers: int
+    """The last position the snapshot stands for."""
+    turn: int | None
+    """The position of the turn it was stored in, or ``None`` if it was stored between turns (by ``compact``)."""
+    items: Sequence[Item]
+    """The framework's items, in order."""
+    results: frozenset[str]
+    """The ids of the tool calls whose results its items hold: the model was given them."""
+
+
+def _snapshot_of(items: Items, covers: int, turn: int | None, held: Sequence[Item]) -> Snapshot:
+    results = frozenset(result.id for item in held for result in items.read(item).results)
+    return Snapshot(covers, turn, tuple(held), results)
+
+
+async def latest_snapshot(db: DatabaseReader, items: Items) -> Snapshot | None:
+    """Return the latest snapshot stored in ``db``, if there is one."""
+    row = await db.get(f"SELECT covers, turn, items FROM {SNAPSHOTS} ORDER BY covers DESC, id DESC LIMIT 1")
+    if row is None:
+        return None
+    held = [items.load(str(stored)) for stored in json.loads(str(row["items"]))]
+    return _snapshot_of(items, int(typing.cast(int, row["covers"])), _int(row["turn"]), held)
+
+
 async def answer_in(db: DatabaseReader, prompt_id: str) -> str | None:
     """Return the stored answer of prompt ``prompt_id``, if it has one: one read, of the turn's row."""
     row = await db.get(f"SELECT answer FROM {TURNS} WHERE prompt = ?", [prompt_id])
@@ -392,6 +442,10 @@ class _Ledger:
         """The ids of the tool calls made in the loaded turns."""
         self.warned = False
         """Whether a call's id that an earlier call has was logged: once is enough."""
+        self.snapshot: Snapshot | None = None
+        """The latest snapshot, if the conversation was loaded with snapshots and has one."""
+        self.compaction = False
+        """Whether the run asked for the history to be compacted after the turn (``Conversation.compact_after``)."""
 
     def called(self, call_id: str) -> None:
         """Note a tool call's id, and log one that an earlier call has (once)."""
@@ -407,6 +461,14 @@ class _Ledger:
     def check_open(self) -> None:
         if self.closed:
             raise RuntimeError("the run was stopped: it stores nothing more")
+
+    async def store_snapshot(self, held: Sequence[Item], turn: int | None) -> Snapshot:
+        """Store ``held`` as a snapshot that covers every position given so far, in turn ``turn``; hold the lock."""
+        covers = self.next - 1
+        stored = json.dumps([self.items.dump(item) for item in held])
+        await self.db.execute(f"INSERT INTO {SNAPSHOTS} (covers, turn, items) VALUES (?, ?, ?)", [covers, turn, stored])
+        self.snapshot = _snapshot_of(self.items, covers, turn, held)
+        return self.snapshot
 
     def carried(self) -> tuple[str | None, str | None]:
         """Return the agent and the framework's state that the latest answered turn left."""
@@ -582,6 +644,20 @@ class Turn:
         if state is not None:
             self._carried["carried"] = state
 
+    async def snapshot(self, items: Sequence[Item]) -> None:
+        """Store ``items`` as a snapshot of the conversation, as the framework's own compaction left it.
+
+        The snapshot stands for every position stored so far, the turn's own
+        included: an agent that takes its history from snapshots gives the
+        model, from the next request on, ``items`` and then what is stored
+        after it (see ``Conversation.history``). A retried attempt carries on
+        from it. Only the turn being answered stores one.
+        """
+        ledger = self._ledger
+        async with ledger.lock:
+            self._check_writable()
+            await ledger.store_snapshot(list(items), self.n)
+
     async def drop(self, reply: int) -> None:
         """Drop the turn's reply ``reply``, and what came after it, to ask the model again.
 
@@ -595,6 +671,8 @@ class Turn:
         if reply not in self.replies():
             raise KeyError(f"turn {self.id!r} has no reply {reply}")
         ledger = self._ledger
+        if ledger.snapshot is not None and ledger.snapshot.covers >= reply:
+            raise RuntimeError(f"turn {self.id!r} has a snapshot that covers reply {reply}: it cannot be dropped")
         async with ledger.lock:
             self._check_writable()
             start = replace(ledger.start, seq=ledger.seq)
@@ -742,6 +820,8 @@ class Conversation:
         seq: int = 0,
         budget: int = BUDGET,
         window: Window = "all",
+        snapshots: bool = False,
+        snapshot: Snapshot | None = None,
     ) -> None:
         """Make the conversation of ``entries``, as ``load`` loaded them from ``db``.
 
@@ -756,8 +836,13 @@ class Conversation:
             seq: The last ``seq`` stored.
             budget: How many tokens of the turns before the window ``history`` gives the model.
             window: How many of the latest answered turns ``entries`` holds whole, or ``"all"``.
+            snapshots: Whether the model gets its history from snapshots: the latest (``snapshot``), then every
+                item of ``entries`` after it. ``window`` and ``budget`` then do not apply.
+            snapshot: The latest snapshot, with ``snapshots``.
         """
         self.db = db
+        self.snapshots = snapshots
+        """Whether the model gets its history from snapshots, rather than from the transcript and the window."""
         self.items = items
         self.budget = budget
         self.size: Window = window
@@ -768,6 +853,7 @@ class Conversation:
         positions.extend(turn.n for turn in transcript[-1:])
         following = max(start.n, max(positions) + 1 if positions else 0)
         self._ledger = _Ledger(db, items, start, transcript, following, max(start.seq, seq))
+        self._ledger.snapshot = snapshot
         self._turns: list[Turn] = []
         grouped: list[tuple[Entry, list[Entry]]] = []
         for entry in entries:
@@ -783,7 +869,14 @@ class Conversation:
 
     @classmethod
     async def load(
-        cls, db: Database, items: Items, window: Window = "all", budget: int = BUDGET, *, complete: bool = False
+        cls,
+        db: Database,
+        items: Items,
+        window: Window = "all",
+        budget: int = BUDGET,
+        *,
+        complete: bool = False,
+        snapshots: bool = False,
     ) -> Conversation:
         """Load the conversation from ``db``, whose items are ``items``': the transcript, and the window's turns whole.
 
@@ -800,11 +893,15 @@ class Conversation:
                 latest turn is loaded whole if it has no answer yet.
             budget: How many tokens of the turns before the window ``history`` gives the model.
             complete: Whether to read the transcript from the summary's start whatever the budget: to summarize it.
+            snapshots: Whether the model gets its history from snapshots: the latest snapshot, then every row after
+                it, whole (see ``Snapshot``). ``window``, ``budget`` and ``complete`` then do not apply.
         """
         check_window(window)
         await SCHEMA.ensure(db)
         start = await start_of(db)
         last, seq = await last_of(db)
+        if snapshots:
+            return await cls._from_snapshot(db, items, start, last, seq)
         first = start.n if window == "all" or start.summarized is None else start.summarized
         transcript = await _transcript(db, items, first, None if window == "all" or complete else (window, budget))
         whole = transcript[window_start(transcript, window) :]
@@ -817,6 +914,36 @@ class Conversation:
             ]
         entries = sorted([*whole, *steps], key=_position)
         return cls(db, items, entries, start, transcript=transcript, last=last, seq=seq, budget=budget, window=window)
+
+    @classmethod
+    async def _from_snapshot(cls, db: Database, items: Items, start: Start, last: int | None, seq: int) -> Conversation:
+        """Load the latest snapshot, and the turns after it whole: from the turn it was stored in, if any.
+
+        The latest turn is loaded whole too while it has no answer, so that it
+        is carried on or closed; and the transcript starts at the latest
+        answered turn before them, for what it carried.
+        """
+        snapshot = await latest_snapshot(db, items)
+        first = start.n
+        if snapshot is not None:
+            first = max(first, snapshot.turn if snapshot.turn is not None else snapshot.covers + 1)
+        latest = await db.get(f"SELECT n, status FROM {TURNS} ORDER BY n DESC LIMIT 1")
+        if latest is not None and latest["status"] is None:
+            first = min(first, int(typing.cast(int, latest["n"])))
+        [[carried]] = await db.values(f"SELECT MAX(n) FROM {TURNS} WHERE n < ? AND answer IS NOT NULL", [first])
+        transcript = await _transcript(db, items, first if carried is None else int(typing.cast(int, carried)), None)
+        whole = [turn for turn in transcript if turn.n >= first]
+        steps: list[Entry] = []
+        if whole:
+            stored = await db.values(f"SELECT n, item, reply, agent FROM {STEPS} WHERE n > ? ORDER BY n", [whole[0].n])
+            steps = [
+                Entry(int(typing.cast(int, n)), items.load(str(item)), reply=_int(reply), agent=_str(agent))
+                for n, item, reply, agent in stored
+            ]
+        entries = sorted([*whole, *steps], key=_position)
+        return cls(
+            db, items, entries, start, transcript=transcript, last=last, seq=seq, snapshots=True, snapshot=snapshot
+        )
 
     # --- Reading: the conversation as a whole ---
 
@@ -862,6 +989,8 @@ class Conversation:
     @property
     def summary(self) -> str | None:
         """The summary of the turns before the transcript, if they have one (and the transcript is after them)."""
+        if self.snapshots:
+            return None
         transcript, start = self._ledger.transcript, self._ledger.start
         first = transcript[0].n if transcript else self._ledger.next
         return start.summary if start.summarized is not None and first >= start.summarized else None
@@ -879,8 +1008,17 @@ class Conversation:
         """Return the agent the conversation is with, and the framework's state, as the latest answered turn left them."""
         return self._ledger.carried()
 
+    @property
+    def snapshot(self) -> Snapshot | None:
+        """The latest snapshot, if the model gets its history from snapshots and one is stored."""
+        return self._ledger.snapshot
+
     def knows_result(self, call_id: str) -> bool:
-        """Return whether a turn of the window holds the result of tool call ``call_id``: the model was given it."""
+        """Return whether a turn of the window, or the snapshot, holds the result of tool call ``call_id``: the model
+        was given it."""
+        snapshot = self._ledger.snapshot
+        if snapshot is not None and call_id in snapshot.results:
+            return True
         return any(turn.has_result(call_id) for turn in self._turns)
 
     def new_results(self, items: Sequence[Item]) -> list[Item]:
@@ -935,6 +1073,8 @@ class Conversation:
 
     def overflowing(self) -> bool:
         """Return whether the turns before the next turn's window outgrow ``budget``: then they are summarized."""
+        if self.snapshots:
+            return False
         before, _ = self._upcoming()
         return sum(self._size(turn) for turn in before) > self.budget * 4
 
@@ -958,7 +1098,16 @@ class Conversation:
         That is the summary of the earliest turns, if they have one; the turns
         before the window, as their prompts and answers, as many of the latest
         as ``budget`` holds; then the window's turns, whole.
+
+        With snapshots, it is the latest snapshot's items, then every item
+        stored after it, whole; before the first snapshot, the whole
+        conversation.
         """
+        if self.snapshots:
+            snapshot = self._ledger.snapshot
+            covers = snapshot.covers if snapshot is not None else -1
+            held = list(snapshot.items) if snapshot is not None else []
+            return held + [entry.item for turn in self._turns for entry in turn.entries if entry.n > covers]
         out: list[Item] = []
         if (summary := self.summary) is not None:
             out.extend(summary_items(self.items, summary))
@@ -977,10 +1126,10 @@ class Conversation:
             if (running := self.running()) is not None:
                 raise RuntimeError(f"turn {running.id!r} has no answer yet: turns never overlap")
             n = ledger.next
-            entry = Entry(n, self.items.prompt(text), prompt=prompt_id)
+            entry = Entry(n, self.items.prompt(text), prompt=prompt_id, asked_at=int(time.time() * 1000))
             await self.db.execute(
-                f"INSERT INTO {TURNS} (n, seq, prompt, item) VALUES (?, ?, ?, ?)",
-                [n, ledger.seq + 1, prompt_id, self.items.dump(entry.item)],
+                f"INSERT INTO {TURNS} (n, seq, prompt, item, asked_at) VALUES (?, ?, ?, ?, ?)",
+                [n, ledger.seq + 1, prompt_id, self.items.dump(entry.item), entry.asked_at],
             )
             ledger.seq += 1
             ledger.next = n + 1
@@ -989,6 +1138,34 @@ class Conversation:
             self._turns.append(turn)
             ledger.latest = turn
             return turn
+
+    async def snapshot_between(self, items: Sequence[Item]) -> None:
+        """Store ``items`` as a snapshot of the whole conversation, between turns (in ``compact``, say).
+
+        Raises:
+            RuntimeError: If a turn is being answered: its run stores its own (``Turn.snapshot``).
+        """
+        ledger = self._ledger
+        async with ledger.lock:
+            ledger.check_open()
+            if (running := self.running()) is not None:
+                raise RuntimeError(f"turn {running.id!r} has no answer yet: it stores its own snapshots")
+            await ledger.store_snapshot(list(items), None)
+
+    def compact_after(self) -> None:
+        """Ask for the history to be compacted after the turn's answer, in an invocation of its own (``compact``).
+
+        For an agent that takes its history from snapshots, whose framework
+        tells when the history nears its limit. ``compact`` then hands the
+        history to the agent's ``compact_history``, and stores what it returns
+        as a snapshot, so that the next turn starts compacted.
+        """
+        self._ledger.compaction = True
+
+    @property
+    def compaction_asked(self) -> bool:
+        """Whether the run asked for the history to be compacted after the turn (``compact_after``)."""
+        return self._ledger.compaction
 
     async def seal(self) -> None:
         """Close the conversation to writes, once those under way are stored.
@@ -1016,7 +1193,7 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
     window and more of the turns before it than the budget holds.
     """
     sql = (
-        f"SELECT n, prompt, item, status, answer, agent, carried, answered_at, answered_seq FROM {TURNS} "
+        f"SELECT n, prompt, item, status, answer, agent, carried, answered_at, answered_seq, asked_at FROM {TURNS} "
         "WHERE n >= ? AND n < ? ORDER BY n DESC LIMIT ?"
     )
     read: list[Entry] = []
@@ -1025,7 +1202,7 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
     left = None if bounded is None else bounded[1] * 4
     while True:
         rows = await db.values(sql, [first, before, PAGE if bounded is not None else 2**62])
-        for n, prompt, item, status, answer, agent, carried, answered_at, answered_seq in rows:
+        for n, prompt, item, status, answer, agent, carried, answered_at, answered_seq, asked_at in rows:
             at = int(typing.cast(int, n))
             entry = Entry(
                 at,
@@ -1038,6 +1215,7 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
                 status=typing.cast(Status | None, _str(status)),
                 answered_at=_int(answered_at),
                 answered_seq=_int(answered_seq),
+                asked_at=_int(asked_at),
             )
             read.append(entry)
             if walk is None or left is None or walk.holds(entry.status):
@@ -1102,6 +1280,9 @@ async def answer_once(
             Defaults to the agent's.
         check: Checks the answer: if it returns a message, the turn asks the model again with it, once, as a
             step of the turn (``Turn.ask_again``), and the turn's answer is the reply to that.
+
+    An agent that takes its history from snapshots (``AgentInfo.snapshots``) loads the latest snapshot and every
+    row after it instead, whatever ``window`` and ``budget``.
     """
     settings = settings_of(ctx)
     window = check_window(settings.window if window is None else window)
@@ -1110,7 +1291,7 @@ async def answer_once(
     await SCHEMA.ensure(ctx.db)
     if (answer := await answer_in(ctx.db, prompt_id)) is not None:
         return stored_answer(answer)
-    conversation = await Conversation.load(ctx.db, items, window, budget)
+    conversation = await Conversation.load(ctx.db, items, window, budget, snapshots=settings.snapshots)
 
     async def work() -> str:
         return await _answer(ctx, conversation, prompt_id, text, run, check)
@@ -1122,8 +1303,12 @@ async def answer_once(
 
     answered = await answering(ctx, stored, work)
     definition = definition_of(ctx)
-    if settings.summarize is not None and definition is not None and conversation.overflowing():
-        # Summarized in an invocation of its own, which the key runs before its next message.
+    if settings.snapshots:
+        due = settings.compact_history is not None and conversation.compaction_asked
+    else:
+        due = settings.summarize is not None and conversation.overflowing()
+    if due and definition is not None:
+        # Compacted in an invocation of its own, which the key runs before its next message.
         ctx.generic_send(definition.name, "compact", key=ctx.key, idempotency_key=f"{prompt_id}:compact")
     return answered
 
@@ -1208,8 +1393,14 @@ async def compact(ctx: SessionContext, items: Items) -> bool:
     and the ``messages`` view shows them as before. A summary that fails is
     logged, and tried again after the next turn. Return whether it
     summarized.
+
+    An agent that takes its history from snapshots compacts it with its
+    ``compact_history`` instead, and stores what that returns as a snapshot
+    between turns: the next turn starts from it.
     """
     settings = settings_of(ctx)
+    if settings.snapshots:
+        return await _compact_history(ctx, items)
     if settings.summarize is None:
         return False
     conversation = await Conversation.load(ctx.db, items, settings.window, settings.budget, complete=True)
@@ -1223,4 +1414,24 @@ async def compact(ctx: SessionContext, items: Items) -> bool:
         return False
     start = replace(await start_of(ctx.db), summary=summary, summarized=after)
     await restart(ctx.db, start)
+    return True
+
+
+async def _compact_history(ctx: SessionContext, items: Items) -> bool:
+    """Compact the history of an agent that takes it from snapshots, with its ``compact_history``: see ``compact``."""
+    compact_history = settings_of(ctx).compact_history
+    if compact_history is None:
+        return False
+    conversation = await Conversation.load(ctx.db, items, snapshots=True)
+    if conversation.running() is not None:
+        # A turn left without an answer (its invocation gone): the next message closes it first.
+        return False
+    try:
+        compacted = await compact_history(ctx, conversation.history())
+    except Exception as error:
+        _logger.warning("Compacting the history failed, and is tried again when a turn asks for it: %s", error)
+        return False
+    if compacted is None:
+        return False
+    await conversation.snapshot_between(compacted)
     return True

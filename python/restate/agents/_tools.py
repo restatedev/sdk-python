@@ -642,14 +642,7 @@ def wait_for_signal(signal: str, *, description: str, input: Any = None, name: s
     shape = _input_of(input, None)
 
     async def run(arguments: dict[str, Any], tool_call: ToolCall) -> Any:
-        async def made(c: ToolCall) -> Any:
-            wait_id = c.idempotency_key
-            request: _signals.WaitRequest = {"id": wait_id, "name": signal}
-            if input is not None:
-                request["input"] = arguments["raw"]
-            return await c.ctx.call(_signals.wait, request, key=_signals.signals_of(c.ctx), idempotency_key=wait_id)
-
-        return await _once(f"signal/{signal}", arguments["raw"], tool_call, made)
+        return await _wait(tool_call, signal, arguments["raw"], shown=input is not None)
 
     return Tool(
         name=name or f"wait_for_{signal}",
@@ -658,3 +651,40 @@ def wait_for_signal(signal: str, *, description: str, input: Any = None, name: s
         _run=run,
         _validate=lambda args: _split(shape, args),
     )
+
+
+async def _wait(call: ToolCall, signal: str, input: object, *, shown: bool) -> Any:
+    """Wait for signal ``signal`` as tool call ``call``, once however often it runs; ``pending`` shows ``input`` if
+    ``shown``."""
+
+    async def made(c: ToolCall) -> Any:
+        wait_id = c.idempotency_key
+        request: _signals.WaitRequest = {"id": wait_id, "name": signal}
+        if shown:
+            request["input"] = input
+        return await c.ctx.call(_signals.wait, request, key=_signals.signals_of(c.ctx), idempotency_key=wait_id)
+
+    return await _once(f"signal/{signal}", input, call, made)
+
+
+async def wait_for(ctx: SessionContext, call_id: str, signal: str, input: Any = None) -> Any:
+    """Wait for signal ``signal`` to the agent, for the model's tool call ``call_id``, and return its value.
+
+    It is what a ``wait_for_signal`` tool does, for a framework whose own
+    tool calls wait for something outside (Pydantic AI's deferred tool
+    calls, say): the wait's id is ``<invocation id>:<call id>``, the agent's
+    ``pending`` view lists it, and its ``signal`` view resolves it. The wait
+    is opened once however often the tool call runs, and a crash carries on
+    waiting on the same one.
+
+    Args:
+        ctx: The agent's context.
+        call_id: The id of the model's tool call.
+        signal: The signal's name.
+        input: What the call waits for (the tool call's arguments, say), as JSON, which ``pending`` shows; None
+            to show nothing.
+
+    Returns:
+        The value the signal resolves the wait with.
+    """
+    return await _wait(ToolCall(ctx, call_id), signal, input, shown=input is not None)

@@ -36,7 +36,16 @@ from restate.agents._api import (
     Waiting,
     Watch,
 )
-from restate.agents._common import BUDGET, WINDOW, MessageSerde, Summarize, Window, check_window, refusal_of
+from restate.agents._common import (
+    BUDGET,
+    WINDOW,
+    CompactHistory,
+    MessageSerde,
+    Summarize,
+    Window,
+    check_window,
+    refusal_of,
+)
 from restate.agents._conversation import SCHEMA, Items, next_start, restart
 from restate.agents._conversation import compact as compact_turns
 from restate.agents._conversation import settle as settle_turn
@@ -344,6 +353,8 @@ class AgentObject(SessionObject):
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
         output: type[Any] | None = None,
         summarize: Summarize | None = None,
+        snapshots: bool = False,
+        compact_history: CompactHistory | None = None,
     ) -> A: ...
 
     @typing.overload
@@ -355,6 +366,8 @@ class AgentObject(SessionObject):
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
         output: type[Any] | None = None,
         summarize: Summarize | None = None,
+        snapshots: bool = False,
+        compact_history: CompactHistory | None = None,
     ) -> Callable[[A], A]: ...
 
     def chat(
@@ -366,6 +379,8 @@ class AgentObject(SessionObject):
         clear: Callable[[SessionContext], Awaitable[None]] | None = None,
         output: type[Any] | None = None,
         summarize: Summarize | None = None,
+        snapshots: bool = False,
+        compact_history: CompactHistory | None = None,
     ) -> Any:
         """Turn this object into an agent that answers each message with ``answer``.
 
@@ -399,6 +414,17 @@ class AgentObject(SessionObject):
                 them. It runs in an invocation of its own (the private
                 ``compact`` handler), after the answer. Without it, the
                 earliest turns are only left out.
+            snapshots: Whether the agent takes its history from snapshots
+                that its framework's own compaction stores
+                (``Turn.snapshot``): each turn gives the model the latest
+                snapshot, then every item stored after it, whole. The
+                agent's ``window`` and ``budget``, and ``summarize``, then do
+                not apply.
+            compact_history: With ``snapshots``, compacts the history between
+                turns, from the history to the compacted history (or
+                ``None``), which is stored as a snapshot. It runs in the
+                private ``compact`` handler, after a turn that asked for it
+                (``Conversation.compact_after``).
 
         Returns:
             ``answer`` itself.
@@ -408,11 +434,26 @@ class AgentObject(SessionObject):
             def decorate(
                 fn: Callable[[SessionContext, str], Awaitable[Any]],
             ) -> Callable[[SessionContext, str], Awaitable[Any]]:
-                return self.chat(fn, items=items, clear=clear, output=output, summarize=summarize)
+                return self.chat(
+                    fn,
+                    items=items,
+                    clear=clear,
+                    output=output,
+                    summarize=summarize,
+                    snapshots=snapshots,
+                    compact_history=compact_history,
+                )
 
             return decorate
+        if compact_history is not None and not snapshots:
+            raise ValueError("compact_history compacts snapshots: pass snapshots=True with it")
         self._settings = dataclasses.replace(
-            self._settings, background=self.background, clear=clear, summarize=summarize
+            self._settings,
+            background=self.background,
+            clear=clear,
+            summarize=summarize,
+            snapshots=snapshots,
+            compact_history=compact_history,
         )
         AGENT.on(self, self._settings)
         answering = answer
@@ -498,7 +539,7 @@ def _followed(agent: AgentObject, items: Items) -> None:
         return True
 
     async def compact(ctx: SessionContext, _: Nothing = None) -> bool:
-        """Summarize the turns before the window that outgrow the agent's budget. Return whether it did."""
+        """Compact the history: summarize the turns past the budget, or compact a snapshot. Return whether it did."""
         return await compact_turns(ctx, items)
 
     async def clear(ctx: ViewContext, _: Nothing = None) -> Stopped:

@@ -62,6 +62,7 @@ EVERY_FRAMEWORK = (
     "tests/agents_langgraph_graph.py",
 )
 OBJECT = ("tests/agents_object.py", "tests/agents_signals.py")
+SNAPSHOTS = ("tests/agents_snapshots.py", "tests/agents_pydantic_ai.py")
 
 # The tests that each fix commit added: a bug's own regression tests.
 OWN: dict[str, tuple[str, ...]] = {
@@ -463,6 +464,48 @@ MUTANTS = [
         """(c for c in state.calls if c["attempt"] != attempt.id and c["tool"] == tool and c["input"] == encoded),""",
         """(c for c in state.calls if False),""",
         EVERY_FRAMEWORK,
+    ),
+    Mutant(
+        "snapshot-rows-twice",
+        "the rows a snapshot stands for reach the model again after it: the compacted history grows back",
+        f"{AGENTS}/_conversation.py",
+        "for entry in turn.entries if entry.n > covers]",
+        "for entry in turn.entries]",
+        SNAPSHOTS,
+    ),
+    Mutant(
+        "snapshot-results-unknown",
+        "the tool results inside a snapshot are taken for new ones: the framework stores them again",
+        f"{AGENTS}/_conversation.py",
+        "        if snapshot is not None and call_id in snapshot.results:",
+        "        if False:",
+        SNAPSHOTS,
+    ),
+    Mutant(
+        "snapshot-loads-everything",
+        "a turn loads the whole conversation rather than from the latest snapshot",
+        f"{AGENTS}/_conversation.py",
+        "            first = max(first, snapshot.turn if snapshot.turn is not None else snapshot.covers + 1)",
+        "            pass",
+        SNAPSHOTS,
+    ),
+    Mutant(
+        "snapshot-hides-unanswered-turn",
+        "compacting between turns covers a turn left without an answer: the next message never closes it",
+        f"{AGENTS}/_conversation.py",
+        "    if conversation.running() is not None:\n"
+        "        # A turn left without an answer (its invocation gone): the next message closes it first.\n"
+        "        return False\n",
+        "",
+        SNAPSHOTS,
+    ),
+    Mutant(
+        "snapshot-compacted-every-turn",
+        "an agent with snapshots compacts after every turn, not only when its framework asks",
+        f"{AGENTS}/_conversation.py",
+        "due = settings.compact_history is not None and conversation.compaction_asked",
+        "due = settings.compact_history is not None",
+        SNAPSHOTS,
     ),
 ]
 

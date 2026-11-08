@@ -192,6 +192,10 @@ BUDGET = 32_000
 Summarize: typing.TypeAlias = Callable[[SessionContext, str], Awaitable[str]]
 """How an agent summarizes earlier turns: from the request (``SUMMARIZE`` and the turns, as text) to the summary."""
 
+CompactHistory: typing.TypeAlias = Callable[[SessionContext, list[typing.Any]], Awaitable[list[typing.Any] | None]]
+"""How an agent that takes its history from snapshots compacts it between turns: from the history (the framework's
+items) to the compacted history, which is stored as a snapshot, or ``None`` to leave it as it is."""
+
 SUMMARIZE = (
     "Summarize the conversation below, for the assistant who carries it on: keep the facts, names, numbers, "
     "decisions, the user's preferences, and what is still open. Answer with the summary only.\n\n"

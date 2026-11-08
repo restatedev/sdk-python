@@ -1,8 +1,8 @@
 # Conversation storage and the frameworks
 
-> **Status:** ready to implement, with every decision taken (D1 to D5, Q1 to
-> Q3). Implementation starts with phase 0, and lands in #296 (Q2). Nothing in
-> this folder is implemented yet. It was written on
+> **Status:** phases 0 and 1 are done (see [Phase 1: what was
+> built](#phase-1-what-was-built)); phase 2, the framework agents, is next.
+> Everything lands in #296 (Q2). It was written on
 > 2026-11-08 against PR restatedev/sdk-python#296 at commit `670445c`, and its line
 > numbers refer to that commit. It was revised the same day:
 > - D1 was clarified, and D4 and D5 were added;
@@ -320,6 +320,83 @@ Pydantic AI agent uses it for deferred tool calls.
   - the waits helper (C2c).
 - **The module docstrings** are each framework agent's job.
 
+## Phase 1: what was built
+
+Phase 0 and phase 1 were done on 2026-11-08.
+
+- **Phase 0.** The full suite passed at `670445c`: 490 passed and 1 skipped.
+  The 490 is the whole suite (`tests/*.py`), not only the agents' tests (382
+  of them, with the sessions tests). Without Docker, `examples_agents.py`
+  registers its program as `host.docker.internal`, so that name must point
+  to 127.0.0.1 (in `/etc/hosts`).
+- **C0.** The extras' floors are the releases listed in D4, and
+  `pydantic-ai-harness>=0.66.0` is in the `pydantic_ai` extra. langchain-core's
+  floor is 1.7.6, its latest. The full suite on the new releases, before any
+  other change: 477 passed, 13 failed, 1 skipped. All 13 are in framework
+  packages and belong to phase 2:
+  - **ADK (6)**, from ADK 2's workflow runner:
+    - `test_a_crash_in_a_tool_resumes_it_with_the_same_call_id_without_asking_the_model_again`
+    - `test_a_refused_message_fails_with_424_and_the_next_is_answered`
+    - `test_a_stopped_turn_ends_cancelled_and_the_next_message_starts_afresh`
+    - `test_a_run_of_more_model_calls_than_its_run_config_allows_fails_its_prompt`
+    - `test_a_workflows_first_step_stored_before_a_crash_is_not_its_answer`
+    - `test_the_state_a_killed_turn_set_holds_after_it_ended`
+
+    Types: `adk/_agent.py:384` and `:529` (an `App`'s root is a `BaseNode | None`).
+  - **LangGraph (3 or 4)**:
+    - `agents_langgraph_checkpointer.py::test_langgraph_keeps_an_interrupts_resume_values_on_the_task_that_raised_it`
+    - `agents_langgraph_create_agent.py::test_a_structured_response_is_the_answer_only_of_the_run_that_wrote_it`
+    - `agents_langgraph_create_agent.py::test_a_turn_answered_with_a_structured_response_gives_the_graph_nothing_more_next`
+    - `agents_langgraph.py::test_a_stopped_turn_ends_cancelled_and_the_next_message_starts_afresh`
+      failed once and passed once: check whether it is flaky.
+  - **Pydantic AI (3)**:
+    - `agents_output.py::test_pydantic_ai_asks_again_for_a_reply_in_prose_itself`
+    - `agents_output.py::test_a_reply_that_is_wrong_after_asking_again_fails_the_message_and_the_next_one_is_answered[pai_native]`
+    - `agents_pydantic_ai.py::test_a_model_whose_provider_cannot_run_is_refused_with_what_to_install`
+
+    Types: `RetryPromptPart` is deprecated in 2.66 (`pydantic_ai/_agent.py`, six
+    places), and pyright fails on it.
+
+  `restate.ext.pydantic` shares the `pydantic_ai` extra, and 2.66 broke its
+  types: `Agent.run` gained `conversation`, `run_id`, `cancellation_token`,
+  `timeout` and `workspace`, and `MCPToolset.tool_for_tool_def` takes `ctx`.
+  Its signatures were brought up to date (outside this plan's scope, but needed
+  for the bump); its tests pass.
+- **C1.** The two `DROP TABLE` statements are gone. No other schema had any
+  statement for databases from before.
+- **C2a, snapshots.** As planned, with these choices:
+  - **The schema:** `restate_agent_snapshots (id, covers, turn, items)`, where
+    `items` is a JSON array of the framework's dumped items (`Items.dump`).
+  - **The opt-in:** `chat(..., snapshots=True)`, kept in `AgentInfo.snapshots`.
+    With it, `window`, `budget` and `summarize` are ignored, not rejected:
+    an agent's options belong to its object, which a framework's `agent()`
+    builds.
+  - **Writing:** `Turn.snapshot(items)` in a run;
+    `Conversation.snapshot_between(items)` between turns.
+  - **Reading:** `Conversation.load(..., snapshots=True)`,
+    `Conversation.snapshot`, and `history()` and `knows_result` as planned.
+  - **Compacting off the answer's path:** a run calls
+    `conversation.compact_after()`. After the answer, the agent sends itself
+    `compact`, which calls `chat(..., compact_history=...)`
+    (`CompactHistory`: from the history to the compacted history, or `None`)
+    and stores the result as a snapshot between turns. `compact` leaves a turn
+    without an answer alone. `compact_history` without `snapshots` is
+    refused.
+  - **Drops:** `Turn.drop` refuses a reply that a snapshot covers. Only the
+    OpenAI agent drops replies, and it doesn't use snapshots.
+  - Exported from `restate.agents.internal`: `Snapshot`.
+- **C2b.** `restate_agent_turns.asked_at`, in Unix milliseconds, set by
+  `Conversation.ask`, and read into `Entry.asked_at`.
+- **C2c.** `wait_for(ctx, call_id, signal, input=None)` in
+  `restate.agents.internal`. `wait_for_signal` uses the same code.
+- **Tests:** `tests/agents_snapshots.py`, 15 tests. Five mutants in
+  `scripts/resurrect.py` (`snapshot-*`), all caught.
+- **Docs:** TURN-SEMANTICS.md has the schema, "History from snapshots", and
+  the waits helper.
+- **CI's jobs for the oldest versions** (D4): kept until phase 3. With the
+  floors at the latest releases they test what the main job tests, so phase
+  3 removes them.
+
 ## The core contract
 
 Phase 2's agents may rely on the following:
@@ -340,7 +417,8 @@ Phase 2's agents may rely on the following:
   A turn that doesn't set it inherits the previous turn's (`_conversation.py:571-583`
   and `_conversation.py:631`). ADK uses it, and Pydantic AI may (see
   [`pydantic-ai.md`](pydantic-ai.md)).
-- **Whatever C2 adds**, as `pydantic-ai.md` describes it.
+- **Whatever C2 adds**, as `pydantic-ai.md` describes it, and as
+  [Phase 1: what was built](#phase-1-what-was-built) records it.
 
 ## Phase 2: the framework agents
 

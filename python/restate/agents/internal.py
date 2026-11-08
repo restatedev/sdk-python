@@ -18,9 +18,13 @@ An integration needs, beyond the public API:
   or failed run closed). An integration gives its ``Items`` (what its
   messages are: ``Call`` and ``Result``) and its own run, which reads what
   the model gets from the conversation (``history``) and stores each step in
-  its turn (``conversation.turn``) as it goes.
+  its turn (``conversation.turn``) as it goes. An integration whose
+  framework compacts the history itself takes its history from snapshots
+  (``chat(..., snapshots=True)``, ``Turn.snapshot`` and ``Snapshot``).
 - ``stop_signal_of``, to stop a turn when it is cancelled or its attempt ends.
-- ``run_tool``, to run a ``restate.agents`` tool for a tool call.
+- ``run_tool``, to run a ``restate.agents`` tool for a tool call, and
+  ``wait_for``, to wait for a signal for a framework's own tool call (a
+  deferred one, say), as ``wait_for_signal`` does.
 - ``answer_with``, to answer with a Pydantic model (``output=``) rather than
   text, and ``asking``, the system prompt's ask for it when the framework has
   no native way.
@@ -52,10 +56,21 @@ from restate.agents._common import (
     refusal_of,
     stored_answer,
 )
-from restate.agents._conversation import Call, Conversation, Entry, Items, Parsed, Result, Status, Turn, answer_once
+from restate.agents._conversation import (
+    Call,
+    Conversation,
+    Entry,
+    Items,
+    Parsed,
+    Result,
+    Snapshot,
+    Status,
+    Turn,
+    answer_once,
+)
 from restate.agents._output import answer_with, asking
 from restate.agents._signals import Companion, companion_of, deliver, signals
-from restate.agents._tools import run_tool
+from restate.agents._tools import run_tool, wait_for
 from restate.agents._turn import (
     AttemptEnded,
     Stop,
@@ -84,6 +99,7 @@ __all__ = [
     "ModelError",
     "Parsed",
     "Result",
+    "Snapshot",
     "Status",
     "Stop",
     "ToolError",
@@ -109,4 +125,5 @@ __all__ = [
     "stored_answer",
     "tool_call_ended",
     "tool_call_started",
+    "wait_for",
 ]
