@@ -142,6 +142,7 @@ from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._tools import Tool, current_call, tools_in, wait_for
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
+from restate.agents.pydantic_ai._stores import TurnsHistorySource, calling
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 from restate.sessions.internal import definition_of
@@ -363,12 +364,15 @@ class _Restate(AbstractCapability[Any]):
     async def before_tool_execute(
         self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any
     ) -> Any:
+        # The stores of this package write once per tool call (``_stores.py``).
+        calling(call.tool_call_id)
         await tool_call_started(self.ctx)
         return args
 
     async def after_tool_execute(
         self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any, result: Any
     ) -> Any:
+        calling(None)
         await tool_call_ended(self.ctx)
         return result
 
@@ -402,6 +406,7 @@ class _Restate(AbstractCapability[Any]):
     async def on_tool_execute_error(
         self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any, error: Exception
     ) -> Any:
+        calling(None)
         stop = stop_signal_of(self.ctx)
         if stop is not None and stop.reason is not None:
             raise stop.reason from error
@@ -647,6 +652,20 @@ def _due(messages: list[ModelMessage], model: Model, context_window: int | None)
     """Return whether ``messages`` are near the default compaction's target for ``model`` (past ``BETWEEN``)."""
     window = context_window or resolve_context_window(model) or DEFAULT_CONTEXT_WINDOW
     return estimate_context_tokens(messages) > window * BETWEEN
+
+
+def history_source() -> TurnsHistorySource:
+    """Return the conversation's turns as a source for the harness's ``ConversationSearch``::
+
+        desk = Agent(model, capabilities=[ConversationSearch(pydantic_ai.history_source())])
+
+    Each turn is a run: its id is the turn's prompt id, its start the time
+    the turn was asked, and its messages the turn's as stored, the originals
+    of what a compaction summarized for the model. The runs are those of the
+    conversation (its id is ``<agent>/<key>``), so the default scope finds
+    them.
+    """
+    return TurnsHistorySource(ITEMS)
 
 
 def conversation_id_of(ctx: SessionContext) -> str:

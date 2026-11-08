@@ -61,6 +61,29 @@ except ImportError as error:
         "restate.agents.pydantic_ai needs Pydantic AI: install the pydantic_ai extra, pip install restate-sdk[pydantic_ai]"
     ) from error
 
-from restate.agents.pydantic_ai._agent import AnyModel, AnyTool, agent, prompt, toolset
+from restate.agents.pydantic_ai._agent import (
+    APPROVAL,
+    AnyModel,
+    AnyTool,
+    agent,
+    approval_of,
+    compaction,
+    history_source,
+    prompt,
+    toolset,
+)
+from restate.agents.pydantic_ai._stores import overflow_store, plan_store
 
-__all__ = ["AnyModel", "AnyTool", "agent", "prompt", "toolset"]
+__all__ = [
+    "APPROVAL",
+    "AnyModel",
+    "AnyTool",
+    "agent",
+    "approval_of",
+    "compaction",
+    "history_source",
+    "overflow_store",
+    "plan_store",
+    "prompt",
+    "toolset",
+]
