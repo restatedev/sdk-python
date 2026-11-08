@@ -61,6 +61,7 @@ flowchart LR
 | [The frameworks](frameworks.md) | per framework: what it expects, how we map onto it, and what we learned |
 | [What we learned](learnings.md) | the research (coding agents, frameworks), the decisions and why, the lessons, the bugs a review found, the open questions |
 | [Porting to sdk-sessions](porting.md) | where the TypeScript agents stand, what to port in which order, what must hold, and the tests that define it |
+| [Access patterns](access-patterns.md) | what a turn and a view read and write in Restate state, warm and cold, before and after the turns; the statements that cost most, and what to change |
 | [Testing](testing.md) | what the tests cover, the gaps, the mutants that bring past bugs back, and the strategy |
 | [Steps retention](steps-retention.md) | future work: deleting the steps no model reads any more |
 
