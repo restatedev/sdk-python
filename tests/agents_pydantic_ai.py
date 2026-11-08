@@ -951,3 +951,14 @@ async def test_a_memory_write_of_a_tool_call_that_runs_again_is_applied_once(har
     assert fact in crashed_writes
     recalled = (await remember(harness, f"{user}.b", "recall")).json()
     assert recalled.count(fact) == 1, recalled
+
+
+def test_a_tool_call_asked_for_again_is_read_as_an_error():
+    """Pydantic AI 2.66 answers such a call with its own ToolReturnPart (outcome "retried"), no RetryPromptPart."""
+    from restate.agents.pydantic_ai._agent import ITEMS  # pylint: disable=import-outside-toplevel
+
+    retried = ToolReturnPart("lookup", "not like that", tool_call_id="c1", outcome="retried")
+    returned = ToolReturnPart("lookup", "found", tool_call_id="c2")
+    [again, found] = ITEMS.read(ModelRequest(parts=[retried, returned])).results
+    assert (again.id, again.output, again.failed) == ("c1", '{"error":"not like that"}', True)
+    assert (found.id, found.output, found.failed) == ("c2", "found", False)
