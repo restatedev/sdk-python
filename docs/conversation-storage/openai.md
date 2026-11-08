@@ -1,7 +1,8 @@
 # OpenAI Agents SDK
 
-> **Status:** done in phase 2, on branch `phase2-openai` (O1 to O4): the summary
-> is one user message, and no guard for older SDKs is left. This plan is for one agent. Read
+> **Status:** done, and merged into #296 on 2026-11-08: O1 to O4. The summary is
+> one user message, no guard for older SDKs is left, and a hand-built `Handoff`
+> no longer crashes a run. This plan is for one agent. Read
 > [`README.md`](README.md) first: the core contract, the rules for framework
 > agents, and how to run the tests.
 

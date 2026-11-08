@@ -349,6 +349,11 @@ sequenceDiagram
   message starts afresh: the cancelled prompt is over.
 - A cancellation that comes once the turn answered changes nothing: the
   answer stands.
+- A tool cut short by the stop raises the stop's reason, so the model never
+  carries on with it. If the framework cancelled the tool's own task, the
+  tool ends cancelled instead: a framework that cancels a task and waits for
+  it (ADK 2's runner) expects nothing else. The turn ends cancelled either
+  way.
 - `clear` stops the turn the same way, then forgets the conversation (the
   key's database, the companion's waits and kept signals). A message sent
   before `clear` is answered first, then forgotten too. Message ids and
@@ -616,19 +621,66 @@ sequenceDiagram
 - **What is summarized:** the turns before the next window, but the latest
   that half the budget holds, which stay as they are, with the summary
   before. Turns stay stored, and `messages` shows them as before.
-- **Who summarizes:** the built-in agents of each framework, with their own
-  model. An agent you configure yourself only trims the earliest turns.
+- **Who summarizes:** the built-in agents of OpenAI, ADK and LangGraph, with
+  their own model. An agent you configure yourself only trims the earliest
+  turns. A LangGraph graph agent never summarizes: its model reads the
+  graph's state.
+- **The summary's form** is the framework's (`Items.summary`). OpenAI's is one
+  user message, `SUMMARY` and the text, as Codex sends its summary. ADK and
+  LangGraph keep the default: a user message, then the assistant's
+  "Understood.".
 - **A summary that fails** is logged, and tried again after the next turn.
   The turn's answer is already returned.
 - Within a turn, the frameworks' own compaction still applies: OpenAI's
-  server-side compaction, Pydantic AI's provider compaction, LangGraph's
-  `trim_messages`.
+  server-side compaction (always on for the built-in agent on a Responses
+  model), and LangGraph's `trim_messages`. A user's ADK `App` events
+  compaction is turned off, with a warning: ADK re-sorts a compacted session
+  by time, which put our replies and summaries out of order.
 - **An agent with snapshots** doesn't summarize this way. Its framework
-  compacts during a run and stores a snapshot. To compact off the answer's
+  compacts during a run and stores a snapshot. That is the Pydantic AI agent:
+  Pydantic AI Harness's `TieredCompaction` compacts at 80% of the model's
+  window, and the rewritten history is stored before the request goes out
+  (without system prompts, and without the input usage that measured the
+  history before it). An `Agent` of your own with no compaction capability
+  gets the same default. To compact off the answer's
   path, a run calls `compact_after()`, and `compact` hands the history to
   the agent's `compact_history`, then stores what it returns as a snapshot
   between turns. `compact` leaves a turn without an answer alone: the next
   message closes it first.
+
+## Per framework
+
+What each integration does on top of the turn model:
+
+- **OpenAI Agents.** The current agent is carried on the turn row, across
+  handoffs whose target is known ahead of time: an `Agent`, or `handoff()`.
+  A `Handoff` built by hand works within a turn, but names no agent until it
+  is invoked, so the next turn goes back to the agent you gave. A
+  `call_model_input_filter` such as the SDK's `ToolOutputTrimmer` runs after
+  the filter that stores tool outputs: it trims what the model sees, never
+  what is stored. `OpenAIResponsesCompactionSession` is unsupported: it
+  rewrites stored items.
+- **Pydantic AI.** History from snapshots (above). Every run has the
+  conversation id `<agent>/<key>`; its run id is the attempt's. Usage limits
+  are per turn. A deferred tool call (an approval, or a result from outside,
+  the harness's `AskUser` included) is a durable wait in the companion, on
+  the signal `approval` or on the tool's name (`wait_for`). The harness's
+  plan, spill and history stores can keep their data in the key's database,
+  and its memory in a session object of its own.
+- **ADK.** ADK 2 reports an agent's exception as an error event before it
+  raises it: the run lets the exception decide (retried, refused, or the
+  limit of model calls), and only an error event that ends the run fails the
+  turn for good. A stopped turn ends as ADK 2 needs: the agent's cancelled
+  task ends cancelled (`Tool.run`). An `App`'s root may be a `Workflow`.
+- **LangGraph.** The built-in agent reads `history()`. A graph agent's model
+  reads the graph's state, never `history()`; its conversation loads the
+  previous turn whole only to carry on from what closed it. Trimming the
+  state is the graph's job (`SummarizationMiddleware`, or `RemoveMessage`):
+  the turn's prune then deletes what held the removed messages, and the
+  conversation, as a log, keeps them. `aprune("keep_latest")` keeps the latest
+  checkpoint of each namespace and, for a `DeltaChannel`, its ancestors back
+  to the channel's snapshot. An interrupt's wait id is `<invocation
+  id>:interrupt:<LangGraph's interrupt id>`.
 
 ## Several prompts in one handler
 

@@ -1,8 +1,9 @@
 # Conversation storage and the frameworks
 
-> **Status:** phases 0 and 1 are done (see [Phase 1: what was
-> built](#phase-1-what-was-built)); phase 2, the framework agents, is next.
-> Everything lands in #296 (Q2). It was written on
+> **Status:** done. Phases 0 to 3 were carried out on 2026-11-08 and landed in
+> #296 (Q2); see [Phase 1: what was built](#phase-1-what-was-built) and
+> [Phase 3: what was merged](#phase-3-what-was-merged). Steps retention stays
+> future work. The plan was written on
 > 2026-11-08 against PR restatedev/sdk-python#296 at commit `670445c`, and its line
 > numbers refer to that commit. It was revised the same day:
 > - D1 was clarified, and D4 and D5 were added;
@@ -486,6 +487,78 @@ Phase 2's agents may rely on the following:
    - the "Status" lines in this folder.
 5. **Publish.** Push the commits to the branch in one push, and update the PR
    description of #296 (Q2).
+
+## Phase 3: what was merged
+
+The four framework branches merged without conflicts, in the planned order.
+Each framework file's "Status" line says what it did; the agents' reports
+said this beyond their files:
+
+- **OpenAI:** a `Handoff` built by hand (not with `handoff()`) failed every run
+  once its guard was gone. It's fixed, but such a handoff isn't followed to
+  the next turn, since it names no agent until it runs.
+- **ADK:** the six failures had three causes, all in the ADK package: ADK 2
+  reports an exception as an event before raising it; a stopped turn hung
+  (below); and an `App`'s root may be a `Workflow`. An in-attempt retry
+  through ADK's `retry_config` also works now.
+- **LangGraph:** the three failures were tests that relied on older releases.
+  Beyond the plan, the prune kept too little for a `DeltaChannel`, whose
+  value a graph lost after its first turn. The flaky stopped-turn test never
+  failed again (about 50 runs).
+- **Pydantic AI:** everything in its file, with these deviations:
+  - responses in a snapshot lose their input usage, or the harness would
+    compact again from the stale count;
+  - compacting off the answer's path triggers at 70% of the window, since
+    `compact_now` at an 80% target does nothing below 80%;
+  - `RetryFeedbackPart` requests are stored;
+  - the stores are opt-in factories (`plan_store()`, `overflow_store()`,
+    `history_source()`, `memory()`).
+
+**Core changes in phase 3:**
+
+- **A tool's cancelled task ends cancelled.** ADK 2's runner cancels the
+  agent's task and waits for it, but `Tool.run` turned the cancellation into
+  the stop's reason, and the runner hung. `Tool.run` now lets a cancellation
+  of its own task through when the turn stopped. ADK's workaround went with
+  it, and the ADK stop test fails without the fix.
+- **CI's jobs for the oldest versions are removed** (D4).
+- **`scripts/resurrect.py`** follows the renamed and removed code, and gains
+  mutants for the Pydantic AI snapshots and approvals, and the tool
+  cancellation.
+
+**Checks:**
+
+- The full suite: 540 passed, none failed or skipped.
+- ruff, pyright and mypy, per directory: clean.
+- `scripts/resurrect.py`: see TESTING-AGENTS.md for the counts.
+- **Not done: the framework-against-framework script.** The `messages` full
+  view of each framework is tested in its own file ("Answer, and the
+  `messages` view after it", in TESTING-AGENTS.md), but no single script
+  compares the four.
+
+**Decisions taken in phase 3:**
+
+- **The summary's form stays per framework.** OpenAI's is one user message,
+  checked against both OpenAI APIs. ADK and LangGraph keep the default, a
+  user message then "Understood.": the tests run on scripted models, which
+  can't tell what Gemini or other chat models accept.
+
+**Open questions from the agents**, for later:
+
+- LangGraph: the latest checkpoint of each subgraph namespace stays forever,
+  one per turn that ran a subgraph. Delete them at the turn's end?
+- LangGraph: a LangChain tool that returns a `Command`, under the built-in
+  agent, would be stored as an item.
+- ADK: a plugin's `before_run_callback` can still turn events compaction on
+  for an invocation.
+- Pydantic AI: capabilities at the agent's layer run before `_Restate` stores
+  new tool results, so one that edits the newest results could change them
+  first. And tools that ran beside a deferred call are stored only at the
+  next request, so a crash during a long wait runs them again (with the same
+  call ids).
+- Pydantic AI, optional core changes: an `answer_once(..., snapshots=...)`
+  override for `prompt()` in an object that isn't an agent, and a public
+  accessor for the running handler's context.
 
 ## Running the tests
 

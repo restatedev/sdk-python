@@ -1,9 +1,8 @@
 # Pydantic AI, on Pydantic AI Harness
 
-> **Status:** done in phase 2, on branch `phase2-pydantic-ai` (from `88b3614`):
-> P0 to P9, each with its tests. Deviations and core notes are in the agent's
-> report. Read [`README.md`](README.md) first: the core contract, the rules for
-> framework agents, and how to run the tests.
+> **Status:** done, and merged into #296 on 2026-11-08: P0 to P9. History from
+> snapshots with the harness's `TieredCompaction`, durable deferred tool calls,
+> the plan, spill, history and memory stores, and a stable conversation id.
 
 ## Scope
 
