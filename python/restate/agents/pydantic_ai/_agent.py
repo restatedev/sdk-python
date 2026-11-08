@@ -33,32 +33,51 @@ stored:
   retries that ran out (a tool's, or the answer's), a
   content filter, and a setup error (``UserError``). A response that a model
   could not read (a body that is not JSON, say) is retried.
-- A run that stops for tool calls it cannot make itself (Pydantic AI's
-  deferred tools: ``requires_approval``, ``CallDeferred``) fails its turn
-  rather than answer with them, as nothing gives their approvals or results:
-  pause for a person with ``restate.agents``' ``wait_for_signal`` tool
-  instead. The turn closes the calls.
+- A tool call that Pydantic AI defers (``requires_approval``,
+  ``ApprovalRequired``, ``CallDeferred``, the harness's ``AskUser`` with no
+  answerer) waits for a signal, durably (``wait_for``): ``approval`` for an
+  approval, else a signal named after the tool, whose value is the call's
+  result. The agent's ``pending`` view lists the waits and ``signal``
+  resolves them; no process is held meanwhile, a retried attempt joins the
+  same wait, and ``stop`` forgets it. An approval runs the tool only if the
+  value says so (``approval_of``); any other text denies it, as the reason
+  the model gets. A capability of the agent may resolve the calls first
+  (``ApprovalReviewer``, say).
 - An ``Agent`` of your own with a ``deps_type`` gets its dependencies from
   ``deps``: a value, or for ``agent`` also a function of the handler's
   context.
-- The model sees the earlier turns as their messages and answers, and the
-  latest turns whole (the agent's ``window``), as many as its ``budget``
-  holds; the built-in agent has its model summarize the earliest once they
-  outgrow it, after a turn's answer (``_conversation.py``).
-- The built-in agent gets Pydantic AI's own capability for a conversation
-  that lives long: the compaction of its model's provider, where Pydantic AI
-  has one (``AnthropicCompaction``, and ``OpenAICompaction`` for OpenAI's
-  Responses API, which ``openai/...`` models use). It summarizes the
-  history as it nears the model's context window, which a long conversation
-  would otherwise outgrow, failing each turn. A model that its provider does
-  not compact (Anthropic's before the 4.6 models, say) refuses such requests:
-  run it as an ``Agent`` of your own, which runs as you configured it. Give
-  that the capabilities it needs, such as
-  ``Agent(model, capabilities=[AnthropicCompaction()])``.
+- The model gets the conversation since the latest compaction, whole, rather
+  than the turn projection of the other frameworks (``window`` and
+  ``budget`` do not apply): the harness's compaction rewrites the history
+  as it nears the model's context window, and the rewritten history is
+  stored as a snapshot of the turn before the request goes out (``Turn.snapshot``),
+  without system prompts. The next turn, or a retried attempt, starts from
+  it, so the history only grows between compactions and the provider's
+  prompt cache holds. The views show the original steps, never a snapshot.
+  (``prompt`` in a session object that is no Pydantic AI agent gets the turn
+  projection: its runs compact, but store no snapshot.)
+- The compaction is the harness's recommended ``TieredCompaction``
+  (``compaction``: clamp oversized parts, clear old tool results, then
+  summarize; within 80% of the window), for the built-in agent and for an
+  ``Agent`` of your own that has no compaction capability of its own; one
+  that has runs as configured. Near the target (70%), a turn has the
+  history compacted after its answer (the ``compact`` handler, with
+  ``compact_now``), so the next turn starts compacted. A model whose window
+  neither its profile nor ``genai-prices`` knows is taken as 200,000
+  tokens: pass ``context_window``.
 - The conversation stores no system prompt: Pydantic AI's
   ``ReinjectSystemPrompt`` gives each run the system prompt of an ``Agent``
   of your own (``system_prompt``), as it is now. (``instructions`` apply to
   every request anyway.)
+- Every run of a key has the conversation id ``<agent>/<key>`` (a run's own
+  id is the attempt's), which the harness's ``ConversationSearch`` and
+  ``WarnOnCacheBusts`` go by.
+- The stores of the harness's capabilities can be the key's database
+  (``_stores.py``): ``plan_store`` for ``Planning``, ``overflow_store`` for
+  ``ToolOutputLimits``, ``history_source`` for ``ConversationSearch``. A
+  tool call's writes are done once, however often it runs; ``clear``
+  empties them.
+- Usage limits (``usage_limits``) are each run's, so each turn's.
 - Each message is answered once per invocation, by the shared conversation of
   ``restate.agents`` (``_conversation.py``), which also closes a stopped,
   refused or failed run.
@@ -431,8 +450,8 @@ def _model(model: str | Model | None) -> Model:
         provider, model_id = provider_of(named)
         return infer_model(f"{provider}:{model_id}" if provider else named)
     except Exception as error:
-        # Making the model makes no request: whatever fails is how it is set up, such as a provider's SDK whose
-        # API key is not set (raising its own error before Pydantic AI 2.15 checks it first).
+        # Making the model makes no request: whatever fails is how it is set up, such as a missing API key
+        # (Pydantic AI's UserError), or a provider's SDK whose client cannot be made (its own error).
         raise ModelError(f'the model "{named}": {error}') from error
 
 
@@ -948,8 +967,8 @@ def agent(
     conversation is kept in the key's database, a step at a time. Add
     handlers of your own with ``@assistant.handler``.
 
-    The built-in agent takes the common options, and gets Pydantic AI's
-    compaction for a conversation that lives long::
+    The built-in agent takes the common options, and gets the harness's
+    compaction (``compaction``) for a conversation that lives long::
 
         assistant = pydantic_ai.agent("assistant", system="Answer briefly.", tools=[get_weather])
 
@@ -960,7 +979,8 @@ def agent(
 
     For anything more, pass an ``Agent`` of your own, configured as Pydantic
     AI does: its model, instructions or system prompt, tools (``toolset`` for
-    this package's), capabilities. It runs as you configured it::
+    this package's), capabilities. It runs as you configured it, with the
+    default compaction if it has none of its own::
 
         desk = Agent(model, system_prompt="...", toolsets=[pydantic_ai.toolset([call(refund)])])
         assistant = pydantic_ai.agent("assistant", agent=desk, deps=lambda ctx: Customer(ctx.key))

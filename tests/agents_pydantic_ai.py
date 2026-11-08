@@ -499,8 +499,8 @@ def test_a_model_whose_provider_cannot_run_is_refused_with_what_to_install(monke
 
 
 def test_a_model_that_cannot_be_made_is_refused_whatever_its_error(monkeypatch: pytest.MonkeyPatch):
-    """Making a model makes no request: before Pydantic AI 2.15, a provider's SDK raised its own error for a missing
-    key, which is refused as any other."""
+    """Making a model makes no request: a provider's SDK whose client cannot be made raises its own error, which is
+    refused as Pydantic AI's own (``UserError``) is."""
     from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
 
     class OpenAIError(Exception):
@@ -772,7 +772,8 @@ async def test_an_error_of_the_agents_own_code_is_retried_whatever_its_name(harn
 
 
 def test_the_openai_sdks_error_for_a_missing_key_is_a_refusal(monkeypatch: pytest.MonkeyPatch):
-    """As the SDK words it now: a provider's SDK may raise it, before Pydantic AI 2.15 checks the key itself."""
+    """As the SDK words it now: an OpenAI client made outside Pydantic AI's check of the key (in an Agent of your
+    own, say) raises it."""
     openai = pytest.importorskip("openai")
     from restate.agents.internal import refusal  # pylint: disable=import-outside-toplevel
 
