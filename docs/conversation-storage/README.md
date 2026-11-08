@@ -210,18 +210,17 @@ What this tells us:
   the capability, and `restate.agents` supplies what the capability needs
   (storage, durability). See [`pydantic-ai.md`](pydantic-ai.md).
 
-**Open.** These should be answered before phase 1; if one isn't, its
-recommendation applies.
+**Answered** (2026-11-08):
 
-| | Question | Recommendation |
+| | Question | Answer |
 | --- | --- | --- |
-| Q1 | Pydantic AI's usage limits: per turn (today) or per conversation (what Pydantic AI does when it carries a `Conversation`)? | Per turn. See [`pydantic-ai.md`](pydantic-ai.md). |
-| Q2 | Land this in #296, or in a follow-up PR on top of it? | Your call. #296 is already large, and approved by the review bot. |
-| Q3 | Your own Pydantic AI `Agent` with no compaction capability: give it the harness's default compaction, or run it as configured, with a history that grows without bound? | Give it the default. See [`pydantic-ai.md`](pydantic-ai.md). |
+| Q1 | Pydantic AI's usage limits: per turn (today) or per conversation (what Pydantic AI does when it carries a `Conversation`)? | **Per turn.** See [`pydantic-ai.md`](pydantic-ai.md). |
+| Q2 | Land this in #296, or in a follow-up PR on top of it? | **In #296.** |
+| Q3 | Your own Pydantic AI `Agent` with no compaction capability: give it the harness's default compaction, or run it as configured, with a history that grows without bound? | **The default compaction.** See [`pydantic-ai.md`](pydantic-ai.md). |
 
 ## Phase 0: preparation (coordinator)
 
-1. Confirm Q1 to Q3.
+1. The decisions are taken (Q1 to Q3 above).
 2. Make the server tests runnable. They use Docker: `restate.harness` starts
    `ghcr.io/restatedev/restate:1.8.1` (`tests/support.py:7`). Without Docker:
    - install restate-server 1.8.1 from npm (`@restatedev/restate-server`);
@@ -381,7 +380,7 @@ Phase 2's agents may rely on the following:
 > Read `docs/conversation-storage/README.md` first: the core contract, the rules
 > for framework agents, and how to run the tests. For server tests, use the
 > plugin in `<plugin dir>` with `RESTATE_SERVER_BIN=<binary>`. Phase 1 is at
-> `<commit>`. Do work items `<list>`; the decisions taken are `<Q1–Q3 answers>`.
+> `<commit>`. Do work items `<list>`; the decisions are in the README (D1 to D5, Q1 to Q3).
 > Report as the rules say.
 
 ## Phase 3: connecting the dots (coordinator)
@@ -406,7 +405,7 @@ Phase 2's agents may rely on the following:
      adds behaviour to the contract;
    - the "Status" lines in this folder.
 5. **Publish.** Push the commits to the branch in one push, and update the PR
-   description, or open a new PR (see Q2).
+   description of #296 (Q2).
 
 ## Running the tests
 

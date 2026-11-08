@@ -286,7 +286,7 @@ sequenceDiagram
 
 - **The default.** The built-in agent gets `TieredCompaction` as above, without
   `DeduplicateFileReads`, since it has no file tools.
-- **An `Agent` of your own** (Q3): if it has no compaction capability, it gets
+- **An `Agent` of your own** (Q3, decided): if it has no compaction capability, it gets
   the same default, so its history stays bounded. If it has one, it runs as
   configured.
 - **A `context_window` option** on the Pydantic AI `agent()` and `prompt()`,
@@ -397,7 +397,7 @@ sequenceDiagram
   - A `Spend` store, which would give a budget per conversation (Q1). Code mode's
     REPL store, and media.
 
-### Usage limits (Q1)
+### Usage limits (Q1, decided: per turn)
 
 Keep `usage_limits` per turn. The harness's `Spend` capability, with a window per
 conversation, is the way to budgets per conversation, later.
