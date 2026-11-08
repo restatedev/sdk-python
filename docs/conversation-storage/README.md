@@ -1,6 +1,8 @@
 # Conversation storage and the frameworks
 
-> **Status:** a plan. Nothing in this folder is implemented yet. It was written on
+> **Status:** ready to implement, with every decision taken (D1 to D5, Q1 to
+> Q3). Implementation starts with phase 0, and lands in #296 (Q2). Nothing in
+> this folder is implemented yet. It was written on
 > 2026-11-08 against PR restatedev/sdk-python#296 at commit `670445c`, and its line
 > numbers refer to that commit. It was revised the same day:
 > - D1 was clarified, and D4 and D5 were added;
