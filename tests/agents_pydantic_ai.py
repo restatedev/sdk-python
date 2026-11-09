@@ -835,7 +835,7 @@ class StopBeforeTheNextRequest(AbstractCapability[Any]):
 
     async def before_model_request(self, ctx: RunContext[Any], request_context: Any) -> Any:
         if any(isinstance(p, ToolReturnPart) for m in ctx.messages if isinstance(m, ModelRequest) for p in m.parts):
-            raise restate.TerminalError("stopped", status_code=409)
+            raise restate.TerminalError("cancelled", status_code=409)
         return request_context
 
 
@@ -975,6 +975,8 @@ def test_an_approvals_signal_approves_only_what_says_so():
         assert approval_of(approving) == ToolApproved()
     assert approval_of({"approved": True, "args": {"city": "Oslo"}}) == ToolApproved(override_args={"city": "Oslo"})
     assert approval_of(False) == ToolDenied()
+    for denying in ("no", "Denied", " rejected ", ""):  # no reason of their own: the model is told it was denied
+        assert approval_of(denying) == ToolDenied()
     assert approval_of("not today") == ToolDenied("not today")
     assert approval_of({"approved": False, "reason": "too much"}) == ToolDenied("too much")
     for anything in (None, 1, ["yes"], {"approved": "yes"}):

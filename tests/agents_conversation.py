@@ -174,15 +174,35 @@ async def test_a_failed_run_is_closed_with_its_error_and_the_next_prompt_starts_
     ]
 
 
+async def test_a_409_that_is_no_cancellation_fails_the_turn_rather_than_cancelling_it():
+    """A call that fails with 409 for another reason (a workflow run a second time) fails the turn with its error."""
+    seen: list[list[Item]] = []
+
+    async def run(conversation: Conversation) -> str:
+        seen.append([entry.item for entry in conversation.entries])
+        if len(seen) == 1:
+            raise restate.TerminalError("the workflow method was already invoked", status_code=409)
+        return "fine"
+
+    ask = asking(run)
+    with pytest.raises(restate.TerminalError, match="already invoked"):
+        await ask("first")
+    assert await ask("second") == "fine"
+    assert seen[1][-2:] == [
+        {"role": "assistant", "text": "Error: the workflow method was already invoked"},
+        {"role": "user", "text": "second"},
+    ]
+
+
 async def test_a_stopped_run_stores_nothing_more():
     kept: list[Conversation] = []
 
     async def run(conversation: Conversation) -> str:
         kept.append(conversation)
-        raise restate.TerminalError("stopped", status_code=409)
+        raise restate.TerminalError("cancelled", status_code=409)
 
     ask = asking(run)
-    with pytest.raises(restate.TerminalError, match="stopped"):
+    with pytest.raises(restate.TerminalError, match="cancelled"):
         await ask("first")
     [conversation] = kept
     turn = conversation.turn
