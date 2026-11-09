@@ -52,17 +52,35 @@ def _clipped(text: str, limit: int = 160) -> str:
 
 
 class Terminal:
-    """What the terminal showed of the conversation: each part of a message once, and a tool's output once."""
+    """What the terminal showed of the conversation: each part of a message once, and a tool's output once.
+
+    The user's messages are shown too, where they are in the conversation (a
+    message steered to a turn, say, among its steps), but for those typed here
+    as messages to ``chat``: the terminal shows them already.
+    """
 
     def __init__(self, agent: str) -> None:
         self.agent = agent
         self.shown: set[str] = set()
+        self.sent: list[str] = []
+        """The messages typed here and sent to ``chat`` that the conversation has not shown yet."""
+        self.typed: set[int] = set()
+        """The ids of the user's messages that were typed here, and so not shown."""
         self.history = True
-        """The first change is the conversation so far, your messages too; after it, you typed them."""
+        """The first change is the conversation so far: all of it is shown, the messages typed before too."""
+
+    def sending(self, text: str) -> None:
+        """Note a message typed here and sent to ``chat``: when the conversation has it, it isn't shown again."""
+        self.sent.append(text)
+
+    def unsent(self, text: str) -> None:
+        """Forget a message ``sending`` noted, whose send failed."""
+        with contextlib.suppress(ValueError):
+            self.sent.remove(text)
 
     def show(self, change: Any) -> None:
         for message in change.messages:
-            if message["role"] == "user" and not self.history:
+            if message["role"] == "user" and not self.history and self._typed(message):
                 continue
             for i, part in enumerate(message["parts"]):
                 self._part(f"{message['id']}.{i}", message["role"], part)
@@ -70,6 +88,17 @@ class Terminal:
             hint = f"/signal {wait['name']} <value>"
             self._once(wait["id"], f"⏸  {wait['name']}: {json.dumps(wait.get('input'))}  ({hint})")
         self.history = False
+
+    def _typed(self, message: Any) -> bool:
+        """Whether the user's ``message`` was typed here: the first sent message of its text, and that one after."""
+        if message["id"] in self.typed:
+            return True
+        text = "".join(part["text"] for part in message["parts"] if part["type"] == "text")
+        if text not in self.sent:
+            return False
+        self.sent.remove(text)
+        self.typed.add(message["id"])
+        return True
 
     def _part(self, key: str, role: str, part: Part) -> None:
         if part["type"] == "text":
@@ -96,7 +125,7 @@ def _value(words: list[str]) -> object:
         return text
 
 
-async def _say(agent: Any, line: str) -> None:
+async def _say(agent: Any, terminal: Terminal, line: str) -> None:
     """Run a command, or send a message to the agent."""
     command, *words = line.split()
     if command == "/steer" and words:
@@ -119,7 +148,12 @@ async def _say(agent: Any, line: str) -> None:
     elif command.startswith("/"):
         print(USAGE, end="", flush=True)
     else:
-        await agent.send(line)
+        terminal.sending(line)
+        try:
+            await agent.send(line)
+        except BaseException:
+            terminal.unsent(line)
+            raise
 
 
 async def chat(target: str, ingress: str | None) -> None:
@@ -147,7 +181,7 @@ async def chat(target: str, ingress: str | None) -> None:
                 if not line.strip():
                     continue
                 try:
-                    await _say(agent, line.strip())
+                    await _say(agent, terminal, line.strip())
                 except Exception as error:  # Restate's answer, shown rather than ending the chat
                     print(f"Restate answered {error}", flush=True)
         finally:
