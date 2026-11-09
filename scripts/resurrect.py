@@ -762,6 +762,14 @@ MUTANTS = [
         ("tests/agents_langgraph.py",),
     ),
     Mutant(
+        "openai-nested-run-filtered",
+        "an agent used as a tool gets the turn's steered messages, and the turn stores its tool outputs, with no call",
+        f"{AGENTS}/openai/_agent.py",
+        "        if self.running:\n            return await self._filtered(data)\n",
+        "",
+        OPENAI,
+    ),
+    Mutant(
         "steer-summary-hides-steers",
         "the summary view leaves out the messages steered to a turn",
         f"{AGENTS}/_messages.py",

@@ -80,7 +80,9 @@ start, and the run resumes from the last step stored:
   (the SDK's run context) and the ``run_config`` you give: its
   ``call_model_input_filter`` runs after this package's, which stores the
   tools' outputs: the SDK's ``ToolOutputTrimmer`` there trims old tool
-  outputs in the model's input, not in the conversation.
+  outputs in the model's input, not in the conversation. An agent used as a
+  tool (``Agent.as_tool``) runs with the same ``run_config``: its requests
+  get your filter only, and the turn keeps the call's output, not its run.
 - The model sees the earlier turns as their messages and answers, and the
   latest turns whole (the agent's ``window``), as many as its ``budget``
   holds; the built-in agent has its model summarize the earliest once they
@@ -306,6 +308,8 @@ class _Hooks(RunHooks[Any]):
         can be its provider refusing."""
         self.steers = _Steers()
         """The messages steered to the turn that the run took: each later request gets them again."""
+        self.running = 0
+        """How many of the run's tool calls are running: a request meanwhile is a nested run's."""
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
         """The run's ``call_model_input_filter``: store the tools' outputs before the next request, and take the
@@ -315,7 +319,13 @@ class _Hooks(RunHooks[Any]):
         steered message: so each message the run took goes back in each later request, in its place.
 
         The run's own filter then changes what the model sees, not what is stored.
+
+        An agent used as a tool runs nested in the run's tool call, with the run's ``run_config`` (the SDK passes it
+        on): its requests come here too, while the call runs. They get the run's own filter only: the turn stores
+        none of their items (the call's output is what the turn keeps), and they get none of its messages.
         """
+        if self.running:
+            return await self._filtered(data)
         items = data.model_data.input
         if outputs := self.conversation.new_results(items):
             await self.conversation.turn.append(*outputs)
@@ -327,14 +337,18 @@ class _Hooks(RunHooks[Any]):
         if after is not None and (taken := await take_steers(self.ctx, self.conversation)):
             self.steers.took(taken, items, after)
         data.model_data.input = self.steers.placed(items)
-        filtered = data.model_data
-        if self.then is not None:
-            given = self.then(data)
-            filtered = await given if inspect.isawaitable(given) else given
+        filtered = await self._filtered(data)
         # The SDK goes on to make the model and its client (which needs the API key: a refusal if it is missing), and
         # to request it. (The instructions have run already.)
         self.requesting = True
         return filtered
+
+    async def _filtered(self, data: CallModelData[Any]) -> ModelInputData:
+        """Return what the run's own filter makes of ``data``, if it has one."""
+        if self.then is None:
+            return data.model_data
+        given = self.then(data)
+        return await given if inspect.isawaitable(given) else given
 
     async def on_llm_end(self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse) -> None:
         self.requesting = False
@@ -342,6 +356,7 @@ class _Hooks(RunHooks[Any]):
         await self.conversation.turn.append_reply(*reply, agent=agent.name)
 
     async def on_tool_start(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool) -> None:
+        self.running += 1
         await tool_call_started(self.ctx)
 
     async def on_handoff(self, context: RunContextWrapper[Any], from_agent: Agent[Any], to_agent: Agent[Any]) -> None:
@@ -349,6 +364,7 @@ class _Hooks(RunHooks[Any]):
         self.conversation.turn.carry(agent=to_agent.name)
 
     async def on_tool_end(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool, result: Any) -> None:
+        self.running -= 1
         await tool_call_ended(self.ctx)
 
 

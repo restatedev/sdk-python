@@ -1512,6 +1512,48 @@ async def test_a_steered_message_keeps_its_place_after_a_handoff_whose_input_fil
     assert await chat.summary() == [("user", "handoff x"), ("user", "use Celsius"), ("assistant", "refunded")]
 
 
+async def test_an_agent_used_as_a_tool_gets_none_of_the_turns_messages_and_stores_none_of_its_items():
+    def nested_script(system: str | None, items: list[Item]) -> list[Output]:
+        outputs = {item["call_id"] for item in items if item.get("type") == "function_call_output"}
+        if system == "You look things up.":
+            return [said("sunny") if "call-w" in outputs else calls("call-w", "forecast", '{"city": "Rome"}')]
+        if "call-l" not in outputs:
+            return [calls("call-l", "lookup", '{"city": "Rome"}')]
+        if "call-s" not in outputs:
+            return [calls("call-s", "ask_helper", '{"input": "Rome?"}')]
+        return [said("done")]
+
+    @function_tool
+    def forecast(city: str) -> str:
+        """The forecast for a city."""
+        return f"sunny in {city}"
+
+    companion = Companion()
+    scripted = Scripted(nested_script)
+    helper = Agent(name="helper", instructions="You look things up.", model=scripted, tools=[forecast])
+    tools = [*openai.tools([steered_while(companion, "use Celsius")]), helper.as_tool("ask_helper", "Asks the helper.")]
+    chat = Chat(openai.agent("steered", agent=Agent(name="desk", model=scripted, tools=tools)), companion)
+    assert await chat("nest x") == "done"
+    # The helper's run gets the turn's run_config, its input filter with it: its requests are its own still.
+    assert [shown(items) for _, items in scripted.requests] == [
+        ["nest x"],
+        ["nest x", "function_call call-l", "function_call_output call-l", "use Celsius"],
+        ["Rome?"],
+        ["Rome?", "function_call call-w", "function_call_output call-w"],
+        [
+            "nest x",
+            "function_call call-l",
+            "function_call_output call-l",
+            "use Celsius",
+            "function_call call-s",
+            "function_call_output call-s",
+        ],
+    ]
+    # The turn stored its own items, none of the helper's: the next turn's request has no output without its call.
+    assert await chat("thanks") == "done"
+    assert "function_call_output call-w" not in shown(scripted.requests[-1][1])
+
+
 def test_steered_messages_keep_their_order_and_go_after_their_item_or_before_what_came_after_them():
     from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
 

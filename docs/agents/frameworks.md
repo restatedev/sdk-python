@@ -121,6 +121,12 @@ In every framework, a tool can wait for a person: `wait_for_signal`.
   had kept it. The run goes on in place: its input guardrails run once, and
   `max_turns`, tool choice and hooks carry on. A run also takes the messages
   waiting as it starts (a retried attempt's, say), into its input.
+- **An agent used as a tool runs with the run's `run_config`** (the SDK
+  passes it on to `Agent.as_tool`'s run), our input filter with it. A request
+  made while one of the run's tool calls runs is that nested run's: it gets
+  your own filter only. The turn stores none of its items (the call's output
+  is what the turn keeps; an output without its call would break the next
+  request) and puts none of the steered messages in it.
 - **A handoff filter that drops the handoff's own output** (`input_filter=
   remove_all_tools`) leaves the handoff's call without an output in the
   turn: the run takes no steered message after it. Found with it, and not
