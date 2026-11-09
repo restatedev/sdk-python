@@ -26,6 +26,8 @@ from restate import (
     WorkflowContext,
 )
 from restate.serde import DefaultSerde
+from restate.server_context import ServerInvocationContext
+import json
 import pytest
 import typing
 
@@ -191,3 +193,23 @@ async def test_handler_with_ctx_none():
     async with simple_harness(greeter) as client:
         res = await client.service_call(greet, arg="bob")
         assert res == "hi"
+
+
+async def test_attach_workflow_returns_the_result_of_its_run():
+    greeter = Workflow("greeter_workflow")
+
+    @greeter.main()
+    async def hello(ctx: WorkflowContext) -> str:
+        return "hi"
+
+    caller = Service("caller")
+
+    @caller.handler()
+    async def send_and_attach(ctx: Context, workflow_id: str) -> str:
+        ctx.workflow_send(hello, key=workflow_id, arg=None)  # starts the run, ignoring its result
+        # attach_workflow is the server context's: the run's result, as JSON bytes.
+        result = await typing.cast(ServerInvocationContext, ctx).attach_workflow("greeter_workflow", workflow_id)
+        return json.loads(result)
+
+    async with restate.create_test_harness(restate.app([greeter, caller]), restate_image=RESTATE_IMAGE) as harness:
+        assert await harness.client.service_call(send_and_attach, arg="wf-1") == "hi"
