@@ -82,6 +82,28 @@ async def read(ctx: sessions.ViewContext, request: MessagesRequest) -> Messages:
     return await _messages.page(ctx.db, ITEMS, request)
 
 
+@chat.view
+async def counted(ctx: sessions.ViewContext, request: MessagesRequest) -> dict[str, Any]:
+    """``read``, with how many rows its queries gave."""
+    db = ctx.db
+    rows = 0
+
+    class Counting:
+        """The view's database, counting the rows of each read."""
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(db, name)
+
+        async def values(self, sql: str, params: Any = None) -> Any:
+            nonlocal rows
+            found = await db.values(sql, params)
+            rows += len(found)
+            return found
+
+    page = await _messages.page(typing.cast(Any, Counting()), ITEMS, request)
+    return {"page": page, "rows": rows}
+
+
 def texts(page: Messages) -> list[tuple[int, str]]:
     return [
         (message["id"], " ".join(typing.cast(str, part.get("text", part.get("name"))) for part in message["parts"]))
@@ -134,6 +156,17 @@ async def test_a_page_of_no_messages_has_the_cursor_and_whether_there_are_any():
     for view in ("full", "summary"):
         none = await run(chat, "read", host.view(), {"limit": 0, "view": view})
         assert (view, none["messages"], none["more"], none["cursor"]) == (view, [], True, every["cursor"])
+
+
+async def test_a_page_back_reads_its_own_turns_not_every_turn_after_it():
+    host = Host(Backend(), service="rendered")
+    for n in range(30):
+        await run(chat, "ask", host, f"question {n}")
+        await run(chat, "reply", host, [{"role": "assistant", "text": f"answer {n}"}])
+    read = await run(chat, "counted", host.view(), {"limit": 2, "before": 4})
+    assert texts(read["page"]) == [(2, "question 1"), (3, "answer 1")]
+    # The rows of its two turns, and a row of each lookup: not the 60 rows of the conversation.
+    assert read["rows"] < 15
 
 
 async def test_an_error_output_is_marked_and_is_a_calls_result_only_if_it_is_its_own_error():
