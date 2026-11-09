@@ -1319,17 +1319,6 @@ class ServerInvocationContext(ObjectContext):
         update_restate_context_is_replaying(self.vm)
         return self.create_future(handle, serde)
 
-    def attach_workflow(self, name: str, key: str) -> RestateDurableFuture[bytes]:
-        """Attach to the run of the workflow ``name`` with the id ``key``: its result, as bytes, once it ends.
-
-        For a call to a workflow's main handler that Restate refused because the
-        run had started (a call made again after a crash, from a handler that
-        runs again from its first line rather than replaying its journal).
-        """
-        handle = self.vm.attach_workflow(name, key)
-        update_restate_context_is_replaying(self.vm)
-        return self.create_future(handle, BytesSerde())
-
     def get_extension_data(self, key: str) -> Any:
         """Get extension data by key."""
         return self.extension_data.get(key)

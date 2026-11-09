@@ -959,25 +959,6 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    /// Attach to the run of the workflow `name` with the id `key` (unscoped): its result, once it ends.
-    fn attach_workflow(
-        mut self_: PyRefMut<'_, Self>,
-        name: String,
-        key: String,
-    ) -> Result<PyNotificationHandle, PyVMError> {
-        self_
-            .vm
-            .sys_attach_invocation(
-                restate_sdk_shared_core::AttachInvocationTarget::WorkflowId {
-                    name,
-                    key,
-                    scope: None,
-                },
-            )
-            .map(Into::into)
-            .map_err(Into::into)
-    }
-
     fn sys_end(mut self_: PyRefMut<'_, Self>) -> Result<(), PyVMError> {
         self_.vm.sys_end().map_err(Into::into)
     }
