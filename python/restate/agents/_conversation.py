@@ -374,10 +374,13 @@ async def latest_snapshot(db: DatabaseReader, items: Items) -> Snapshot | None:
     return _snapshot_of(items, int(typing.cast(int, row["covers"])), _int(row["turn"]), held)
 
 
-async def answer_in(db: DatabaseReader, prompt_id: str) -> str | None:
-    """Return the stored answer of prompt ``prompt_id``, if it has one: one read, of the turn's row."""
-    row = await db.get(f"SELECT answer FROM {TURNS} WHERE prompt = ?", [prompt_id])
-    return _str(row["answer"]) if row else None
+async def answer_in(db: DatabaseReader, prompt_id: str) -> tuple[str, Status | None] | None:
+    """Return the stored answer of prompt ``prompt_id``, and how its turn ended, if it has one: one read, of its row."""
+    row = await db.get(f"SELECT answer, status FROM {TURNS} WHERE prompt = ?", [prompt_id])
+    answer = _str(row["answer"]) if row else None
+    if row is None or answer is None:
+        return None
+    return answer, typing.cast("Status | None", _str(row["status"]))
 
 
 class _Walk:
@@ -1297,8 +1300,10 @@ async def answer_once(
     budget = settings.budget if budget is None else budget
     prompt_id = next_prompt_id(ctx)
     await SCHEMA.ensure(ctx.db)
-    if (answer := await answer_in(ctx.db, prompt_id)) is not None:
-        return stored_answer(answer)
+    if (found := await answer_in(ctx.db, prompt_id)) is not None:
+        # Answered (or closed) already: a retry answers, or fails, as the turn ended.
+        answer, status = found
+        return stored_answer(answer, status)
     conversation = await Conversation.load(ctx.db, items, window, budget, snapshots=settings.snapshots)
 
     async def work() -> str:

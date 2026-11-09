@@ -192,6 +192,36 @@ async def test_a_stopped_run_stores_nothing_more():
         await turn.answered("too late")
 
 
+async def test_a_retry_of_a_closed_turn_fails_as_the_prompt_did():
+    from restate.agents.internal import ENDED  # pylint: disable=import-outside-toplevel
+
+    async def run(conversation: Conversation) -> str:
+        text = conversation.turn.prompt.item["text"]
+        if text == "boom":
+            raise restate.TerminalError("boom")
+        if text == "stop":
+            raise restate.TerminalError("cancelled", status_code=409)
+        await conversation.turn.append_reply(_calling("c1"))
+        raise RuntimeError("the invocation is gone")
+
+    ask = asking(run)
+
+    async def failure(text: str, invocation: Any = None) -> tuple[str, int]:
+        with pytest.raises(restate.TerminalError) as error:
+            await ask(text, invocation)
+        return error.value.message, error.value.status_code
+
+    boom, stop, gone = request(), request(), request()
+    # Retried (after a crash right after the close, say): each fails as it did, not with the note as its answer.
+    assert [await failure("boom", boom), await failure("boom", boom)] == [("boom", 500)] * 2
+    assert [await failure("stop", stop), await failure("stop", stop)] == [("cancelled", 409)] * 2
+    with pytest.raises(RuntimeError, match="gone"):
+        await ask("gone", gone)
+    # The next message closes that turn, ended; the gone invocation, run again, fails with the note.
+    assert await failure("boom") == ("boom", 500)
+    assert await failure("gone", gone) == (ENDED, 500)
+
+
 async def test_a_dropped_reply_takes_what_followed_it_and_each_item_is_read_once():
     reads: list[Item] = []
 

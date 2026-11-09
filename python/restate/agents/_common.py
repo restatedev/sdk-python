@@ -349,8 +349,22 @@ def refusal_of(ctx: SessionContext, error: BaseException) -> TerminalError | Non
     return refusal(error)
 
 
-def stored_answer(answer: str) -> str:
-    """Return a prompt's stored answer, or raise the refusal again if it is ``UNANSWERED``."""
-    if answer != UNANSWERED:
-        return answer
-    raise TerminalError(f"the model's provider refused the request: {CHECK_MODEL}", status_code=REFUSED)
+def stored_answer(answer: str, status: str | None = "answered") -> str:
+    """Return a prompt's stored answer, or fail as the prompt did, by how its turn ended (``status``).
+
+    A turn refused (``UNANSWERED``) fails with ``REFUSED``; one failed for
+    good, with its error; one cancelled, with the cancellation; one that
+    another invocation ended, with its note. So a retry after a crash right
+    after the turn was closed fails as the prompt did, instead of answering
+    with the note. A failed turn's error has the default status code: the
+    turn keeps its message, not its code.
+    """
+    if status == "refused" or answer == UNANSWERED:
+        raise TerminalError(f"the model's provider refused the request: {CHECK_MODEL}", status_code=REFUSED)
+    if status == "cancelled":
+        raise TerminalError("cancelled", status_code=CANCELLATION)
+    if status == "failed":
+        raise TerminalError(answer.removeprefix("Error: "))
+    if status == "ended":
+        raise TerminalError(answer)
+    return answer
