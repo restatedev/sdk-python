@@ -25,14 +25,14 @@ import pytest
 
 pytest.importorskip("google.adk")
 
-from google.adk.agents import LlmAgent, RunConfig  # noqa: E402
+from google.adk.agents import LlmAgent, RunConfig, SequentialAgent  # noqa: E402
 from google.adk.models import BaseLlm  # noqa: E402
 from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.models.llm_response import LlmResponse  # noqa: E402
 from google.genai import types  # noqa: E402
 
 import restate  # noqa: E402
-from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
+from support import RESTATE_IMAGE, Gate  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import adk, tool  # noqa: E402
 from restate.agents._api import Messages  # noqa: E402
@@ -81,7 +81,7 @@ def reply(system: str, contents: list[types.Content]) -> list[types.Part]:
         call = types.FunctionCall(id=f"call-{rest}", name="transfer_to_agent", args={"agent_name": "refunds"})
         return [types.Part(function_call=call)]
     names = {"weather": "get_weather", "crash": "flaky", "wait": "blocking", "wrong": "get_weather"}
-    names |= {"forbidden": "forbidden", "unknown": "nonexistent"}
+    names |= {"forbidden": "forbidden", "unknown": "nonexistent", "hold": "hold"}
     if word in names and not responses:
         args: dict[str, Any] = {"town": 3} if word == "wrong" else {"city": rest}
         return [types.Part(function_call=types.FunctionCall(id=f"call-{rest}", name=names[word], args=args))]
@@ -183,11 +183,59 @@ class Remembering(Scripted):
 summarizing = adk.agent("adk_summarizing", model=Remembering(), budget=10)
 """An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
 
+held = Gate()
+"""The gate that ``hold``, and the answer to a ``slow`` prompt, wait on until the test opens it."""
+holds: collections.Counter[str] = collections.Counter()
+
+
+@tool
+async def hold(city: str) -> str:
+    """Waits until the test opens the gate."""
+    holds[city] += 1
+    await held.wait()
+    return f"held in {city}"
+
+
+seen: collections.defaultdict[str, list[list[types.Content]]] = collections.defaultdict(list)
+"""The requests of the steered agents' model, by the key word that ends each test's first prompt."""
+failed: collections.Counter[str] = collections.Counter()
+
+
+class Steered(Scripted):
+    """The scripted model, keeping each request. Its answer to a prompt that starts with ``slow`` waits on
+    ``held``; a request whose last message starts with ``crashing`` crashes, once, as a process would."""
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        contents = list(llm_request.contents)
+        prompts = _prompts(contents)
+        seen[prompts[0].split(" ")[-1]].append(contents)
+        if prompts[-1].startswith("slow"):
+            await held.wait()
+        if prompts[-1].startswith("crashing") and not failed[prompts[-1]]:
+            failed[prompts[-1]] += 1
+            raise RuntimeError("the process crashed after the steered message was stored")
+        async for response in super().generate_content_async(llm_request, stream):
+            yield response
+
+
+steered = adk.agent("adk_steered", model=Steered(), tools=[hold])
+"""An agent whose turns take the messages steered to them: its root is an LlmAgent (the built-in agent)."""
+
+pipeline = adk.agent(
+    "adk_pipeline",
+    agent=SequentialAgent(
+        name="pipeline", sub_agents=[LlmAgent(name="step", model=Steered(), tools=adk.tools([hold]))]
+    ),
+)
+"""An agent whose root is a workflow agent: its turns take no steered message."""
+
 
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, triage, summarizing]), restate_image=RESTATE_IMAGE
+        restate.app([assistant, triage, summarizing, steered, pipeline]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -314,6 +362,166 @@ async def test_a_transfer_to_a_sub_agent_holds_for_the_next_messages(harness: Ha
     assert (await chat(harness, k, f"system {k}", "adk_desk")).json() == "system: You handle refunds."
     # The refunds agent has the tools that adk.tools() gave it.
     assert (await chat(harness, k, f"weather {k}", "adk_desk")).json() == f"tool said: sunny in {k}"
+
+
+# --- Steering, against a Restate server -----------------------------------------------------------
+
+
+async def send(harness: HarnessEnvironment, service: str, key: str, text: str) -> str:
+    sent = await post(harness, f"{service}/{key}/chat/send", content=text, headers=TEXT)
+    return typing.cast(str, sent.json()["invocationId"])
+
+
+async def steer(harness: HarnessEnvironment, service: str, key: str, text: str) -> dict[str, Any]:
+    # With an idempotency key, as a client sends it: a retried request is the same message.
+    headers = {**TEXT, "idempotency-key": uuid.uuid4().hex}
+    steered = await post(harness, f"{service}/{key}/steer", content=text, headers=headers)
+    assert steered.status_code == 200, steered.text
+    return typing.cast(dict[str, Any], steered.json())
+
+
+async def attach(harness: HarnessEnvironment, invocation: str) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        return await ingress.get(f"{harness.ingress_url}/restate/invocation/{invocation}/attach")
+
+
+async def holding(key: str) -> None:
+    """Wait until ``hold`` runs for ``key``, its turn's tool call."""
+
+    async def started() -> bool:
+        return holds[key] > 0
+
+    await until(started)
+
+
+async def settled(harness: HarnessEnvironment, service: str, key: str) -> None:
+    """Wait until the key answered every message queued so far: a chat sent now is answered after them."""
+    assert (await chat(harness, key, "done", service)).json() == "echo: done"
+
+
+async def summary(harness: HarnessEnvironment, service: str, key: str) -> list[tuple[str, str]]:
+    page = typing.cast(Messages, (await post(harness, f"{service}/{key}/messages", json={"view": "summary"})).json())
+    return [(message["role"], str(message["parts"][0].get("text"))) for message in page["messages"]]
+
+
+def said(contents: list[types.Content]) -> list[tuple[str, str]]:
+    """What a request holds, part by part: a message's text, a tool's call, or a tool's result."""
+    parts: list[tuple[str, str]] = []
+    for content in contents:
+        for part in content.parts or []:
+            if part.function_call:
+                parts.append((str(content.role), f"call {part.function_call.name}"))
+            elif part.function_response:
+                parts.append((str(content.role), f"result {part.function_response.name}"))
+            elif part.text:
+                parts.append((str(content.role), part.text))
+    return parts
+
+
+async def test_a_message_steered_while_a_tool_runs_reaches_the_next_request_once(harness: HarnessEnvironment):
+    k = key()
+    held.close()
+    invocation = await send(harness, "adk_steered", k, f"hold {k}")
+    await holding(k)
+    assert (await steer(harness, "adk_steered", k, f"hold Celsius {k}"))["turn"] == invocation
+    held.open()
+    # The model's next request has it after the tool's result, once. The model answers it with a call of its own,
+    # and the request after that one still has it, in place: the turn's answer is the reply to it.
+    assert (await attach(harness, invocation)).json() == f"tool said: held in Celsius {k}"
+    steered_request = [
+        ("user", f"hold {k}"),
+        ("model", "call hold"),
+        ("user", "result hold"),
+        ("user", f"hold Celsius {k}"),
+    ]
+    assert [said(request) for request in seen[k]] == [
+        [("user", f"hold {k}")],
+        steered_request,
+        [*steered_request, ("model", "call hold"), ("user", "result hold")],
+    ]
+    # Stored once, in the turn: the turn of its own that was queued for it does nothing.
+    await settled(harness, "adk_steered", k)
+    assert await summary(harness, "adk_steered", k) == [
+        ("user", f"hold {k}"),
+        ("user", f"hold Celsius {k}"),
+        ("assistant", f"tool said: held in Celsius {k}"),
+        ("user", "done"),
+        ("assistant", "echo: done"),
+    ]
+
+
+async def test_a_crash_after_a_steered_message_is_stored_resumes_the_run_with_it_once(harness: HarnessEnvironment):
+    k = key()
+    held.close()
+    invocation = await send(harness, "adk_steered", k, f"hold {k}")
+    await holding(k)
+    await steer(harness, "adk_steered", k, f"crashing {k}")
+    held.open()
+    # The request with the message crashed the attempt: the retry resumed the prompt's invocation, from the events
+    # the turn stored, the message among them.
+    assert (await attach(harness, invocation)).json() == f"echo: crashing {k}"
+    after = [("user", f"hold {k}"), ("model", "call hold"), ("user", "result hold"), ("user", f"crashing {k}")]
+    # Its request is the crashed one: the message once, as the turn stored it, which it did not take again.
+    assert [said(request) for request in seen[k][1:]] == [after, after]
+    # Resumed at the step: the tool ran once, and the model was not asked for its call again.
+    assert holds[k] == 1 and asked[k] == 2
+    await settled(harness, "adk_steered", k)
+    assert await summary(harness, "adk_steered", k) == [
+        ("user", f"hold {k}"),
+        ("user", f"crashing {k}"),
+        ("assistant", f"echo: crashing {k}"),
+        ("user", "done"),
+        ("assistant", "echo: done"),
+    ]
+
+
+async def test_an_agent_whose_root_is_a_workflow_agent_answers_a_steered_message_as_its_next_turn(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    held.close()
+    invocation = await send(harness, "adk_pipeline", k, f"hold {k}")
+    await holding(k)
+    # Its turn takes none: the message is answered as a turn of its own, after it.
+    assert (await steer(harness, "adk_pipeline", k, f"in Celsius {k}"))["turn"] is None
+    held.open()
+    assert (await attach(harness, invocation)).json() == f"tool said: held in {k}"
+    assert said(seen[k][1]) == [("user", f"hold {k}"), ("model", "call hold"), ("user", "result hold")]
+    await settled(harness, "adk_pipeline", k)
+    assert await summary(harness, "adk_pipeline", k) == [
+        ("user", f"hold {k}"),
+        ("assistant", f"tool said: held in {k}"),
+        ("user", f"in Celsius {k}"),
+        ("assistant", f"echo: in Celsius {k}"),
+        ("user", "done"),
+        ("assistant", "echo: done"),
+    ]
+
+
+async def test_a_message_steered_during_the_last_model_call_is_answered_as_the_next_turn(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    held.close()
+    invocation = await send(harness, "adk_steered", k, f"slow {k}")
+
+    async def answering() -> bool:
+        return len(seen[k]) == 1
+
+    await until(answering)
+    assert (await steer(harness, "adk_steered", k, f"in Celsius {k}"))["turn"] == invocation
+    held.open()
+    # The model's reply was its last: no step comes after it to take the message, which is answered next.
+    assert (await attach(harness, invocation)).json() == f"echo: slow {k}"
+    await settled(harness, "adk_steered", k)
+    assert await summary(harness, "adk_steered", k) == [
+        ("user", f"slow {k}"),
+        ("assistant", f"echo: slow {k}"),
+        ("user", f"in Celsius {k}"),
+        ("assistant", f"echo: in Celsius {k}"),
+        ("user", "done"),
+        ("assistant", "echo: done"),
+    ]
 
 
 # --- Definitions ----------------------------------------------------------------------------------
@@ -504,7 +712,6 @@ async def test_an_agent_of_your_own_runs_as_configured_its_sub_agents_with_its_m
 
 
 async def test_a_workflows_first_step_stored_before_a_crash_is_not_its_answer(monkeypatch: pytest.MonkeyPatch):
-    from google.adk.agents import SequentialAgent  # pylint: disable=import-outside-toplevel
     from sessions_object import request  # pylint: disable=import-error,import-outside-toplevel
 
     from restate.agents.adk import _agent  # pylint: disable=import-outside-toplevel
@@ -733,3 +940,128 @@ async def test_the_session_state_holds_across_turns_that_are_not_loaded():
     assert await asked("hi 3") == "echo: hi 3"
     # The first turn's events are not loaded any more: its state is, as the latest turn carried it.
     assert await asked("system x") == "system: City: Lisbon"
+
+
+@pytest.mark.parametrize("last", ["skip_summarization", "set_model_response"])
+async def test_a_step_after_which_adk_asks_the_model_nothing_takes_no_steered_message(last: str):
+    from google.adk.apps import App  # pylint: disable=import-outside-toplevel
+    from google.adk.plugins import BasePlugin  # pylint: disable=import-outside-toplevel
+    from google.adk.tools.tool_context import ToolContext  # pylint: disable=import-outside-toplevel
+    from pydantic import BaseModel  # pylint: disable=import-outside-toplevel
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents._conversation import steer_stored  # pylint: disable=import-outside-toplevel
+    from restate.agents._turn import _STEERING, Steering  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    class Weather(BaseModel):
+        summary: str
+
+    def quiet(city: str, tool_context: ToolContext) -> str:
+        """Answers for the model."""
+        tool_context.actions.skip_summarization = True
+        return f"sunny in {city}"
+
+    calls = {
+        "skip_summarization": ("quiet", {"city": "Rome"}),
+        "set_model_response": ("set_model_response", {"summary": "sunny"}),
+    }
+    name, args = calls[last]
+    asked_for: list[list[tuple[str, str]]] = []
+
+    class Ending(BaseLlm):
+        """Calls the tool after whose result ADK asks it nothing more."""
+
+        model: str = "ending"
+
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            asked_for.append(said(list(llm_request.contents)))
+            call = types.FunctionCall(id="call-1", name=name, args=args)
+            yield LlmResponse(content=types.Content(role="model", parts=[types.Part(function_call=call)]))
+
+    steering = Steering(revision=0)
+
+    class Steerer(BasePlugin):
+        """A message is steered to the turn while its tool runs, as the companion's publish would return it."""
+
+        async def before_tool_callback(self, *, tool: Any, tool_args: Any, tool_context: Any) -> None:
+            steering.messages.append({"id": "s1", "text": "use Celsius"})
+
+    output = Weather if last == "set_model_response" else None
+    # An output schema with tools: the model answers through ADK's set_model_response, whose result is the answer.
+    mine = LlmAgent(name="mine", model=Ending(), tools=[quiet], output_schema=output)
+    app = App(name="mine", root_agent=mine, plugins=[Steerer("steerer")])
+    asker = sessions.SessionObject("asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> Any:
+        # As a chat turn of an agent that takes steered messages sets it.
+        _STEERING.set(ctx, steering)
+        return await adk.prompt(ctx, text, agent=app)
+
+    @asker.handler
+    async def taken(ctx: sessions.SessionContext) -> bool:
+        return await steer_stored(ctx.db, "s1")
+
+    backend = Backend()
+    host = Host(backend, service="asker", answers={"publish": b"null"})
+    answer = await invoke(asker, "ask", host, request(), "weather")
+    assert answer == ('{"summary": "sunny"}' if output else "")
+    # No request after the tool's result: the turn left the message to a turn of its own.
+    assert asked_for == [[("user", "weather")]]
+    assert await invoke(asker, "taken", Host(backend, service="asker"), request()) is False
+
+
+async def test_a_steered_message_starts_an_invocation_of_its_own_which_a_retry_resumes_past():
+    """After a crash, ADK resumes the prompt's invocation from that invocation's events. Its runner of a root that
+    is no LlmAgent (a SequentialAgent here, made to take steered messages) would take a message of the user last
+    among them for the answer to a tool call, which it fails to find on every retry ("No agent to transfer to"). A
+    steered message starts an invocation of its own instead, as a prompt does."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents._turn import _STEERING, Steering  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    steering = Steering(revision=0)
+    crashed: list[bool] = []
+
+    def get_weather(city: str) -> str:  # pylint: disable=redefined-outer-name
+        """The weather, while a message is steered to the turn."""
+        steering.messages.append({"id": "s1", "text": "in Celsius"})
+        return f"sunny in {city}"
+
+    class Crashing(Scripted):
+        """Crashes once, on the request with the steered message."""
+
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            if "in Celsius" in _prompts(list(llm_request.contents)) and not crashed:
+                crashed.append(True)
+                raise RuntimeError("the process crashed after the steered message was stored")
+            async for response in super().generate_content_async(llm_request, stream):
+                yield response
+
+    steps = SequentialAgent(name="steps", sub_agents=[LlmAgent(name="step", model=Crashing(), tools=[get_weather])])
+    asker = sessions.SessionObject("asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        # As a chat turn of an agent that takes steered messages sets it.
+        _STEERING.set(ctx, steering)
+        return await adk.prompt(ctx, text, agent=steps)
+
+    backend, invocation = Backend(), request()
+
+    async def attempt() -> Any:
+        host = Host(backend, service="asker", answers={"publish": b"null"})
+        return await invoke(asker, "ask", host, invocation, "weather Rome")
+
+    with pytest.raises(RuntimeError, match="crashed after the steered message was stored"):
+        await attempt()
+    # The retry resumed the prompt's invocation, past the message, and answered it.
+    assert await attempt() == "echo: in Celsius"
