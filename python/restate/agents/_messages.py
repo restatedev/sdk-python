@@ -194,19 +194,20 @@ def _summarized(
     message of the assistant), and the ``seq`` it was stored with; so does a
     steered message.
     """
-    messages: list[_Message] = []
-    for n, seq, stored, answer, answered_at, answered_seq in rows:
+
+    def user_message(n: typing.Any, seq: typing.Any, stored: typing.Any) -> _Message:
         said = items.read(load_item(items, str(stored))).said
         text = said[1] if said else ""
-        messages.append(_Message(int(n), "user", [text_part(text)] if text.strip() else [], int(seq)))
+        return _Message(int(n), "user", [text_part(text)] if text.strip() else [], int(seq))
+
+    messages: list[_Message] = []
+    for n, seq, stored, answer, answered_at, answered_seq in rows:
+        messages.append(user_message(n, seq, stored))
         if answer is not None and answered_at is not None:
             answered = str(answer)
             parts: list[Part] = [text_part(answered)] if answered.strip() else []
             messages.append(_Message(int(answered_at), "assistant", parts, int(typing.cast(int, answered_seq))))
-    for n, seq, stored in steered:
-        said = items.read(load_item(items, str(stored))).said
-        text = said[1] if said else ""
-        messages.append(_Message(int(n), "user", [text_part(text)] if text.strip() else [], int(seq)))
+    messages.extend(user_message(n, seq, stored) for n, seq, stored in steered)
     return sorted((message for message in messages if message.parts), key=lambda message: message.id)
 
 

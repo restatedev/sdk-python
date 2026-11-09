@@ -35,7 +35,9 @@ What the core gives an integration (`restate.agents.internal`):
   them), `prompt(text)`, `reply(text, agent)`, `results(calls)` (to make
   them), `read(item)` (what an item says, the tool calls it makes, the
   results it holds), and optionally `summary(text)` (the summary in the
-  framework's own form).
+  framework's own form) and `steered(text, steer_id)` (a message steered
+  to a turn, as the framework tells it apart from a prompt; by default a
+  prompt's item).
 - **`answer_once(ctx, text, items, run, window, budget, check=)`**, which
   answers a prompt once. `run` gets the `Conversation`: `history()` is the
   model's input, and `conversation.turn` is the turn to write.
@@ -439,8 +441,9 @@ sequenceDiagram
   (`take_steers`) before its request, sends it after the tool results, and
   returns it with the reply, so the state keeps it for the rounds after:
   running the graph again with it would reset the recursion limit. Its id is
-  `steer:<id>` (the conversation stores it without one, so a retried attempt
-  marks the ones it loads), and a trimmed request never starts at one, which
-  would leave out the turn's prompt and its tool results.
+  `steer:<id>`, as `_Items.steered` makes and stores it, so the history of
+  a retried attempt and of the next turns has it too; a trimmed request
+  never starts at one, which would leave out the turn's prompt and its tool
+  results.
 - **Subgraph checkpoints pile up:** the latest checkpoint of each subgraph
   namespace stays, one per turn that ran a subgraph (an open question).

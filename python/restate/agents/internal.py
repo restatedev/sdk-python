@@ -33,9 +33,10 @@ An integration needs, beyond the public API:
   tool's error.
 - ``companion_of`` and ``deliver``, to see what an agent is doing and to send
   it a message from another session object's handler.
-- ``take_steers``, at each step of a turn: the messages steered to it, which
-  the next model request gets (an integration says it calls it with
-  ``chat(..., steers=True)``).
+- ``take_steers``, at each step of a turn: the items of the messages steered
+  to it, which the next model request gets (an integration says it calls it
+  with ``chat(..., steers=True)``, and its ``Items`` may make a steered
+  message's item, with ``steered``).
 """
 
 from restate.agents._common import (

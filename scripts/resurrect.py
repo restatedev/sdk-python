@@ -565,8 +565,8 @@ MUTANTS = [
         "        if (final := conversation.turn.final_reply()) is not None:\n"
         "            # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.\n"
         "            return final\n"
-        "        messages = ",
-        "        messages = ",
+        "        graph = ",
+        "        graph = ",
         LANGGRAPH,
     ),
     Mutant(
@@ -701,8 +701,8 @@ MUTANTS = [
         "steer-taken-with-open-calls",
         "a steered message is taken while a tool call has no result, between a call and its result",
         f"{AGENTS}/_steering.py",
-        "    if turn is None or turn.open_calls():\n",
-        "    if turn is None:\n",
+        "    if not going() or turn is None or turn.open_calls():\n",
+        "    if not going() or turn is None:\n",
         STEERING,
     ),
     Mutant(
@@ -741,7 +741,7 @@ MUTANTS = [
         "steer-taken-by-a-stopped-turn",
         "a turn that stopped while it waited to store a steered message takes it, so it is never answered",
         f"{AGENTS}/_conversation.py",
-        "                if going is not None and not going():\n                    return []\n",
+        "            if not going():\n                return []\n",
         "",
         STEERING,
     ),
@@ -749,16 +749,24 @@ MUTANTS = [
         "steer-size-misses-the-turns-own",
         "the turn just answered leaves its steered messages out of the budget: its summary comes a turn late",
         f"{AGENTS}/_conversation.py",
-        "                self.prompt.steers.extend(added)\n",
+        "            self.prompt.steers.extend(added)\n",
         "",
         STEERING,
+    ),
+    Mutant(
+        "steer-langgraph-unmarked",
+        "LangGraph's steered message is stored as a prompt: a trimmed request may start at it, without its turn",
+        f"{AGENTS}/langgraph/_agent.py",
+        '        return HumanMessage(text, id=f"{STEER}{steer_id}")\n',
+        "        return HumanMessage(text)\n",
+        ("tests/agents_langgraph.py",),
     ),
     Mutant(
         "steer-summary-hides-steers",
         "the summary view leaves out the messages steered to a turn",
         f"{AGENTS}/_messages.py",
-        "    for n, seq, stored in steered:\n",
-        "    for n, seq, stored in ():\n",
+        "    messages.extend(user_message(n, seq, stored) for n, seq, stored in steered)\n",
+        "",
         STEERING,
     ),
 ]

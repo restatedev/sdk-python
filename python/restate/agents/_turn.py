@@ -168,8 +168,8 @@ def _unfollowed(ctx: SessionContext) -> bool:
 
 
 @dataclass
-class Steering:
-    """The messages steered to a ``chat`` turn that it has not taken yet, as the companion last told it.
+class Inbox:
+    """The messages steered to a ``chat`` turn that it has not taken yet, as the companion last published them.
 
     The companion returns them from every ``publish``, which a turn makes at
     each tool call's start and end: so the turn knows of them without a call
@@ -190,12 +190,12 @@ class Steering:
             self.messages = list(published.get("steering", []))
 
 
-_STEERING: ScopeKey[Steering] = ScopeKey("steering")
+_INBOX: ScopeKey[Inbox] = ScopeKey("inbox")
 
 
-def steering_of(ctx: SessionContext) -> Steering | None:
-    """Return the steered messages of the ``chat`` turn running on ``ctx``, if it takes them: ``None`` outside one."""
-    return _STEERING.get(ctx)
+def inbox_of(ctx: SessionContext) -> Inbox | None:
+    """Return the inbox of the ``chat`` turn running on ``ctx``, if it takes steered messages: ``None`` outside one."""
+    return _INBOX.get(ctx)
 
 
 _ANSWERING: ScopeKey[Stored] = ScopeKey("answering")
@@ -230,9 +230,9 @@ async def publish(ctx: SessionContext) -> None:
     if stored is not None:
         await _settled(ctx, stored)
     published = await ctx.call(_signals.publish, key=_signals.signals_of(ctx))
-    steering = _STEERING.get(ctx)
-    if steering is not None:
-        steering.saw(typing.cast(Published | None, published))
+    inbox = _INBOX.get(ctx)
+    if inbox is not None:
+        inbox.saw(typing.cast(Published | None, published))
 
 
 async def stepped(ctx: SessionContext) -> None:
@@ -326,7 +326,7 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     steers = settings.steers and not settings.background
     if steers:
         # Before the first publish, which may return messages steered to the turn already.
-        _STEERING.set(ctx, Steering())
+        _INBOX.set(ctx, Inbox())
     # From here until the turn closes, the companion knows about it: `status` and `stop` ask it.
     # The agent has ``settle`` (``chat()`` adds it), so the companion may send it this turn once it is gone.
     started: _signals.Started = {**turn, "settles": True, "steers": steers}

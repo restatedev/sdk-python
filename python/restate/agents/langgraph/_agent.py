@@ -38,7 +38,7 @@ start, and the run resumes from the last step stored:
   to the model's next request, after the results. The graph's state keeps it
   for the rest of the run, which goes on (within the same recursion limit)
   rather than starting again. A retried attempt finds it stored, in the
-  turn. In the graph its id is ``steer:<its id>``.
+  turn. It is stored, and is in the graph, with the id ``steer:<its id>``.
 - The model sees the earlier turns as their messages and answers, and the
   latest turns whole (the agent's ``window``), as many as its ``budget``
   holds; the built-in agent has its model summarize the earliest once they
@@ -101,7 +101,7 @@ from restate.agents._common import (
     model_of,
     provider_of,
 )
-from restate.agents._conversation import Call, Conversation, Entry, Item, Parsed, Result, Run, answer_once
+from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with, asking
 from restate.agents._steering import take_steers
@@ -240,6 +240,15 @@ def _text(message: BaseMessage) -> str:
     return str(message.text)
 
 
+STEER = "steer:"
+"""The prefix of the id that a message steered to a turn has in the graph: ``steer:<the message's id>``."""
+
+
+def _steered(message: BaseMessage) -> bool:
+    """Return whether ``message`` is a message steered to a turn (``steer``): a message of the user, but no prompt."""
+    return isinstance(message, HumanMessage) and message.id is not None and message.id.startswith(STEER)
+
+
 class _Items:
     """LangChain's messages, as the conversation keeps them: stored as LangChain's dicts, in JSON."""
 
@@ -252,6 +261,10 @@ class _Items:
 
     def prompt(self, text: str) -> Item:
         return HumanMessage(text)
+
+    def steered(self, text: str, steer_id: str) -> Item:
+        # Stored with its id, so that every run's state tells it apart from a prompt (``_steered``).
+        return HumanMessage(text, id=f"{STEER}{steer_id}")
 
     def reply(self, text: str, agent: str | None = None) -> Item:
         return AIMessage(text)
@@ -295,36 +308,6 @@ def _window(model: BaseChatModel) -> int | None:
     return int(limit * WINDOW) if limit is not None and limit > 0 else None
 
 
-STEER = "steer:"
-"""The prefix of the id that a message steered to a turn has in the graph: ``steer:<the message's id>``."""
-
-
-def _steered(message: BaseMessage) -> bool:
-    """Return whether ``message`` is a message steered to a turn (``steer``): a message of the user, but no prompt."""
-    return isinstance(message, HumanMessage) and message.id is not None and message.id.startswith(STEER)
-
-
-def _as_steered(entry: Entry) -> BaseMessage:
-    """Return the message steered to a turn that ``entry`` is, as the graph holds it: under its ``steer:`` id."""
-    return typing.cast(BaseMessage, entry.item).model_copy(update={"id": f"{STEER}{entry.steer}"})
-
-
-def _history(conversation: Conversation) -> list[BaseMessage]:
-    """Return what the model gets (``Conversation.history``), each message steered to a turn under its ``steer:`` id.
-
-    The conversation stores a steered message as a message of the user,
-    without that id. So the messages that a retried attempt finds in its turn,
-    and those of the turns before, are marked here, as the run marks the
-    messages it takes (``_as_steered``).
-    """
-    steered = {id(entry.item): entry for turn in conversation.transcript for entry in turn.steers}
-    steered |= {id(entry.item): entry for turn in conversation.turns for entry in turn.steered()}
-    return [
-        _as_steered(entry) if (entry := steered.get(id(item))) is not None else typing.cast(BaseMessage, item)
-        for item in conversation.history()
-    ]
-
-
 def _latest(messages: Sequence[BaseMessage], window: int | None) -> list[BaseMessage]:
     """Return the latest of ``messages`` that fit in ``window`` tokens, starting with a prompt (LangChain's ``trim_messages``).
 
@@ -366,7 +349,7 @@ def _graph(
     async def call_model(state: State) -> dict[str, Any]:
         # The turn's step: once the tool calls have their results, the turn takes the messages steered to it. The
         # request has them after the results, and the state keeps them for the rest of the run, which goes on.
-        steered = [_as_steered(entry) for entry in await take_steers(ctx, conversation)]
+        steered = typing.cast(list[BaseMessage], await take_steers(ctx, conversation))
         messages = _latest([*state["messages"], *steered], window)
         reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
         await conversation.turn.append_reply(reply)
@@ -407,7 +390,7 @@ def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given
             return final
         graph = _graph(ctx, conversation, chat_model, tools, system)
         try:
-            state = typing.cast(State, await graph.ainvoke({"messages": _history(conversation)}))
+            state = typing.cast(State, await graph.ainvoke({"messages": conversation.history()}))
         except Exception as error:
             if (terminal := terminal_of(error)) is not None:
                 # LangGraph's own error, which a retry would meet again: its recursion limit, say.

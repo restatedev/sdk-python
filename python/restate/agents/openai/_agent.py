@@ -304,10 +304,8 @@ class _Hooks(RunHooks[Any]):
         self.requesting = False
         """Whether a model request is in progress, with the making of its model and client: the only time an error
         can be its provider refusing."""
-        self.steered: list[_Steered] = []
-        """The messages steered to the turn that the run took, in order: each later request gets them again."""
-        self.seen: dict[str, int] = {}
-        """The keys (``_key``) of the items of the run's requests, once it took a message, in the order it saw them."""
+        self.steers = _Steers()
+        """The messages steered to the turn that the run took: each later request gets them again."""
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
         """The run's ``call_model_input_filter``: store the tools' outputs before the next request, and take the
@@ -327,12 +325,8 @@ class _Hooks(RunHooks[Any]):
         # and takes the next at its next step.
         after = _key(items[-1]) if items else None
         if after is not None and (taken := await take_steers(self.ctx, self.conversation)):
-            # This request's items came before the messages; an item whose key the run sees later, after them.
-            self._see(items)
-            self.steered.extend(_Steered(entry.item, after, len(self.seen)) for entry in taken)
-        if self.steered:
-            self._see(items)
-            data.model_data.input = _spliced(items, self.steered, self.seen)
+            self.steers.took(taken, items, after)
+        data.model_data.input = self.steers.placed(items)
         filtered = data.model_data
         if self.then is not None:
             given = self.then(data)
@@ -356,6 +350,35 @@ class _Hooks(RunHooks[Any]):
 
     async def on_tool_end(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool, result: Any) -> None:
         await tool_call_ended(self.ctx)
+
+
+class _Steers:
+    """The messages steered to the turn that a run took, which each of the run's later requests gets again, in place.
+
+    The SDK makes each request's input afresh, from the run's input and the
+    items the run made, which hold no steered message: so ``placed`` puts
+    each one back, right after the item it came after (``_spliced``).
+    """
+
+    def __init__(self) -> None:
+        self.taken: list[_Steered] = []
+        """The messages the run took, in order."""
+        self.seen: dict[str, int] = {}
+        """The keys (``_key``) of the items of the run's requests, once it took a message, in the order it saw them."""
+
+    def took(self, taken: Sequence[Item], items: Sequence[Item], after: str) -> None:
+        """Note the messages ``taken`` at a step, after ``items`` (the request's input), whose last item's key is
+        ``after``."""
+        # This request's items came before the messages; an item whose key the run sees later, after them.
+        self._see(items)
+        self.taken.extend(_Steered(item, after, len(self.seen)) for item in taken)
+
+    def placed(self, items: list[Item]) -> list[Item]:
+        """Return ``items`` (a request's input) with each message the run took in its place."""
+        if not self.taken:
+            return items
+        self._see(items)
+        return _spliced(items, self.taken, self.seen)
 
     def _see(self, items: Sequence[Item]) -> None:
         """Note the keys of ``items`` that the run had not seen: they come after the messages it took so far."""

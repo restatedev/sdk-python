@@ -31,6 +31,7 @@ from restate.agents._api import (
     Resolved,
     Signal,
     Status,
+    Steer,
     Steered,
     Stopped,
     View,
@@ -479,7 +480,7 @@ class AgentObject(SessionObject):
 
         chat.__annotations__["return"] = output if output is not None else str
 
-        async def steered(ctx: SessionContext, message: _signals.SteerRequest) -> None:
+        async def steered(ctx: SessionContext, message: Steer) -> None:
             """Answer a message sent to ``steer`` as a turn of its own, unless the turn it was sent to took it.
 
             The companion sends it as the message is sent, so that it keeps its

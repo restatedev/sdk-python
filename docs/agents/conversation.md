@@ -163,12 +163,12 @@ CREATE TABLE restate_agent_steers (          -- the messages steered to a turn t
   don't depend on it, and it is never shown
   ([History from snapshots](#history-from-snapshots)).
 - **A steered message** is an item of its turn, a message of the user made
-  with `Items.prompt`, and a row of `restate_agent_steers` at the same
-  position, with its id: unique, so a turn stores it once whatever its
-  attempts do, and the agent's `steered` finds that it was taken with one
-  read. Earlier turns' steered messages are one range of that table's
-  primary key, as positions only grow. A drop deletes those after the reply
-  it drops.
+  with `Items.steered` (by default `Items.prompt`), and a row of
+  `restate_agent_steers` at the same position, with its id: unique, so a
+  turn stores it once whatever its attempts do, and the agent's `steered`
+  finds that it was taken with one read. Earlier turns' steered messages
+  are one range of that table's primary key, as positions only grow. A drop
+  deletes those after the reply it drops.
 
 ### Around the conversation
 

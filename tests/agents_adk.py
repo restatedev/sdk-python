@@ -952,7 +952,7 @@ async def test_a_step_after_which_adk_asks_the_model_nothing_takes_no_steered_me
     from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
 
     from restate.agents._conversation import steer_stored  # pylint: disable=import-outside-toplevel
-    from restate.agents._turn import _STEERING, Steering  # pylint: disable=import-outside-toplevel
+    from restate.agents._turn import _INBOX, Inbox  # pylint: disable=import-outside-toplevel
     from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
 
     class Weather(BaseModel):
@@ -982,13 +982,13 @@ async def test_a_step_after_which_adk_asks_the_model_nothing_takes_no_steered_me
             call = types.FunctionCall(id="call-1", name=name, args=args)
             yield LlmResponse(content=types.Content(role="model", parts=[types.Part(function_call=call)]))
 
-    steering = Steering(revision=0)
+    inbox = Inbox(revision=0)
 
     class Steerer(BasePlugin):
         """A message is steered to the turn while its tool runs, as the companion's publish would return it."""
 
         async def before_tool_callback(self, *, tool: Any, tool_args: Any, tool_context: Any) -> None:
-            steering.messages.append({"id": "s1", "text": "use Celsius"})
+            inbox.messages.append({"id": "s1", "text": "use Celsius"})
 
     output = Weather if last == "set_model_response" else None
     # An output schema with tools: the model answers through ADK's set_model_response, whose result is the answer.
@@ -999,7 +999,7 @@ async def test_a_step_after_which_adk_asks_the_model_nothing_takes_no_steered_me
     @asker.handler
     async def ask(ctx: sessions.SessionContext, text: str) -> Any:
         # As a chat turn of an agent that takes steered messages sets it.
-        _STEERING.set(ctx, steering)
+        _INBOX.set(ctx, inbox)
         return await adk.prompt(ctx, text, agent=app)
 
     @asker.handler
@@ -1023,15 +1023,15 @@ async def test_a_steered_message_starts_an_invocation_of_its_own_which_a_retry_r
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
     from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
 
-    from restate.agents._turn import _STEERING, Steering  # pylint: disable=import-outside-toplevel
+    from restate.agents._turn import _INBOX, Inbox  # pylint: disable=import-outside-toplevel
     from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
 
-    steering = Steering(revision=0)
+    inbox = Inbox(revision=0)
     crashed: list[bool] = []
 
     def get_weather(city: str) -> str:  # pylint: disable=redefined-outer-name
         """The weather, while a message is steered to the turn."""
-        steering.messages.append({"id": "s1", "text": "in Celsius"})
+        inbox.messages.append({"id": "s1", "text": "in Celsius"})
         return f"sunny in {city}"
 
     class Crashing(Scripted):
@@ -1052,7 +1052,7 @@ async def test_a_steered_message_starts_an_invocation_of_its_own_which_a_retry_r
     @asker.handler
     async def ask(ctx: sessions.SessionContext, text: str) -> str:
         # As a chat turn of an agent that takes steered messages sets it.
-        _STEERING.set(ctx, steering)
+        _INBOX.set(ctx, inbox)
         return await adk.prompt(ctx, text, agent=steps)
 
     backend, invocation = Backend(), request()

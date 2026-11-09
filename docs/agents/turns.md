@@ -605,7 +605,7 @@ Turn                              one prompt, the messages steered to it, and wh
   open_calls(), replies(), last_reply(), final_reply(), stored()   its own state, never another turn's
   latest_ask(), steered()                                           its latest ask; the messages steered to it
   append(), append_reply(), drop(), carry(), ask_again(text)        its run's writes
-  steer(messages, sent, going)                                      take steered messages, at a step (take_steers)
+  steer(messages, taken, going)                                     take steered messages, at a step (take_steers)
   answered(answer), close(ctx, status, note)                        its end: once
 ```
 

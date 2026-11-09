@@ -703,24 +703,20 @@ class _Snapshots(AbstractCapability[Any]):
 
 
 class _Steering(AbstractCapability[Any]):
-    """Give the model the messages steered to the turn, at its next step, in the request about to go out.
+    """Give the model the messages steered to the turn at its next step, in the request about to go out.
 
-    Before each model request, once the model's tool calls all have their
-    results stored, it takes the messages that wait (``take_steers``): each
-    is stored once, as a message of the user that is a step of the turn. It
-    then enqueues the stored messages with Pydantic AI's own
-    ``RunContext.enqueue`` (``'asap'``), which delivers them once every
-    ``before_model_request`` ran: into this request and into the run's
-    history, after what both hold. So the model gets each message as it is
-    stored and where it is stored, and the run goes on with it, its usage
-    limits, retries and capabilities' state with it, rather than starting
-    again; the turn's next requests, a retried attempt and the next turns
-    have it in their history, in place, and never take it again.
+    Before each model request, it takes the messages waiting
+    (``take_steers``), which stores each once as a step of the turn, and
+    hands them to Pydantic AI's own ``RunContext.enqueue`` (``'asap'``): once
+    every ``before_model_request`` ran, Pydantic AI adds them to this request
+    and to the run's history, after what both hold. The run goes on with them
+    (its usage limits, retries and capabilities' state too); a retried attempt
+    and the next turns find them in their history, where the model saw them,
+    and never take them again.
 
     It is the innermost capability, after ``_Snapshots``: a snapshot that this
-    request stores stands for the positions stored before the messages, so
-    the history after it (the next request's, a retried attempt's, the next
-    turn's) has them after it.
+    request stores covers what was stored before the messages, so every
+    history after it has them after it.
     """
 
     def __init__(self, ctx: SessionContext, conversation: Conversation) -> None:
@@ -738,9 +734,8 @@ class _Steering(AbstractCapability[Any]):
             # A response that its provider paused, resumed: Pydantic AI delivers nothing into its request, so a
             # message taken now would reach the model after the response, though stored before it.
             return request_context
-        steered = await take_steers(self.ctx, self.conversation)
-        if steered:
-            ctx.enqueue(*(typing.cast(ModelRequest, entry.item) for entry in steered), priority="asap")
+        if steered := typing.cast(list[ModelRequest], await take_steers(self.ctx, self.conversation)):
+            ctx.enqueue(*steered, priority="asap")
         return request_context
 
 

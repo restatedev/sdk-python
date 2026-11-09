@@ -119,13 +119,6 @@ class Started(Answering, total=False):
     SDK, or of an agent whose framework cannot take them) gets none: each is answered as a turn of its own."""
 
 
-class SteerRequest(TypedDict):
-    """A message to steer to the turn being answered: its id (the ``steer`` request's) and its text."""
-
-    id: str
-    text: str
-
-
 class _Held(TypedDict):
     """A message steered to the turn ``turn`` (an invocation id), and when it was sent."""
 
@@ -236,7 +229,7 @@ def _set_inbox(ctx: ObjectContext, inbox: list[_Inboxed]) -> None:
 
 
 @signals.handler(ingress_private=True)
-async def steer(ctx: ObjectContext, request: SteerRequest) -> Steered:
+async def steer(ctx: ObjectContext, message: Steer) -> Steered:
     """Take a message steered to the agent (its ``steer`` view): for the turn being answered, or as a turn of its own.
 
     The message is always sent to the agent's private ``steered`` handler at
@@ -247,7 +240,7 @@ async def steer(ctx: ObjectContext, request: SteerRequest) -> Steered:
     at its next step, through ``publish``, until it takes it (``taken``) or
     ends.
     """
-    message_id, text = request["id"], request["text"]
+    message_id, text = message["id"], message["text"]
     agent, key = ctx.key().split(":", 1)
     placeholder = json.dumps({"id": message_id, "text": text}).encode()
     ctx.generic_send(agent, "steered", placeholder, key=key, idempotency_key=f"steer:{message_id}")

@@ -31,47 +31,44 @@ answered as a turn of its own. So each message is answered once.
 from __future__ import annotations
 
 from restate.agents import _signals
-from restate.agents._conversation import Conversation, Entry
-from restate.agents._turn import steering_of, stop_signal_of
+from restate.agents._conversation import Conversation, Item
+from restate.agents._turn import inbox_of, stop_signal_of
 from restate.sessions import SessionContext, Transaction
 
 
-async def take_steers(ctx: SessionContext, conversation: Conversation) -> list[Entry]:
-    """Take the messages steered to the turn being answered, at a step: store each once, and return the new ones.
+async def take_steers(ctx: SessionContext, conversation: Conversation) -> list[Item]:
+    """Take the messages steered to the turn being answered, at a step: store each once, and return their items.
 
     Call it right before a model request that follows the model's reply and
-    its tools' results: the integration then gives the model the returned
-    entries' items (messages of the user), after what the request already
-    holds. It returns nothing, at no cost, unless the turn runs in a ``chat``
-    handler of an agent that takes steered messages, a message is waiting,
-    the turn is not stopping, and each of its tool calls has a result.
+    its tools' results: the integration then puts the returned items in the
+    request, after what it already holds. They are messages of the user, as
+    the framework's ``Items`` makes them (``steered``, or else ``prompt``).
+    It returns nothing, at no cost, unless the turn runs in a ``chat``
+    handler of an agent that takes steered messages, a message it has not
+    taken is waiting, the turn is not stopping, and each of its tool calls
+    has a result.
 
     The messages are steps of the turn from then on: a retried attempt finds
     them stored, in ``history``, and never takes them again. They share the
     turn's fate: stopped, refused or failed with it, they are not answered
     again.
     """
-    steering = steering_of(ctx)
-    if steering is None or not steering.messages:
+    inbox = inbox_of(ctx)
+    if inbox is None or not inbox.messages:
         return []
     stop = stop_signal_of(ctx)
-    if stop is not None and stop.stopped:
-        return []
-    turn = conversation.running()
-    if turn is None or turn.open_calls():
-        return []
-    taken = {entry.steer for entry in turn.steered()}
-    fresh = [message for message in steering.messages if message["id"] not in taken]
-    if not fresh:
-        return []
-    companion = _signals.signals_of(ctx)
-
-    def sent(tx: Transaction, ids: list[str]) -> None:
-        # With the transaction that stores them: so they are marked taken once stored, and once.
-        tx.send(_signals.taken, ids, key=companion, idempotency_key=f"taken:{ids[0]}")
 
     def going() -> bool:
         # A turn stopped while it waited to store them takes none: each is then answered as a turn of its own.
         return stop is None or not stop.stopped
 
-    return await turn.steer(fresh, sent, going)
+    turn = conversation.running()
+    if not going() or turn is None or turn.open_calls():
+        return []
+    companion = _signals.signals_of(ctx)
+
+    def taken(tx: Transaction, ids: list[str]) -> None:
+        # With the transaction that stores them: so they are marked taken once stored, and once.
+        tx.send(_signals.taken, ids, key=companion, idempotency_key=f"taken:{ids[0]}")
+
+    return await turn.steer(inbox.messages, taken, going)

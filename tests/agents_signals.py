@@ -24,7 +24,7 @@ import restate
 from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import HarnessEnvironment
 from restate.agents import _signals
-from restate.agents._api import Published, Signal, Status, Steered, Watch
+from restate.agents._api import Published, Signal, Status, Steer, Steered, Watch
 from restate.agents._signals import STEERS, Started, WaitRequest
 
 
@@ -57,7 +57,7 @@ async def close_turn(ctx: restate.Context, request: dict[str, str]) -> None:
 @driver.handler()
 async def steer_to(ctx: restate.Context, request: dict[str, str]) -> Steered:
     message = {"id": request["id"], "text": request["text"]}
-    return await ctx.object_call(_signals.steer, key=request["key"], arg=typing.cast(_signals.SteerRequest, message))
+    return await ctx.object_call(_signals.steer, key=request["key"], arg=typing.cast(Steer, message))
 
 
 @driver.handler()

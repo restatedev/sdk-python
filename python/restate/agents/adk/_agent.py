@@ -161,6 +161,12 @@ class _Items:
         content = types.Content(role="user", parts=[types.Part(text=text)])
         return Event(author="user", invocation_id=new_invocation_context_id(), content=content)
 
+    def steered(self, text: str, steer_id: str) -> Item:
+        # An invocation of its own too, not the running one, which ADK resumes from its events after a crash: there,
+        # ADK's runner of a workflow root would take a message of the user last among them for the answer to a tool
+        # call, which it fails to find on every retry.
+        return self.prompt(text)
+
     def reply(self, text: str, agent: str | None = None) -> Item:
         content = types.Content(role="model", parts=[types.Part(text=text)])
         return Event(author=agent or self.author, content=content)
@@ -192,9 +198,8 @@ class _Items:
 class _Sessions(BaseSessionService):
     """ADK's sessions, of which there is one: the conversation, an event per item."""
 
-    def __init__(self, ctx: SessionContext, conversation: Conversation) -> None:
+    def __init__(self, conversation: Conversation) -> None:
         super().__init__()
-        self.ctx = ctx
         self.conversation = conversation
 
     def session(self) -> Session:
@@ -252,22 +257,12 @@ class _Sessions(BaseSessionService):
         self._carry(session)
         return event
 
-    async def steered(self, session: Session) -> list[Event]:
-        """Take the messages steered to the turn (``take_steers``), and add them to ``session`` after its events.
+    async def add_stored(self, session: Session, event: Event) -> None:
+        """Add ``event``, which the turn stored already (a message steered to it), to ``session``, after its events.
 
-        ADK builds each model request from the session's events: every
-        request after this one has them too, in place. Each starts an
-        invocation of its own, as a prompt does (``_Items.prompt``), and not
-        the running one, which ADK resumes from its events after a crash:
-        there, ADK's runner of a workflow root would take a message of the
-        user last among them for the answer to a tool call, which it fails to
-        find on every retry.
+        ADK builds each model request from the session's events: every request after this one has it too, in place.
         """
-        taken = [typing.cast(Event, entry.item) for entry in await take_steers(self.ctx, self.conversation)]
-        for event in taken:
-            # Not stored again: the turn stored them as it took them.
-            await super().append_event(session, event)
-        return taken
+        await super().append_event(session, event)
 
 
 class _Restate(BasePlugin):
@@ -288,7 +283,8 @@ class _Restate(BasePlugin):
         # output schema's set_model_response), and a message the turn took there would go unread. The agent's own
         # before_model_callback runs after this one, on the request with them: a response it gives in place of the
         # model's answers them too, as the model would have.
-        for event in await self.sessions.steered(callback_context.session):
+        for event in typing.cast(list[Event], await take_steers(self.ctx, self.sessions.conversation)):
+            await self.sessions.add_stored(callback_context.session, event)
             if event.content is not None:
                 llm_request.contents.append(event.content.model_copy(deep=True))
         return None
@@ -473,7 +469,7 @@ def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
             return final
         turn = conversation.running()
         invocation = typing.cast(Event, turn.latest_ask().item).invocation_id if turn is not None else None
-        sessions = _Sessions(ctx, conversation)
+        sessions = _Sessions(conversation)
         # This package's plugin, after the app's own: a plugin of the app that answers in the model's place leaves
         # the messages steered to the turn to a request that goes out.
         plugins = [*app.plugins, _Restate(ctx, sessions)]

@@ -27,16 +27,10 @@ from sessions_object import Host, Send, request
 from restate import sessions
 from restate.agents import _messages
 from restate.agents._api import Steer
-from restate.agents._conversation import (
-    SCHEMA,
-    STEERED,
-    Conversation,
-    Entry,
-    answer_once,
-    steer_stored,
-)
+from restate.agents._common import Check
+from restate.agents._conversation import SCHEMA, STEERED, Conversation, answer_once, steer_stored
 from restate.agents._steering import take_steers
-from restate.agents._turn import _STEERING, _STOP, Steering, Stop
+from restate.agents._turn import _INBOX, _STOP, Inbox, Stop
 from restate.sessions.internal import Schema, invoke
 
 
@@ -51,18 +45,18 @@ Run = Callable[[sessions.SessionContext, Conversation], Awaitable[str]]
 
 
 class Asker:
-    """An object whose handler answers each prompt with ``run``, steered with what ``steering`` holds."""
+    """An object whose handler answers each prompt with ``run``, steered with what ``inbox`` holds."""
 
-    def __init__(self, run: Run, *, window: int | None = None, check: Callable[[str], str | None] | None = None):
+    def __init__(self, run: Run, *, window: int | None = None, check: Check | None = None):
         self.obj = sessions.SessionObject("asker")
         self.backend = Backend()
-        self.steering: list[Steer] = []
+        self.inbox: list[Steer] = []
         self.hosts: list[Host] = []
 
         @self.obj.handler
         async def ask(ctx: sessions.SessionContext, text: str) -> str:
             # As ``chat_turn`` sets it, from what the companion's ``publish`` returned.
-            _STEERING.set(ctx, Steering(revision=0, messages=list(self.steering)))
+            _INBOX.set(ctx, Inbox(revision=0, messages=list(self.inbox)))
 
             async def ran(conversation: Conversation) -> str:
                 return await run(ctx, conversation)
@@ -92,8 +86,8 @@ async def tool_round(conversation: Conversation, call_id: str = "c1") -> None:
     await conversation.turn.append({"result": call_id, "output": "found"})
 
 
-def texts(entries: list[Entry]) -> list[str]:
-    return [entry.item["text"] for entry in entries]
+def texts(items: list[Any]) -> list[str]:
+    return [item["text"] for item in items]
 
 
 async def test_a_steered_message_is_stored_once_as_a_step_of_the_turn_and_taken_with_its_store():
@@ -116,7 +110,7 @@ async def test_a_steered_message_is_stored_once_as_a_step_of_the_turn_and_taken_
         return "done, in Celsius"
 
     asker = Asker(run)
-    asker.steering = [{"id": "s1", "text": "use Celsius"}]
+    asker.inbox = [{"id": "s1", "text": "use Celsius"}]
     assert await asker.ask("the weather?") == "done, in Celsius"
     assert took == [["use Celsius"], []]
     # The model's next request has the message, after the tool's result.
@@ -133,20 +127,20 @@ async def test_a_steered_message_is_stored_once_as_a_step_of_the_turn_and_taken_
 
 
 async def test_no_message_is_taken_while_a_tool_call_has_no_result_nor_outside_a_chat_turn():
-    took: list[list[Entry]] = []
+    took: list[list[Any]] = []
 
     async def run(ctx: sessions.SessionContext, conversation: Conversation) -> str:
         call = {"id": "c1", "name": "lookup", "input": {}}
         await conversation.turn.append_reply({"role": "assistant", "text": "", "calls": [call]})
         took.append(await take_steers(ctx, conversation))
         await conversation.turn.append({"result": "c1", "output": "found"})
-        _STEERING.delete(ctx)
+        _INBOX.delete(ctx)
         took.append(await take_steers(ctx, conversation))
         await conversation.turn.append_reply({"role": "assistant", "text": "done"})
         return "done"
 
     asker = Asker(run)
-    asker.steering = [{"id": "s1", "text": "use Celsius"}]
+    asker.inbox = [{"id": "s1", "text": "use Celsius"}]
     assert await asker.ask("the weather?") == "done"
     assert took == [[], []]
     assert asker.taken() == []
@@ -168,7 +162,7 @@ async def test_a_retried_attempt_finds_the_steered_message_stored_and_never_take
         return "done"
 
     asker, invocation = Asker(run), request()
-    asker.steering = [{"id": "s1", "text": "use Celsius"}]
+    asker.inbox = [{"id": "s1", "text": "use Celsius"}]
     with pytest.raises(RuntimeError, match="crashed"):
         await asker.ask("the weather?", invocation)
     assert await asker.ask("the weather?", invocation) == "done"
@@ -190,9 +184,9 @@ async def test_an_earlier_turn_reaches_the_model_as_its_prompt_its_steered_messa
 
     # A window of 0: every earlier turn is its messages and answer.
     asker = Asker(run, window=0)
-    asker.steering = [{"id": "s1", "text": "and then?"}]
+    asker.inbox = [{"id": "s1", "text": "and then?"}]
     await asker.ask("first")
-    asker.steering = []
+    asker.inbox = []
     await asker.ask("second")
     assert seen[1] == [
         {"role": "user", "text": "first"},
@@ -214,7 +208,7 @@ async def test_a_turn_counts_its_steered_messages_toward_the_budget_as_soon_as_i
 
     # A window of 0: the turn just answered is before the next turn's window.
     asker = Asker(run, window=0)
-    asker.steering = [{"id": "s1", "text": "use Celsius"}]
+    asker.inbox = [{"id": "s1", "text": "use Celsius"}]
     await asker.ask("the weather?")
     [conversation] = loaded
     # Its message and answer (16 characters) fit in 20; with the steered message (11 more), they do not: the
@@ -243,7 +237,7 @@ async def test_a_turn_stopped_while_it_waits_to_store_steered_messages_takes_non
         return "done"
 
     asker = Asker(run)
-    asker.steering = [{"id": "s1", "text": "use Celsius"}]
+    asker.inbox = [{"id": "s1", "text": "use Celsius"}]
     assert await asker.ask("the weather?") == "done"
     assert asker.taken() == []
 
@@ -262,8 +256,8 @@ async def test_the_output_check_asks_again_once_after_a_steered_message():
         await turn.append_reply({"role": "assistant", "text": reply})
         return reply
 
-    asker = Asker(run, check=lambda answer: "Reply again, with JSON only." if answer == "prose" else None)
-    asker.steering = [{"id": "s1", "text": "be brief"}]
+    asker = Asker(run, check=lambda answer, _: "Reply again, with JSON only." if answer == "prose" else None)
+    asker.inbox = [{"id": "s1", "text": "be brief"}]
     assert await asker.ask("plan") == "still prose"
     # The steered message did not count as the ask: the check asked again, once.
     assert asked == ["plan", "Reply again, with JSON only."]
@@ -286,7 +280,7 @@ async def test_a_dropped_reply_drops_the_message_steered_after_it_which_is_then_
         return "again"
 
     asker = Asker(run)
-    asker.steering = [{"id": "s1", "text": "use Celsius"}]
+    asker.inbox = [{"id": "s1", "text": "use Celsius"}]
     assert await asker.ask("the weather?") == "again"
 
 
@@ -298,7 +292,7 @@ async def test_the_summary_view_shows_a_steered_message_in_its_turn_once_from_a_
         return "done"
 
     asker = Asker(run)
-    asker.steering = [{"id": "s1", "text": "use Celsius"}]
+    asker.inbox = [{"id": "s1", "text": "use Celsius"}]
     await asker.ask("the weather?")
     page = await asker.messages({"view": "summary"})
     shown = [(m["role"], m["parts"][0]["text"]) for m in page["messages"]]
@@ -339,5 +333,5 @@ async def test_steer_dedupes_by_id_within_the_messages_given():
         return "done"
 
     asker = Asker(run)
-    asker.steering = typing.cast(list[Steer], [{"id": "s1", "text": "once"}, {"id": "s1", "text": "once"}])
+    asker.inbox = typing.cast(list[Steer], [{"id": "s1", "text": "once"}, {"id": "s1", "text": "once"}])
     assert await asker.ask("hi") == "done"
