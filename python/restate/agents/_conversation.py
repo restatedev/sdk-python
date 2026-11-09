@@ -297,14 +297,16 @@ def summary_items(items: Items, summary: str) -> list[Item]:
 def load_item(items: Items, stored: str) -> Item:
     """Return the item stored as ``stored``, or fail for good: a retry would read the same row again.
 
-    A row that ``items`` cannot read was stored by another framework's agent of the same name, say.
+    A row that ``items`` cannot read was stored by another framework's agent of the same name, or by another
+    version of this framework, say.
     """
     try:
         return items.load(stored)
     except Exception as error:
         raise TerminalError(
-            f"This conversation holds a message that this agent cannot read (one stored by an agent of another "
-            f"framework, under the same name?): {type(error).__name__}: {error}"
+            f"This conversation holds a message that this agent cannot read (stored by an agent of another "
+            f"framework under the same name, or by another version of its framework?): {type(error).__name__}: "
+            f"{error}"
         ) from error
 
 
