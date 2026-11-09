@@ -10,8 +10,8 @@ its own conversation with each user (``billing/alice``, ``tech/alice``)::
         --with langchain-openai --with 'pydantic-ai-slim[openai]' examples-agents/intermediate/router.py
     npx @restatedev/restate-server                                                  # Restate, in another terminal
     npx @restatedev/restate -y deployments register --force http://localhost:9080
-    curl localhost:8080/desk/alice/route --json '"I was charged twice for order 103"'
-    curl localhost:8080/desk/alice/route --json '"The app crashes when I open my orders"'
+    curl localhost:8080/front_desk/alice/route --json '"I was charged twice for order 103"'
+    curl localhost:8080/front_desk/alice/route --json '"The app crashes when I open my orders"'
     curl localhost:8080/billing/alice/messages --json '{}'   # what billing was asked, and answered
 """
 
@@ -31,10 +31,10 @@ tech = openai.agent(
     system="You handle technical problems with the app. Ask for what you need to know, one question at a time.",
 )
 
-desk = sessions.SessionObject("desk")
+front_desk = sessions.SessionObject("front_desk")
 
 
-@desk.handler
+@front_desk.handler
 async def route(ctx: sessions.SessionContext, message: str) -> str:
     # Asked once: a retried attempt gets the same answer.
     team = await pydantic_ai.prompt(
@@ -49,4 +49,4 @@ async def route(ctx: sessions.SessionContext, message: str) -> str:
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(restate.app([desk, billing, tech])))
+    asyncio.run(restate.serve(restate.app([front_desk, billing, tech])))
