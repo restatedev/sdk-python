@@ -191,3 +191,23 @@ async def test_handler_with_ctx_none():
     async with simple_harness(greeter) as client:
         res = await client.service_call(greet, arg="bob")
         assert res == "hi"
+
+
+async def test_a_send_to_a_workflow_gives_the_invocation_id_that_attach_waits_for():
+    greeter = Workflow("greeter_workflow_send")
+
+    @greeter.main()
+    async def hello(ctx: WorkflowContext) -> str:
+        return "hi"
+
+    caller = Service("caller_send")
+
+    @caller.handler()
+    async def send_and_attach(ctx: Context, workflow_id: str) -> list[str]:
+        first = await ctx.workflow_send(hello, key=workflow_id, arg=None).invocation_id()  # starts the run
+        again = await ctx.workflow_send(hello, key=workflow_id, arg=None).invocation_id()  # starts nothing: same run
+        assert again == first
+        return [await ctx.attach_invocation(again, type_hint=str), await ctx.attach_invocation(first, type_hint=str)]
+
+    async with restate.create_test_harness(restate.app([greeter, caller]), restate_image=RESTATE_IMAGE) as harness:
+        assert await harness.client.service_call(send_and_attach, arg="wf-1") == ["hi", "hi"]

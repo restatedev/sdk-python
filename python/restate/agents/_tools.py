@@ -45,6 +45,7 @@ from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_star
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable
 from restate.sessions import SessionContext
+from restate.sessions.internal import attach_invocation, start
 
 T = typing.TypeVar("T")
 
@@ -326,6 +327,21 @@ async def _once(
     return result
 
 
+async def run_workflow(ctx: SessionContext, target: Callable[..., Any], value: Any, workflow_id: str) -> Any:
+    """Run the workflow ``target`` (its main handler) with the id ``workflow_id`` to its end, and return its result.
+
+    It sends to the workflow, and waits for the invocation the send started.
+    A workflow runs once per id: a send to one whose run started already
+    starts nothing, and its invocation id is that run's. So a tool call made
+    again after a crash, or a ``key`` that ran before, waits for that run. The
+    run is the workflow's own, not a call of the turn: stopping the turn
+    doesn't cancel it.
+    """
+    handler = handler_of(target)
+    invocation_id = await start(ctx, target, *inputs_of(handler, value), key=workflow_id)
+    return handler.handler_io.output_serde.deserialize(await attach_invocation(ctx, invocation_id))
+
+
 def untyped(ctx: SessionContext) -> Any:
     """Return ``ctx`` untyped, to call a handler whose input type is known only at run time."""
     return ctx
@@ -523,7 +539,9 @@ def workflow(
     """Create a tool that runs a workflow to completion and returns its result.
 
     Each tool call starts a workflow of its own, whose id is built from the
-    agent's key and the tool call's id, unless ``key`` is given.
+    agent's key and the tool call's id, unless ``key`` is given. A workflow
+    runs once per id: a tool call run again after a crash waits for the run
+    it started, and a ``key`` that already ran gets that run's result.
 
     Args:
         target: The workflow's main handler.
@@ -546,9 +564,7 @@ def workflow(
 
         async def made(c: ToolCall) -> Any:
             workflow_id = f"{c.ctx.key}-{c.call_id}" if key is None else await configured(key, c.ctx)
-            return await untyped(c.ctx).call(
-                target, *inputs_of(handler, value), key=workflow_id, idempotency_key=c.idempotency_key
-            )
+            return await run_workflow(c.ctx, target, value, workflow_id)
 
         return await _once(service, arguments["raw"], tool_call, made)
 

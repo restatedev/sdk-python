@@ -48,7 +48,7 @@ from restate.retry_policy import InvocationRetryPolicy
 from restate.serde import BytesSerde, DefaultSerde, Serde
 from restate.server_context import DisconnectedException, ServerInvocationContext
 from restate.sessions._api import Database, DatabaseReader, SessionContext, ViewContext
-from restate.sessions._calls import CallHost, Calls, GenericSend, Sends, send_now
+from restate.sessions._calls import CallHost, Calls, GenericSend, Sends, send_now, send_to
 from restate.sessions._link import Link
 from restate.sessions._schema import Migration, Schema, steps_of
 from restate.sessions._scope import SCOPE, Scope
@@ -166,6 +166,9 @@ class _ContextHost:
         headers: dict[str, str] | None = None,
     ) -> Any:
         return self.context.generic_call(service, handler, arg, key, idempotency_key, headers)
+
+    def attach_invocation(self, invocation_id: str) -> Awaitable[bytes]:
+        return self.context.attach_invocation(invocation_id, serde=BytesSerde())
 
     def generic_send(
         self,
@@ -334,6 +337,37 @@ async def cancel_calls(ctx: SessionContext) -> list[str]:
             ``explicit_cancellation=True``.
     """
     return await _preview.cancel_previous_calls(_explicit_of(ctx, "cancel_calls"))
+
+
+def _host_of(ctx: SessionContext) -> CallHost:
+    if not isinstance(ctx, AttemptContext):
+        raise TypeError(f"{ctx!r} is not the context of a session object's handler")
+    return ctx._call_host  # pyright: ignore[reportPrivateUsage] (this module's own class)
+
+
+async def start(
+    ctx: SessionContext, handler: Callable[..., Awaitable[Any]], arg: Any = None, *, key: str | None = None
+) -> str:
+    """Start an invocation of ``handler`` with ``arg`` by a send, made right away as ``ctx.send`` does, and return its id.
+
+    For libraries that wait for what they sent (``attach_invocation``). A
+    send to a workflow's main handler whose run of that id started already
+    starts nothing: its invocation id is that run's.
+
+    Raises:
+        TypeError: If ``ctx`` is not the context of a session object's handler.
+    """
+    sent = send_to(_host_of(ctx), handler, arg, key)
+    return typing.cast(str, await sent.invocation_id())
+
+
+def attach_invocation(ctx: SessionContext, invocation_id: str) -> Awaitable[bytes]:
+    """Wait for the invocation ``invocation_id`` to end, and return its result, serialized.
+
+    Raises:
+        TypeError: If ``ctx`` is not the context of a session object's handler.
+    """
+    return _host_of(ctx).attach_invocation(invocation_id)
 
 
 def definition_of(ctx: SessionContext | ViewContext) -> SessionObject | None:

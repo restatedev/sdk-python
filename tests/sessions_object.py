@@ -14,6 +14,7 @@
 
 import asyncio
 import itertools
+import json
 import typing
 from dataclasses import dataclass, field
 from typing import Any
@@ -84,6 +85,16 @@ class Answer(restate.RestateDurableCallFuture[bytes]):
         pass
 
 
+class Sent:
+    """The SDK's handle of a send: its invocation id is made of its target."""
+
+    def __init__(self, invocation_id: str) -> None:
+        self.id = invocation_id
+
+    async def invocation_id(self) -> str:
+        return self.id
+
+
 @dataclass
 class Host:
     """An attempt's context over ``backend``, the object's state, as the SDK's gives it."""
@@ -95,6 +106,8 @@ class Host:
     sends: list[Send] = field(default_factory=list)
     calls: list[tuple[str, str, bytes, str | None, str | None]] = field(default_factory=list)
     answers: dict[str, bytes] = field(default_factory=dict)
+    # The invocations attached to, by id; their results are the answers of their ids.
+    attached: list[str] = field(default_factory=list)
     cancelled: list[str] = field(default_factory=list)
     # How many more syncs go through before the process crashes: every sync after fails, losing its writes.
     _syncs_left: int | None = None
@@ -129,8 +142,13 @@ class Host:
         self.calls.append((service, handler, arg, key, idempotency_key))
         return Answer(self.answers[handler])
 
+    def attach_invocation(self, invocation_id: str):
+        self.attached.append(invocation_id)
+        return Answer(self.answers[invocation_id])
+
     def generic_send(self, service, handler, arg, key=None, send_delay=None, idempotency_key=None, headers=None):
         self.sends.append(Send(service, handler, arg, key, send_delay, idempotency_key))
+        return Sent(f"inv_{service}/{key}")
 
     def cancel_invocation(self, invocation_id: str) -> None:
         self.cancelled.append(invocation_id)
@@ -357,6 +375,32 @@ async def test_calls_are_typed_by_their_handler_and_checked_for_their_key():
     with pytest.raises(TerminalError, match="audit is an object: call it with its key"):
         await run(caller, "unkeyed", host)
     assert await run(caller, "literal", host) == 42
+
+
+payouts = restate.Workflow("payouts")
+
+
+@payouts.main()
+async def pay(ctx: restate.WorkflowContext, amount: int) -> str:
+    return f"paid {amount}"
+
+
+async def test_start_sends_and_returns_the_invocation_id_that_attach_invocation_waits_for():
+    """For libraries: start an invocation by a send, and wait for its result by its id."""
+    caller = sessions.SessionObject("caller")
+
+    @caller.handler()
+    async def refund(ctx: sessions.SessionContext, amount: int) -> str:
+        invocation_id = await internal.start(ctx, pay, amount, key="order-7")
+        return json.loads(await internal.attach_invocation(ctx, invocation_id))
+
+    host = Host(Backend(), service="caller", answers={"inv_payouts/order-7": b'"paid 30"'})
+    assert await run(caller, "refund", host, 30) == "paid 30"
+    [send] = host.sends
+    assert (send.service, send.handler, send.arg, send.key) == ("payouts", "pay", b"30", "order-7")
+    assert host.attached == ["inv_payouts/order-7"]
+    with pytest.raises(TypeError, match="is not the context of a session object"):
+        await internal.start(typing.cast(sessions.SessionContext, object()), pay, 30, key="order-7")
 
 
 async def test_ctx_send_is_made_at_once_and_cancel_takes_an_invocation_id():

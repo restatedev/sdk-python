@@ -74,6 +74,8 @@ class CallHost(Protocol):
         headers: dict[str, str] | None = None,
     ) -> Any: ...
 
+    def attach_invocation(self, invocation_id: str) -> Awaitable[bytes]: ...
+
 
 def _target(handler: Callable[..., Any], key: str | None) -> tuple[str, str, Serde[Any], Serde[Any]]:
     """Return the service name, handler name and serdes of ``handler``, checking ``key``.
@@ -243,6 +245,12 @@ class Sends:
     ) -> None:
         parameter = input_serde.serialize(arg)
         self._send_sink(GenericSend(service, handler, parameter, key, delay, idempotency_key, headers))
+
+
+def send_to(host: CallHost, handler: Callable[..., Awaitable[Any]], arg: Any, key: str | None) -> Any:
+    """Send ``arg`` to ``handler`` right away, as ``ctx.send`` does, and return the SDK's handle of the send."""
+    service, name, input_serde, _ = _target(handler, key)
+    return host.generic_send(service, name, input_serde.serialize(arg), key)
 
 
 def send_now(host: CallHost) -> Callable[[GenericSend], None]:

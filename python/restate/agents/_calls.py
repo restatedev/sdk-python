@@ -20,7 +20,10 @@ the interrupted tool call again with the same id, or tells the model it was
 interrupted, and the model makes it again under a new id. Either way, a call
 with the same tool and input as one an earlier attempt made reuses that
 call's id, and so its idempotency key: it is the same Restate call, which it
-waits for again or whose result it gets.
+waits for again or whose result it gets. (A workflow's main handler takes no
+idempotency key: the ``workflow`` tool, and LangGraph's ``nodes.workflow``,
+send to it, which starts its run once per workflow id, and wait for that run,
+``run_workflow``.)
 
 A call is kept until the framework's transcript has its result under the
 latest id it was made with (``settle`` checks this at each publish and before
