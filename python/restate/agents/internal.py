@@ -33,6 +33,9 @@ An integration needs, beyond the public API:
   tool's error.
 - ``companion_of`` and ``deliver``, to see what an agent is doing and to send
   it a message from another session object's handler.
+- ``take_steers``, at each step of a turn: the messages steered to it, which
+  the next model request gets (an integration says it calls it with
+  ``chat(..., steers=True)``).
 """
 
 from restate.agents._common import (
@@ -70,6 +73,7 @@ from restate.agents._conversation import (
 )
 from restate.agents._output import answer_with, asking
 from restate.agents._signals import Companion, companion_of, deliver, signals
+from restate.agents._steering import take_steers
 from restate.agents._tools import run_tool, wait_for
 from restate.agents._turn import (
     AttemptEnded,
@@ -123,6 +127,7 @@ __all__ = [
     "signals",
     "stop_signal_of",
     "stored_answer",
+    "take_steers",
     "tool_call_ended",
     "tool_call_started",
     "wait_for",

@@ -30,7 +30,7 @@ import typing
 from dataclasses import dataclass, field
 
 from restate.agents._api import ChatMessage, Messages, MessagesRequest, Part, Role, ToolPart, text_part
-from restate.agents._conversation import SCHEMA, STEPS, TURNS, Items, last_of, load_item, start_of
+from restate.agents._conversation import SCHEMA, STEERED, STEPS, TURNS, Items, last_of, load_item, start_of
 from restate.sessions import DatabaseReader
 
 
@@ -174,16 +174,25 @@ async def _latest(db: DatabaseReader, items: Items, before: int | None, limit: i
     }
 
 
-# --- The summary: per turn, the user's message and the answer -------------------------------------------------------
+# --- The summary: per turn, the user's messages and the answer ------------------------------------------------------
 
 _TURN = f"SELECT n, seq, item, answer, answered_at, answered_seq FROM {TURNS}"
 
+_STEERED = f"SELECT st.n, s.seq, s.item FROM {STEERED} st JOIN {STEPS} s ON s.n = st.n"
+"""The messages steered to turns that took them: messages of the user, which the summary shows too."""
 
-def _summarized(items: Items, rows: typing.Sequence[typing.Sequence[typing.Any]]) -> list[_Message]:
-    """Render turns' rows (``_TURN``'s columns) as their user's messages and answers, in order.
+
+def _summarized(
+    items: Items,
+    rows: typing.Sequence[typing.Sequence[typing.Any]],
+    steered: typing.Sequence[typing.Sequence[typing.Any]] = (),
+) -> list[_Message]:
+    """Render turns' rows (``_TURN``'s columns) as their user's messages and answers, with the messages steered to
+    them (``_STEERED``'s columns), in order.
 
     The answer's message has the id it has in the full view (the turn's last
-    message of the assistant), and the ``seq`` it was stored with.
+    message of the assistant), and the ``seq`` it was stored with; so does a
+    steered message.
     """
     messages: list[_Message] = []
     for n, seq, stored, answer, answered_at, answered_seq in rows:
@@ -194,15 +203,21 @@ def _summarized(items: Items, rows: typing.Sequence[typing.Sequence[typing.Any]]
             answered = str(answer)
             parts: list[Part] = [text_part(answered)] if answered.strip() else []
             messages.append(_Message(int(answered_at), "assistant", parts, int(typing.cast(int, answered_seq))))
-    return [message for message in messages if message.parts]
+    for n, seq, stored in steered:
+        said = items.read(load_item(items, str(stored))).said
+        text = said[1] if said else ""
+        messages.append(_Message(int(n), "user", [text_part(text)] if text.strip() else [], int(seq)))
+    return sorted((message for message in messages if message.parts), key=lambda message: message.id)
 
 
 async def _summary_since(db: DatabaseReader, items: Items, cursor: int, limit: int) -> Messages:
     """Return the user's messages and answers stored since ``cursor``, in the order they were."""
     asked = await db.values(f"{_TURN} WHERE seq > ?", [cursor])
     answered = await db.values(f"{_TURN} WHERE answered_seq > ?", [cursor])
+    steered = await db.values(f"{_STEERED} WHERE s.seq > ?", [cursor])
     rows = {int(typing.cast(int, row[0])): row for row in [*asked, *answered]}
-    messages = sorted((m for m in _summarized(items, list(rows.values())) if m.seq > cursor), key=lambda m: m.seq)
+    summarized = _summarized(items, list(rows.values()), steered)
+    messages = sorted((m for m in summarized if m.seq > cursor), key=lambda m: m.seq)
     shown = messages[:limit]
     return {
         "messages": [_chat(m) for m in shown],
@@ -218,7 +233,9 @@ async def _summary_latest(db: DatabaseReader, items: Items, before: int | None, 
     start = await start_of(db)
     _, now = await last_of(db)
     cursor = max(start.seq, now)
-    messages = [m for m in _summarized(items, rows[::-1]) if m.id < end]
+    earliest = int(typing.cast(int, rows[-1][0])) if rows else end
+    steered = await db.values(f"{_STEERED} WHERE st.n >= ? AND st.n < ? ORDER BY st.n", [earliest, end])
+    messages = [m for m in _summarized(items, rows[::-1], steered) if m.id < end]
     first = int(typing.cast(int, rows[-1][0])) if rows else end
     [[earlier]] = await db.values(f"SELECT EXISTS (SELECT 1 FROM {TURNS} WHERE n < ?)", [first])
     return {

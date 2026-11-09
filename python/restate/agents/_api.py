@@ -182,6 +182,42 @@ class Notifications(TypedDict):
     revision: int
 
 
+class Steer(TypedDict):
+    """A message steered to the turn being answered (``steer``): its id (the ``steer`` request's) and its text."""
+
+    id: str
+    text: str
+
+
+class Published(Notifications, total=False):
+    """What the companion's ``publish`` returns to the turn that published: the new revision, and the messages
+    steered to that turn that it has not taken yet, if any, oldest first."""
+
+    steering: list[Steer]
+
+
+class Steering(TypedDict):
+    """A message steered to the turn being answered that it has not taken yet, as ``status`` shows it."""
+
+    id: str
+    since: str
+    """When it was sent, as an ISO 8601 timestamp."""
+
+
+class Steered(TypedDict):
+    """The response of the ``steer`` view.
+
+    ``id`` is the message's (the request's id). ``turn`` is the invocation of
+    the turn being answered, which takes the message at its next step if it
+    reaches one; ``None`` if no turn takes it. Either way the message is
+    answered once: in that turn, or else as a turn of its own, in the order
+    it was sent.
+    """
+
+    id: str
+    turn: str | None
+
+
 class _Watch(TypedDict):
     revision: int
 
@@ -192,11 +228,16 @@ class Watch(_Watch, total=False):
     timeoutSeconds: float
 
 
-class Status(TypedDict):
-    """What an agent is doing: the message it is answering, if any, and what its tools wait for, oldest first."""
-
+class _Status(TypedDict):
     answering: Answering | None
     waiting: list[Waiting]
+
+
+class Status(_Status, total=False):
+    """What an agent is doing: the message it is answering, if any, and what its tools wait for, oldest first."""
+
+    steering: list[Steering]
+    """The messages steered to the turn being answered that it has not taken yet, oldest first; absent if none."""
 
 
 class Stopped(TypedDict):

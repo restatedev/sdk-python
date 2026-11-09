@@ -15,6 +15,7 @@ messages, its tool calls with their outputs, and what its tools wait for.
 What you type goes to the agent, as a message it answers after the one it is
 answering, if any. A line that starts with ``/`` is a command::
 
+    /steer <message>         send <message> to the turn being answered, which takes it at its next step
     /signal <name> [value]   resolve the oldest wait for the signal <name> (value: JSON, or text; default "approved")
     /pending                 what the agent's tools wait for
     /status                  what the agent is doing
@@ -35,12 +36,13 @@ import json
 import os
 import sys
 import threading
+import uuid
 from typing import Any
 
 from restate.agents._api import Part
 
 USAGE = """\
-commands: /signal <name> [value], /pending, /status, /stop, /clear, /help; Ctrl-D leaves
+commands: /steer <message>, /signal <name> [value], /pending, /status, /stop, /clear, /help; Ctrl-D leaves
 """
 
 
@@ -97,7 +99,11 @@ def _value(words: list[str]) -> object:
 async def _say(agent: Any, line: str) -> None:
     """Run a command, or send a message to the agent."""
     command, *words = line.split()
-    if command == "/signal" and words:
+    if command == "/steer" and words:
+        steered = await agent.steer(line.split(None, 1)[1], idempotency_key=str(uuid.uuid4()))
+        turn = steered["turn"]
+        print(f"steered to {turn}" if turn else "queued: no turn takes it, it is answered next", flush=True)
+    elif command == "/signal" and words:
         resolved = await agent.signal(words[0], _value(words[1:]))
         print(f"resolved {resolved}" if resolved else f"nothing waits for {words[0]}", flush=True)
     elif command == "/pending":

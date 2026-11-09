@@ -31,6 +31,7 @@ from restate.agents._api import (
     Resolved,
     Signal,
     Status,
+    Steered,
     Stopped,
     View,
     Waiting,
@@ -46,7 +47,7 @@ from restate.agents._common import (
     check_window,
     refusal_of,
 )
-from restate.agents._conversation import SCHEMA, Items, next_start, restart
+from restate.agents._conversation import SCHEMA, Items, next_start, restart, steer_stored
 from restate.agents._conversation import compact as compact_turns
 from restate.agents._conversation import settle as settle_turn
 from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared, publish
@@ -171,6 +172,8 @@ BUILT_IN = frozenset(
         "erase",
         "settle",
         "compact",
+        "steer",
+        "steered",
     }
 )
 """The names of the built-in handlers and views of every agent, which are reserved."""
@@ -196,6 +199,9 @@ class AgentObject(SessionObject):
     ``chat()`` turns the object into an agent, and adds:
 
     - ``chat``: a handler that takes a message and returns the answer.
+    - ``steer``: send a message while a turn is answered: the turn takes it
+      at its next step, or else it is answered as a turn of its own, in the
+      order it was sent.
     - ``messages``: read the conversation, one page at a time.
     - ``clear``: stop the message being answered and forget the
       conversation, emptying the key's database.
@@ -203,8 +209,9 @@ class AgentObject(SessionObject):
       and the revision, for clients that follow the conversation.
 
     These names, ``erase`` (which ``clear`` uses), ``settle`` (which closes
-    a turn whose invocation is gone) and ``compact`` (which summarizes the
-    earliest turns), are reserved:
+    a turn whose invocation is gone), ``compact`` (which summarizes the
+    earliest turns) and ``steered`` (which answers a steered message that no
+    turn took), are reserved:
     registering a handler or view of your own under one of them raises
     ``ValueError``. You rarely create an ``AgentObject`` yourself: a
     framework's ``agent()`` creates one and calls ``chat()`` for you.
@@ -355,6 +362,7 @@ class AgentObject(SessionObject):
         summarize: Summarize | None = None,
         snapshots: bool = False,
         compact_history: CompactHistory | None = None,
+        steers: bool = False,
     ) -> A: ...
 
     @typing.overload
@@ -368,6 +376,7 @@ class AgentObject(SessionObject):
         summarize: Summarize | None = None,
         snapshots: bool = False,
         compact_history: CompactHistory | None = None,
+        steers: bool = False,
     ) -> Callable[[A], A]: ...
 
     def chat(
@@ -381,6 +390,7 @@ class AgentObject(SessionObject):
         summarize: Summarize | None = None,
         snapshots: bool = False,
         compact_history: CompactHistory | None = None,
+        steers: bool = False,
     ) -> Any:
         """Turn this object into an agent that answers each message with ``answer``.
 
@@ -425,6 +435,10 @@ class AgentObject(SessionObject):
                 ``None``), which is stored as a snapshot. It runs in the
                 private ``compact`` handler, after a turn that asked for it
                 (``Conversation.compact_after``).
+            steers: Whether ``answer`` takes steered messages at the turn's
+                steps (``take_steers``), which a framework's integration
+                says. Without, every message sent to ``steer`` is answered as
+                a turn of its own, after the turn being answered.
 
         Returns:
             ``answer`` itself.
@@ -442,6 +456,7 @@ class AgentObject(SessionObject):
                     summarize=summarize,
                     snapshots=snapshots,
                     compact_history=compact_history,
+                    steers=steers,
                 )
 
             return decorate
@@ -454,6 +469,7 @@ class AgentObject(SessionObject):
             summarize=summarize,
             snapshots=snapshots,
             compact_history=compact_history,
+            steers=steers,
         )
         AGENT.on(self, self._settings)
         answering = answer
@@ -463,9 +479,20 @@ class AgentObject(SessionObject):
 
         chat.__annotations__["return"] = output if output is not None else str
 
+        async def steered(ctx: SessionContext, message: _signals.SteerRequest) -> None:
+            """Answer a message sent to ``steer`` as a turn of its own, unless the turn it was sent to took it.
+
+            The companion sends it as the message is sent, so that it keeps its
+            place in the key's queue: it runs once the turns before it ended.
+            """
+            if await steer_stored(ctx.db, message["id"]):
+                return
+            await chat_turn(ctx, message["text"], answering)
+
         self._building = True
         try:
             self.handler(name="chat", accept="*/*", input_serde=MessageSerde(), explicit_cancellation=True)(chat)
+            self.handler(name="steered", ingress_private=True, explicit_cancellation=True)(steered)
             _followed(self, items)
         finally:
             self._building = False
@@ -503,7 +530,8 @@ async def _stopped(ctx: ViewContext, step: str) -> Stopped:
 
 
 def _followed(agent: AgentObject, items: Items) -> None:
-    """Register the views that ``chat()`` adds (``messages``, ``clear``, ``sync``), and the private handlers."""
+    """Register the views that ``chat()`` adds (``messages``, ``steer``, ``clear``, ``sync``), and the private
+    handlers."""
 
     async def messages(ctx: ViewContext, request: MessagesRequest | None = None) -> Messages:
         """Read the conversation: a page of it, or what changed since a cursor.
@@ -513,6 +541,20 @@ def _followed(agent: AgentObject, items: Items) -> None:
         is being answered, it returns what has been stored so far.
         """
         return await _messages.page(ctx.db, items, request)
+
+    async def steer(ctx: ViewContext, text: str) -> Steered:
+        """Send a message to the agent while it answers another: the turn takes it at its next step.
+
+        The message is the request's body, as plain text or as a JSON string,
+        as for ``chat``. The turn being answered gives it to the model at its
+        next step (once the model's tool calls have their results), if its
+        framework takes steered messages and it reaches one; otherwise the
+        message is answered as a turn of its own, after the turns before it,
+        in the order it was sent. With no turn being answered, it starts one.
+        Either way it is answered once: send it with an idempotency key, so
+        that a retried request is the same message.
+        """
+        return await _companion(ctx, _signals.steer, "steer")({"id": ctx.request.id, "text": text})
 
     async def erase(ctx: SessionContext) -> None:
         """Empty the key's database and its signals, once the handlers queued before it are done."""
@@ -581,6 +623,7 @@ def _followed(agent: AgentObject, items: Items) -> None:
         return synced
 
     agent.view(messages)
+    agent.view(accept="*/*", input_serde=MessageSerde())(steer)
     agent.handler(ingress_private=True)(erase)
     agent.handler(ingress_private=True)(settle)
     agent.handler(ingress_private=True)(compact)

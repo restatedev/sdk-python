@@ -88,9 +88,10 @@ import logging
 import time
 import typing
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol
 
+from restate.agents._api import Steer
 from restate.agents._calls import outcomes
 from restate.agents._common import (
     BUDGET,
@@ -109,7 +110,7 @@ from restate.agents._common import (
 )
 from restate.agents._turn import AttemptEnded, answering, settings_of, stop_signal_of
 from restate.exceptions import TerminalError
-from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext
+from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext, Transaction
 from restate.sessions.internal import Schema, definition_of
 
 _logger = logging.getLogger(__name__)
@@ -128,6 +129,10 @@ START = "restate_agent_conversation_start"
 
 SNAPSHOTS = "restate_agent_snapshots"
 """The history as a framework's own compaction left it, for agents that take their history from snapshots."""
+
+STEERED = "restate_agent_steers"
+"""The messages steered to a turn that it took (``Turn.steer``): which items of the trajectories they are, by
+position, and their ids, each stored once."""
 
 SCHEMA = Schema(
     "restate_agents.turns",
@@ -168,6 +173,12 @@ SCHEMA = Schema(
             covers INTEGER NOT NULL,
             turn INTEGER,
             items TEXT NOT NULL
+        )""",
+        # Appended: a new table, which costs a view that applies it to its own session nothing.
+        f"""CREATE TABLE {STEERED} (
+            n INTEGER PRIMARY KEY,
+            turn INTEGER NOT NULL,
+            id TEXT NOT NULL UNIQUE
         )""",
     ],
 )
@@ -233,6 +244,12 @@ class Entry:
     """On a prompt: the ``seq`` given as its turn was answered."""
     asked_at: int | None = None
     """On a prompt: when its turn's row was stored, in Unix milliseconds."""
+    steer: str | None = None
+    """The id of the steered message it is, if it is one: a message of the user that its turn took at a step
+    (``Turn.steer``)."""
+    steers: list[Entry] = field(default_factory=list["Entry"])
+    """On a prompt of the transcript: the messages steered to its turn that it took, in order, which the model
+    sees between its message and its answer once the turn is before the window."""
 
 
 class Parsed(typing.NamedTuple):
@@ -624,15 +641,22 @@ class Turn:
         return list(self._open)
 
     def latest_ask(self) -> Entry:
-        """Return the turn's latest message of the user: its prompt, or the message that asked again (``ask_again``).
+        """Return the turn's latest message of the user that asks for its answer: its prompt, or the message that
+        asked again (``ask_again``).
 
         A framework that runs from a message of its own (ADK's invocation, a
-        LangGraph graph's input) runs from this one.
+        LangGraph graph's input) runs from this one. A steered message
+        (``steer``) is not one: the model reads it within the run, which goes
+        on from the same ask.
         """
         return next(
-            (e for e in reversed(self.items) if e.said is not None and e.said[0] == "user"),
+            (e for e in reversed(self.items) if e.steer is None and e.said is not None and e.said[0] == "user"),
             self.prompt,
         )
+
+    def steered(self) -> list[Entry]:
+        """Return the messages steered to the turn that it took, in order."""
+        return [entry for entry in self.items if entry.steer is not None]
 
     def has_result(self, call_id: str) -> bool:
         """Return whether the turn's tool call ``call_id`` has a result."""
@@ -665,6 +689,60 @@ class Turn:
         the user asked it.
         """
         await self.append(self._ledger.items.prompt(text))
+
+    async def steer(
+        self, messages: Sequence[Steer], sent: Callable[[Transaction, list[str]], None] | None = None
+    ) -> list[Entry]:
+        """Store the steered ``messages`` that are not stored yet as messages of the user in the turn, and return them.
+
+        Each is stored once, by its id, as a step of the turn after those
+        before: the model reads it in its next request, and in every turn's
+        history after, between the turn's message and its answer. ``sent``
+        adds what goes out with the transaction that stores them (the
+        companion's ``taken``), which commits once.
+
+        The store finishes even if the turn stops meanwhile: the turn then
+        closes after it, at the positions after its messages.
+        """
+        ledger = self._ledger
+
+        async def store() -> list[Entry]:
+            async with ledger.lock:
+                self._check_writable()
+                wanted = list({message["id"]: message for message in messages}.values())
+                if not wanted:
+                    return []
+                ids = [message["id"] for message in wanted]
+                marks = ", ".join("?" for _ in ids)
+                stored = await ledger.db.values(f"SELECT id FROM {STEERED} WHERE id IN ({marks})", ids)
+                known = {str(row[0]) for row in stored}
+                new = [message for message in wanted if message["id"] not in known]
+                if not new:
+                    return []
+                n = ledger.next
+                added = [
+                    Entry(n + i, ledger.items.prompt(message["text"]), steer=message["id"])
+                    for i, message in enumerate(new)
+                ]
+                async with ledger.db.transaction() as tx:
+                    for i, entry in enumerate(added, 1):
+                        await tx.execute(
+                            f"INSERT INTO {STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, NULL, NULL)",
+                            [entry.n, self.n, ledger.seq + i, ledger.items.dump(entry.item)],
+                        )
+                        await tx.execute(
+                            f"INSERT INTO {STEERED} (n, turn, id) VALUES (?, ?, ?)", [entry.n, self.n, entry.steer]
+                        )
+                    if sent is not None:
+                        sent(tx, [typing.cast(str, entry.steer) for entry in added])
+                ledger.seq += len(added)
+                ledger.next = n + len(added)
+                self._add(added)
+                return added
+
+        # Shielded: a stop cancels the run, but a commit that is under way still lands, and the turn's own record of
+        # its positions with it, so that the turn's close stores after it rather than over it.
+        return await asyncio.shield(store())
 
     def carry(self, *, agent: str | None = None, state: str | None = None) -> None:
         """Keep what the turn carries to the turns after it: it is stored with its answer.
@@ -702,6 +780,9 @@ class Turn:
         was made from the reply. The positions are given again, so the new
         reply's messages take the dropped ones' ids; the ``seq`` is kept, so
         that a client's cursor still sees them.
+
+        A steered message after the reply is dropped too: it is no longer the
+        turn's, so the agent's ``steered`` answers it as a turn of its own.
         """
         self._check_writable()
         if reply not in self.replies():
@@ -714,6 +795,7 @@ class Turn:
             start = replace(ledger.start, seq=ledger.seq)
             async with ledger.db.transaction() as tx:
                 await tx.execute(f"DELETE FROM {STEPS} WHERE n >= ?", [reply])
+                await tx.execute(f"DELETE FROM {STEERED} WHERE n >= ?", [reply])
                 await restart(tx, start)
             ledger.start = start
             ledger.next = min(ledger.next, reply)
@@ -960,13 +1042,7 @@ class Conversation:
         first = start.n if window == "all" or start.summarized is None else start.summarized
         transcript = await _transcript(db, items, first, None if window == "all" or complete else (window, budget))
         whole = transcript[window_start(transcript, window) :]
-        steps: list[Entry] = []
-        if whole:
-            stored = await db.values(f"SELECT n, item, reply, agent FROM {STEPS} WHERE n > ? ORDER BY n", [whole[0].n])
-            steps = [
-                Entry(int(typing.cast(int, n)), load_item(items, str(item)), reply=_int(reply), agent=_str(agent))
-                for n, item, reply, agent in stored
-            ]
+        steps = await _steps(db, items, whole[0].n) if whole else []
         entries = sorted([*whole, *steps], key=_position)
         return cls(db, items, entries, start, transcript=transcript, last=last, seq=seq, budget=budget, window=window)
 
@@ -988,13 +1064,7 @@ class Conversation:
         [[carried]] = await db.values(f"SELECT MAX(n) FROM {TURNS} WHERE n < ? AND answer IS NOT NULL", [first])
         transcript = await _transcript(db, items, first if carried is None else int(typing.cast(int, carried)), None)
         whole = [turn for turn in transcript if turn.n >= first]
-        steps: list[Entry] = []
-        if whole:
-            stored = await db.values(f"SELECT n, item, reply, agent FROM {STEPS} WHERE n > ? ORDER BY n", [whole[0].n])
-            steps = [
-                Entry(int(typing.cast(int, n)), load_item(items, str(item)), reply=_int(reply), agent=_str(agent))
-                for n, item, reply, agent in stored
-            ]
+        steps = await _steps(db, items, whole[0].n) if whole else []
         entries = sorted([*whole, *steps], key=_position)
         return cls(
             db, items, entries, start, transcript=transcript, last=last, seq=seq, snapshots=True, snapshot=snapshot
@@ -1094,10 +1164,11 @@ class Conversation:
         return [turn for turn in self._ledger.transcript if turn.n < start and turn.answer is not None]
 
     def _size(self, turn: Entry) -> int:
-        """Return the size of ``turn`` as the transcript has it, in characters: its message and its answer."""
+        """Return the size of ``turn`` as the transcript has it, in characters: its message, the messages steered
+        to it, and its answer."""
         if turn.said is None:
             turn.said = self.items.read(turn.item).said
-        return len(turn.said[1] if turn.said else "") + len(turn.answer or "")
+        return len(turn.said[1] if turn.said else "") + _steered_size(turn) + len(turn.answer or "")
 
     def _latest(self, turns: list[Entry], characters: int) -> list[Entry]:
         """Return the latest of ``turns`` that ``characters`` holds, in order."""
@@ -1151,8 +1222,9 @@ class Conversation:
         """Return the items the model gets, in order: the one place where turns are composed, flat.
 
         That is the summary of the earliest turns, if they have one; the turns
-        before the window, as their prompts and answers, as many of the latest
-        as ``budget`` holds; then the window's turns, whole.
+        before the window, as their prompts, the messages steered to them and
+        their answers, as many of the latest as ``budget`` holds; then the
+        window's turns, whole.
 
         With snapshots, it is the latest snapshot's items, then every item
         stored after it, whole; before the first snapshot, the whole
@@ -1167,7 +1239,9 @@ class Conversation:
         if (summary := self.summary) is not None:
             out.extend(summary_items(self.items, summary))
         for turn in self.earlier():
-            out.extend((turn.item, self.items.reply(turn.answer or "", turn.agent)))
+            out.append(turn.item)
+            out.extend(steered.item for steered in turn.steers)
+            out.append(self.items.reply(turn.answer or "", turn.agent))
         out.extend(entry.item for turn in self._turns for entry in turn.entries)
         return out
 
@@ -1257,6 +1331,8 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
     left = None if bounded is None else bounded[1] * 4
     while True:
         rows = await db.values(sql, [first, before, PAGE if bounded is not None else 2**62])
+        # The messages steered to the page's turns: positions between its earliest turn's and the turn after it.
+        steered = await _steered_in(db, items, int(typing.cast(int, rows[-1][0])), before) if rows else {}
         for n, prompt, item, status, answer, agent, carried, answered_at, answered_seq, asked_at in rows:
             at = int(typing.cast(int, n))
             entry = Entry(
@@ -1271,6 +1347,7 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
                 answered_at=_int(answered_at),
                 answered_seq=_int(answered_seq),
                 asked_at=_int(asked_at),
+                steers=steered.get(at, []),
             )
             read.append(entry)
             if walk is None or left is None or walk.holds(entry.status):
@@ -1278,12 +1355,61 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
             if entry.answer is not None:
                 # A turn before the window: the model sees its message and answer, while the budget holds them.
                 entry.said = items.read(entry.item).said
-                left -= len(entry.said[1] if entry.said else "") + len(entry.answer or "")
+                left -= len(entry.said[1] if entry.said else "") + _steered_size(entry) + len(entry.answer or "")
                 if left < 0:
                     return read[::-1]
         if bounded is None or len(rows) < PAGE:
             return read[::-1]
         before = read[-1].n
+
+
+async def _steps(db: DatabaseReader, items: Items, after: int) -> list[Entry]:
+    """Return the trajectories' entries after position ``after``, in order, each steered message marked as one."""
+    stored = await db.values(f"SELECT n, item, reply, agent FROM {STEPS} WHERE n > ? ORDER BY n", [after])
+    steered = {
+        int(typing.cast(int, n)): str(i)
+        for n, i in await db.values(f"SELECT n, id FROM {STEERED} WHERE n > ?", [after])
+    }
+    return [
+        Entry(
+            int(typing.cast(int, n)),
+            load_item(items, str(item)),
+            reply=_int(reply),
+            agent=_str(agent),
+            steer=steered.get(int(typing.cast(int, n))),
+        )
+        for n, item, reply, agent in stored
+    ]
+
+
+async def _steered_in(db: DatabaseReader, items: Items, first: int, end: int) -> dict[int, list[Entry]]:
+    """Return the messages steered to the turns at positions ``first`` (included) to ``end``, by their turn's position.
+
+    It reads only the steered messages: one range of their table's primary key, joined to their items.
+    """
+    rows = await db.values(
+        f"SELECT st.n, st.turn, st.id, s.item FROM {STEERED} st JOIN {STEPS} s ON s.n = st.n "
+        "WHERE st.n >= ? AND st.n < ? ORDER BY st.n",
+        [first, end],
+    )
+    steered: dict[int, list[Entry]] = {}
+    for n, turn, steer_id, item in rows:
+        loaded = load_item(items, str(item))
+        at = int(typing.cast(int, turn))
+        entry = Entry(int(typing.cast(int, n)), loaded, steer=str(steer_id), turn=at, said=items.read(loaded).said)
+        steered.setdefault(at, []).append(entry)
+    return steered
+
+
+def _steered_size(turn: Entry) -> int:
+    """Return the size, in characters, of the messages steered to ``turn`` (a prompt of the transcript)."""
+    return sum(len(steered.said[1]) if steered.said else 0 for steered in turn.steers)
+
+
+async def steer_stored(db: DatabaseReader, steer_id: str) -> bool:
+    """Return whether a turn took the steered message ``steer_id``: one read, of its unique id."""
+    await SCHEMA.ensure(db)
+    return await db.get(f"SELECT 1 FROM {STEERED} WHERE id = ?", [steer_id]) is not None
 
 
 def _str(value: object) -> str | None:
@@ -1444,7 +1570,8 @@ def _transcribed(conversation: Conversation, turns: Sequence[Entry]) -> str:
     lines = [f"Summary of the conversation before:\n{conversation.summary}\n"] if conversation.summary else []
     for turn in turns:
         said = turn.said[1] if turn.said else ""
-        lines.append(f"User: {said}\nAssistant: {turn.answer or ''}\n")
+        steered = "".join(f"User: {steer.said[1] if steer.said else ''}\n" for steer in turn.steers)
+        lines.append(f"User: {said}\n{steered}Assistant: {turn.answer or ''}\n")
     return "\n".join(lines)
 
 
