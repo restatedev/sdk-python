@@ -19,13 +19,16 @@ it. It provides:
 - ``reset``: empty the key's database inside a transaction.
 - ``cancelled`` and ``cancel_calls``: explicit cancellation, for handlers
   declared with ``explicit_cancellation=True``.
+- ``attach_workflow``: wait for a workflow's run by its id, for a call to its
+  main handler that Restate refused as already invoked (made again after a
+  crash).
 - ``ScopeKey`` and ``definition_of``: state a library keeps per attempt, and
   the object an attempt belongs to.
 - ``invoke``, ``SqlHost`` and ``ObjectConfig``: run one attempt of a handler
   against a host of your own, without Restate, for tests.
 """
 
-from restate.sessions._object import cancel_calls, cancelled, definition_of, invoke
+from restate.sessions._object import attach_workflow, cancel_calls, cancelled, definition_of, invoke
 from restate.sessions._schema import Schema
 from restate.sessions._scope import ScopeKey
 from restate.sessions._session import ObjectConfig, SqlHost, database, reset
@@ -35,6 +38,7 @@ __all__ = [
     "Schema",
     "ScopeKey",
     "SqlHost",
+    "attach_workflow",
     "cancel_calls",
     "cancelled",
     "database",

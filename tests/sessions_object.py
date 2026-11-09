@@ -14,6 +14,7 @@
 
 import asyncio
 import itertools
+import json
 import typing
 from dataclasses import dataclass, field
 from typing import Any
@@ -397,56 +398,22 @@ async def pay(ctx: restate.WorkflowContext, amount: int) -> str:
     return f"paid {amount}"
 
 
-@payouts.handler()
-async def paid(ctx: restate.WorkflowSharedContext) -> str:
-    return "paid"
-
-
 ALREADY_INVOKED = TerminalError("the workflow method was already invoked", status_code=409)
 
 
-async def test_a_call_to_a_workflow_refused_as_already_invoked_waits_for_that_run():
-    """A session object runs again from its first line, so it calls a workflow again after a crash: Restate refuses the
-    second call to its main handler (it takes no idempotency key), and the call waits for the run it started."""
+async def test_attach_workflow_waits_for_a_workflows_run_by_its_id():
+    """For libraries: the run of a workflow, by its id, which a call to its main handler made again can't get."""
     caller = sessions.SessionObject("caller")
 
     @caller.handler()
-    async def refund(ctx: sessions.SessionContext, amount: int) -> str:
-        return await ctx.call(pay, amount, key="order-7")
+    async def receipt(ctx: sessions.SessionContext, order: str) -> str:
+        return json.loads(await internal.attach_workflow(ctx, "payouts", order))
 
-    host = Host(
-        Backend(), service="caller", refusals={"pay": ALREADY_INVOKED}, answers={"payouts/order-7": b'"paid 30"'}
-    )
-    assert await run(caller, "refund", host, 30) == "paid 30"
+    host = Host(Backend(), service="caller", answers={"payouts/order-7": b'"paid 30"'})
+    assert await run(caller, "receipt", host, "order-7") == "paid 30"
     assert host.attached == [("payouts", "order-7")]
-
-
-async def test_only_a_workflows_main_handler_refused_as_already_invoked_is_rejoined():
-    caller = sessions.SessionObject("caller")
-
-    @caller.handler()
-    async def refund(ctx: sessions.SessionContext, amount: int) -> str:
-        return await ctx.call(pay, amount, key="order-7")
-
-    @caller.handler()
-    async def receipt(ctx: sessions.SessionContext) -> str:
-        return await ctx.call(paid, key="order-7")
-
-    @caller.handler()
-    async def by_name(ctx: sessions.SessionContext) -> str:
-        return await ctx.generic_call("payouts", "pay", 30, key="order-7")
-
-    cancelled = TerminalError("cancelled", status_code=409)
-    host = Host(Backend(), service="caller", refusals={"pay": cancelled})
-    with pytest.raises(TerminalError, match="cancelled"):
-        await run(caller, "refund", host, 30)
-    host = Host(Backend(), service="caller", refusals={"paid": ALREADY_INVOKED, "pay": ALREADY_INVOKED})
-    with pytest.raises(TerminalError, match="already invoked"):
-        await run(caller, "receipt", host)
-    # By name, the call can't tell a workflow's main handler from another: it is not rejoined.
-    with pytest.raises(TerminalError, match="already invoked"):
-        await run(caller, "by_name", host)
-    assert host.attached == []
+    with pytest.raises(TypeError, match="is not the context of a session object"):
+        internal.attach_workflow(typing.cast(sessions.SessionContext, object()), "payouts", "order-7")
 
 
 async def test_ctx_send_is_made_at_once_and_cancel_takes_an_invocation_id():

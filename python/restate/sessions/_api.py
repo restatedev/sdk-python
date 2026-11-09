@@ -128,9 +128,6 @@ class Caller(Protocol):
             key: The object's or workflow's key; a service takes none.
             idempotency_key: The same on every attempt, so that a retried
                 attempt gets the first call's result instead of calling again.
-                A workflow's main handler needs none: it runs once per
-                workflow id, and a call that Restate refuses because that
-                run started waits for the run, and returns its result.
             headers: Headers to send with the call.
 
         Raises:

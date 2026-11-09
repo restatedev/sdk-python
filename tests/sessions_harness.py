@@ -156,32 +156,10 @@ async def stoppable(ctx: sessions.SessionContext, text: str) -> list[str]:
     return cancelled
 
 
-payouts = restate.Workflow("payouts")
-
-
-@payouts.main()
-async def pay(ctx: restate.WorkflowContext, amount: int) -> str:
-    await ctx.sleep(timedelta(milliseconds=100))
-    return f"paid {amount} for {ctx.key()}"
-
-
-@notes.handler()
-async def refund(ctx: sessions.SessionContext, order: str) -> str:
-    """Pays ``order`` out with a workflow, and crashes on its first attempt once the call is made: the retry calls the
-    workflow again, which Restate refuses (409, already invoked), and so waits for the run the first attempt started."""
-    payout = ctx.call(pay, 30, key=order)
-    await payout.invocation_id()  # the call is made
-    seen = await ctx.db.get("SELECT count(*) AS n FROM notes WHERE text = ?", [order])
-    if seen is not None and seen["n"] == 0:
-        await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [order])
-        raise ValueError("crash after the call was made")
-    return await payout
-
-
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([inbox, pricing, sleeper, payouts, notes]), restate_image=RESTATE_IMAGE
+        restate.app([inbox, pricing, sleeper, notes]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -201,13 +179,6 @@ async def test_a_retry_runs_the_handler_from_the_start_against_what_was_committe
     key = str(uuid.uuid4())
     assert await harness.client.object_call(flaky, key=key, arg="once") == 1
     assert await harness.client.object_call(texts, key=key, arg=None) == ["once"]
-
-
-async def test_a_call_to_a_workflow_made_again_after_a_crash_returns_the_run_it_started(harness: HarnessEnvironment):
-    key, order = str(uuid.uuid4()), f"order-{uuid.uuid4()}"
-    assert await harness.client.object_call(refund, key=key, arg=order) == f"paid 30 for {order}"
-    # Another key's call for the same workflow id gets that run's result too: a workflow runs once per id.
-    assert await harness.client.object_call(refund, key=str(uuid.uuid4()), arg=order) == f"paid 30 for {order}"
 
 
 async def test_calls_and_sql_are_awaited_together(harness: HarnessEnvironment):

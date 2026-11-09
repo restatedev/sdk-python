@@ -339,6 +339,22 @@ async def cancel_calls(ctx: SessionContext) -> list[str]:
     return await _preview.cancel_previous_calls(_explicit_of(ctx, "cancel_calls"))
 
 
+def attach_workflow(ctx: SessionContext | ViewContext, name: str, key: str) -> Awaitable[bytes]:
+    """Wait for the run of the workflow ``name`` with the id ``key``, and return its result, serialized.
+
+    For libraries that run workflows from session objects. Restate takes no
+    idempotency key for a workflow's main handler, and refuses a call to it
+    made again, after a crash, with 409 ("the workflow method was already
+    invoked"): this waits for the run the first call started instead.
+
+    Raises:
+        TypeError: If ``ctx`` is not the context of a session object's handler or view.
+    """
+    if not isinstance(ctx, (AttemptContext, AttemptViewContext)):
+        raise TypeError(f"{ctx!r} is not the context of a session object's handler or view")
+    return ctx._call_host.attach_workflow(name, key)  # pyright: ignore[reportPrivateUsage] (this module's own class)
+
+
 def definition_of(ctx: SessionContext | ViewContext) -> SessionObject | None:
     """Return the session object whose handler or view ``ctx`` belongs to, or ``None``.
 

@@ -139,6 +139,14 @@ async def test_workflow_made_again_after_a_crash_waits_for_the_run_it_started():
     assert host.attached == [("payouts", "alice-c1")]
 
 
+async def test_workflow_refused_otherwise_answers_with_the_error_and_waits_for_no_run():
+    tools["pay"] = workflow(pay, description="Pay an amount out.")
+    cancelled = restate.TerminalError("cancelled", status_code=409)  # a 409 that is no "already invoked"
+    host = Host(Backend(), service="runner", key="alice", refusals={"pay": cancelled})
+    assert await run_tool(host, "pay", {"input": 30}, "c1") == "Error: cancelled"
+    assert host.attached == []
+
+
 # --- signal and subagent --------------------------------------------------------------------------
 
 

@@ -60,7 +60,7 @@ from pydantic import PydanticSchemaGenerationError, TypeAdapter, ValidationError
 from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
-from restate.agents._tools import handler_of, input_type_of, inputs_of, keyed, untyped
+from restate.agents._tools import handler_of, input_type_of, inputs_of, keyed, run_workflow, untyped
 from restate.agents.langgraph._context import handler_context
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
@@ -254,9 +254,7 @@ def workflow(
         step = _step(runtime, "workflow")
         workflow_id = key(state) if key is not None else step.idempotency_key
         value = called.validated(input(state)) if input is not None else None
-        result = await untyped(step.ctx).call(
-            target, *inputs_of(called.handler, value), key=workflow_id, idempotency_key=step.idempotency_key
-        )
+        result = await run_workflow(step.ctx, target, value, workflow_id, step.idempotency_key)
         return _update(output, result)
 
     return node
