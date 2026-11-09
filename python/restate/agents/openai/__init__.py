@@ -36,7 +36,10 @@ and ``RunConfig``::
     desk = openai.agent("desk", agent=triage)
 
 ``tools`` gives an ``Agent`` of your own this package's tools. The
-conversation is stored one step at a time.
+conversation is stored one step at a time. A message sent to an agent's
+``steer`` view while it answers joins the turn at its next step, once the
+model's tool calls have their outputs: the next model request has it, and
+the run goes on.
 
 The conversation lives in the key's database, and only its turns write it,
 so the SDK's ``Session`` stores are not used. Don't use
@@ -60,8 +63,8 @@ This differs from the older ``restate.ext.openai`` integration, whose
 journaling its model calls with ``ctx.run_typed``. Pick ``restate.ext.openai`` to
 add durability to an agent you run in your own services; pick this module for
 a ready-made agent per key, whose conversation lives in a database and which
-comes with built-in handlers to chat, read the conversation, watch its
-progress and stop a turn.
+comes with built-in handlers to chat, steer a turn, read the conversation,
+watch its progress and stop a turn.
 
 Install the ``openai`` extra (``pip install restate-sdk[openai]``). Requests
 use OPENAI_API_KEY, unless you pass a model of the SDK of your own.

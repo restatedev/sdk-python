@@ -41,6 +41,7 @@ from agents import (  # noqa: E402
     Usage,
     function_tool,
     handoff,
+    input_guardrail,
     output_guardrail,
     set_tracing_disabled,
     tool_input_guardrail,
@@ -51,9 +52,9 @@ from openai import AsyncOpenAI  # noqa: E402
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText  # noqa: E402
 
 import restate  # noqa: E402
-from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
+from support import RESTATE_IMAGE, Gate  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
-from restate.agents import openai, tool  # noqa: E402
+from restate.agents import AgentObject, Tool, openai, tool  # noqa: E402
 from restate.agents._api import Messages  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
 
@@ -216,11 +217,65 @@ remembering = Scripted(reply)
 summarizing = openai.agent("oai_summarizing", model=remembering, budget=10)
 """An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
 
+STEPPED = ("steer", "twice")
+"""The prompts on which the steering tests' model calls tools: ``lookup``, and for ``twice`` then ``get_weather``."""
+
+
+def steered_reply(system: str | None, items: list[Item]) -> list[Output]:
+    """The steering tests' model: for ``steer <key>`` and ``twice <key>`` it calls its tools, then answers with the
+    messages of the user that came after the prompt (those steered to the turn); it echoes any other message."""
+    users = [(n, str(i["content"])) for n, i in enumerate(items) if i.get("role") == "user"]
+    at, prompt = next(((n, text) for n, text in reversed(users) if text.split(" ")[0] in STEPPED), (-1, ""))
+    turn = items[at + 1 :]
+    if at < 0 or any(item.get("role") == "assistant" for item in turn):
+        return [said(f"echo: {users[-1][1]}")]
+    word, _, rest = prompt.partition(" ")
+    outputs = [str(item["output"]) for item in turn if item.get("type") == "function_call_output"]
+    if not outputs:
+        return [calls(f"lookup-{rest}", "lookup", f'{{"city": "{rest}"}}')]
+    if word == "twice" and len(outputs) == 1:
+        return [calls(f"weather-{rest}", "get_weather", f'{{"city": "{rest}"}}')]
+    heard = [str(item["content"]) for item in turn if item.get("role") == "user"]
+    return [said(f"heard: {', '.join(heard)}" if heard else f"tool said: {outputs[-1]}")]
+
+
+held = Gate()
+"""Holds the steering agent's ``lookup``, and its model's request for ``slow <key>``, while a test steers."""
+holding: set[str] = set()
+"""The keys whose ``lookup``, or request for ``slow``, waits on ``held``."""
+
+
+class Holding(Scripted):
+    """The steering tests' model, served: its request for ``slow <key>`` waits on ``held``, as a long answer would."""
+
+    async def get_response(
+        self, system_instructions: str | None, input: Any, *args: Any, **kwargs: Any
+    ) -> ModelResponse:
+        last = input[-1] if isinstance(input, list) and input else {}
+        word, _, rest = str(last.get("content", "")).partition(" ")
+        if last.get("role") == "user" and word == "slow":
+            holding.add(rest)
+            await held.wait()
+        return await super().get_response(system_instructions, input, *args, **kwargs)
+
+
+@tool
+async def lookup(city: str) -> str:
+    """Looks it up, once the test lets it."""
+    holding.add(city)
+    await held.wait()
+    return f"found {city}"
+
+
+steering = Holding(steered_reply)
+steerable = openai.agent("oai_steerable", model=steering, tools=[lookup, get_weather])
+"""An agent that takes the messages steered to its turns, as each agent of this package does."""
+
 
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, triage, forgetful, summarizing]), restate_image=RESTATE_IMAGE
+        restate.app([assistant, per_user, triage, forgetful, summarizing, steerable]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -237,8 +292,10 @@ async def chat(harness: HarnessEnvironment, key: str, text: str, service: str = 
     return await post(harness, f"{service}/{key}/chat", content=text, headers=TEXT)
 
 
-async def messages(harness: HarnessEnvironment, key: str) -> list[tuple[str, str]]:
-    page = typing.cast(Messages, (await post(harness, f"oai_assistant/{key}/messages", json={})).json())
+async def messages(
+    harness: HarnessEnvironment, key: str, service: str = "oai_assistant", view: str = "full"
+) -> list[tuple[str, str]]:
+    page = typing.cast(Messages, (await post(harness, f"{service}/{key}/messages", json={"view": view})).json())
     return [
         (message["role"], " ".join(str(part.get("text", part.get("output", ""))) for part in message["parts"]))
         for message in page["messages"]
@@ -1159,3 +1216,318 @@ async def test_a_missing_package_ends_the_turn_but_a_tools_import_error_is_retri
     # Also on the retry, which runs the stored call again itself.
     with pytest.raises(ImportError):
         await ask("weather Rome", invocation)
+
+
+# --- Steering: a message steered to a turn joins it at its next step, in place --------------------
+
+
+async def send(harness: HarnessEnvironment, key: str, text: str) -> str:
+    sent = await post(harness, f"oai_steerable/{key}/chat/send", content=text, headers=TEXT)
+    return typing.cast(str, sent.json()["invocationId"])
+
+
+async def steer(harness: HarnessEnvironment, key: str, text: str) -> dict[str, Any]:
+    # With an idempotency key, as a client sends it: a retried request is the same message.
+    steered = await post(
+        harness, f"oai_steerable/{key}/steer", content=text, headers={**TEXT, "idempotency-key": uuid.uuid4().hex}
+    )
+    assert steered.status_code == 200, steered.text
+    return typing.cast(dict[str, Any], steered.json())
+
+
+async def attach(harness: HarnessEnvironment, invocation: str) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        return await ingress.get(f"{harness.ingress_url}/restate/invocation/{invocation}/attach")
+
+
+async def waiting(k: str) -> None:
+    """Wait until the steering agent's tool (or its model's request) for key ``k`` waits on ``held``."""
+
+    async def holds() -> bool:
+        return k in holding
+
+    await until(holds)
+
+
+def requests_of(scripted: Scripted, prompt: str) -> list[list[Item]]:
+    """Return the requests of ``scripted`` for the conversation that starts with ``prompt``, in order."""
+    return [items for _, items in scripted.requests if _prompts(items)[:1] == [prompt]]
+
+
+async def test_a_message_steered_while_a_tool_runs_is_in_the_next_request_once(harness: HarnessEnvironment):
+    k = key()
+    held.close()
+    try:
+        invocation = await send(harness, k, f"steer {k}")
+        await waiting(k)
+        assert (await steer(harness, k, "use Celsius"))["turn"] == invocation
+    finally:
+        held.open()
+    # The turn's answer is the model's reply to the message.
+    assert (await attach(harness, invocation)).json() == "heard: use Celsius"
+    first, after_the_tool = requests_of(steering, f"steer {k}")
+    assert _prompts(first) == [f"steer {k}"]
+    # The request after the tool's output has it, once, right after that output.
+    assert after_the_tool[-1] == {"role": "user", "content": "use Celsius"}
+    assert after_the_tool[-2]["type"] == "function_call_output" and after_the_tool[-2]["call_id"] == f"lookup-{k}"
+    assert _prompts(after_the_tool) == [f"steer {k}", "use Celsius"]
+    # Its own turn, queued as it was sent, finds it taken: once the key answered a message sent after it, the
+    # conversation has it once, in the turn, between the prompt and the answer.
+    assert (await chat(harness, k, f"done {k}", "oai_steerable")).json() == f"echo: done {k}"
+    assert await messages(harness, k, "oai_steerable", view="summary") == [
+        ("user", f"steer {k}"),
+        ("user", "use Celsius"),
+        ("assistant", "heard: use Celsius"),
+        ("user", f"done {k}"),
+        ("assistant", f"echo: done {k}"),
+    ]
+    assert [text for _, text in await messages(harness, k, "oai_steerable")].count("use Celsius") == 1
+
+
+async def test_a_message_steered_while_the_model_writes_its_answer_is_the_next_turn(harness: HarnessEnvironment):
+    k = key()
+    held.close()
+    try:
+        invocation = await send(harness, k, f"slow {k}")
+        await waiting(k)
+        # The model's request is the turn's last: no step comes after it.
+        assert (await steer(harness, k, "and also"))["turn"] == invocation
+    finally:
+        held.open()
+    assert (await attach(harness, invocation)).json() == f"echo: slow {k}"
+    assert (await chat(harness, k, f"done {k}", "oai_steerable")).json() == f"echo: done {k}"
+    assert await messages(harness, k, "oai_steerable", view="summary") == [
+        ("user", f"slow {k}"),
+        ("assistant", f"echo: slow {k}"),
+        ("user", "and also"),
+        ("assistant", "echo: and also"),
+        ("user", f"done {k}"),
+        ("assistant", f"echo: done {k}"),
+    ]
+    # The turn's one request had no steered message; the message was the next turn's prompt.
+    assert [_prompts(items) for items in requests_of(steering, f"slow {k}")] == [
+        [f"slow {k}"],
+        [f"slow {k}", "and also"],
+        [f"slow {k}", "and also", f"done {k}"],
+    ]
+
+
+class Companion(dict[str, bytes]):
+    """An agent's companion, in this process: it answers a turn's start and close, and each publish with the
+    messages steered to the turn (``steering``), as the companion does until the turn closes."""
+
+    def __init__(self) -> None:
+        super().__init__(start=b"null")
+        self.revision = 0
+        self.sent = 0
+        self.steering: list[dict[str, str]] = []
+        """The messages steered to the turn being answered. ``taken`` never reaches this companion: each publish
+        lists them all, those the turn took too."""
+
+    def __missing__(self, handler: str) -> bytes:
+        if handler == "close":
+            # The messages the turn did not take are each answered as a turn of their own.
+            self.steering.clear()
+            return b"null"
+        assert handler == "publish", f"the companion has no answer for {handler}"
+        self.revision += 1
+        return json.dumps({"revision": self.revision, "steering": self.steering}).encode()
+
+    def steer(self, text: str) -> None:
+        """Steer ``text`` to the turn being answered: its next publish lists it."""
+        self.sent += 1
+        self.steering.append({"id": f"steer-{self.sent}", "text": text})
+
+
+def steered_while(companion: Companion, text: str) -> Tool:
+    """The ``lookup`` tool, which ``text`` is steered to the turn while it runs: the turn learns of it as it ends."""
+
+    @tool(name="lookup")
+    async def looking(city: str) -> str:
+        """Looks it up."""
+        companion.steer(text)
+        return f"found {city}"
+
+    return looking
+
+
+class Chat:
+    """An agent's ``chat``, invoked in this process with ``companion``: each call is a turn, with an invocation of
+    its own unless given one (to retry it)."""
+
+    def __init__(self, obj: AgentObject, companion: Companion) -> None:
+        from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+
+        self.obj = obj
+        self.companion = companion
+        self.backend = Backend()
+        self.hosts: list[Any] = []
+
+    async def __call__(self, text: str, invocation: Any = None) -> Any:
+        from sessions_object import Host  # pylint: disable=import-error,import-outside-toplevel
+
+        from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+        host = Host(self.backend, service=self.obj.name, answers=self.companion)
+        self.hosts.append(host)
+        return await invoke(self.obj, "chat", host, invocation or request_of(), text)
+
+    async def summary(self) -> list[tuple[str, str]]:
+        from sessions_object import Host  # pylint: disable=import-error,import-outside-toplevel
+
+        from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+        view = Host(self.backend, service=self.obj.name).view()
+        page = typing.cast(Messages, await invoke(self.obj, "messages", view, request_of(), {"view": "summary"}))
+        return [(m["role"], str(m["parts"][0].get("text"))) for m in page["messages"]]
+
+    def taken(self) -> list[Any]:
+        """Return the companion's ``taken`` that the turns sent, with the transactions that stored the messages."""
+        return [send for host in self.hosts for send in host.sends if send.handler == "taken"]
+
+
+CELSIUS = {"role": "user", "content": "use Celsius"}
+"""The message steered in the tests in this process, as the model gets it."""
+
+
+async def test_a_steered_message_keeps_its_place_in_every_later_request_of_the_run():
+    companion = Companion()
+    scripted = Scripted(steered_reply)
+    chat = Chat(
+        openai.agent("steered", model=scripted, tools=[steered_while(companion, "use Celsius"), get_weather]), companion
+    )
+    assert await chat("twice Rome") == "heard: use Celsius"
+    first, second, third = (items for _, items in scripted.requests)
+    assert first == [{"role": "user", "content": "twice Rome"}]
+    # Taken after the first round: the request after it has it after the round's output.
+    assert second[-1] == CELSIUS and second[-2]["call_id"] == "lookup-Rome"
+    # The run made the request after the second round afresh, from its input and its items: it has the message
+    # still, once, in its place, before the second round's call and output.
+    assert third[: len(second)] == second
+    assert [item.get("call_id") for item in third[len(second) :]] == ["weather-Rome", "weather-Rome"]
+    assert third.count(CELSIUS) == 1
+    # Stored once, though each publish listed it again: the turn has it between its prompt and its answer.
+    assert await chat.summary() == [
+        ("user", "twice Rome"),
+        ("user", "use Celsius"),
+        ("assistant", "heard: use Celsius"),
+    ]
+    assert len(chat.taken()) == 1
+
+
+async def test_a_steered_message_stored_before_a_crash_is_in_the_retried_request_once(monkeypatch: pytest.MonkeyPatch):
+    # The process crashes once the filter stored the message, before the model is asked.
+    crash_once_after(monkeypatch, "model_input", lambda data: CELSIUS in data.model_data.input)
+    companion = Companion()
+    scripted = Scripted(steered_reply)
+    chat = Chat(openai.agent("steered", model=scripted, tools=[steered_while(companion, "use Celsius")]), companion)
+    invocation = request_of()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await chat("steer Rome", invocation)
+    assert len(scripted.requests) == 1
+    # The retry (the companion lists the message still) runs on from what is stored: the next request has it once,
+    # after the tool's output, and it is not stored again.
+    assert await chat("steer Rome", invocation) == "heard: use Celsius"
+    _, retried = scripted.requests[-1]
+    assert retried[-1] == CELSIUS and retried.count(CELSIUS) == 1
+    assert retried[-2]["call_id"] == "lookup-Rome"
+    assert await chat.summary() == [
+        ("user", "steer Rome"),
+        ("user", "use Celsius"),
+        ("assistant", "heard: use Celsius"),
+    ]
+    assert len(chat.taken()) == 1
+
+
+async def test_a_steered_message_runs_no_input_guardrail_again():
+    checked: list[Any] = []
+
+    @input_guardrail
+    async def counted(context: RunContextWrapper[Any], agent: Agent[Any], input: Any) -> GuardrailFunctionOutput:
+        checked.append(input)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    companion = Companion()
+    scripted = Scripted(steered_reply)
+    tools = openai.tools([steered_while(companion, "use Celsius")])
+    mine = Agent(name="guarded", model=scripted, tools=tools, input_guardrails=[counted])
+    chat = Chat(openai.agent("steered", agent=mine), companion)
+    assert await chat("steer Rome") == "heard: use Celsius"
+    # The run took the message in place, and went on: its input guardrail ran once, on its input.
+    assert len(scripted.requests) == 2 and CELSIUS in scripted.requests[-1][1]
+    assert len(checked) == 1
+
+
+async def test_a_message_steered_before_the_runs_first_request_is_in_it():
+    companion = Companion()
+    scripted = Scripted(steered_reply)
+    chat = Chat(openai.agent("steered", model=scripted), companion)
+    # The turn's first publish, as it starts, lists the message: the run starts with it, after the prompt.
+    companion.steer("use Celsius")
+    assert await chat("hi there") == "echo: use Celsius"
+    assert [items for _, items in scripted.requests] == [[{"role": "user", "content": "hi there"}, CELSIUS]]
+    assert await chat.summary() == [("user", "hi there"), ("user", "use Celsius"), ("assistant", "echo: use Celsius")]
+
+
+def shown(items: list[Item]) -> list[str]:
+    """Return ``items`` as text, to compare: each message's text, and each call's and output's kind and id."""
+    return [str(item["content"]) if "role" in item else f"{item['type']} {item['call_id']}" for item in items]
+
+
+async def test_a_steered_message_keeps_its_place_after_a_handoff_whose_input_filter_took_out_its_item():
+    def desk_script(system: str | None, items: list[Item]) -> list[Output]:
+        outputs = {item["call_id"] for item in items if item.get("type") == "function_call_output"}
+        if system == "You triage.":
+            if "call-l1" in outputs:
+                return [calls("call-h", "transfer_to_refunds", "{}")]
+            return [calls("call-l1", "lookup", '{"city": "Rome"}')]
+        if "call-l2" not in outputs:
+            return [calls("call-l2", "lookup", '{"city": "Oslo"}')]
+        return [said("refunded")]
+
+    companion = Companion()
+    scripted = Scripted(desk_script)
+    refunds_tools = openai.tools([steered_while(companion, "and Fahrenheit")])
+    refunds = Agent(name="refunds", instructions="You handle refunds.", model=scripted, tools=refunds_tools)
+    triage = Agent(
+        name="triage",
+        instructions="You triage.",
+        model=scripted,
+        tools=openai.tools([steered_while(companion, "use Celsius")]),
+        handoffs=[handoff(refunds, input_filter=handoff_filters.remove_all_tools)],
+    )
+    chat = Chat(openai.agent("steered", agent=triage), companion)
+    assert await chat("handoff x") == "refunded"
+    assert [shown(items) for _, items in scripted.requests] == [
+        ["handoff x"],
+        ["handoff x", "function_call call-l1", "function_call_output call-l1", "use Celsius"],
+        # The filter took the tools' items out of the refunds agent's input, the output the message came after
+        # among them: it stays where the filter would have kept it, after the prompt and before what came after.
+        ["handoff x", "use Celsius"],
+        ["handoff x", "use Celsius", "function_call call-l2", "function_call_output call-l2"],
+    ]
+    # The filter took the handoff's own output out too, so the turn has no output for its call: the run takes no
+    # message after it (a turn of its own answers the one steered during the refunds' lookup).
+    assert companion.sent == 2
+    assert await chat.summary() == [("user", "handoff x"), ("user", "use Celsius"), ("assistant", "refunded")]
+
+
+def test_steered_messages_keep_their_order_and_go_after_their_item_or_before_what_came_after_them():
+    from restate.agents.openai import _agent  # pylint: disable=import-outside-toplevel
+
+    spliced, steered = _agent._spliced, _agent._Steered  # pyright: ignore[reportPrivateUsage]
+    output = {"type": "function_call_output", "call_id": "c1", "output": "found"}
+    later = {"type": "function_call", "call_id": "c2", "name": "lookup", "arguments": "{}"}
+    hi, first, second = ({"role": "user", "content": text} for text in ("hi", "first", "second"))
+    # Both taken after the output, once the run had seen one key; the call's key it saw after.
+    seen = {"function_call_output:call_id:c1": 0, "function_call:call_id:c2": 1}
+    taken = [
+        steered(first, "function_call_output:call_id:c1", 1),
+        steered(second, "function_call_output:call_id:c1", 1),
+    ]
+    assert spliced([hi, output, later], taken, seen) == [hi, output, first, second, later]
+    # The item twice: after its last copy, the one the SDK keeps.
+    assert spliced([output, later, output], taken, seen) == [output, later, output, first, second]
+    # The item they came after taken out: before the first item that came after them, in order; else at the end.
+    assert spliced([hi, later], taken, seen) == [hi, first, second, later]
+    assert spliced([hi], taken, seen) == [hi, first, second]

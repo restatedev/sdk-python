@@ -28,6 +28,23 @@ start, and the run resumes from the last step stored:
   resumed call would bypass). A function tool's timeout applies to a resumed
   call too. A call to a tool the agent does not have (which the SDK fails the
   run for) is reported back to the model to fix, on the retry.
+- A message steered to the turn (the agent's ``steer`` view) joins it at its
+  next step: once each of the model's tool calls has its output, the input
+  filter stores the outputs, then the messages waiting (``take_steers``),
+  and the request about to go out has them after those outputs. The run
+  goes on in place rather than starting over: its input guardrails run
+  once, ``max_turns`` counts on, and its tool choice and hooks carry on. As
+  the SDK makes each request's input afresh, from the run's input and its
+  own items, each later request of the run gets each message again, right
+  after the item it came after (if a handoff's ``input_filter`` took that
+  item out, before the first item after it, as if the filter had kept the
+  message). A message waiting as a run starts (that an earlier attempt
+  learned of, say) is stored first, and is in its input; a retried attempt
+  finds the messages stored, in the history, each once. A message that
+  comes while the model writes its final answer is answered next, as a turn
+  of its own. A handoff whose ``input_filter`` takes its own output out of
+  the next agent's input (as ``remove_all_tools`` does) leaves its call
+  without an output in the turn: the run takes no message after it.
 - A run that stops for tool calls that need an approval (``needs_approval``)
   fails its turn, rather than answer without them, as nothing gives the
   approval: pause for a person with ``restate.agents``' ``wait_for_signal``
@@ -115,6 +132,7 @@ from agents import (
     UserError,
 )
 from agents import Tool as SdkTool
+from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.run import CallModelData, ModelInputData
 from agents.tool import invoke_function_tool
 from agents.tool_context import ToolContext
@@ -136,6 +154,7 @@ from restate.agents._common import (
 from restate.agents._conversation import SUMMARY, Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
+from restate.agents._steering import take_steers
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
@@ -285,14 +304,35 @@ class _Hooks(RunHooks[Any]):
         self.requesting = False
         """Whether a model request is in progress, with the making of its model and client: the only time an error
         can be its provider refusing."""
+        self.steered: list[_Steered] = []
+        """The messages steered to the turn that the run took, in order: each later request gets them again."""
+        self.seen: dict[str, int] = {}
+        """The keys (``_key``) of the items of the run's requests, once it took a message, in the order it saw them."""
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
-        """The run's ``call_model_input_filter``: store the tools' outputs before the next request.
+        """The run's ``call_model_input_filter``: store the tools' outputs before the next request, and take the
+        messages steered to the turn, which the request gets after them.
+
+        The SDK makes each request's input afresh, from the run's input and the items the run made, which hold no
+        steered message: so each message the run took goes back in each later request, in its place.
 
         The run's own filter then changes what the model sees, not what is stored.
         """
-        if outputs := self.conversation.new_results(data.model_data.input):
+        items = data.model_data.input
+        if outputs := self.conversation.new_results(items):
             await self.conversation.turn.append(*outputs)
+        # A step, once each of the model's tool calls has its output (else ``take_steers`` takes none): the messages
+        # go after the input's last item. A last item with nothing to tell it apart in the later requests (a message
+        # of the user, as a run's first request ends with) takes none: the run took them as it started (``_go``),
+        # and takes the next at its next step.
+        after = _key(items[-1]) if items else None
+        if after is not None and (taken := await take_steers(self.ctx, self.conversation)):
+            # This request's items came before the messages; an item whose key the run sees later, after them.
+            self._see(items)
+            self.steered.extend(_Steered(entry.item, after, len(self.seen)) for entry in taken)
+        if self.steered:
+            self._see(items)
+            data.model_data.input = _spliced(items, self.steered, self.seen)
         filtered = data.model_data
         if self.then is not None:
             given = self.then(data)
@@ -316,6 +356,65 @@ class _Hooks(RunHooks[Any]):
 
     async def on_tool_end(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool, result: Any) -> None:
         await tool_call_ended(self.ctx)
+
+    def _see(self, items: Sequence[Item]) -> None:
+        """Note the keys of ``items`` that the run had not seen: they come after the messages it took so far."""
+        for item in items:
+            if (key := _key(item)) is not None:
+                self.seen.setdefault(key, len(self.seen))
+
+
+@dataclasses.dataclass(frozen=True)
+class _Steered:
+    """A message steered to the turn that the run took, and where it goes in the run's requests."""
+
+    item: Item
+    after: str
+    """The key (``_key``) of the item of the input it came after."""
+    seen: int
+    """How many keys the run had seen as it took it: an item whose key it saw later came after it."""
+
+
+def _key(item: Item) -> str | None:
+    """Return what tells ``item`` apart in a run's input, from one request to the next: the id of its tool call, if
+    it is a call or an output, else its own; ``None`` for an item with neither, such as a message of the user."""
+    if not isinstance(item, dict):
+        return None
+    fields = typing.cast(dict[str, Any], item)
+    kind = str(fields.get("type", "message"))
+    for name in ("call_id", "id"):
+        value = fields.get(name)
+        if isinstance(value, str) and value != FAKE_RESPONSES_ID:
+            return f"{kind}:{name}:{value}"
+    return None
+
+
+def _spliced(items: list[Any], steered: Sequence[_Steered], seen: dict[str, int]) -> list[Any]:
+    """Return ``items`` (a request's input) with each steered message in its place.
+
+    That is right after the item it came after; if ``items`` lacks that item (a handoff's ``input_filter`` took it
+    out, say), right before the first item that came after the message (whose key the run saw later, in ``seen``),
+    as if the filter had kept the message; else at the end. Messages in the same place keep their order. An item
+    found more than once counts where it last is, as the SDK keeps an output where its latest copy is.
+    """
+    keys = [_key(item) for item in items]
+    last = {key: i for i, key in enumerate(keys) if key is not None}
+
+    def place(steer: _Steered) -> int:
+        if steer.after in last:
+            return last[steer.after] + 1
+        later = (i for i, key in enumerate(keys) if key is not None and seen.get(key, steer.seen) >= steer.seen)
+        return next(later, len(items))
+
+    before: dict[int, list[Item]] = {}
+    for steer in steered:
+        before.setdefault(place(steer), []).append(steer.item)
+    spliced: list[Any] = []
+    for i, item in enumerate(items):
+        spliced.extend(before.get(i, ()))
+        spliced.append(item)
+    spliced.extend(before.get(len(items), ()))
+    return spliced
 
 
 async def _resume(
@@ -521,6 +620,9 @@ async def _go(
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:
         agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
+        # A step: the messages steered to the turn by now (that an earlier attempt learned of, say) are the run's
+        # input, after what the turn stored.
+        await take_steers(ctx, conversation)
         items = typing.cast(Any, _since_compaction(conversation.history()))
         run = Runner.run(agent, items, context=options.context, hooks=hooks, run_config=filtered, **limit)
         result = await _unwrapped(ctx, run)
@@ -791,8 +893,10 @@ def agent(
     """Create an OpenAI Agents SDK agent: a virtual object with one conversation per key.
 
     Its ``chat`` handler answers each message with the SDK's ``Runner``; the
-    conversation is kept in the key's database, a step at a time. Add
-    handlers of your own with ``@assistant.handler``.
+    conversation is kept in the key's database, a step at a time. A message
+    sent to its ``steer`` view while it answers joins the turn at its next
+    step: the run goes on with it, rather than starting over. Add handlers
+    of your own with ``@assistant.handler``.
 
     The built-in agent takes the common options::
 
@@ -863,7 +967,9 @@ def agent(
             run,
         )
 
-    obj.chat(answer, items=ITEMS, output=output, summarize=_summarizer(model) if own is None else None)
+    # Steered messages: the run's input filter takes them at each step (``_Hooks.model_input``).
+    summarize = _summarizer(model) if own is None else None
+    obj.chat(answer, items=ITEMS, output=output, summarize=summarize, steers=True)
     return obj
 
 
