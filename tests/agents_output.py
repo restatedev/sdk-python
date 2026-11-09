@@ -58,7 +58,7 @@ from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import adk, langgraph, openai, pydantic_ai, tool  # noqa: E402
 from restate.agents._api import Messages  # noqa: E402
-from restate.agents._output import Wrong, parsed  # noqa: E402
+from restate.agents._output import Wrong, parsed, recheck  # noqa: E402
 
 
 class Plan(BaseModel):
@@ -79,6 +79,15 @@ def test_a_reply_that_is_not_the_answer_says_what_is_wrong():
     assert parsed(Plan, "  ") == Wrong("it is empty")
     assert parsed(Plan, "I made a plan.") == Wrong('it is not JSON: "I made a plan."')
     assert parsed(Plan, '{"title": 3}') == Wrong("title: Input should be a valid string; mode: Field required")
+
+
+def test_a_reply_that_is_not_the_answer_asks_again_and_once_asked_fails_the_turn():
+    check = recheck(Plan)
+    assert check(Plan(title="t", mode="m").model_dump_json(), True) is None
+    assert (check("I made a plan.", False) or "").startswith("Your reply is not the answer asked for: it is not JSON")
+    # Asked again already: the error the prompt fails with, which closes its turn failed.
+    with pytest.raises(restate.TerminalError, match="^the agent's reply is not the answer asked for: it is not JSON"):
+        check("I made a plan.", True)
 
 
 AGAIN = "Your reply is not the answer asked for"

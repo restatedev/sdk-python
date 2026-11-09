@@ -203,9 +203,10 @@ SUMMARIZE = (
 """What a request to summarize earlier turns starts with, before the turns themselves."""
 
 
-Check: typing.TypeAlias = Callable[[str], "str | None"]
+Check: typing.TypeAlias = Callable[[str, bool], "str | None"]
 """What a turn checks its answer with: ``None`` if the answer is what was asked for, else the message that asks
-the model again, once, within the turn (``answer_once``'s ``check``)."""
+the model again, once, within the turn (``answer_once``'s ``check``). Its second argument, ``last``, says the model
+was asked again already: a ``TerminalError`` the check raises then fails the turn, which is closed with it."""
 
 
 def check_window(window: Window) -> Window:

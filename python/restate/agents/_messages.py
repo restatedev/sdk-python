@@ -114,10 +114,14 @@ def _latest_of(messages: list[_Message], limit: int) -> list[_Message]:
     return messages[-limit:] if limit > 0 else []
 
 
-async def _rows(db: DatabaseReader, first: int) -> list[typing.Sequence[typing.Any]]:
-    """Return the rows (``n``, ``seq``, ``item``) of the transcript and the trajectories from position ``first`` on, in order."""
-    turns = await db.values(f"SELECT n, seq, item FROM {TURNS} WHERE n >= ? ORDER BY n", [first])
-    steps = await db.values(f"SELECT n, seq, item FROM {STEPS} WHERE n >= ? ORDER BY n", [first])
+async def _rows(db: DatabaseReader, first: int, until: int | None = None) -> list[typing.Sequence[typing.Any]]:
+    """Return the rows (``n``, ``seq``, ``item``) of the transcript and the trajectories in order.
+
+    They are those from position ``first`` on, and before position ``until`` if given.
+    """
+    bounds = [first, 2**53 - 1 if until is None else until]
+    turns = await db.values(f"SELECT n, seq, item FROM {TURNS} WHERE n >= ? AND n < ? ORDER BY n", bounds)
+    steps = await db.values(f"SELECT n, seq, item FROM {STEPS} WHERE n >= ? AND n < ? ORDER BY n", bounds)
     return sorted([*turns, *steps], key=lambda row: int(row[0]))
 
 
@@ -142,7 +146,9 @@ async def _latest(db: DatabaseReader, items: Items, before: int | None, limit: i
     """Return the latest ``limit`` messages before id ``before``, rendered from enough turns back to hold them.
 
     Each turn starts with a message, so the rows from the ``limit + 1``-th
-    latest turn before ``before`` on hold more than ``limit`` messages.
+    latest turn before ``before`` on hold more than ``limit`` messages. And
+    to no later than the turn ``before`` is in: a turn's rows add only to its
+    own messages, so the turns from ``before`` on change none before it.
     """
     end = before if before is not None else 2**53 - 1
     [[first]] = await db.values(
@@ -155,7 +161,10 @@ async def _latest(db: DatabaseReader, items: Items, before: int | None, limit: i
     cursor = max(start.seq, now)
     if first is None:
         return {"messages": [], "more": False, "cursor": cursor}
-    rows = await _rows(db, int(typing.cast(int, first)))
+    until = None
+    if before is not None:
+        [[until]] = await db.values(f"SELECT MIN(n) FROM {TURNS} WHERE n >= ?", [end])
+    rows = await _rows(db, int(typing.cast(int, first)), None if until is None else int(typing.cast(int, until)))
     messages = [m for m in render(items, rows) if m.id < end]
     [[earlier]] = await db.values(f"SELECT EXISTS (SELECT 1 FROM {TURNS} WHERE n < ?)", [first])
     return {

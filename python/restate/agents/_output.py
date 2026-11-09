@@ -120,13 +120,24 @@ def parsed(output: type[O], reply: str) -> O | Wrong:
         )
 
 
-def recheck(output: type[O]) -> Check:
-    """Return the check of an answer that must be a value of ``output``: what asks again for one, if it is not."""
+def _not_asked(wrong: Wrong) -> TerminalError:
+    """Return the error of a prompt whose answer is not a value of its ``output``: ``wrong`` says why."""
+    return TerminalError(f"the agent's reply is not the answer asked for: {wrong.reason}")
 
-    def check(reply: str) -> str | None:
+
+def recheck(output: type[O]) -> Check:
+    """Return the check of an answer that must be a value of ``output``.
+
+    It is what asks again for one, if the answer is not; or, once the model
+    was asked again (``last``), the error that fails the turn.
+    """
+
+    def check(reply: str, last: bool) -> str | None:
         answer = parsed(output, reply)
         if not isinstance(answer, Wrong):
             return None
+        if last:
+            raise _not_asked(answer)
         return (
             f"Your reply is not the answer asked for: {answer.reason}\n"
             f"Reply again, with JSON only: a value of this JSON schema.\n{_schema(output)}"
@@ -152,9 +163,9 @@ async def answer_with(output: type[O], text: str, prompt: Callable[[str, Check],
         The answer.
 
     Raises:
-        TerminalError: If the reply to the second ask does not validate either.
+        TerminalError: If the reply to the second ask does not validate either: its turn is closed failed with it.
     """
     answer = parsed(output, await prompt(text, recheck(output)))
     if isinstance(answer, Wrong):
-        raise TerminalError(f"the agent's reply is not the answer asked for: {answer.reason}")
+        raise _not_asked(answer)
     return answer
