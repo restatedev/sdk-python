@@ -124,7 +124,9 @@ sequenceDiagram
    `awaitTurn(turn)`, the turn's watch.
 2. **The prompt.** `answer_once` reads the prompt's answer by its id, one
    indexed read: a retried attempt of an answered turn returns it, and reads
-   nothing more. Otherwise it loads the conversation
+   nothing more; one of a turn that was closed (cancelled, failed, refused, or
+   ended by another invocation) fails as the prompt did, the note never
+   taken for an answer. Otherwise it loads the conversation
    ([Which turns a turn loads](conversation.md#which-turns-a-turn-loads)), closes a turn
    left without an answer, and stores the prompt as the turn's row.
 3. **Steps.** The framework answers: model calls and tool calls. Each step

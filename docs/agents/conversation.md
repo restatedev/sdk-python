@@ -515,7 +515,9 @@ invocation (the next invocation's first call replaces it):
 - **Closing a turn.** A turn that closes with open calls gives each a result:
   the error its Restate call returned, or `RETURNED_UNRECORDED` ("Done, but
   the turn was stopped before this call's result was recorded: it did
-  happen…") if it returned, or else the note that closes the turn. An
+  happen…") if it returned, or else the note that closes the turn. The
+  results, the note and the answer are one transaction: a crash between them
+  would leave the turn open, and closing it again would add a second note. An
   approval returning is not the call: a denied call is closed with the note.
   `settle` reads the dead invocation's records, while the key's next
   invocation hasn't replaced them.

@@ -374,10 +374,13 @@ async def latest_snapshot(db: DatabaseReader, items: Items) -> Snapshot | None:
     return _snapshot_of(items, int(typing.cast(int, row["covers"])), _int(row["turn"]), held)
 
 
-async def answer_in(db: DatabaseReader, prompt_id: str) -> str | None:
-    """Return the stored answer of prompt ``prompt_id``, if it has one: one read, of the turn's row."""
-    row = await db.get(f"SELECT answer FROM {TURNS} WHERE prompt = ?", [prompt_id])
-    return _str(row["answer"]) if row else None
+async def answer_in(db: DatabaseReader, prompt_id: str) -> tuple[str, Status | None] | None:
+    """Return the stored answer of prompt ``prompt_id``, and how its turn ended, if it has one: one read, of its row."""
+    row = await db.get(f"SELECT answer, status FROM {TURNS} WHERE prompt = ?", [prompt_id])
+    answer = _str(row["answer"]) if row else None
+    if row is None or answer is None:
+        return None
+    return answer, typing.cast("Status | None", _str(row["status"]))
 
 
 class _Walk:
@@ -482,6 +485,15 @@ class _Ledger:
         """Return the agent and the framework's state that the latest answered turn left."""
         latest = next((turn for turn in reversed(self.transcript) if turn.answer is not None), None)
         return (latest.agent, latest.carried) if latest is not None else (None, None)
+
+
+_INSERT_STEP = f"INSERT INTO {STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)"
+"""Store a step of a turn: its position, its turn's, its ``seq``, its item, and the reply and agent it is of."""
+
+_ANSWER = (
+    f"UPDATE {TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? WHERE n = ?"
+)
+"""Store a turn's answer on its row: how it ended, the answer, what it carries, its message's position, its ``seq``."""
 
 
 class Turn:
@@ -716,11 +728,7 @@ class Turn:
             agent = self._agent()
             carried = self._carried.get("carried", ledger.carried()[1])
             seq = ledger.seq + 1
-            await ledger.db.execute(
-                f"UPDATE {TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? "
-                f"WHERE n = ?",
-                [status, answer, agent, carried, at, seq, self.n],
-            )
+            await ledger.db.execute(_ANSWER, [status, answer, agent, carried, at, seq, self.n])
             ledger.seq = seq
             prompt = self.prompt
             prompt.status, prompt.answer, prompt.agent, prompt.carried = status, answer, agent, carried
@@ -755,15 +763,39 @@ class Turn:
         answer. The calls' outcomes are those of the invocation that made the
         turn's prompt: this one, or an earlier one whose calls are still
         stored. A turn that has its answer has nothing to close.
+
+        The results, the note and the answer are stored in one transaction: a
+        crash between them would leave the turn without its answer, and the
+        next attempt would close it again, with a second note.
         """
         if self.status is not None:
             return
-        items = self._ledger.items
+        ledger = self._ledger
+        items = ledger.items
         calls = self.open_calls()
         returned = await outcomes(ctx, [call.id for call in calls], invocation_of(self.id))
-        results = items.results([(call, cut_off_result(returned, call.id, note)) for call in calls])
-        await self.append(*results, items.reply(note))
-        await self.answered(note, status)
+        closing = [
+            *items.results([(call, cut_off_result(returned, call.id, note)) for call in calls]),
+            items.reply(note),
+        ]
+        async with ledger.lock:
+            self._check_writable()
+            n, seq = ledger.next, ledger.seq
+            added = [Entry(n + i, item) for i, item in enumerate(closing)]
+            at = added[-1].n  # the note: the turn's last message, and its answer
+            answered_seq = seq + len(added) + 1
+            agent = self._agent()
+            carried = self._carried.get("carried", ledger.carried()[1])
+            async with ledger.db.transaction() as tx:
+                for i, entry in enumerate(added, 1):
+                    await tx.execute(_INSERT_STEP, [entry.n, self.n, seq + i, items.dump(entry.item), None, None])
+                await tx.execute(_ANSWER, [status, note, agent, carried, at, answered_seq, self.n])
+            ledger.next = n + len(added)
+            ledger.seq = answered_seq
+            self._add(added)
+            prompt = self.prompt
+            prompt.status, prompt.answer, prompt.agent, prompt.carried = status, note, agent, carried
+            prompt.answered_at, prompt.answered_seq = at, answered_seq
 
     def _check_writable(self) -> None:
         """Refuse a write unless this is the latest turn and has no answer: only its run (or its close) writes it."""
@@ -782,19 +814,18 @@ class Turn:
             self._check_writable()
             n = ledger.next
             added = made(n)
-            sql = f"INSERT INTO {STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)"
             rows = [
                 [e.n, self.n, ledger.seq + i, ledger.items.dump(e.item), e.reply, e.agent]
                 for i, e in enumerate(added, 1)
             ]
             if len(rows) == 1:
                 # One statement commits on its own.
-                await ledger.db.execute(sql, rows[0])
+                await ledger.db.execute(_INSERT_STEP, rows[0])
             else:
                 async with ledger.db.transaction() as tx:
                     # The same SQL for each row: the database prepares it once.
                     for row in rows:
-                        await tx.execute(sql, row)
+                        await tx.execute(_INSERT_STEP, row)
             ledger.seq += len(rows)
             ledger.next = n + len(rows)
             self._add(added)
@@ -1297,8 +1328,10 @@ async def answer_once(
     budget = settings.budget if budget is None else budget
     prompt_id = next_prompt_id(ctx)
     await SCHEMA.ensure(ctx.db)
-    if (answer := await answer_in(ctx.db, prompt_id)) is not None:
-        return stored_answer(answer)
+    if (found := await answer_in(ctx.db, prompt_id)) is not None:
+        # Answered (or closed) already: a retry answers, or fails, as the turn ended.
+        answer, status = found
+        return stored_answer(answer, status)
     conversation = await Conversation.load(ctx.db, items, window, budget, snapshots=settings.snapshots)
 
     async def work() -> str:

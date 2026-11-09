@@ -192,6 +192,36 @@ async def test_a_stopped_run_stores_nothing_more():
         await turn.answered("too late")
 
 
+async def test_a_retry_of_a_closed_turn_fails_as_the_prompt_did():
+    from restate.agents.internal import ENDED  # pylint: disable=import-outside-toplevel
+
+    async def run(conversation: Conversation) -> str:
+        text = conversation.turn.prompt.item["text"]
+        if text == "boom":
+            raise restate.TerminalError("boom")
+        if text == "stop":
+            raise restate.TerminalError("cancelled", status_code=409)
+        await conversation.turn.append_reply(_calling("c1"))
+        raise RuntimeError("the invocation is gone")
+
+    ask = asking(run)
+
+    async def failure(text: str, invocation: Any = None) -> tuple[str, int]:
+        with pytest.raises(restate.TerminalError) as error:
+            await ask(text, invocation)
+        return error.value.message, error.value.status_code
+
+    boom, stop, gone = request(), request(), request()
+    # Retried (after a crash right after the close, say): each fails as it did, not with the note as its answer.
+    assert [await failure("boom", boom), await failure("boom", boom)] == [("boom", 500)] * 2
+    assert [await failure("stop", stop), await failure("stop", stop)] == [("cancelled", 409)] * 2
+    with pytest.raises(RuntimeError, match="gone"):
+        await ask("gone", gone)
+    # The next message closes that turn, ended; the gone invocation, run again, fails with the note.
+    assert await failure("boom") == ("boom", 500)
+    assert await failure("gone", gone) == (ENDED, 500)
+
+
 async def test_a_dropped_reply_takes_what_followed_it_and_each_item_is_read_once():
     reads: list[Item] = []
 
@@ -600,6 +630,51 @@ async def test_settle_closes_only_the_turn_its_gone_invocation_left_and_only_onc
     assert tuple(entries[0][:2]) == (gone.id, ENDED)
     results = dict(output for e in entries for output in e[2])
     assert results == {"c1": RETURNED_UNRECORDED, "c2": ENDED}
+
+
+async def test_a_turn_left_without_an_answer_is_closed_once_however_a_crash_cuts_the_close():
+    from restate.agents.internal import ENDED  # pylint: disable=import-outside-toplevel
+
+    async def run(conversation: Conversation) -> str:
+        if conversation.turn.prompt.item["text"] == "first":
+            await conversation.turn.append_reply(_calling("c1"))
+            raise RuntimeError("the invocation is gone")
+        return "fine"
+
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    @obj.handler
+    async def first(ctx: sessions.SessionContext) -> list[Any]:
+        conversation = await Conversation.load(ctx.db, ITEMS, "all")
+        return [entry.item for entry in conversation.entries if entry.turn == conversation.transcript[0].n]
+
+    def host(backend: Backend) -> Host:
+        return Host(backend, service="asker", answers=PUBLISHED)
+
+    crashes = 0
+    for syncs in range(100):
+        backend = Backend()
+        with pytest.raises(RuntimeError, match="gone"):
+            await invoke(obj, "ask", host(backend), request(), "first")
+        # The second prompt closes the first's turn, ended; its process crashes after ``syncs`` syncs.
+        second, crashing = request(), host(backend)
+        crashing.crash_after(syncs)
+        try:
+            assert await invoke(obj, "ask", crashing, second, "second") == "fine"
+            break
+        except RuntimeError as error:
+            assert str(error) == "the sync failed"
+        crashes += 1
+        assert await invoke(obj, "ask", host(backend), second, "second") == "fine"
+        items = await invoke(obj, "first", host(backend), request())
+        notes = [item for item in items if item == {"role": "assistant", "text": ENDED}]
+        results = [item for item in items if "result" in item]
+        assert (syncs, len(notes), results) == (syncs, 1, [{"result": "c1", "output": ENDED}])
+    assert crashes > 0
 
 
 async def test_a_window_of_all_loads_every_turn_whole():

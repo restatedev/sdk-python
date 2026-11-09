@@ -109,6 +109,11 @@ async def page(db: DatabaseReader, items: Items, request: MessagesRequest | None
     return result
 
 
+def _latest_of(messages: list[_Message], limit: int) -> list[_Message]:
+    """Return the latest ``limit`` of ``messages``: none for a ``limit`` of 0, though ``messages[-0:]`` is all of them."""
+    return messages[-limit:] if limit > 0 else []
+
+
 async def _rows(db: DatabaseReader, first: int) -> list[typing.Sequence[typing.Any]]:
     """Return the rows (``n``, ``seq``, ``item``) of the transcript and the trajectories from position ``first`` on, in order."""
     turns = await db.values(f"SELECT n, seq, item FROM {TURNS} WHERE n >= ? ORDER BY n", [first])
@@ -154,7 +159,7 @@ async def _latest(db: DatabaseReader, items: Items, before: int | None, limit: i
     messages = [m for m in render(items, rows) if m.id < end]
     [[earlier]] = await db.values(f"SELECT EXISTS (SELECT 1 FROM {TURNS} WHERE n < ?)", [first])
     return {
-        "messages": [_chat(m) for m in messages[-limit:]],
+        "messages": [_chat(m) for m in _latest_of(messages, limit)],
         "more": len(messages) > limit or bool(earlier),
         "cursor": cursor,
     }
@@ -208,7 +213,7 @@ async def _summary_latest(db: DatabaseReader, items: Items, before: int | None, 
     first = int(typing.cast(int, rows[-1][0])) if rows else end
     [[earlier]] = await db.values(f"SELECT EXISTS (SELECT 1 FROM {TURNS} WHERE n < ?)", [first])
     return {
-        "messages": [_chat(m) for m in messages[-limit:]],
+        "messages": [_chat(m) for m in _latest_of(messages, limit)],
         "more": len(messages) > limit or bool(earlier),
         "cursor": cursor,
     }
