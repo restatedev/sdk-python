@@ -14,6 +14,7 @@
 
 import asyncio
 import collections
+import json
 import typing
 import uuid
 from dataclasses import dataclass
@@ -41,7 +42,7 @@ from pydantic_ai.messages import (  # noqa: E402
 from pydantic_ai.models.function import AgentInfo, FunctionModel  # noqa: E402
 
 import restate  # noqa: E402
-from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
+from support import RESTATE_IMAGE, Gate  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import tool  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
@@ -456,11 +457,57 @@ def trimmed_agent() -> Any:
 
 trimmed = pydantic_ai.agent("pai_trimmed", agent=trimmed_agent())
 
+steer_gate = Gate()
+"""Holds the steered agent's ``hold`` tool, and its model's answer to ``slow``, until a test opens it."""
+
+held: set[str] = set()
+"""The keys whose tool call, or model request, waits on ``steer_gate``."""
+
+steered_requests: collections.defaultdict[str, list[list[ModelMessage]]] = collections.defaultdict(list)
+"""What the steered agent's model was given, request by request, by the key that ends the conversation's first
+prompt."""
+
+crashing: set[str] = set()
+"""The keys whose model crashes once, as it answers a message steered to the turn."""
+
+
+async def steerable(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """The scripted model of the steered agent: it answers the latest message of the user, after looking it up
+    (``hold``) for ``look <key>``, and taking its time (``steer_gate``) for ``slow <key>``."""
+    prompts = _prompts(messages)
+    k = prompts[0].split(" ")[-1]
+    steered_requests[k].append(list(messages))
+    latest = prompts[-1]
+    word = latest.split(" ")[0]
+    last = messages[-1]
+    returned = isinstance(last, ModelRequest) and any(isinstance(p, ToolReturnPart) for p in last.parts)
+    if word == "look" and not returned:
+        return ModelResponse(parts=[ToolCallPart("hold", {"key": k}, tool_call_id=f"call-{k}")])
+    if word == "slow":
+        held.add(k)
+        await steer_gate.wait()
+    if k in crashing and word not in ("look", "slow"):
+        crashing.discard(k)
+        raise RuntimeError("the process crashed while the model answered")
+    return ModelResponse(parts=[TextPart(f"answer to: {latest}")])
+
+
+@tool
+async def hold(key: str) -> str:
+    """Looks something up, until the test opens the gate."""
+    held.add(key)
+    await steer_gate.wait()
+    return f"found for {key}"
+
+
+steered = pydantic_ai.agent("pai_steered", model=FunctionModel(steerable), tools=[hold])
+
 
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, trimmed, shop, desk, remembering, memories]), restate_image=RESTATE_IMAGE
+        restate.app([assistant, per_user, trimmed, shop, desk, remembering, memories, steered]),
+        restate_image=RESTATE_IMAGE,
     ) as harness:
         yield harness
 
@@ -1054,3 +1101,169 @@ def test_a_tool_call_asked_for_again_is_read_as_an_error():
     [again, found] = ITEMS.read(ModelRequest(parts=[retried, returned])).results
     assert (again.id, again.output, again.failed) == ("c1", '{"error":"not like that"}', True)
     assert (found.id, found.output, found.failed) == ("c2", "found", False)
+
+
+async def steered_post(harness: HarnessEnvironment, path: str, **kwargs: Any) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        return await ingress.post(f"{harness.ingress_url}/pai_steered/{path}", **kwargs)
+
+
+async def steered_send(harness: HarnessEnvironment, k: str, text: str) -> str:
+    sent = await steered_post(harness, f"{k}/chat/send", content=text, headers=TEXT)
+    return typing.cast(str, sent.json()["invocationId"])
+
+
+async def steer(harness: HarnessEnvironment, k: str, text: str) -> dict[str, Any]:
+    # With an idempotency key, as a client sends it: a retried request is the same message.
+    headers = {**TEXT, "idempotency-key": uuid.uuid4().hex}
+    steered_to = await steered_post(harness, f"{k}/steer", content=text, headers=headers)
+    assert steered_to.status_code == 200, steered_to.text
+    return typing.cast(dict[str, Any], steered_to.json())
+
+
+async def attach(harness: HarnessEnvironment, invocation: str) -> httpx2.Response:
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        return await ingress.get(f"{harness.ingress_url}/restate/invocation/{invocation}/attach")
+
+
+async def steered_thread(harness: HarnessEnvironment, k: str, view: str | None = None) -> list[tuple[str, str]]:
+    """The steered agent's conversation, as the ``messages`` view shows it: whole, or its ``summary``."""
+    wanted = {"view": view} if view is not None else {}
+    page = typing.cast(Messages, (await steered_post(harness, f"{k}/messages", json=wanted)).json())
+    return [
+        (message["role"], " ".join(str(part.get("text", part.get("output", ""))) for part in message["parts"]))
+        for message in page["messages"]
+    ]
+
+
+async def until_held(k: str) -> None:
+    async def holding() -> bool:
+        return k in held
+
+    await until(holding)
+
+
+async def test_a_message_steered_while_a_tool_runs_reaches_the_next_request_after_the_tools_result(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    steer_gate.close()
+    invocation = await steered_send(harness, k, f"look {k}")
+    await until_held(k)
+    assert (await steer(harness, k, "use Celsius"))["turn"] == invocation
+    steer_gate.open()
+    # The turn's answer is the model's reply to it.
+    assert (await attach(harness, invocation)).json() == "answer to: use Celsius"
+    # The very next request had it, after the tool's result, once.
+    [first, following] = steered_requests[k]
+    assert _prompts(first) == [f"look {k}"]
+    assert _prompts(following) == [f"look {k}", "use Celsius"]
+    last = following[-1]
+    assert isinstance(last, ModelRequest) and [type(p) for p in last.parts] == [ToolReturnPart, UserPromptPart]
+    # Stored once, as a step of the turn; its queued turn of its own then did nothing.
+    assert (await steered_post(harness, f"{k}/chat", content=f"thanks {k}", headers=TEXT)).status_code == 200
+    thread = await steered_thread(harness, k)
+    assert [text for role, text in thread if role == "user"] == [f"look {k}", "use Celsius", f"thanks {k}"]
+    assert await steered_thread(harness, k, "summary") == [
+        ("user", f"look {k}"),
+        ("user", "use Celsius"),
+        ("assistant", "answer to: use Celsius"),
+        ("user", f"thanks {k}"),
+        ("assistant", f"answer to: thanks {k}"),
+    ]
+
+
+async def test_a_crash_after_a_steered_message_is_stored_gives_the_retried_request_it_once(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    crashing.add(k)
+    steer_gate.close()
+    invocation = await steered_send(harness, k, f"look {k}")
+    await until_held(k)
+    await steer(harness, k, "use Celsius")
+    steer_gate.open()
+    assert (await attach(harness, invocation)).json() == "answer to: use Celsius"
+    # The attempt crashed as the model answered the stored message: the retried attempt carries on from the
+    # history, which has it, and takes it no more.
+    assert k not in crashing
+    [_, crashed, retried] = steered_requests[k]
+    assert _prompts(crashed) == _prompts(retried) == [f"look {k}", "use Celsius"]
+    thread = await steered_thread(harness, k)
+    assert [text for role, text in thread if role == "user"] == [f"look {k}", "use Celsius"]
+
+
+async def test_a_message_steered_during_the_last_model_request_is_answered_as_the_next_turn(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    steer_gate.close()
+    invocation = await steered_send(harness, k, f"slow {k}")
+    await until_held(k)
+    assert (await steer(harness, k, "use Celsius"))["turn"] == invocation
+    steer_gate.open()
+    # The turn reaches no step after it: the message is answered next, as a turn of its own.
+    assert (await attach(harness, invocation)).json() == f"answer to: slow {k}"
+    done = await steered_post(harness, f"{k}/chat", content=f"done {k}", headers=TEXT)
+    assert done.json() == f"answer to: done {k}"
+    assert await steered_thread(harness, k, "summary") == [
+        ("user", f"slow {k}"),
+        ("assistant", f"answer to: slow {k}"),
+        ("user", "use Celsius"),
+        ("assistant", "answer to: use Celsius"),
+        ("user", f"done {k}"),
+        ("assistant", f"answer to: done {k}"),
+    ]
+
+
+async def test_a_chat_without_snapshots_that_answers_with_prompt_takes_steered_messages_in_order():
+    """A ``chat`` of one's own that takes steered messages and answers with ``prompt``: the turn projection, with no
+    snapshot (nor ``_Snapshots``). Two messages steered during a tool call reach the next request, in order."""
+    from agents_pydantic_ai_snapshots import ANSWERS, Chat  # pylint: disable=import-outside-toplevel,import-error
+    from sessions_object import Host, request  # pylint: disable=import-outside-toplevel,import-error
+
+    from restate.agents import AgentObject  # pylint: disable=import-outside-toplevel
+    from restate.agents.pydantic_ai._agent import ITEMS  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    answers = {**ANSWERS}
+    requests: list[list[ModelMessage]] = []
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        requests.append(list(messages))
+        latest = _prompts(messages)[-1]
+        last = messages[-1]
+        returned = isinstance(last, ModelRequest) and any(isinstance(p, ToolReturnPart) for p in last.parts)
+        if latest.startswith("look") and not returned:
+            return ModelResponse(parts=[ToolCallPart("lookup", {"about": "weather"}, tool_call_id="call-look")])
+        return ModelResponse(parts=[TextPart(f"answer to: {latest}")])
+
+    def lookup(about: str) -> str:
+        """Look something up; meanwhile, a client steers the turn twice."""
+        steering = [{"id": "s1", "text": "use Celsius"}, {"id": "s2", "text": "and be brief"}]
+        answers["publish"] = json.dumps({"revision": 1, "steering": steering}).encode()
+        return f"found {about}"
+
+    mine: Any = Agent(FunctionModel(model), tools=[lookup])
+    obj = AgentObject("pai_steered_turns", window=0)
+
+    @obj.chat(items=ITEMS, steers=True)
+    async def answer(ctx: sessions.SessionContext, text: str) -> str:
+        return await pydantic_ai.prompt(ctx, text, agent=mine)
+
+    chat = Chat(obj)
+    host = Host(chat.backend, service=chat.name, answers=answers)
+    assert await invoke(obj, "chat", host, request(), "look it up") == "answer to: and be brief"
+    # Both reached the request after the tool's result, in order, each once; one transaction took both.
+    assert _prompts(requests[-1]) == ["look it up", "use Celsius", "and be brief"]
+    assert [send.handler for send in host.sends].count("taken") == 1
+    # The next turn has them between the earlier turn's message and its answer (a window of 0: no trajectory).
+    assert await chat("and then?") == "answer to: and then?"
+    assert _prompts(requests[-1]) == ["look it up", "use Celsius", "and be brief", "and then?"]
+    thread = await chat.messages()
+    assert [text for role, text in thread if role == "user"] == [
+        "look it up",
+        "use Celsius",
+        "and be brief",
+        "and then?",
+    ]

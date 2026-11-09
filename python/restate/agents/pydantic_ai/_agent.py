@@ -78,6 +78,16 @@ stored:
   tool call's writes are done once, however often it runs; ``clear``
   empties them.
 - Usage limits (``usage_limits``) are each run's, so each turn's.
+- A message steered to a turn (the agent's ``steer``) joins it at its next
+  step: once the model's tool calls all have their results stored, before
+  the next model request (``take_steers``). It is stored as a message of the
+  user that is a step of the turn, then given to the model with Pydantic
+  AI's ``RunContext.enqueue``, into that request and the run's history,
+  after what they hold. The run carries on with it (its usage limits,
+  retries and capabilities' state too), and a retried attempt, or the next
+  turn, has the message where the model saw it. A message that comes after
+  the turn's last step (while the model gives its final answer, say) is
+  answered next, as a turn of its own.
 - Each message is answered once per invocation, by the shared conversation of
   ``restate.agents`` (``_conversation.py``), which also closes a stopped,
   refused or failed run.
@@ -160,6 +170,7 @@ from restate.agents._common import (
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
+from restate.agents._steering import take_steers
 from restate.agents._tools import Tool, current_call, tools_in, wait_for
 from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
 from restate.agents.pydantic_ai._stores import TurnsHistorySource, calling, conversation_id_of
@@ -323,10 +334,16 @@ class _Items:
 ITEMS = _Items()
 
 
-def _feedback(message: ModelMessage) -> bool:
-    """Return whether ``message`` is Pydantic AI's feedback on a reply it could not use (an answer that does not
-    validate, say), which answers no tool call."""
-    return isinstance(message, ModelRequest) and any(isinstance(p, RetryFeedbackPart) for p in message.parts)
+def _feedback_of(message: ModelMessage) -> list[str]:
+    """Return Pydantic AI's feedback on a reply it could not use (an answer that does not validate, say) that
+    ``message`` holds, which answers no tool call: each ``RetryFeedbackPart``, as JSON.
+
+    A part is its own feedback (it has its own time): a run keeps it as it is when it merges consecutive requests
+    (a feedback and a message steered after it, say) or resumes from the last one, though the request is new.
+    """
+    if not isinstance(message, ModelRequest):
+        return []
+    return [to_json(p, bytes_mode="base64").decode() for p in message.parts if isinstance(p, RetryFeedbackPart)]
 
 
 def _result_ids(message: ModelMessage) -> set[str]:
@@ -351,13 +368,14 @@ class _Restate(AbstractCapability[Any]):
         self.conversation = conversation
         self.model_errors = ErrorSet()
         """The errors that the run's model requests failed with."""
-        self.feedback = {_MESSAGE.dump_json(m) for m in history if _feedback(m)}
-        """Pydantic AI's feedback requests that the conversation has (``RetryFeedbackPart``), as JSON."""
+        self.feedback = {feedback for m in history for feedback in _feedback_of(m)}
+        """Pydantic AI's feedback that the conversation has (each ``RetryFeedbackPart``), as JSON."""
 
     def _new(self, message: ModelMessage) -> bool:
         if any(not self.conversation.knows_result(i) for i in _result_ids(message)):
             return True
-        return _feedback(message) and _MESSAGE.dump_json(message) not in self.feedback
+        # Found by its parts, not the whole request: the run's request may be a stored one, merged or resumed.
+        return any(feedback not in self.feedback for feedback in _feedback_of(message))
 
     async def store(self, messages: Sequence[ModelMessage]) -> None:
         """Store the requests in ``messages`` (the run's) that the conversation does not have yet.
@@ -365,14 +383,17 @@ class _Restate(AbstractCapability[Any]):
         Those are the tools' results, and Pydantic AI's feedback on a reply it
         could not use (``RetryFeedbackPart``): the rest of what a run adds, its
         responses, is stored as each arrives. Results are found by their call
-        ids, not by their place: a history processor (``ProcessHistory``) may
-        have trimmed the run's messages, and what it makes of them is the
-        model's to see, not the conversation's.
+        ids, and feedback by its parts, not by their place or their request: a
+        history processor (``ProcessHistory``) may have trimmed the run's
+        messages, and a run merges the consecutive requests it is given (a
+        message steered after a result, say) and resumes from the last one as
+        a request of its own. What it makes of them is the model's to see, not
+        the conversation's.
         """
         new = [m for m in messages if self._new(m)]
         if new:
             await self.conversation.turn.append(*new)
-            self.feedback.update(_MESSAGE.dump_json(m) for m in new if _feedback(m))
+            self.feedback.update(feedback for m in new for feedback in _feedback_of(m))
 
     async def before_model_request(
         self, ctx: RunContext[Any], request_context: ModelRequestContext
@@ -654,11 +675,12 @@ def _snapshot_of(messages: Sequence[ModelMessage]) -> list[ModelMessage]:
 class _Snapshots(AbstractCapability[Any]):
     """Store the history as a snapshot of the turn when a compaction rewrote it, before the request goes out.
 
-    It runs after every other capability's ``before_model_request`` (it is
-    innermost), so it sees the messages as they are sent. The history was
-    rewritten, rather than extended, if the messages sent before (or, for a
-    run's first request, the history the run was given) do not start them:
-    the next turn, or a retried attempt, then starts from the snapshot.
+    It runs after every other capability's ``before_model_request`` but
+    ``_Steering``'s (it is innermost), so it sees the messages as they are
+    sent. The history was rewritten, rather than extended, if the messages
+    sent before (or, for a run's first request, the history the run was
+    given) do not start them: the next turn, or a retried attempt, then
+    starts from the snapshot.
     """
 
     def __init__(self, conversation: Conversation, history: Sequence[ModelMessage]) -> None:
@@ -677,6 +699,48 @@ class _Snapshots(AbstractCapability[Any]):
         if not _extends(prints, self.sent):
             await self.conversation.turn.snapshot(_snapshot_of(messages))
         self.sent = prints
+        return request_context
+
+
+class _Steering(AbstractCapability[Any]):
+    """Give the model the messages steered to the turn, at its next step, in the request about to go out.
+
+    Before each model request, once the model's tool calls all have their
+    results stored, it takes the messages that wait (``take_steers``): each
+    is stored once, as a message of the user that is a step of the turn. It
+    then enqueues the stored messages with Pydantic AI's own
+    ``RunContext.enqueue`` (``'asap'``), which delivers them once every
+    ``before_model_request`` ran: into this request and into the run's
+    history, after what both hold. So the model gets each message as it is
+    stored and where it is stored, and the run goes on with it, its usage
+    limits, retries and capabilities' state with it, rather than starting
+    again; the turn's next requests, a retried attempt and the next turns
+    have it in their history, in place, and never take it again.
+
+    It is the innermost capability, after ``_Snapshots``: a snapshot that this
+    request stores stands for the positions stored before the messages, so
+    the history after it (the next request's, a retried attempt's, the next
+    turn's) has them after it.
+    """
+
+    def __init__(self, ctx: SessionContext, conversation: Conversation) -> None:
+        self.ctx = ctx
+        self.conversation = conversation
+
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position="innermost", wrapped_by=[_Snapshots])
+
+    async def before_model_request(
+        self, ctx: RunContext[Any], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        messages = request_context.messages
+        if not messages or isinstance(messages[-1], ModelResponse):
+            # A response that its provider paused, resumed: Pydantic AI delivers nothing into its request, so a
+            # message taken now would reach the model after the response, though stored before it.
+            return request_context
+        steered = await take_steers(self.ctx, self.conversation)
+        if steered:
+            ctx.enqueue(*(typing.cast(ModelRequest, entry.item) for entry in steered), priority="asap")
         return request_context
 
 
@@ -733,6 +797,9 @@ def _run(
         # The snapshots of an agent that takes its history from them (the agent's ``chat``); a prompt of a session
         # object that is no Pydantic AI agent takes the turn projection, which never reads one.
         snapshots = [_Snapshots(conversation, history)] if conversation.snapshots else []
+        # The messages steered to a turn of a ``chat`` that takes them, with snapshots or without; any other run takes
+        # none (``take_steers``).
+        steering = _Steering(ctx, conversation)
         spec = _output_spec(output, model) if output is not None else None
         try:
             # The tools of ``toolset`` find their call and the handler's context in the run.
@@ -741,7 +808,7 @@ def _run(
                     message_history=history,
                     model=model,
                     toolsets=toolsets,
-                    capabilities=[restate, *chosen, *snapshots],
+                    capabilities=[restate, *chosen, *snapshots, steering],
                     output_type=spec,
                     deps=deps,
                     usage_limits=usage_limits,
@@ -971,8 +1038,10 @@ def agent(
     """Create a Pydantic AI agent: a virtual object with one conversation per key.
 
     Its ``chat`` handler answers each message with Pydantic AI; the
-    conversation is kept in the key's database, a step at a time. Add
-    handlers of your own with ``@assistant.handler``.
+    conversation is kept in the key's database, a step at a time. A message
+    sent to its ``steer`` view while a turn runs joins the turn at its next
+    step, once the model's tool calls have their results. Add handlers of
+    your own with ``@assistant.handler``.
 
     The built-in agent takes the common options, and gets the harness's
     compaction (``compaction``) for a conversation that lives long::
@@ -1050,7 +1119,8 @@ def agent(
         )
 
     compact_history = None if any(map(_compacts, _leaves(own))) else _compactor(own, model, context_window)
-    obj.chat(answer, items=ITEMS, output=output, snapshots=True, compact_history=compact_history)
+    # Its runs take the messages steered to a turn at the turn's steps (``_Steering``).
+    obj.chat(answer, items=ITEMS, output=output, snapshots=True, compact_history=compact_history, steers=True)
     return obj
 
 

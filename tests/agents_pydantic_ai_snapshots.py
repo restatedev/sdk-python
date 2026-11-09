@@ -16,6 +16,7 @@ scripted model whose replies are long enough to cross a small context window.
 
 # pylint: disable=missing-function-docstring,missing-class-docstring,import-error
 
+import dataclasses
 import json
 import warnings
 from typing import Any
@@ -24,8 +25,8 @@ import pytest
 
 pytest.importorskip("pydantic_ai")
 
-from pydantic_ai import Agent  # noqa: E402
-from pydantic_ai.capabilities import ReinjectSystemPrompt  # noqa: E402
+from pydantic_ai import Agent, RunContext  # noqa: E402
+from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
     CompactionPart,
     ModelMessage,
@@ -34,6 +35,7 @@ from pydantic_ai.messages import (  # noqa: E402
     SystemPromptPart,
     TextPart,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel  # noqa: E402
@@ -513,3 +515,131 @@ async def test_every_run_of_a_key_has_the_conversation_id_of_the_agent_and_key()
     await chat("q1 hi")
     await invoke(obj, "own", chat.host(), request(), "q2 hi")
     assert ids == ["pai_ids/alice"] * 3
+
+
+STEERING = json.dumps({"revision": 1, "steering": [{"id": "s1", "text": "use Celsius"}]}).encode()
+"""What the signals object answers a publish with once a client steered the turn: the message waiting for it."""
+
+
+def _returned(message: ModelMessage) -> bool:
+    return isinstance(message, ModelRequest) and any(isinstance(p, ToolReturnPart) for p in message.parts)
+
+
+def _said(messages: list[ModelMessage], text: str) -> int:
+    """How often the model is given ``text`` as a message of the user in ``messages``."""
+    return _prompts(messages).count(text)
+
+
+class CompactAtTheStep(AbstractCapability[Any]):
+    """A compaction of one's own, which compacts at a step: at the request after a tool's result, the turns before the
+    one being answered become a summary. A history that starts with the summary is left as it is."""
+
+    def compact(self, messages: list[ModelMessage]) -> list[ModelMessage]:
+        # The turn's prompt, its tool call and the result stay.
+        return [ModelRequest(parts=[CompactionPart(SUMMARY)]), *messages[-3:]]
+
+    async def before_model_request(self, ctx: RunContext[Any], request_context: Any) -> Any:
+        messages = request_context.messages
+        if not _returned(messages[-1]) or _has_summary(messages[0]):
+            return request_context
+        compacted = self.compact(messages)
+        ctx.messages[:] = compacted
+        return dataclasses.replace(request_context, messages=compacted)
+
+
+async def test_a_message_steered_at_the_request_that_stores_a_snapshot_comes_after_it():
+    """The snapshot that a compaction stores at a step stands for what was stored before the message steered to the
+    turn at that step: a retried attempt, and the next turn, give the model the message after the snapshot's items,
+    once."""
+    answers = {**ANSWERS}
+    requests: list[list[ModelMessage]] = []
+    crashed: list[bool] = []
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        requests.append(list(messages))
+        latest = _prompts(messages)[-1]
+        if latest.startswith("look") and not _returned(messages[-1]):
+            return ModelResponse(parts=[ToolCallPart("lookup", {"about": "weather"}, tool_call_id="call-look")])
+        if latest == "use Celsius" and not crashed:
+            crashed.append(True)
+            raise RuntimeError("the process crashed while the model answered")
+        return ModelResponse(parts=[TextPart(f"answer to: {latest}")])
+
+    def lookup(about: str) -> str:
+        """Look something up; meanwhile, a client steers the turn."""
+        answers["publish"] = STEERING
+        return f"found {about}"
+
+    mine: Any = Agent(FunctionModel(model), tools=[lookup], capabilities=[CompactAtTheStep()])
+    chat = Chat(pydantic_ai.agent("pai_steered_snapshot", agent=mine))
+    await chat("hi")
+    hosts = [Host(chat.backend, service=chat.name, answers=answers) for _ in range(2)]
+    invocation = request()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await invoke(chat.obj, "chat", hosts[0], invocation, "look it up")
+    # The step after the tool's result stored the snapshot, then the steered message: the snapshot stands for what
+    # was stored before it, and does not hold it.
+    stored = await chat.read()
+    assert stored["snapshots"] == 1
+    assert all("use Celsius" not in item for item in stored["items"])
+    steps = [_agent.ITEMS.load(step) for step in stored["steps"]]
+    assert _said(steps, "use Celsius") == 1 and _returned(steps[-2])
+    # The request had the summary, the turn, then the message after the tool's result.
+    sent = requests[-1]
+    assert _has_summary(sent[0]) and _said(sent, "use Celsius") == 1
+    assert [type(p) for p in sent[-1].parts] == [ToolReturnPart, UserPromptPart]
+    # The retried attempt (the companion still lists the message) carries on from the snapshot and the message, once.
+    assert await invoke(chat.obj, "chat", hosts[1], invocation, "look it up") == "answer to: use Celsius"
+    retried = requests[-1]
+    assert _has_summary(retried[0]) and _said(retried, "use Celsius") == 1
+    assert _sent(retried) == _sent(sent)
+    assert [send.handler for host in hosts for send in host.sends].count("taken") == 1
+    # The next turn's history is the snapshot's items, then the message, the answer, and the turn's own prompt.
+    assert await chat("and then?") == "answer to: and then?"
+    following = requests[-1]
+    assert _has_summary(following[0]) and _said(following, "use Celsius") == 1
+    assert _prompts(following)[-2:] == ["use Celsius", "and then?"]
+    stored = await chat.read()
+    assert stored["snapshots"] == 1
+    assert _said([_agent.ITEMS.load(step) for step in stored["steps"]], "use Celsius") == 1
+
+
+async def test_a_feedback_and_the_message_steered_after_it_are_stored_once_through_a_retry_and_the_next_turn():
+    """A retried attempt resumes from its last request, Pydantic AI's feedback on a reply it could not use, as a
+    request of its own; a later run merges it with the message steered after it. Either is found by its parts:
+    stored once, and the model gets each once."""
+    from pydantic import BaseModel  # pylint: disable=import-outside-toplevel
+
+    class Plan(BaseModel):
+        title: str
+
+    requests: list[list[ModelMessage]] = []
+    crashed: list[bool] = []
+
+    def planner(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        requests.append(list(messages))
+        # The model gets the feedback as a message of the user, which says it is automated.
+        feedback = any("automated feedback" in prompt for prompt in _prompts([messages[-1]]))
+        if feedback and not crashed:
+            crashed.append(True)
+            raise RuntimeError("the process crashed while the model answered")
+        latest = [prompt for prompt in _prompts(messages) if "automated feedback" not in prompt][-1]
+        if latest.startswith("plan") and not feedback:
+            return ModelResponse(parts=[TextPart("not json")])
+        return ModelResponse(parts=[TextPart(json.dumps({"title": latest}))])
+
+    chat = Chat(pydantic_ai.agent("pai_feedback_steered", model=FunctionModel(planner), output=Plan))
+    invocation = request()
+    with pytest.raises(RuntimeError, match="crashed"):
+        await invoke(chat.obj, "chat", chat.host(), invocation, "plan one")
+    # The retried attempt takes a message steered meanwhile, right after the stored feedback.
+    host = Host(chat.backend, service=chat.name, answers={**ANSWERS, "publish": STEERING})
+    assert await invoke(chat.obj, "chat", host, invocation, "plan one") == Plan(title="use Celsius")
+    assert await chat("plan two") == Plan(title="plan two")
+    # The model got each feedback, and the message, once; the conversation stored each once.
+    feedbacks = [prompt for prompt in _prompts(requests[-1]) if "automated feedback" in prompt]
+    assert len(feedbacks) == 2 and _said(requests[-1], "use Celsius") == 1
+    steps = [_agent.ITEMS.load(step) for step in (await chat.read())["steps"]]
+    stored = [p for m in steps if isinstance(m, ModelRequest) for p in m.parts]
+    assert [type(p).__name__ for p in stored] == ["RetryFeedbackPart", "UserPromptPart", "RetryFeedbackPart"]
+    assert [text for role, text in await chat.messages() if role == "user"] == ["plan one", "use Celsius", "plan two"]
