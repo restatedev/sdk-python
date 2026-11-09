@@ -357,6 +357,7 @@ sequenceDiagram
 | Our items | the run's messages | a copy of the messages after the run's input, matched by id |
 | The window | the agent's | at least 1: the graph reads what closed the previous turn |
 | Summaries | ours | none: its model reads its own state |
+| Steered messages | taken by the model node at each step, kept in the run's state | none: each is answered as a turn of its own |
 
 ### What we learned
 
@@ -384,5 +385,12 @@ sequenceDiagram
   an answer the conversation stored.
 - **A structured response is the answer only of the run that wrote it:** the
   turn compares the channel's version before and after its run.
+- **A steered message joins the run in place.** The model node takes it
+  (`take_steers`) before its request, sends it after the tool results, and
+  returns it with the reply, so the state keeps it for the rounds after:
+  running the graph again with it would reset the recursion limit. Its id is
+  `steer:<id>` (the conversation stores it without one, so a retried attempt
+  marks the ones it loads), and a trimmed request never starts at one, which
+  would leave out the turn's prompt and its tool results.
 - **Subgraph checkpoints pile up:** the latest checkpoint of each subgraph
   namespace stays, one per turn that ran a subgraph (an open question).

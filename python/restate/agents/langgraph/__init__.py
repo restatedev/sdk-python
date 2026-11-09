@@ -60,6 +60,9 @@ Good to know about a graph of your own:
   graphs that live long.
 - Clients see a run step by step, as each step is stored: there is no
   token streaming.
+- A message sent to the agent's ``steer`` view is answered as a turn of its
+  own, after the one being answered: a graph of your own takes no steered
+  messages. (The built-in agent's model gets one at the turn's next step.)
 - Pause a graph with ``interrupt()``, not static breakpoints
   (``interrupt_before``, ``interrupt_after``), which have nothing to wait
   for: a compiled graph with them is refused, and a run that stops at a
