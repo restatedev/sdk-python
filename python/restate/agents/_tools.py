@@ -45,7 +45,7 @@ from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_star
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable
 from restate.sessions import SessionContext
-from restate.sessions.internal import attach_workflow
+from restate.sessions.internal import attach_invocation, start
 
 T = typing.TypeVar("T")
 
@@ -327,36 +327,19 @@ async def _once(
     return result
 
 
-def already_invoked(error: TerminalError) -> bool:
-    """Whether ``error`` is Restate refusing a call to a workflow's main handler because that workflow's run started.
-
-    Its status code is a cancellation's too (409): the message tells them apart.
-    """
-    return error.status_code == 409 and "already invoked" in error.message
-
-
-async def run_workflow(
-    ctx: SessionContext, target: Callable[..., Any], value: Any, workflow_id: str, idempotency_key: str
-) -> Any:
+async def run_workflow(ctx: SessionContext, target: Callable[..., Any], value: Any, workflow_id: str) -> Any:
     """Run the workflow ``target`` (its main handler) with the id ``workflow_id`` to its end, and return its result.
 
-    A workflow runs once per id. Restate takes no idempotency key for its main
-    handler, and refuses a call to it made again (after a crash, which runs
-    the tool call again) with 409, "already invoked": the call then waits for
-    the run of that id instead (``attach_workflow``), whoever started it.
-    Waiting for the run this way is not a call of the attempt, so stopping the
-    turn doesn't cancel the run, as it cancels the first call's.
+    It sends to the workflow, and waits for the invocation the send started.
+    A workflow runs once per id: a send to one whose run started already
+    starts nothing, and its invocation id is that run's. So a tool call made
+    again after a crash, or a ``key`` that ran before, waits for that run. The
+    run is the workflow's own, not a call of the turn: stopping the turn
+    doesn't cancel it.
     """
     handler = handler_of(target)
-    try:
-        return await untyped(ctx).call(
-            target, *inputs_of(handler, value), key=workflow_id, idempotency_key=idempotency_key
-        )
-    except TerminalError as error:
-        if not already_invoked(error):
-            raise
-    result = await attach_workflow(ctx, handler.service_tag.name, workflow_id)
-    return handler.handler_io.output_serde.deserialize(result)
+    invocation_id = await start(ctx, target, *inputs_of(handler, value), key=workflow_id)
+    return handler.handler_io.output_serde.deserialize(await attach_invocation(ctx, invocation_id))
 
 
 def untyped(ctx: SessionContext) -> Any:
@@ -581,7 +564,7 @@ def workflow(
 
         async def made(c: ToolCall) -> Any:
             workflow_id = f"{c.ctx.key}-{c.call_id}" if key is None else await configured(key, c.ctx)
-            return await run_workflow(c.ctx, target, value, workflow_id, c.idempotency_key)
+            return await run_workflow(c.ctx, target, value, workflow_id)
 
         return await _once(service, arguments["raw"], tool_call, made)
 

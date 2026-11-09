@@ -27,7 +27,7 @@ from restate.agents._object import AgentObject
 from restate.agents._tools import Tool, ToolCall, call, subagent, tool, wait_for_signal, workflow
 from restate.context import Request
 from sessions_database import Backend  # pylint: disable=import-error
-from sessions_object import ALREADY_INVOKED, Host, pay, request  # pylint: disable=import-error
+from sessions_object import Host, pay, request  # pylint: disable=import-error
 
 
 @pytest.fixture
@@ -124,27 +124,17 @@ async def test_call_lets_the_model_choose_the_key_and_makes_the_call_once_per_to
 # --- workflow -------------------------------------------------------------------------------------
 
 
-async def test_workflow_made_again_after_a_crash_waits_for_the_run_it_started():
-    """A crash after the tool call started its workflow runs the tool call again: Restate refuses the second call to
-    the workflow's main handler (409, already invoked), and the tool answers with that run's result, not the error."""
+async def test_workflow_sends_to_the_workflow_and_waits_for_the_run_the_send_started():
+    """The tool sends to the workflow, and attaches to the invocation of the send. Run again (after a crash), it sends
+    again, which Restate starts nothing for (the same run, of the same id), and waits for that run again."""
     tools["pay"] = workflow(pay, description="Pay an amount out.")
-    host = Host(
-        Backend(),
-        service="runner",
-        key="alice",
-        refusals={"pay": ALREADY_INVOKED},
-        answers={"payouts/alice-c1": b'"paid 30"'},
-    )
-    assert await run_tool(host, "pay", {"input": 30}, "c1") == "paid 30"
-    assert host.attached == [("payouts", "alice-c1")]
-
-
-async def test_workflow_refused_otherwise_answers_with_the_error_and_waits_for_no_run():
-    tools["pay"] = workflow(pay, description="Pay an amount out.")
-    cancelled = restate.TerminalError("cancelled", status_code=409)  # a 409 that is no "already invoked"
-    host = Host(Backend(), service="runner", key="alice", refusals={"pay": cancelled})
-    assert await run_tool(host, "pay", {"input": 30}, "c1") == "Error: cancelled"
-    assert host.attached == []
+    host = Host(Backend(), service="runner", key="alice", answers={"inv_payouts/alice-c1": b'"paid 30"'})
+    req = request()
+    assert await run_tool(host, "pay", {"input": 30}, "c1", req) == "paid 30"
+    assert await run_tool(host, "pay", {"input": 30}, "c1", req) == "paid 30"
+    assert [(s.service, s.handler, s.arg, s.key) for s in host.sends] == [("payouts", "pay", b"30", "alice-c1")] * 2
+    assert host.attached == ["inv_payouts/alice-c1"] * 2
+    assert host.calls == []
 
 
 # --- signal and subagent --------------------------------------------------------------------------

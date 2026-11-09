@@ -85,24 +85,14 @@ class Answer(restate.RestateDurableCallFuture[bytes]):
         pass
 
 
-class Refused(restate.RestateDurableCallFuture[bytes]):
-    """A call that Restate refused with ``error``."""
+class Sent:
+    """The SDK's handle of a send: its invocation id is made of its target."""
 
-    def __init__(self, error: TerminalError) -> None:
-        super().__init__()
-        self.error = error
-
-    def __await__(self):
-        async def refused() -> bytes:
-            raise self.error
-
-        return refused().__await__()
+    def __init__(self, invocation_id: str) -> None:
+        self.id = invocation_id
 
     async def invocation_id(self) -> str:
-        return "inv_refused"
-
-    async def cancel_invocation(self) -> None:
-        pass
+        return self.id
 
 
 @dataclass
@@ -116,10 +106,8 @@ class Host:
     sends: list[Send] = field(default_factory=list)
     calls: list[tuple[str, str, bytes, str | None, str | None]] = field(default_factory=list)
     answers: dict[str, bytes] = field(default_factory=dict)
-    # The calls Restate refuses, by handler: the error they fail with.
-    refusals: dict[str, TerminalError] = field(default_factory=dict)
-    # The workflow runs attached to, as (workflow, id); their results are the answers of "<workflow>/<id>".
-    attached: list[tuple[str, str]] = field(default_factory=list)
+    # The invocations attached to, by id; their results are the answers of their ids.
+    attached: list[str] = field(default_factory=list)
     cancelled: list[str] = field(default_factory=list)
     # How many more syncs go through before the process crashes: every sync after fails, losing its writes.
     _syncs_left: int | None = None
@@ -152,16 +140,15 @@ class Host:
 
     def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None):
         self.calls.append((service, handler, arg, key, idempotency_key))
-        if handler in self.refusals:
-            return Refused(self.refusals[handler])
         return Answer(self.answers[handler])
 
-    def attach_workflow(self, name: str, key: str):
-        self.attached.append((name, key))
-        return Answer(self.answers[f"{name}/{key}"])
+    def attach_invocation(self, invocation_id: str):
+        self.attached.append(invocation_id)
+        return Answer(self.answers[invocation_id])
 
     def generic_send(self, service, handler, arg, key=None, send_delay=None, idempotency_key=None, headers=None):
         self.sends.append(Send(service, handler, arg, key, send_delay, idempotency_key))
+        return Sent(f"inv_{service}/{key}")
 
     def cancel_invocation(self, invocation_id: str) -> None:
         self.cancelled.append(invocation_id)
@@ -398,22 +385,22 @@ async def pay(ctx: restate.WorkflowContext, amount: int) -> str:
     return f"paid {amount}"
 
 
-ALREADY_INVOKED = TerminalError("the workflow method was already invoked", status_code=409)
-
-
-async def test_attach_workflow_waits_for_a_workflows_run_by_its_id():
-    """For libraries: the run of a workflow, by its id, which a call to its main handler made again can't get."""
+async def test_start_sends_and_returns_the_invocation_id_that_attach_invocation_waits_for():
+    """For libraries: start an invocation by a send, and wait for its result by its id."""
     caller = sessions.SessionObject("caller")
 
     @caller.handler()
-    async def receipt(ctx: sessions.SessionContext, order: str) -> str:
-        return json.loads(await internal.attach_workflow(ctx, "payouts", order))
+    async def refund(ctx: sessions.SessionContext, amount: int) -> str:
+        invocation_id = await internal.start(ctx, pay, amount, key="order-7")
+        return json.loads(await internal.attach_invocation(ctx, invocation_id))
 
-    host = Host(Backend(), service="caller", answers={"payouts/order-7": b'"paid 30"'})
-    assert await run(caller, "receipt", host, "order-7") == "paid 30"
-    assert host.attached == [("payouts", "order-7")]
+    host = Host(Backend(), service="caller", answers={"inv_payouts/order-7": b'"paid 30"'})
+    assert await run(caller, "refund", host, 30) == "paid 30"
+    [send] = host.sends
+    assert (send.service, send.handler, send.arg, send.key) == ("payouts", "pay", b"30", "order-7")
+    assert host.attached == ["inv_payouts/order-7"]
     with pytest.raises(TypeError, match="is not the context of a session object"):
-        internal.attach_workflow(typing.cast(sessions.SessionContext, object()), "payouts", "order-7")
+        await internal.start(typing.cast(sessions.SessionContext, object()), pay, 30, key="order-7")
 
 
 async def test_ctx_send_is_made_at_once_and_cancel_takes_an_invocation_id():

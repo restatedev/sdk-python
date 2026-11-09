@@ -254,7 +254,7 @@ def workflow(
         step = _step(runtime, "workflow")
         workflow_id = key(state) if key is not None else step.idempotency_key
         value = called.validated(input(state)) if input is not None else None
-        result = await run_workflow(step.ctx, target, value, workflow_id, step.idempotency_key)
+        result = await run_workflow(step.ctx, target, value, workflow_id)
         return _update(output, result)
 
     return node
