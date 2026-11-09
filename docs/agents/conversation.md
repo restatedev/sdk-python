@@ -16,7 +16,8 @@ records).
   `assistant`) has its own SQL database, and its conversation is the tables
   below in it. Nothing in it is shared with another key.
 - **A conversation is a sequence of turns,** in the order their messages
-  came. A turn is one prompt and what answers it:
+  came. A turn is one prompt, the messages steered to it, and what answers
+  them:
   - its **row**: the prompt, then, once the turn ends, its status, its answer
     and what it carries to later turns. The rows together are the
     *transcript*;
@@ -25,7 +26,7 @@ records).
     steered to it that it took ([Steering a turn](turns.md#steering-a-turn)).
     A turn's steps are its *trajectory*.
 - **Turns never overlap**, so at most one turn has no answer: the latest
-  ([One message at a time](turns.md#one-message-at-a-time)).
+  ([One turn at a time](turns.md#one-turn-at-a-time)).
 - **Every row belongs to one turn,** and only the latest turn, while it has
   no answer, is written ([The turn model](turns.md#the-turn-model)).
 - **The model's input is composed from the turns in one place,**

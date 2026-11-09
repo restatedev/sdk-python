@@ -14,9 +14,10 @@ building it, and how to port it.
 
 ## In brief
 
-- **A conversation is a sequence of turns.** A turn is one prompt and what
-  answers it: its steps (the model's replies, tool calls and results) and its
-  answer. Turns never overlap, so at most one turn has no answer: the latest.
+- **A conversation is a sequence of turns.** A turn is one prompt, the
+  messages steered to it, and what answers them: its steps (the model's
+  replies, tool calls and results) and its answer. Turns never overlap, so
+  at most one turn has no answer: the latest.
 - **A message can join the turn being answered.** Sent to `steer` rather than
   `chat`, the turn takes it at its next step, once the model's tool calls
   have their results, and the model's next request has it; otherwise it is
@@ -40,7 +41,7 @@ building it, and how to port it.
 
 ```mermaid
 flowchart LR
-  C[Client] -- "chat, stop, signal" --> A
+  C[Client] -- "chat, steer, stop, signal" --> A
   C -- "status, messages, sync, watch" --> A
   subgraph A["Agent (session object), key alice"]
     H["chat: a turn"] --> F["Framework run: model, tools"]
@@ -48,19 +49,19 @@ flowchart LR
     H -- "prompt, answer" --> T
     T[("Key's database: turns, items, snapshots, call records")]
     V["views: messages, sync"] -- read --> T
-    X["private: settle, compact"] --> T
+    X["private: settle, compact, steered"] --> T
   end
-  H -- "start, close, publish" --> S[("Companion signals, key assistant:alice: turn, waits, revision")]
+  H -- "start, close, publish" --> S[("Companion signals, key assistant:alice: turn, waits, steered messages, revision")]
   F -- "wait, for a tool or an approval" --> S
   C -- "signal resolves a wait" --> S
-  S -- "settle a dead turn" --> X
+  S -- "settle a dead turn, and steered for each steered message" --> X
 ```
 
 ## The pages
 
 | Page | What it holds |
 | --- | --- |
-| [Turn semantics](turns.md) | what a turn is; its life, its end, attempts, stops, dead turns and `settle`; the turn model; what clients see; the guarantees |
+| [Turn semantics](turns.md) | what a turn is; its life, its end, attempts, stops, dead turns and `settle`; steering; the turn model; what clients see; the guarantees |
 | [The conversation](conversation.md) | the data layout (every table), a worked example, which turns a turn reads, what the model gets (the turn projection, summaries, snapshots), what a turn carries, the call records, the schemas |
 | [The frameworks](frameworks.md) | per framework: what it expects, how we map onto it, and what we learned |
 | [What we learned](learnings.md) | the research (coding agents, frameworks), the decisions and why, the lessons, the bugs a review found, the open questions |
