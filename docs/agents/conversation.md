@@ -16,15 +16,17 @@ records).
   `assistant`) has its own SQL database, and its conversation is the tables
   below in it. Nothing in it is shared with another key.
 - **A conversation is a sequence of turns,** in the order their messages
-  came. A turn is one prompt and what answers it:
+  came. A turn is one prompt, the messages steered to it, and what answers
+  them:
   - its **row**: the prompt, then, once the turn ends, its status, its answer
     and what it carries to later turns. The rows together are the
     *transcript*;
   - its **steps**: everything else it stored, the model's replies, the tool
-    calls and their results, a message that asked again. A turn's steps are
-    its *trajectory*.
+    calls and their results, a message that asked again, the messages
+    steered to it that it took ([Steering a turn](turns.md#steering-a-turn)).
+    A turn's steps are its *trajectory*.
 - **Turns never overlap**, so at most one turn has no answer: the latest
-  ([One message at a time](turns.md#one-message-at-a-time)).
+  ([One turn at a time](turns.md#one-turn-at-a-time)).
 - **Every row belongs to one turn,** and only the latest turn, while it has
   no answer, is written ([The turn model](turns.md#the-turn-model)).
 - **The model's input is composed from the turns in one place,**
@@ -32,14 +34,15 @@ records).
   [turn projection](#what-the-model-sees), or
   [history from snapshots](#history-from-snapshots).
 - **Clients read the turns as stored**, in two projections of the same rows:
-  the full view (every step) and the summary view (each turn's message and
-  answer), under the same message ids.
+  the full view (every step) and the summary view (each turn's message, the
+  messages steered to it, and its answer), under the same message ids.
 
 ```mermaid
 erDiagram
   restate_agent_turns ||--o{ restate_agent_items : "its steps (items.turn = turns.n)"
   restate_agent_conversation_start ||--o{ restate_agent_turns : "where they start, and their summary"
   restate_agent_snapshots }o--|| restate_agent_turns : "stored in a turn, or between turns"
+  restate_agent_steers |o--|| restate_agent_items : "a steered message (steers.n = items.n)"
   restate_agent_turns {
     int n PK "position: the prompt's message id"
     int seq "the change it was written at"
@@ -123,6 +126,12 @@ CREATE TABLE restate_agent_snapshots (       -- the latest only, for agents with
     turn INTEGER,
     items TEXT NOT NULL
 );
+
+CREATE TABLE restate_agent_steers (          -- the messages steered to a turn that it took (appended)
+    n INTEGER PRIMARY KEY,                   -- the item's position: the message of the user it is
+    turn INTEGER NOT NULL,                   -- the turn's position
+    id TEXT NOT NULL UNIQUE                  -- the message's id: the `steer` request's
+);
 ```
 
 - **Positions.** The two tables share one sequence of positions (`n`), the
@@ -153,6 +162,13 @@ CREATE TABLE restate_agent_snapshots (       -- the latest only, for agents with
 - **A snapshot** takes no position of its own, so message ids and cursors
   don't depend on it, and it is never shown
   ([History from snapshots](#history-from-snapshots)).
+- **A steered message** is an item of its turn, a message of the user made
+  with `Items.steered` (by default `Items.prompt`), and a row of
+  `restate_agent_steers` at the same position, with its id: unique, so a
+  turn stores it once whatever its attempts do, and the agent's `steered`
+  finds that it was taken with one read. Earlier turns' steered messages
+  are one range of that table's primary key, as positions only grow. A drop
+  deletes those after the reply it drops.
 
 ### Around the conversation
 
@@ -301,17 +317,18 @@ the previous turn whole, to give its graph what closed it.
 
 1. The summary of the earliest turns, if they have one: a user's message
    with it, and the assistant's acknowledgement.
-2. The turns before the window, as their prompt and answer: the latest of
-   them that the agent's `budget` holds (32 000 tokens by default, counted
-   as 4 characters each).
+2. The turns before the window, as their prompt, the messages steered to
+   them, and their answer: the latest of them that the agent's `budget`
+   holds (32 000 tokens by default, counted as 4 characters each).
 3. The window's turns, whole.
 
 The model sees the earlier turns' messages, not their tool calls: those of
 the window only. The `messages` view shows every turn whole, as stored.
 
 This is a contract for every integration on the turn projection: **earlier
-turns reach the model only from their rows** (each as its prompt, then
-`Items.reply(answer, agent)`), so a framework must never depend on an
+turns reach the model only from their rows** (each as its prompt, the
+messages steered to it, then `Items.reply(answer, agent)`), so a framework
+must never depend on an
 earlier turn's steps outside the window. What it needs from them, it
 carries ([What a turn carries](#what-a-turn-carries)).
 
@@ -348,7 +365,8 @@ sequenceDiagram
 
 - **What is summarized:** the turns before the next window, but the latest
   that half the budget holds, which stay as they are, with the summary
-  before. Turns stay stored, and `messages` shows them as before.
+  before: each turn's message, the messages steered to it, and its answer.
+  Turns stay stored, and `messages` shows them as before.
 - **Who summarizes:** the built-in agents of OpenAI, ADK and LangGraph, with
   their own model. An agent you configure yourself only trims the earliest
   turns. A LangGraph graph agent never summarizes: its model reads the
@@ -537,7 +555,8 @@ invocation (the next invocation's first call replaces it):
   [What we learned](learnings.md#decisions)): its schemas are written for new
   databases, with no migration from the layout of the 1.4.x releases, whose
   tables no deployment uses. From the next release on, schema changes are
-  appended migrations.
+  appended migrations: the first is `restate_agent_steers`, a new table,
+  which a view that applies it to its own session creates at no cost.
 - **The database** is the session object's SQL engine (sdk-shared-core's,
   the same for the TypeScript SDK), one per key, stored in Restate's state.
   It refuses an expression more than 100 deep: match many pairs with a list

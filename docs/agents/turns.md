@@ -12,9 +12,11 @@ The code lives in:
 - [`_conversation.py`](../../python/restate/agents/_conversation.py): the
   conversation, and `answer_once`, which answers a prompt;
 - [`_signals.py`](../../python/restate/agents/_signals.py): the companion;
+- [`_steering.py`](../../python/restate/agents/_steering.py): the messages
+  steered to a turn, which it takes at its steps;
 - [`_object.py`](../../python/restate/agents/_object.py): the views (`status`,
-  `stop`, `clear`, `sync`, `watch`) and the private handlers (`settle`,
-  `compact`, `erase`);
+  `stop`, `steer`, `clear`, `sync`, `watch`) and the private handlers
+  (`settle`, `compact`, `erase`, `steered`);
 - [`_messages.py`](../../python/restate/agents/_messages.py): the conversation as
   clients read it;
 - [`_calls.py`](../../python/restate/agents/_calls.py): the Restate calls of a
@@ -31,16 +33,20 @@ stored and loaded, and the `settle` and `compact` handlers, are this SDK's
 - **Agent, key.** A session object of `restate.agents`, such as `assistant`,
   and one of its keys, such as `alice`: one conversation, in its own SQL
   database.
-- **Message.** One call of the agent's `chat` handler: one Restate
-  invocation, whose id (`inv_1f…`) is also the message's id.
-- **Turn.** One prompt, and what answers it: the unit of the conversation
+- **Message.** What a client sends the agent: a call of its `chat` handler,
+  one Restate invocation whose id (`inv_1f…`) is also the message's id; or a
+  call of its `steer` view, whose request's id is the message's id.
+- **Turn.** One prompt, the messages steered to it that it took, and what
+  answers them: the unit of the conversation
   ([The turn model](#the-turn-model)). Its id is the prompt's: the
   invocation's id, or `<id>:2`, `<id>:3` for later prompts of a handler that
-  prompts more than once. A `chat` message is one turn.
-- **Invocation.** The `chat` invocation answering a message, from its start
-  to its end, across its attempts: what the companion follows (`status`
-  calls it the turn being answered, `answering`) and what `stop` cancels.
-  An invocation of a handler of your own can hold several turns.
+  prompts more than once. A `chat` message is one turn; a steered message
+  joins the turn being answered, or is a turn of its own.
+- **Invocation.** The invocation answering a message (`chat`'s, or
+  `steered`'s for a steered message answered as a turn of its own), from its
+  start to its end, across its attempts: what the companion follows
+  (`status` calls it the turn being answered, `answering`) and what `stop`
+  cancels. An invocation of a handler of your own can hold several turns.
 - **Attempt.** One run of a turn's invocation. A crash, a lost connection or
   a suspension ends an attempt; Restate starts another, which runs the
   handler again from its first line and resumes from what the database has.
@@ -59,14 +65,25 @@ stored and loaded, and the `settle` and `compact` handlers, are this SDK's
   framework's own state (ADK's session state).
 - **Window.** The turns the model sees whole, with their trajectories
   ([Which turns a turn loads](conversation.md#which-turns-a-turn-loads)).
+- **Step.** The point in a turn after the model's reply has a result for
+  each of its tool calls, before the model's next request.
+- **Steered message.** A message sent to the agent's `steer` view: the turn
+  being answered takes it at its next step, or else it is answered as a turn
+  of its own ([Steering a turn](#steering-a-turn)).
 
-## One message at a time
+## One turn at a time
 
-A key answers one message at a time, in the order they came. `chat` is an
-exclusive handler, and it keeps the key while it waits (suspended on a
+A key answers one turn at a time, in the order its messages came. `chat` is
+an exclusive handler, and it keeps the key while it waits (suspended on a
 signal, say): a message sent while the agent answers another waits in
 Restate's queue for the key, and its turn starts when the one before it
-ended. There is no steering: a message never joins the turn being answered.
+ended.
+
+A message sent to `steer` takes its place in the same queue as it is sent,
+and is answered there, as a turn of its own, unless the turn being answered
+takes it first, at its next step, and answers it together with its own
+message. A message sent to `chat` never joins the turn being answered
+([Steering a turn](#steering-a-turn)).
 
 So **turns never overlap.** At most one turn of a conversation has no
 answer, and it is the latest. A turn that finds an earlier one without an
@@ -80,8 +97,9 @@ still hold the key.
 - **Once.** A message sent with an idempotency key is one invocation,
   answered once, however often it is sent. A webhook's delivery (`deliver`)
   is a message of this kind, keyed by the delivery.
-- **To change course,** stop the turn (`stop`) and send the message that
-  replaces it: it is answered once the stopped turn ended, after any
+- **To change course,** send the turn a message with `steer`, which it
+  takes at its next step; or stop the turn (`stop`) and send the message
+  that replaces it: it is answered once the stopped turn ended, after any
   messages already waiting.
 
 ## A turn's life
@@ -104,6 +122,10 @@ sequenceDiagram
   loop each step of the framework
     A->>DB: append the model's reply, the tool calls' results
     A->>S: publish (a tool call starts, ends)
+    S-->>A: the revision, and the messages steered to the turn, if any
+    opt messages steered to the turn wait, at the step
+      A->>DB: take them: steps of the turn, and taken in the outbox
+    end
   end
   A->>DB: answered: the answer, and what the turn carries
   opt the earlier turns outgrow the budget
@@ -132,7 +154,10 @@ sequenceDiagram
 3. **Steps.** The framework answers: model calls and tool calls. Each step
    is stored as it comes (a reply in one transaction, each result as it
    comes back), and each tool call publishes as it starts and as it ends,
-   so a follower sees the call start and its result.
+   so a follower sees the call start and its result. The companion answers
+   each `publish` with the messages steered to the turn that wait: at its
+   next step, the turn takes them, and the model's next request has them
+   ([Steering a turn](#steering-a-turn)).
 4. **Answer.** The answer is stored on the turn's row, with what the turn
    carries. If the turns before the next turn's window outgrow the agent's
    budget, the agent sends itself `compact`
@@ -143,7 +168,8 @@ sequenceDiagram
    turn's error.
 
 A **background** agent (`background=True`, a subagent say) publishes its
-turn's end only: no step, nor its start, wakes a follower.
+turn's end only: no step, nor its start, wakes a follower. Its turns take no
+steered messages.
 
 ## How a turn ends
 
@@ -164,11 +190,18 @@ or else the note that ends the turn), then the note is the turn's last
 reply, and its answer. So the next turn's model never sees a tool call
 without a result, and knows how the turn ended.
 
+**The messages steered to a turn go as the turn goes.** Those it took are
+its own, as its prompt is: its answer answers them, and a turn that ends
+otherwise (refused, failed, stopped, ended) ends them too, and they are not
+answered again. Those it did not take were queued as turns of their own as
+they were sent, and are answered after it, in order.
+
 Whoever closes a turn in the companion, a close does the same: it clears the
 turn (if the agent still answers it), drops the waits of the turn's tools
-(rejecting their awakeables, so a `wait` still parked ends), and publishes
-once if either changed something. A second close of the same turn changes
-nothing, and publishes nothing.
+(rejecting their awakeables, so a `wait` still parked ends), forgets the
+messages steered to the turn, and publishes once if any of these changed
+something. A second close of the same turn changes nothing, and publishes
+nothing.
 
 ## Dead turns
 
@@ -308,6 +341,10 @@ sequenceDiagram
   once however often the tool call runs: a framework that gives a cut-off
   call a new id gets the earlier call's id back
   ([`_calls.py`](../../python/restate/agents/_calls.py)).
+- **Steered messages, once.** A message the turn stored is a step of the
+  turn for every later attempt: in the model's history, and never taken
+  again (by its id). The `taken` that tells the companion is sent from the
+  storing transaction's outbox, again with the same key after a crash.
 - **Waits survive.** A tool waiting for a signal waits in the companion
   (`wait`), by that key: the next attempt rejoins the same wait, and the
   turn is still answered meanwhile. A framework's own tool call that waits
@@ -363,10 +400,162 @@ sequenceDiagram
   tool ends cancelled instead: a framework that cancels a task and waits for
   it (ADK 2's runner) expects nothing else. The turn ends cancelled either
   way.
+- A message steered to the turn ends with it if the turn took it, as the
+  turn's prompt does; one it had not taken is answered as a turn of its own
+  after it. A turn that stops while it waits to store messages takes none.
 - `clear` stops the turn the same way, then forgets the conversation (the
-  key's database, the companion's waits and kept signals). A message sent
-  before `clear` is answered first, then forgotten too. Message ids and
-  cursors carry on.
+  key's database, the companion's waits, kept signals and steered
+  messages). A message sent before `clear` is answered first (unless the
+  stopped turn took it), then forgotten too; one sent after it is answered
+  in the cleared conversation. Message ids and cursors carry on.
+
+## Steering a turn
+
+A message sent to the agent's `steer` view, rather than to `chat`, adds to
+the turn being answered. The turn takes it at its next **step**: once the
+model's reply has a result for each of its tool calls, before the model's
+next request. That request has the message, after those results, and the
+turn's answer answers the turn's messages so far. If the turn reaches no
+step before it ends, the message is answered as a turn of its own, right
+after it. Either way, it is answered once.
+
+| The message is sent | It is answered |
+| --- | --- |
+| while the turn has a step ahead (a tool call runs, say) | by the turn being answered, which takes it at that step |
+| while the model writes the turn's final answer | as the next turn, before the messages sent after it: no step follows |
+| with no turn being answered | as a turn of its own, which it starts, as `chat/send` does |
+| to a turn that takes none (see the limits), or past its 16 | as a turn of its own, once the turn being answered ended |
+| to a turn that then stops, fails, is refused or killed | not at all if the turn took it (it ends with the turn); otherwise as a turn of its own after it |
+
+The view answers `{id, turn}`: the message's id (the request's: send it
+with an idempotency key, so that a retried request is the same message),
+and the turn that holds it for its next step, or `null` if it is answered as
+a turn of its own.
+
+### Taken at the next step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant V as Agent (steer view)
+  participant S as Companion
+  participant A as Agent (chat)
+  participant P as Agent (steered)
+  participant DB as Key's database
+  C->>A: chat/send("Plan my week")
+  A->>S: start(turn, steers)
+  A->>DB: the model's reply, a tool call
+  C->>V: steer("Skip Friday")
+  V->>S: steer(id, text)
+  S-)P: steered(id, text): queued now, behind the turn
+  Note over S: inbox: the message, for this turn
+  A->>S: publish (the tool call ends)
+  S-->>A: revision, steering: [the message]
+  A->>DB: the tool's result
+  A->>DB: the message, a step of the turn, and taken(id) in the transaction's outbox
+  DB--)S: taken(id), once the transaction commits
+  A->>A: the model's next request has it
+  A->>DB: the answer
+  A->>S: close(turn)
+  Note over P: runs once the turn ended: the message is stored, so it does nothing
+```
+
+### Too late: the next turn
+
+The model writes the turn's final answer, so no step follows: the turn ends
+without taking the message, which its own turn answers next, before a
+message sent after it.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant S as Companion
+  participant A as Agent (chat)
+  participant P as Agent (steered)
+  participant DB as Key's database
+  C->>A: chat/send("Plan my week")
+  Note over A: the tools are done: the model writes the final answer
+  C->>S: steer("Skip Friday"), through the steer view
+  S-)P: steered(id, text): queued behind the turn
+  Note over S: inbox: the message, for this turn
+  C->>A: chat/send("And next week?"): queued behind steered
+  A->>DB: the answer
+  A->>S: close(turn): the message it did not take is forgotten here
+  P->>DB: stored by a turn? no
+  P->>DB: a turn of its own: "Skip Friday", and its answer
+  Note over A: then "And next week?" is answered
+```
+
+### The turn ends otherwise
+
+A message the turn took is its own, as its prompt is: stopped with it here.
+One it had not taken is answered as a turn of its own after it.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant S as Companion
+  participant A as Agent (chat)
+  participant P as Agent (steered)
+  participant DB as Key's database
+  C->>S: steer("Use Celsius"), through the steer view
+  S-)P: steered(1): queued behind the turn
+  A->>DB: at a step: "Use Celsius", a step of the turn, and taken(1)
+  C->>S: steer("And the rain")
+  S-)P: steered(2): queued behind steered(1)
+  C->>A: stop
+  A->>DB: the turn ends cancelled, and "Use Celsius" with it
+  A->>S: close(turn): message 2, not taken, is forgotten here
+  P->>DB: steered(1): stored by a turn? yes: nothing to do
+  P->>DB: steered(2): stored? no: a turn of its own, "And the rain", and its answer
+```
+
+### How it holds
+
+- **Where it waits.** The companion's `steer` sends the agent's private
+  `steered` handler the message at once, so it takes its place in the key's
+  queue as it is sent; and, if the turn being answered takes steered
+  messages (its `start` says so, `Started.steers`), it holds the message for
+  that turn (`inbox`), 16 at most (`STEERS`).
+- **How the turn learns of it.** From `publish`, which the turn makes at
+  each tool call's start and end anyway: the companion answers it with the
+  messages waiting for the turn. A turn that nobody steers makes no call
+  more.
+- **Taken once.** At a step, the framework's integration calls
+  `take_steers`: the turn stores each waiting message by its id, once, as a
+  message of the user that is a step of the turn, and the integration puts it
+  in the request that is about to go out, in place: the framework's run goes
+  on, with its limits, guardrails and state. The transaction that stores the
+  messages sends the companion `taken` from its outbox, once, with the
+  commit; the companion marks them taken, and counts them among the turn's
+  16 until it ends. A turn that stops while it waits to store messages
+  takes none.
+- **Answered once.** Once the turn ended, `steered` runs, for each message:
+  it does nothing if a turn stored the message, and otherwise answers it as
+  a turn of its own. So each message is answered once, in the order it was
+  sent with the messages after it.
+- **A taken message is its turn's.** It goes as the turn goes
+  ([How a turn ends](#how-a-turn-ends)): answered by the turn's answer, or
+  stopped, refused, failed or ended with it, and never answered again. A
+  reply dropped to ask the model again drops the messages taken after it,
+  which `steered` then answers.
+- **What the model sees.** In the window, the message is where it was taken.
+  Later, an earlier turn is its message, the messages steered to it, and its
+  answer; budgets and summaries count them. `latest_ask` skips them: the
+  turn goes on from its prompt (an ADK invocation, a graph's run).
+- **Limits.** A step comes once a reply's tool calls all have results: a
+  tool that waits a day for an approval holds the message until it
+  returns (stop the turn to change course sooner). A turn takes at most 16
+  messages in all; past them, each is a turn of its own. A message is taken
+  only as a model request goes out: one that no request follows (ADK asks
+  the model nothing more after some tools) is a turn of its own. A LangGraph
+  graph (`graph=`), an ADK agent whose root is a workflow, and a background
+  agent take none; an OpenAI run takes none after a handoff whose
+  `input_filter` drops the handoff's own output
+  ([The frameworks](frameworks.md)).
 
 ## The turn model
 
@@ -382,16 +571,22 @@ Turns are composed into one flat list in one place only: what the model gets.
   nothing else.
 - **Scope.** A turn's run reads and writes its own turn: its open calls, its
   replies, its final reply, its drops. Earlier turns are read-only context.
+- **Messages.** A turn's messages of the user are its prompt, then the
+  messages steered to it that it took, each a step at the place it was
+  taken, and a message that asked again (`ask_again`). Its answer answers
+  them all.
 - **Lifecycle.** A turn is being answered (no status), then ends once, with a
   status: `answered` by its run, or closed as `cancelled`, `failed`,
   `refused` or `ended`. The status, the answer, the answer's message and
-  what the turn carries are stored in one update of its row.
-- **Two projections.** The transcript (each turn's message and answer) and a
-  turn's detail (its steps), read separately: the `messages` view's
-  `summary` and `full` views.
+  what the turn carries are stored in one update of its row. The messages
+  steered to it that it took end with it.
+- **Two projections.** The transcript (each turn's message, the messages
+  steered to it, and its answer) and a turn's detail (its steps), read
+  separately: the `messages` view's `summary` and `full` views.
 - **One composition.** `Conversation.history()` composes the turns into what
-  the model gets: the summary, the earlier turns' messages and answers, the
-  window's turns whole. Nothing else flattens turns.
+  the model gets: the summary, the earlier turns' messages (with the
+  messages steered to them) and answers, the window's turns whole. Nothing
+  else flattens turns.
 
 In code ([`_conversation.py`](../../python/restate/agents/_conversation.py)):
 
@@ -404,12 +599,13 @@ Conversation                      the key's conversation, loaded for a turn
   knows_result(), new_results()   what the model was given, across turns (to tell new results)
   ask(prompt_id, text) -> Turn    start the next turn: refused while another has no answer
 
-Turn                              one prompt, and what answers it
+Turn                              one prompt, the messages steered to it, and what answers them
   id, n, status, answer, prompt   its row
   entries, items                  its prompt and steps
   open_calls(), replies(), last_reply(), final_reply(), stored()   its own state, never another turn's
-  latest_ask()                                                      its latest message of the user
+  latest_ask(), steered()                                           its latest ask; the messages steered to it
   append(), append_reply(), drop(), carry(), ask_again(text)        its run's writes
+  steer(messages, taken, going)                                     take steered messages, at a step (take_steers)
   answered(answer), close(ctx, status, note)                        its end: once
 ```
 
@@ -433,7 +629,9 @@ invocation, a LangGraph graph's input) runs from the turn's latest message of
 the user (`latest_ask`). A retried attempt that finds the ask stored does
 not ask again. The check reads the reply to the ask too (`last`): a
 `TerminalError` it raises fails the turn, which is closed `failed` with it,
-as `output=` does for a reply that still does not validate.
+as `output=` does for a reply that still does not validate. A steered
+message is a message of the user that is a step of the turn too, but no
+ask: the turn goes on from its latest ask, which skips it.
 
 **Names.** A turn is the conversation's (`restate.agents.internal.Turn`).
 What `status` reports, `answering`, is the invocation being answered
@@ -451,9 +649,9 @@ own answer, and the companion's turn is the invocation, all of them.
 
 | View | What it gives |
 | --- | --- |
-| `status` | `answering`: the turn from its `start` to its close, or null; `waiting`: its tools' waits |
+| `status` | `answering`: the turn from its `start` to its close, or null; `waiting`: its tools' waits; `steering`: the messages steered to the turn that it has not taken yet (absent if none) |
 | `pending` | the waits, oldest first, each with its id (`<turn>:<call>`) for `signal` |
-| `messages` | the conversation as stored. `view: "full"` (the default): every turn, with its tool calls and their outputs, and how a closed turn ended. `view: "summary"`: each turn's message and answer, under the same ids |
+| `messages` | the conversation as stored. `view: "full"` (the default): every turn, with its tool calls and their outputs, the messages steered to it where it took them, and how a closed turn ended. `view: "summary"`: each turn's message, the messages steered to it, and its answer, under the same ids |
 | `notifications`, `watch` | the revision; `watch` waits (up to a minute) for a newer one |
 | `sync` | the revision, `status`, and the messages since a cursor, at once: what a follower reads |
 
@@ -466,6 +664,7 @@ The revision increases at:
 - `settle`, once it closed a dead turn in the conversation;
 - a wait that starts, is resolved by a `signal`, or is forgotten (a
   cancelled turn's);
+- a message steered to the turn, and the turn taking it (`taken`);
 - `clear`.
 
 So a follower that reads each new revision sees every turn begin, its tool
@@ -483,10 +682,22 @@ does not show), and only such a turn is sent it:
 - this SDK's agent whose turn the TypeScript companion holds has a dead turn
   closed by its next message.
 
+A turn says it takes steered messages the same way (`Started.steers`): the
+companion holds messages only for such a turn, and every other gets them as
+turns of their own. A TypeScript companion, which has no `steer`, answers
+`publish` with no `steering`, so this SDK's turns take none from it; and the
+`steer` view fails there, as the companion has no such handler.
+
 ## Guarantees and limits
 
 - **One turn at a time per key**, in the order messages came. A turn is
-  never joined by another message.
+  joined only by a message sent to `steer`, at a step.
+- **A steered message is answered once**: by the turn that took it, or as a
+  turn of its own, in the order it was sent with the messages after it. One
+  that a turn took goes as the turn goes: stopped, refused, failed or ended
+  with it, it is not answered again.
+- **A turn takes at most 16 steered messages**, and only as a model request
+  goes out, once each of the model's tool calls has a result.
 - **A turn is completed from its own rows**, and reads a bounded part of the
   conversation: the transcript the budget holds, and the window.
 - **`status` says the turn being answered** from its start to its close,

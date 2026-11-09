@@ -35,7 +35,9 @@ What the core gives an integration (`restate.agents.internal`):
   them), `prompt(text)`, `reply(text, agent)`, `results(calls)` (to make
   them), `read(item)` (what an item says, the tool calls it makes, the
   results it holds), and optionally `summary(text)` (the summary in the
-  framework's own form).
+  framework's own form) and `steered(text, steer_id)` (a message steered
+  to a turn, as the framework tells it apart from a prompt; by default a
+  prompt's item).
 - **`answer_once(ctx, text, items, run, window, budget, check=)`**, which
   answers a prompt once. `run` gets the `Conversation`: `history()` is the
   model's input, and `conversation.turn` is the turn to write.
@@ -59,6 +61,7 @@ At a glance:
 | Summaries | ours: one user message | the harness's compaction | ours: a user message, then "Understood." | ours: as ADK | none: the graph trims its own state |
 | Steps are stored from | the run's hooks and input filter | the `_Restate` capability | `_Sessions.append_event` | the agent's nodes | a copy of the messages after the run's input |
 | The framework's own approvals | not given: such a run fails its turn | durable: deferred tool calls wait | not integrated | not integrated | durable: `interrupt()` waits |
+| Steered messages ([Steering a turn](turns.md#steering-a-turn)) | the input filter, at each step; spliced back into each later request | `_Steering`, innermost after `_Snapshots`: Pydantic AI's `enqueue('asap')` | `_Restate.before_model_callback`, as a request goes out, for an `LlmAgent` root: in the request and the session | the model node, kept in the run's state | none: each is a turn of its own |
 
 In every framework, a tool can wait for a person: `wait_for_signal`.
 
@@ -109,6 +112,26 @@ In every framework, a tool can wait for a person: `wait_for_signal`.
 - **Approvals aren't durable yet.** A run that stops for tool calls that
   need an approval (`needs_approval`) fails its turn: nothing would give the
   approval. A tool that waits for a person uses `wait_for_signal`.
+- **A steered message must be put back in every request.** The input filter
+  changes one request only: the SDK makes each request's input afresh, from
+  the run's input and its own items. So the run keeps the messages it took,
+  each with the item it came after (a tool call's id), and splices them back
+  into each later request; where a handoff's `input_filter` took that item
+  out, before the first item the run saw after the message, as if the filter
+  had kept it. The run goes on in place: its input guardrails run once, and
+  `max_turns`, tool choice and hooks carry on. A run also takes the messages
+  waiting as it starts (a retried attempt's, say), into its input.
+- **An agent used as a tool runs with the run's `run_config`** (the SDK
+  passes it on to `Agent.as_tool`'s run), our input filter with it. A request
+  made while one of the run's tool calls runs is that nested run's: it gets
+  your own filter only. The turn stores none of its items (the call's output
+  is what the turn keeps; an output without its call would break the next
+  request) and puts none of the steered messages in it.
+- **A handoff filter that drops the handoff's own output** (`input_filter=
+  remove_all_tools`) leaves the handoff's call without an output in the
+  turn: the run takes no steered message after it. Found with it, and not
+  steering's: that output is never stored, so the next turns' requests carry
+  a function call with no output, which OpenAI's APIs refuse (an open bug).
 
 ## Pydantic AI, on Pydantic AI Harness
 
@@ -252,10 +275,29 @@ handlers have no `ctx.run`; it disables harness features), `StepPersistence`
   compaction); store `RetryFeedbackPart` requests.
 - **Compacting off the answer's path** (`compact_after()`) triggers at 70% of
   the window: `compact_now` at an 80% target does nothing below 80%.
-- **Order matters.** `_Restate` runs innermost in `before_model_request`, so
-  that it sees the messages as they will be sent. Capabilities at the
-  agent's own layer run before it, so one that edits the newest tool results
-  could change them before they are stored (an open question).
+- **Order matters.** `_Snapshots` runs innermost in `before_model_request`
+  but for `_Steering`, which it wraps, so that it sees the messages as they
+  will be sent; `_Restate`, which stores the tools' results, has no position
+  of its own. Capabilities at the agent's own layer run before them, so one
+  that edits the newest tool results could change them before they are
+  stored (an open question).
+- **A steered message goes in with Pydantic AI's own steering**,
+  `RunContext.enqueue(..., priority='asap')` from `before_model_request`:
+  it is delivered once every before-hook ran, into the request and the
+  run's history, after what both hold, and the run goes on with its usage
+  limits, retries and capabilities' state. `_Steering` stores the messages
+  after any snapshot of the same request, so that the snapshot covers only
+  what came before them. A request that resumes a paused response takes
+  none.
+- **Feedback is found by its parts.** A run merges the consecutive requests
+  it is given, and resumes from the last one as a request of its own, so a
+  stored `RetryFeedbackPart` request came back as a new request and was
+  stored again (a retry, then every later turn): `_Restate` now knows each
+  feedback part by its own JSON.
+- **What other capabilities enqueue is not stored** (the harness's system
+  reminders, loop detection, ...): it reaches the model, but a retried
+  attempt and the next turns lack it. Planning records its plan again when
+  it is missing; the others are lost (an open question).
 - **The trade-offs of snapshots.** A turn reads everything since the latest
   compaction, up to the harness's target (80% of the model's window), where
   the turn projection reads up to its budget; and a snapshot repeats the
@@ -328,6 +370,22 @@ sequenceDiagram
   guess), then applies the state deltas of the loaded turns after it.
 - **The summary keeps the default form**, a user event then "Understood.":
   the tests run on scripted models, which can't tell what Gemini accepts.
+- **A steered message is taken as a model request goes out**
+  (`_Restate.before_model_callback`), not as the tools' results are stored:
+  after some tools ADK asks the model nothing more (a tool's
+  `skip_summarization`, an output schema's `set_model_response`), and a
+  message taken there would go unread. It is added to the request and to the
+  session, which ADK builds every later request from, so the run goes on
+  with it. The agent's own `before_model_callback` runs after the plugin's,
+  on the request with the message: a response it gives in place of the
+  model's answers the message too.
+- **A steered message starts an invocation of its own**, as a prompt does:
+  after a crash ADK resumes the prompt's invocation from its events, and its
+  classic runner (a workflow root's) fails on a user message last among
+  them, on every retry. Only an `LlmAgent` root takes steered messages; with
+  a workflow root, each is a turn of its own. With
+  `include_contents='none'`, the requests after the one that takes a message
+  start at it, without the prompt and the tools' results before it.
 
 ## LangGraph and LangChain
 
@@ -357,6 +415,7 @@ sequenceDiagram
 | Our items | the run's messages | a copy of the messages after the run's input, matched by id |
 | The window | the agent's | at least 1: the graph reads what closed the previous turn |
 | Summaries | ours | none: its model reads its own state |
+| Steered messages | taken by the model node at each step, kept in the run's state | none: each is answered as a turn of its own |
 
 ### What we learned
 
@@ -384,5 +443,13 @@ sequenceDiagram
   an answer the conversation stored.
 - **A structured response is the answer only of the run that wrote it:** the
   turn compares the channel's version before and after its run.
+- **A steered message joins the run in place.** The model node takes it
+  (`take_steers`) before its request, sends it after the tool results, and
+  returns it with the reply, so the state keeps it for the rounds after:
+  running the graph again with it would reset the recursion limit. Its id is
+  `steer:<id>`, as `_Items.steered` makes and stores it, so the history of
+  a retried attempt and of the next turns has it too; a trimmed request
+  never starts at one, which would leave out the turn's prompt and its tool
+  results.
 - **Subgraph checkpoints pile up:** the latest checkpoint of each subgraph
   namespace stays, one per turn that ran a subgraph (an open question).

@@ -43,7 +43,7 @@ except ImportError as error:
         "restate.agents.client needs Restate's client: install the client extra, pip install restate-sdk[client]"
     ) from error
 
-from restate.agents._api import ChatMessage, Messages, MessagesRequest, Signal, Status, View, Waiting
+from restate.agents._api import ChatMessage, Messages, MessagesRequest, Signal, Status, Steered, View, Waiting
 from restate.agents._object import Synced, SyncRequest
 from restate.client_types import HttpError, RestateClient
 
@@ -118,6 +118,20 @@ class AgentClient:
             headers=dict(_JSON),
         )
         return sent.invocation_id
+
+    async def steer(self, text: str, *, idempotency_key: str | None = None) -> Steered:
+        """Send ``text`` while the agent answers another message: the turn takes it at its next step.
+
+        If the turn being answered reaches a step after it (once its model's
+        tool calls have their results), the model gets the message there, and
+        the turn's answer covers it. Otherwise the message is answered as a
+        turn of its own, after the messages before it, in the order it was
+        sent; with no turn being answered, it starts one. Either way it is
+        answered once. Pass an ``idempotency_key`` (made once per message),
+        so that sending it again (after a lost connection, say) is the same
+        message; ``follow`` shows it, and its answer, as they come.
+        """
+        return cast(Steered, await self._call("steer", text, idempotency_key=idempotency_key))
 
     async def messages(
         self,

@@ -40,8 +40,8 @@ run in two tiers.
 
 | Tier | How | Used by |
 | --- | --- | --- |
-| In-process | `sessions_object.Host`: an attempt's context over an in-memory `Backend`, with no Restate | `agents_conversation`, `agents_messages`, `agents_tools`, and the crash tests that monkeypatch a hook |
-| Real server | `restate.create_test_harness`: Restate in Docker, with the app on a thread of the test process | each framework's file, `agents_object`, `agents_signals`, `agents_webhook`, `examples_agents` |
+| In-process | `sessions_object.Host`: an attempt's context over an in-memory `Backend`, with no Restate | `agents_conversation`, `agents_messages`, `agents_tools`, `agents_steering`, and the crash tests that monkeypatch a hook |
+| Real server | `restate.create_test_harness`: Restate in Docker, with the app on a thread of the test process | each framework's file, `agents_object`, `agents_signals`, `agents_steering_server`, `agents_webhook`, `examples_agents` |
 
 Each framework's file runs its agent on a scripted model, which answers from
 the first word of the prompt (`weather`, `crash`, `wait`, `refuse`, ...). The

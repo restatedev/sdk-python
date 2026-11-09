@@ -532,6 +532,28 @@ async def test_a_prebuilt_node_waits_for_a_signal_in_chat(harness: HarnessEnviro
     assert (await answering).json() == "approved: yes"
 
 
+async def test_a_graph_takes_no_steered_message_which_is_answered_as_a_turn_of_its_own(harness: HarnessEnvironment):
+    key = uuid.uuid4().hex
+    answering = asyncio.ensure_future(chat(harness, "graph_desk", key, f"refund {key}"))
+    await until_waiting(harness, key)
+    headers = {"content-type": "text/plain", "idempotency-key": uuid.uuid4().hex}
+    steered = await post(harness, f"graph_desk/{key}/steer", content=f"hi {key}", headers=headers)
+    # The turn being answered takes none: the message waits, as a turn of its own.
+    assert steered.status_code == 200 and steered.json()["turn"] is None, steered.text
+    await post(harness, f"graph_desk/{key}/signal", json={"name": "approval", "value": "yes"})
+    assert (await answering).json() == "approved: yes"
+    # Answered next, before the message sent after it.
+    assert (await chat(harness, "graph_desk", key, "hi again")).json() == "hello again"
+    assert await messages(harness, "graph_desk", key) == [
+        ("user", f"refund {key}"),
+        ("assistant", "approved: yes"),
+        ("user", f"hi {key}"),
+        ("assistant", f"hello {key}"),
+        ("user", "hi again"),
+        ("assistant", "hello again"),
+    ]
+
+
 async def test_a_crash_resumes_the_run_and_its_messages_are_copied_once(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     assert (await chat(harness, "graph_desk", key, f"crash {key}")).json() == f"done {key}"

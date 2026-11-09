@@ -24,8 +24,8 @@ import restate
 from support import RESTATE_IMAGE  # pylint: disable=import-error
 from restate import HarnessEnvironment
 from restate.agents import _signals
-from restate.agents._api import Signal, Status, Watch
-from restate.agents._signals import Started, WaitRequest
+from restate.agents._api import Published, Signal, Status, Steer, Steered, Watch
+from restate.agents._signals import STEERS, Started, WaitRequest
 
 
 @pytest.fixture(scope="session")
@@ -44,6 +44,8 @@ async def start_turn(ctx: restate.Context, request: dict[str, str]) -> None:
     turn: Started = {"invocationId": request["invocation"], "since": "2026-11-04T00:00:00.000Z"}
     if request.get("settles"):
         turn["settles"] = True
+    if request.get("steers"):
+        turn["steers"] = True
     await ctx.object_call(_signals.start, key=request["key"], arg=turn)
 
 
@@ -52,8 +54,32 @@ async def close_turn(ctx: restate.Context, request: dict[str, str]) -> None:
     await ctx.object_call(_signals.close, key=request["key"], arg=request["invocation"])
 
 
+@driver.handler()
+async def steer_to(ctx: restate.Context, request: dict[str, str]) -> Steered:
+    message = {"id": request["id"], "text": request["text"]}
+    return await ctx.object_call(_signals.steer, key=request["key"], arg=typing.cast(Steer, message))
+
+
+@driver.handler()
+async def publish_to(ctx: restate.Context, key: str) -> Published:
+    return await ctx.object_call(_signals.publish, key=key, arg=None)
+
+
+@driver.handler()
+async def taken_by(ctx: restate.Context, request: dict[str, typing.Any]) -> None:
+    await ctx.object_call(_signals.taken, key=request["key"], arg=request["ids"])
+
+
+@driver.handler()
+async def reset_of(ctx: restate.Context, key: str) -> None:
+    await ctx.object_call(_signals.reset, key=key, arg=None)
+
+
 settled: list[tuple[str, str]] = []
 """The turns the companion had the agent settle: its key, and the turn's invocation."""
+
+placeholders: list[tuple[str, dict[str, str]]] = []
+"""The steered messages the companion queued as turns of their own: the agent's key, and the message."""
 
 assistant = restate.VirtualObject("assistant")
 """The agent of the companions' keys (``assistant:<key>``), which records the turns it is sent to settle."""
@@ -63,6 +89,11 @@ assistant = restate.VirtualObject("assistant")
 async def settle(ctx: restate.ObjectContext, invocation_id: str) -> bool:
     settled.append((ctx.key(), invocation_id))
     return True
+
+
+@assistant.handler()
+async def steered(ctx: restate.ObjectContext, message: dict[str, str]) -> None:
+    placeholders.append((ctx.key(), message))
 
 
 failing = restate.Service("failing")
@@ -210,3 +241,88 @@ async def test_a_turn_whose_invocation_is_gone_is_settled_by_its_agent_if_the_ag
 
     await until(sent)
     assert (agent_key, other.invocation_id) not in settled
+
+
+# --- Steered messages -----------------------------------------------------------------------------
+
+
+async def steer(harness: HarnessEnvironment, k: str, message_id: str, text: str) -> Steered:
+    return await harness.client.service_call(steer_to, arg={"key": k, "id": message_id, "text": text})
+
+
+async def published(harness: HarnessEnvironment, k: str) -> Published:
+    return await harness.client.service_call(publish_to, arg=k)
+
+
+async def queued(k: str, message_id: str) -> bool:
+    agent_key = k.split(":", 1)[1]
+    return any(at == agent_key and message["id"] == message_id for at, message in placeholders)
+
+
+async def test_a_steered_message_is_queued_as_a_turn_and_held_for_a_turn_that_steers_until_taken(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    await harness.client.service_call(start_turn, arg={"key": k, "invocation": "inv_steers", "steers": "yes"})
+    assert await steer(harness, k, "s1", "use Celsius") == {"id": "s1", "turn": "inv_steers"}
+    # Queued as a turn of its own at once, in case the turn does not take it.
+    await until(lambda: queued(k, "s1"))
+    assert [m for _, m in placeholders if m["id"] == "s1"] == [{"id": "s1", "text": "use Celsius"}]
+    # The turn learns of it from its next publish, and status shows it.
+    assert (await published(harness, k)).get("steering") == [{"id": "s1", "text": "use Celsius"}]
+    status = typing.cast(Status, await harness.client.object_call(_signals.status, key=k, arg=None))
+    assert [one["id"] for one in status.get("steering", [])] == ["s1"]
+    # Once the turn stored it, it is gone.
+    await harness.client.service_call(taken_by, arg={"key": k, "ids": ["s1"]})
+    assert "steering" not in await published(harness, k)
+    assert "steering" not in await harness.client.object_call(_signals.status, key=k, arg=None)
+    # Sent again, it is still the turn's, and not held again; marked taken again, nothing changes or publishes.
+    assert await steer(harness, k, "s1", "use Celsius") == {"id": "s1", "turn": "inv_steers"}
+    assert "steering" not in await published(harness, k)
+    now = (await harness.client.object_call(_signals.notifications, key=k, arg=None))["revision"]
+    await harness.client.service_call(taken_by, arg={"key": k, "ids": ["s1"]})
+    assert (await harness.client.object_call(_signals.notifications, key=k, arg=None))["revision"] == now
+
+
+async def test_a_turn_that_does_not_steer_holds_nothing_and_a_closed_turn_forgets_what_it_left(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    # No turn, or one that takes no steered messages: only the turn of its own.
+    assert await steer(harness, k, "s1", "hello") == {"id": "s1", "turn": None}
+    await harness.client.service_call(start_turn, arg={"key": k, "invocation": "inv_plain"})
+    assert await steer(harness, k, "s2", "hello again") == {"id": "s2", "turn": None}
+    assert "steering" not in await published(harness, k)
+    await until(lambda: queued(k, "s2"))
+    await harness.client.service_call(close_turn, arg={"key": k, "invocation": "inv_plain"})
+
+    # A turn that steers ends without taking it: the message is left to its own turn.
+    await harness.client.service_call(start_turn, arg={"key": k, "invocation": "inv_left", "steers": "yes"})
+    assert (await steer(harness, k, "s3", "too late"))["turn"] == "inv_left"
+    await harness.client.service_call(close_turn, arg={"key": k, "invocation": "inv_left"})
+    await harness.client.service_call(start_turn, arg={"key": k, "invocation": "inv_next", "steers": "yes"})
+    assert "steering" not in await published(harness, k)
+    await until(lambda: queued(k, "s3"))
+
+    # The agent's clear forgets them too.
+    assert (await steer(harness, k, "s4", "forget me"))["turn"] == "inv_next"
+    await harness.client.service_call(reset_of, arg=k)
+    assert "steering" not in await published(harness, k)
+
+
+async def test_a_turn_takes_at_most_its_share_of_steered_messages(harness: HarnessEnvironment):
+    k = key()
+    await harness.client.service_call(start_turn, arg={"key": k, "invocation": "inv_busy", "steers": "yes"})
+    for n in range(STEERS):
+        assert (await steer(harness, k, f"s{n}", f"message {n}"))["turn"] == "inv_busy"
+    # Past them, a message is answered as a turn of its own only.
+    assert await steer(harness, k, "past", "one more") == {"id": "past", "turn": None}
+    assert len((await published(harness, k)).get("steering", [])) == STEERS
+    # The same message sent again is held once.
+    assert (await steer(harness, k, "s0", "message 0"))["turn"] == "inv_busy"
+    assert len((await published(harness, k)).get("steering", [])) == STEERS
+    # The messages the turn took still count: it has taken its share, and the next is a turn of its own.
+    await harness.client.service_call(taken_by, arg={"key": k, "ids": [f"s{n}" for n in range(STEERS)]})
+    assert "steering" not in await published(harness, k)
+    assert await steer(harness, k, "later", "and more") == {"id": "later", "turn": None}
+    assert "steering" not in await published(harness, k)

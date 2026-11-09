@@ -30,6 +30,23 @@ its stored events:
   have (which ADK fails the run for). An agent with a ``retry_config`` of its
   own is first run again by ADK, within the attempt.
 - A transfer to a sub-agent holds for the next messages, as ADK's sessions do.
+- A message steered to the turn (``steer``) joins it at its next step: as
+  the model's next request goes out, once its tool calls have their results,
+  the turn stores it (``take_steers``), and it is added to that request and
+  to the session, after the results, so that every request after has it too.
+  It starts an invocation of its own, as a prompt does: after a crash, ADK
+  resumes the prompt's invocation from that invocation's events. A message
+  that no request follows (one sent during the model's last reply, or during
+  a tool after whose result ADK asks the model nothing more: a tool's
+  ``skip_summarization``, an output schema's ``set_model_response``) is
+  answered next, as a turn of its own. A tool that runs an agent
+  (``AgentTool``) is one call: the step comes after its result. Only an
+  agent whose root is an ``LlmAgent`` takes steered messages, as the
+  built-in agent does; with a workflow root (a ``SequentialAgent``, say, or
+  an ``App``'s ``Workflow``), each is answered as a turn of its own. An agent
+  with ``include_contents='none'`` starts each request at the latest message
+  of the user: the requests after the one that takes a steered message start
+  at it, without the prompt and the tools' results before it.
 - A run of more model calls than its ``RunConfig``'s ``max_llm_calls`` (500 by
   default) fails its prompt for good: a retry would carry on with a fresh count.
 - An agent or ``App`` of your own runs as you configured it, with the
@@ -61,11 +78,13 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Unpack
 
 from google.adk.agents import BaseAgent, LlmAgent, RunConfig
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError, new_invocation_context_id
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events import Event
 from google.adk.models import BaseLlm
 from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins import BasePlugin
 from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService, Session
@@ -92,6 +111,7 @@ from restate.agents._common import (
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
+from restate.agents._steering import take_steers
 from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_ended, tool_call_started
 from restate.exceptions import TerminalError
@@ -140,6 +160,12 @@ class _Items:
         # A prompt starts an invocation of its own, which every attempt resumes.
         content = types.Content(role="user", parts=[types.Part(text=text)])
         return Event(author="user", invocation_id=new_invocation_context_id(), content=content)
+
+    def steered(self, text: str, steer_id: str) -> Item:
+        # An invocation of its own too, not the running one, which ADK resumes from its events after a crash: there,
+        # ADK's runner of a workflow root would take a message of the user last among them for the answer to a tool
+        # call, which it fails to find on every retry.
+        return self.prompt(text)
 
     def reply(self, text: str, agent: str | None = None) -> Item:
         content = types.Content(role="model", parts=[types.Part(text=text)])
@@ -231,13 +257,37 @@ class _Sessions(BaseSessionService):
         self._carry(session)
         return event
 
+    async def add_stored(self, session: Session, event: Event) -> None:
+        """Add ``event``, which the turn stored already (a message steered to it), to ``session``, after its events.
+
+        ADK builds each model request from the session's events: every request after this one has it too, in place.
+        """
+        await super().append_event(session, event)
+
 
 class _Restate(BasePlugin):
-    """Publish each tool call as it starts and ends, and mark a tool's error as the tool's."""
+    """Publish each tool call as it starts and ends, mark a tool's error as the tool's, and give the model the
+    messages steered to the turn."""
 
-    def __init__(self, ctx: SessionContext) -> None:
+    def __init__(self, ctx: SessionContext, sessions: _Sessions) -> None:
         super().__init__(name="restate")
         self.ctx = ctx
+        self.sessions = sessions
+
+    async def before_model_callback(
+        self, *, callback_context: CallbackContext, llm_request: LlmRequest
+    ) -> LlmResponse | None:
+        # The turn's step: a model request is going out, which ADK built from the session's events. Once the
+        # model's tool calls have their results, the messages steered to the turn join it, after the results. Here
+        # rather than as the results are stored: ADK makes no request after some (a tool's skip_summarization, an
+        # output schema's set_model_response), and a message the turn took there would go unread. The agent's own
+        # before_model_callback runs after this one, on the request with them: a response it gives in place of the
+        # model's answers them too, as the model would have.
+        for event in typing.cast(list[Event], await take_steers(self.ctx, self.sessions.conversation)):
+            await self.sessions.add_stored(callback_context.session, event)
+            if event.content is not None:
+                llm_request.contents.append(event.content.model_copy(deep=True))
+        return None
 
     async def before_tool_callback(
         self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext
@@ -319,14 +369,13 @@ def _model(model: AnyModel | None) -> str | BaseLlm:
 
 
 def _app(
-    ctx: SessionContext,
     own: BaseAgent | App | None,
     model: AnyModel | None,
     system: str | None,
     given: Sequence[AnyTool],
     output: type[BaseModel] | None,
 ) -> App:
-    """Return the app that runs the agent: resumable, with this package's plugin.
+    """Return the app that runs the agent: resumable (each run adds this package's plugin, ``_Restate``).
 
     ``output`` is the ``output_schema`` of its root ``LlmAgent``. ADK answers
     with its JSON, through a tool of its own when the model cannot combine a
@@ -347,9 +396,8 @@ def _app(
         if app.events_compaction_config is not None:
             _without_compaction()
     resumable = ResumabilityConfig(is_resumable=True)
-    update = {"name": _APP, "plugins": [*app.plugins, _Restate(ctx)], "resumability_config": resumable}
     # The conversation's summary and window stand in for ADK's events compaction (see the module's docstring).
-    return app.model_copy(update={**update, "events_compaction_config": None})
+    return app.model_copy(update={"name": _APP, "resumability_config": resumable, "events_compaction_config": None})
 
 
 @functools.cache
@@ -421,7 +469,11 @@ def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
             return final
         turn = conversation.running()
         invocation = typing.cast(Event, turn.latest_ask().item).invocation_id if turn is not None else None
-        runner = Runner(app=app, session_service=_Sessions(conversation))
+        sessions = _Sessions(conversation)
+        # This package's plugin, after the app's own: a plugin of the app that answers in the model's place leaves
+        # the messages steered to the turn to a request that goes out.
+        plugins = [*app.plugins, _Restate(ctx, sessions)]
+        runner = Runner(app=app.model_copy(update={"plugins": plugins}), session_service=sessions)
         answer = ""
         error: Event | None = None
         events = runner.run_async(user_id=_USER, session_id=_USER, invocation_id=invocation, run_config=config)
@@ -582,7 +634,7 @@ async def _prompt(
     config: RunConfig | None,
 ) -> Any:
     """Answer ``text`` as ``prompt`` does, with its options checked."""
-    app = _app(ctx, own, model, system, tools, output)
+    app = _app(own, model, system, tools, output)
 
     def ask(text: str, check: Check | None = None) -> Awaitable[str]:
         return answer_once(ctx, text, _Items(_root(app).name), _run(ctx, app, config), check=check)
@@ -692,8 +744,26 @@ def agent(
             run_config,
         )
 
-    obj.chat(answer, items=_Items(), output=output, summarize=_summarizer(model) if own is None else None)
+    obj.chat(
+        answer,
+        items=_Items(),
+        output=output,
+        summarize=_summarizer(model) if own is None else None,
+        steers=_steers(own),
+    )
     return obj
+
+
+def _steers(own: BaseAgent | App | None) -> bool:
+    """Return whether the agent takes steered messages at its turns' steps: if its root is an ``LlmAgent``, as the
+    built-in agent's is.
+
+    A workflow root (a ``SequentialAgent``, ``ParallelAgent`` or
+    ``LoopAgent``, or an ``App``'s ``Workflow``) takes none: each message
+    steered to it is answered as a turn of its own.
+    """
+    root = own.root_agent if isinstance(own, App) else own
+    return own is None or isinstance(root, LlmAgent)
 
 
 def _summarizer(model: PerSession[AnyModel | None]) -> Summarize:

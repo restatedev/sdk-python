@@ -73,6 +73,10 @@ message as a new ``HumanMessage``:
   (a model provider refuses such a history), and the note that ends it (such
   as "Cancelled: ..."), so that the graph's model knows, as the built-in
   agent's does. So does that run's message, if the graph never stored it.
+- A run takes no steered messages: the agent does not say it does
+  (``chat(..., steers=True)``), as the graph's steps are its own. So a
+  message sent to the agent's ``steer`` view while a run goes on is answered
+  as a turn of its own, after it, in the order it was sent.
 
 The graph's state is its own. Its models read the state, not the
 conversation: the agent's ``window`` and ``budget`` do not reach them, and

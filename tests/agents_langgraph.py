@@ -33,7 +33,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 from langchain_core.tools import tool as langchain_tool  # noqa: E402
 
 import restate  # noqa: E402
-from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
+from support import RESTATE_IMAGE, Gate  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import tool  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
@@ -77,13 +77,14 @@ def reply(messages: Sequence[BaseMessage]) -> AIMessage:
         return AIMessage(
             "", tool_calls=[{"id": f"call-{rest}-{len(results)}", "name": "get_weather", "args": {"city": rest}}]
         )
-    if word in ("weather", "crash", "wait", "wrong", "unknown", "forbidden") and not results:
+    if word in ("weather", "crash", "wait", "wrong", "unknown", "forbidden", "hold") and not results:
         name = {
             "weather": "get_weather",
             "crash": "flaky",
             "wait": "blocking",
             "wrong": "get_weather",
             "forbidden": "forbidden",
+            "hold": "hold",
         }.get(word, "nonexistent")
         args: dict[str, Any] = {"town": 3} if word == "wrong" else {"city": rest}
         return AIMessage("", tool_calls=[{"id": f"call-{rest}", "name": name, "args": args}])
@@ -195,10 +196,58 @@ summarizing = langgraph.agent("lg_summarizing", model=Remembering(), budget=10)
 """An agent whose model sees 40 characters of the turns before the window: it summarizes the earlier ones."""
 
 
+holding = Gate()
+"""Holds the tool ``hold`` until a test opens it: a gate between the test's thread and the served app's."""
+held: set[str] = set()
+
+
+@tool
+async def hold(city: str) -> str:
+    """Waits until the test opens the gate, so that it can steer a message to the turn meanwhile."""
+    held.add(city)
+    await holding.wait()
+    return f"held in {city}"
+
+
+requests: collections.defaultdict[str, list[list[BaseMessage]]] = collections.defaultdict(list)
+"""Each request of the steered agent's model, in order, by the last word of its first message of the user (each
+test's own key)."""
+booms: set[str] = set()
+
+
+class Recording(Scripted):
+    """The scripted model, which keeps each request it gets, and crashes the first request whose latest message of
+    the user is ``boom ...``, as a process that crashed after the turn stored that message."""
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        first = next(m for m in messages if isinstance(m, HumanMessage))
+        requests[str(first.content).split(" ")[-1]].append(list(messages))
+        latest = str(next(m for m in reversed(messages) if isinstance(m, HumanMessage)).content)
+        if latest.startswith("boom ") and latest not in booms:
+            booms.add(latest)
+            raise RuntimeError("the process crashed")
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+steered_agent = langgraph.agent(
+    "lg_steered", model=Recording(profile={"max_input_tokens": 4}), tools=[get_weather, hold]
+)
+"""An agent whose model answers the latest message of the user: a message steered to its turn, once it has one.
+
+Its window holds no message, so each request is the latest prompt and what followed it, whole: a steered message
+taken for a prompt would be the request's start, without the prompt."""
+
+
 @pytest.fixture(scope="session")
 async def harness():
     async with restate.create_test_harness(
-        restate.app([assistant, per_user, summarizing]), restate_image=RESTATE_IMAGE
+        restate.app([assistant, per_user, summarizing, steered_agent]), restate_image=RESTATE_IMAGE
     ) as harness:
         yield harness
 
@@ -206,17 +255,21 @@ async def harness():
 TEXT = {"content-type": "text/plain"}
 
 
-async def post(harness: HarnessEnvironment, path: str, **kwargs: Any) -> httpx2.Response:
+async def post(harness: HarnessEnvironment, path: str, agent: str = "lg_assistant", **kwargs: Any) -> httpx2.Response:
     async with httpx2.AsyncClient(timeout=60) as ingress:
-        return await ingress.post(f"{harness.ingress_url}/lg_assistant/{path}", **kwargs)
+        return await ingress.post(f"{harness.ingress_url}/{agent}/{path}", **kwargs)
 
 
 async def chat(harness: HarnessEnvironment, key: str, text: str) -> httpx2.Response:
     return await post(harness, f"{key}/chat", content=text, headers=TEXT)
 
 
-async def messages(harness: HarnessEnvironment, key: str) -> list[tuple[str, str]]:
-    page = typing.cast(Messages, (await post(harness, f"{key}/messages", json={})).json())
+async def messages(
+    harness: HarnessEnvironment, key: str, agent: str = "lg_assistant", view: str | None = None
+) -> list[tuple[str, str]]:
+    """The conversation as the ``messages`` view shows it: the full view, or ``view`` (such as ``"summary"``)."""
+    wanted = {"view": view} if view else {}
+    page = typing.cast(Messages, (await post(harness, f"{key}/messages", agent, json=wanted)).json())
     return [
         (message["role"], " ".join(str(part.get("text", part.get("output", ""))) for part in message["parts"]))
         for message in page["messages"]
@@ -368,6 +421,117 @@ async def test_options_may_be_functions_of_the_context(harness: HarnessEnvironme
         assert (await ingress.post(url, content=f"weather {k}", headers=TEXT)).json() == f"tool said: sunny in {k}"
 
 
+# --- Steering -------------------------------------------------------------------------------------
+
+STEERED = "lg_steered"
+
+
+async def holding_turn(harness: HarnessEnvironment, k: str) -> str:
+    """Send ``hold <k>`` to the steered agent, and return its invocation once its tool waits on the closed gate."""
+    holding.close()
+    sent = await post(harness, f"{k}/chat/send", STEERED, content=f"hold {k}", headers=TEXT)
+    invocation = typing.cast(str, sent.json()["invocationId"])
+
+    async def in_the_tool() -> bool:
+        return k in held
+
+    await until(in_the_tool)
+    return invocation
+
+
+async def steer(harness: HarnessEnvironment, k: str, text: str, turn: str) -> str:
+    """Steer ``text`` to the turn being answered, invocation ``turn``, and return the message's id."""
+    # With an idempotency key, as a client sends it: a retried request is the same message.
+    headers = {**TEXT, "idempotency-key": uuid.uuid4().hex}
+    steered = await post(harness, f"{k}/steer", STEERED, content=text, headers=headers)
+    assert steered.status_code == 200, steered.text
+    assert steered.json()["turn"] == turn
+    return typing.cast(str, steered.json()["id"])
+
+
+async def answered(harness: HarnessEnvironment, invocation: str) -> Any:
+    """Open the gate, and return the answer of the turn of ``invocation``."""
+    holding.open()
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        return (await ingress.get(f"{harness.ingress_url}/restate/invocation/{invocation}/attach")).json()
+
+
+def said(request: list[BaseMessage]) -> list[tuple[str, str]]:
+    return [(type(m).__name__, str(m.content)) for m in request]
+
+
+async def told(harness: HarnessEnvironment, k: str) -> list[str]:
+    """The messages of the user that the steered agent's conversation stores, in order."""
+    return [text for role, text in await messages(harness, k, STEERED) if role == "user"]
+
+
+async def test_a_message_steered_while_a_tool_runs_is_in_the_next_request_after_its_result_once(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    invocation = await holding_turn(harness, k)
+    steered = await steer(harness, k, "use celsius", invocation)
+    # The model answers the latest message of the user: the turn's answer is the reply to the steered message.
+    assert await answered(harness, invocation) == "echo: use celsius"
+    first, second = requests[k]
+    assert said(first) == [("HumanMessage", f"hold {k}")]
+    # The very next request has it, once, after the tool's result: as the graph's state holds it, under its id.
+    assert said(second) == [
+        ("HumanMessage", f"hold {k}"),
+        ("AIMessage", ""),
+        ("ToolMessage", f"held in {k}"),
+        ("HumanMessage", "use celsius"),
+    ]
+    assert second[-1].id == f"steer:{steered}"
+    # Stored once, as a step of the turn: the summary has the prompt, the steered message and the answer.
+    assert await told(harness, k) == [f"hold {k}", "use celsius"]
+    assert await messages(harness, k, STEERED, "summary") == [
+        ("user", f"hold {k}"),
+        ("user", "use celsius"),
+        ("assistant", "echo: use celsius"),
+    ]
+
+
+async def test_a_message_steered_after_a_tool_round_stays_in_the_request_after_the_next_round(
+    harness: HarnessEnvironment,
+):
+    k = key()
+    invocation = await holding_turn(harness, k)
+    # The model acts on it with a tool call of its own: a second round.
+    await steer(harness, k, f"weather Paris-{k}", invocation)
+    assert await answered(harness, invocation) == f"tool said: sunny in Paris-{k}"
+    _, _, after_second = requests[k]
+    # The run went on with the message in its state, in place: the request after the second round still has it, once.
+    assert said(after_second) == [
+        ("HumanMessage", f"hold {k}"),
+        ("AIMessage", ""),
+        ("ToolMessage", f"held in {k}"),
+        ("HumanMessage", f"weather Paris-{k}"),
+        ("AIMessage", ""),
+        ("ToolMessage", f"sunny in Paris-{k}"),
+    ]
+
+
+async def test_a_crash_after_a_steered_message_is_stored_retries_with_it_stored_once(harness: HarnessEnvironment):
+    k = key()
+    invocation = await holding_turn(harness, k)
+    # The first request with it crashes the attempt, after the turn stored it: Restate retries the turn.
+    steered = await steer(harness, k, f"boom {k}", invocation)
+    assert await answered(harness, invocation) == f"echo: boom {k}"
+    _, crashed, retried = requests[k]
+    assert said(crashed) == [
+        ("HumanMessage", f"hold {k}"),
+        ("AIMessage", ""),
+        ("ToolMessage", f"held in {k}"),
+        ("HumanMessage", f"boom {k}"),
+    ]
+    # The retry found it stored, in its place and marked as steered, and did not take it again: its request is the
+    # crashed one.
+    assert said(retried) == said(crashed)
+    assert retried[-1].id == crashed[-1].id == f"steer:{steered}"
+    assert await told(harness, k) == [f"hold {k}", f"boom {k}"]
+
+
 # --- In process -----------------------------------------------------------------------------------
 
 
@@ -431,6 +595,26 @@ def test_a_prompt_longer_than_the_window_is_sent_whole():
     latest = _agent._latest(messages, 10)  # pyright: ignore[reportPrivateUsage]
     assert latest == messages[-1:]
     assert _agent._latest(messages, None) == messages  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_request_starts_at_a_prompt_never_at_a_steered_message():
+    from restate.agents.langgraph import _agent  # pylint: disable=import-outside-toplevel
+
+    latest = _agent._latest  # pyright: ignore[reportPrivateUsage]
+    earlier: list[BaseMessage] = [HumanMessage("hi"), AIMessage("hello")]
+    prompt = HumanMessage("hold on")
+    call = AIMessage("", tool_calls=[{"id": "c1", "name": "hold", "args": {"city": "x"}}])
+    result = ToolMessage("x" * 1000, tool_call_id="c1")
+    turn: list[BaseMessage] = [prompt, call, result, HumanMessage("use celsius", id="steer:s1")]
+    # Only the steered message fits, then nothing does: the request is the turn whole, from its prompt.
+    assert latest([*earlier, *turn], 10) == turn
+    assert latest([*earlier, *turn], 1) == turn
+    # Unmarked, LangChain's trim would start at it, without the turn's prompt and the tool's call and result.
+    unmarked = HumanMessage("use celsius")
+    assert latest([*earlier, prompt, call, result, unmarked], 10) == [unmarked]
+    # Nor does a request start at a message steered to an earlier turn: it starts at the next prompt.
+    before: list[BaseMessage] = [HumanMessage("x" * 400), HumanMessage("in brief", id="steer:s0"), AIMessage("done")]
+    assert latest([*before, HumanMessage("next")], 20) == [HumanMessage("next")]
 
 
 async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatch: pytest.MonkeyPatch):

@@ -32,15 +32,22 @@ start, and the run resumes from the last step stored:
   turn that reaches it ends for good, with a terminal error: a retry would
   carry on from where it stopped, with a fresh limit, and so would never end
   a model that keeps calling tools.
+- A message steered to the turn (the agent's ``steer`` view) joins it at its
+  next step: once the model's tool calls have their results, the model node
+  has the turn take it (``take_steers``), which stores it once, and gives it
+  to the model's next request, after the results. The graph's state keeps it
+  for the rest of the run, which goes on (within the same recursion limit)
+  rather than starting again. A retried attempt finds it stored, in the
+  turn. It is stored, and is in the graph, with the id ``steer:<its id>``.
 - The model sees the earlier turns as their messages and answers, and the
   latest turns whole (the agent's ``window``), as many as its ``budget``
   holds; the built-in agent has its model summarize the earliest once they
   outgrow it, after a turn's answer (``_conversation.py``).
 - The model sees the latest messages of a conversation that lives long: as
   many as fit in ``WINDOW`` of its context window, by LangChain's
-  ``trim_messages`` (starting with a prompt, counted by
-  ``count_tokens_approximately``). The conversation is stored whole. That
-  takes a chat model whose profile has its context window
+  ``trim_messages`` (starting with a prompt, never with a message steered to
+  a turn, counted by ``count_tokens_approximately``). The conversation is
+  stored whole. That takes a chat model whose profile has its context window
   (``max_input_tokens``), as LangChain's integrations have for the models
   they know, else the model sees all of it. For a summary of the earlier
   messages instead, pass a graph of your own, such as ``create_agent`` with
@@ -49,7 +56,8 @@ start, and the run resumes from the last step stored:
 For a graph of your own, ``SqlCheckpointSaver`` stores LangGraph's checkpoints
 in the object's database instead. Its state is the graph's own: its models
 read the state, which the agent's ``window``, ``budget`` and summaries do not
-reach, and which grows unless the graph trims it (``_graph.py`` shows how).
+reach, and which grows unless the graph trims it (``_graph.py`` shows how). It
+takes no steered messages: each is answered as a turn of its own.
 """
 
 from __future__ import annotations
@@ -96,6 +104,7 @@ from restate.agents._common import (
 from restate.agents._conversation import Call, Conversation, Item, Parsed, Result, Run, answer_once
 from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with, asking
+from restate.agents._steering import take_steers
 from restate.agents._tools import Tool, ToolCall
 from restate.agents._turn import settings_of, tool_call_ended, tool_call_started
 from restate.agents.langgraph._context import handler_context
@@ -231,6 +240,15 @@ def _text(message: BaseMessage) -> str:
     return str(message.text)
 
 
+STEER = "steer:"
+"""The prefix of the id that a message steered to a turn has in the graph: ``steer:<the message's id>``."""
+
+
+def _steered(message: BaseMessage) -> bool:
+    """Return whether ``message`` is a message steered to a turn (``steer``): a message of the user, but no prompt."""
+    return isinstance(message, HumanMessage) and message.id is not None and message.id.startswith(STEER)
+
+
 class _Items:
     """LangChain's messages, as the conversation keeps them: stored as LangChain's dicts, in JSON."""
 
@@ -243,6 +261,10 @@ class _Items:
 
     def prompt(self, text: str) -> Item:
         return HumanMessage(text)
+
+    def steered(self, text: str, steer_id: str) -> Item:
+        # Stored with its id, so that every run's state tells it apart from a prompt (``_steered``).
+        return HumanMessage(text, id=f"{STEER}{steer_id}")
 
     def reply(self, text: str, agent: str | None = None) -> Item:
         return AIMessage(text)
@@ -289,7 +311,10 @@ def _window(model: BaseChatModel) -> int | None:
 def _latest(messages: Sequence[BaseMessage], window: int | None) -> list[BaseMessage]:
     """Return the latest of ``messages`` that fit in ``window`` tokens, starting with a prompt (LangChain's ``trim_messages``).
 
-    The latest prompt and what followed it are sent whole, even if they do not fit.
+    The latest prompt and what followed it are sent whole, even if they do not
+    fit. A message steered to a turn is no prompt: the messages never start at
+    one, which would leave out its turn's prompt, and the tool calls and
+    results before it.
     """
     if window is None:
         return list(messages)
@@ -302,10 +327,11 @@ def _latest(messages: Sequence[BaseMessage], window: int | None) -> list[BaseMes
         token_counter=count_tokens_approximately,
         start_on="human",
     )
-    if fitting:
-        return fitting
-    last_prompt = max((i for i, message in enumerate(messages) if isinstance(message, HumanMessage)), default=0)
-    return list(messages[last_prompt:])
+    # The trim keeps the latest messages: from the first prompt among them, else from the latest prompt, whole.
+    first = len(messages) - len(fitting)
+    prompts = [i for i, message in enumerate(messages) if isinstance(message, HumanMessage) and not _steered(message)]
+    start = next((i for i in prompts if i >= first), prompts[-1] if prompts else 0)
+    return list(messages[start:])
 
 
 def _graph(
@@ -321,10 +347,13 @@ def _graph(
     window = _window(model)
 
     async def call_model(state: State) -> dict[str, Any]:
-        messages = _latest(state["messages"], window)
+        # The turn's step: once the tool calls have their results, the turn takes the messages steered to it. The
+        # request has them after the results, and the state keeps them for the rest of the run, which goes on.
+        steered = typing.cast(list[BaseMessage], await take_steers(ctx, conversation))
+        messages = _latest([*state["messages"], *steered], window)
         reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
         await conversation.turn.append_reply(reply)
-        return {"messages": [reply]}
+        return {"messages": [*steered, reply]}
 
     async def run_tools(state: State, config: RunnableConfig) -> Any:
         await tool_call_started(ctx)
@@ -359,10 +388,9 @@ def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given
         if (final := conversation.turn.final_reply()) is not None:
             # The run had stored its final reply, but not its answer: that is the answer, rather than ask again.
             return final
-        messages = typing.cast(list[BaseMessage], conversation.history())
         graph = _graph(ctx, conversation, chat_model, tools, system)
         try:
-            state = typing.cast(State, await graph.ainvoke({"messages": messages}))
+            state = typing.cast(State, await graph.ainvoke({"messages": conversation.history()}))
         except Exception as error:
             if (terminal := terminal_of(error)) is not None:
                 # LangGraph's own error, which a retry would meet again: its recursion limit, say.
@@ -532,8 +560,10 @@ def agent(
     """Create a LangGraph agent: a virtual object with one conversation per key.
 
     Its ``chat`` handler answers each message with LangGraph's tool-calling
-    loop; the conversation is kept in the key's database, a step at a time.
-    Add handlers of your own with ``@assistant.handler``::
+    loop; the conversation is kept in the key's database, a step at a time. A
+    message sent to its ``steer`` view while it answers joins that turn at the
+    turn's next step: the model gets it in its next request, after its tool
+    calls' results. Add handlers of your own with ``@assistant.handler``::
 
         assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
 
@@ -544,7 +574,8 @@ def agent(
 
     Or bring a graph of your own, built on LangGraph's ``MessagesState``:
     ``chat`` then runs it, with the message as a new ``HumanMessage``, and
-    answers with its last AI message. Its checkpoints are in the key's
+    answers with its last AI message. It takes no steered messages: each is
+    answered as a turn of its own. Its checkpoints are in the key's
     database, and the prebuilt ``nodes`` (a signal, a workflow, a call,
     another agent) and the tools of ``tools()`` get the handler's context in
     it::
@@ -610,7 +641,8 @@ def agent(
             output=output,
         )
 
-    obj.chat(answer, items=ITEMS, output=output, summarize=_summarizer(model))
+    # The model node takes the messages steered to the turn (``take_steers``); a graph of your own takes none.
+    obj.chat(answer, items=ITEMS, output=output, summarize=_summarizer(model), steers=True)
     return obj
 
 
