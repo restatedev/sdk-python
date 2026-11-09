@@ -835,7 +835,7 @@ class StopBeforeTheNextRequest(AbstractCapability[Any]):
 
     async def before_model_request(self, ctx: RunContext[Any], request_context: Any) -> Any:
         if any(isinstance(p, ToolReturnPart) for m in ctx.messages if isinstance(m, ModelRequest) for p in m.parts):
-            raise restate.TerminalError("stopped", status_code=409)
+            raise restate.TerminalError("cancelled", status_code=409)
         return request_context
 
 

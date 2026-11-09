@@ -199,10 +199,10 @@ async def test_a_stopped_run_stores_nothing_more():
 
     async def run(conversation: Conversation) -> str:
         kept.append(conversation)
-        raise restate.TerminalError("stopped", status_code=409)
+        raise restate.TerminalError("cancelled", status_code=409)
 
     ask = asking(run)
-    with pytest.raises(restate.TerminalError, match="stopped"):
+    with pytest.raises(restate.TerminalError, match="cancelled"):
         await ask("first")
     [conversation] = kept
     turn = conversation.turn

@@ -459,7 +459,7 @@ async def _closed_result(wait: Callable[[sessions.SessionContext], Awaitable[Non
         await conversation.turn.append_reply(_calling("c1"))
         await wait(contexts[-1])
         # The turn is stopped before the call's result is stored.
-        raise TerminalError("stopped", status_code=409)
+        raise TerminalError("cancelled", status_code=409)
 
     @obj.handler
     async def ask(ctx: sessions.SessionContext, text: str) -> str:
