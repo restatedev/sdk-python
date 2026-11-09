@@ -13,6 +13,7 @@ seeing it. The companion and the agent's ``steered`` are tested against a server
 
 # pylint: disable=missing-function-docstring,import-error
 
+import asyncio
 import json
 import typing
 from collections.abc import Awaitable, Callable
@@ -35,7 +36,7 @@ from restate.agents._conversation import (
     steer_stored,
 )
 from restate.agents._steering import take_steers
-from restate.agents._turn import _STEERING, Steering
+from restate.agents._turn import _STEERING, _STOP, Steering, Stop
 from restate.sessions.internal import Schema, invoke
 
 
@@ -107,6 +108,8 @@ async def test_a_steered_message_is_stored_once_as_a_step_of_the_turn_and_taken_
         seen.append(conversation.history())
         turn = conversation.turn
         assert [entry.steer for entry in turn.steered()] == ["s1"]
+        # The transcript's entry of the turn has it too, as the next turn loads it.
+        assert [entry.steer for entry in turn.prompt.steers] == ["s1"]
         # A steered message asks for no answer of its own: the turn goes on from its prompt.
         assert turn.latest_ask() is turn.prompt
         await turn.append_reply({"role": "assistant", "text": "done, in Celsius"})
@@ -199,6 +202,52 @@ async def test_an_earlier_turn_reaches_the_model_as_its_prompt_its_steered_messa
     ]
 
 
+async def test_a_turn_counts_its_steered_messages_toward_the_budget_as_soon_as_it_is_answered():
+    loaded: list[Conversation] = []
+
+    async def run(ctx: sessions.SessionContext, conversation: Conversation) -> str:
+        loaded.append(conversation)
+        await tool_round(conversation)
+        await take_steers(ctx, conversation)
+        await conversation.turn.append_reply({"role": "assistant", "text": "done"})
+        return "done"
+
+    # A window of 0: the turn just answered is before the next turn's window.
+    asker = Asker(run, window=0)
+    asker.steering = [{"id": "s1", "text": "use Celsius"}]
+    await asker.ask("the weather?")
+    [conversation] = loaded
+    # Its message and answer (16 characters) fit in 20; with the steered message (11 more), they do not: the
+    # summary due now is asked for now, rather than after the next turn.
+    conversation.budget = 5
+    assert conversation.overflowing()
+
+
+async def test_a_turn_stopped_while_it_waits_to_store_steered_messages_takes_none():
+    async def run(ctx: sessions.SessionContext, conversation: Conversation) -> str:
+        await tool_round(conversation)
+        stop = Stop()
+        _STOP.set(ctx, stop)
+        # Another write holds the ledger: the turn waits for it to store the message, and stops meanwhile.
+        async with conversation._ledger.lock:  # pylint: disable=protected-access
+            taking = asyncio.ensure_future(take_steers(ctx, conversation))
+            for _ in range(10):
+                await asyncio.sleep(0)
+            stop.stop(RuntimeError("stopped"))
+        assert await taking == []
+        # Not the turn's: its agent's ``steered`` answers it as a turn of its own.
+        assert not await steer_stored(ctx.db, "s1")
+        assert conversation.turn.steered() == []
+        _STOP.delete(ctx)
+        await conversation.turn.append_reply({"role": "assistant", "text": "done"})
+        return "done"
+
+    asker = Asker(run)
+    asker.steering = [{"id": "s1", "text": "use Celsius"}]
+    assert await asker.ask("the weather?") == "done"
+    assert asker.taken() == []
+
+
 async def test_the_output_check_asks_again_once_after_a_steered_message():
     replies = iter(["prose", "still prose"])
     asked: list[str] = []
@@ -229,6 +278,7 @@ async def test_a_dropped_reply_drops_the_message_steered_after_it_which_is_then_
         [reply] = turn.replies()
         await turn.drop(reply)
         assert turn.steered() == []
+        assert turn.prompt.steers == []
         assert not await steer_stored(ctx.db, "s1")
         [[rows]] = await ctx.db.values(f"SELECT COUNT(*) FROM {STEERED}")
         assert rows == 0

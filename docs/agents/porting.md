@@ -112,12 +112,15 @@ Each step stands on its own, with its tests, and the earlier ones are small.
    conversation store. The companion first, as its handlers are shared:
    `steer` (the placeholder sent to the agent's `steered`, idempotency key
    `steer:<id>`, and the inbox for a turn whose `start` says
-   `steers: true`), `taken`, `publish` answering `{revision, steering?}`,
-   `_closed` and `reset` forgetting the inbox, and `status.steering`. Then
-   the agent's `steer` view and private `steered` (it answers the message
-   as a turn unless `restate_agent_steers` has its id), `takeSteers` at a
-   step with the `taken` send in the storing transaction's outbox, and
-   each framework putting the messages in its next request in place: pi's
+   `steers: true`, at most `STEERS` per turn, taken or not), `taken`
+   (marking them, without their text, and publishing only a change),
+   `publish` answering `{revision, steering?}`, `_closed` and `reset`
+   forgetting the inbox, and `status.steering`. Then the agent's `steer`
+   view and private `steered` (it answers the message as a turn unless
+   `restate_agent_steers` has its id), `takeSteers` at a step with the
+   `taken` send in the storing transaction's outbox (taking none once the
+   turn stopped, checked again as the store gets the ledger), and each
+   framework putting the messages in its next request in place: pi's
    `whenBusy: "steer"` inbox may be that framework's way.
 
 ## What must hold afterwards

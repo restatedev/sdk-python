@@ -434,9 +434,13 @@ sequenceDiagram
   steered messages, or past the cap, or one sent with no turn being answered
   (it starts one, as `chat/send` does). So each message is answered once, in
   the order it was sent with the messages after it.
-- **A taken message is its turn's.** A turn killed after it took a message
-  ends `ended`, and the message with it. A reply dropped to ask the model
-  again drops the messages taken after it, which `steered` then answers.
+- **A taken message is its turn's.** A turn that ends otherwise than
+  answered after it took a message (stopped, refused, failed, or killed and
+  so `ended`) ends so for the message too, which is not answered again, as
+  the turn's own message is not. A turn that stops while it waits to store
+  messages takes none: each is then a turn of its own. A reply dropped to
+  ask the model again drops the messages taken after it, which `steered`
+  then answers.
 - **What the model sees.** In the window, the message is where it was taken.
   Later, an earlier turn is its message, the messages steered to it, and its
   answer; budgets and summaries count them. `latest_ask` skips them: the
@@ -444,7 +448,8 @@ sequenceDiagram
 - **Limits.** A step comes once a reply's tool calls all have results: a
   tool that waits a day for an approval holds the message until it
   returns (stop the turn to change course sooner). A turn takes at most 16
-  messages (`STEERS`); past them, each is a turn of its own. A message is
+  messages in all (`STEERS`; the companion counts those it took until the
+  turn ends); past them, each is a turn of its own. A message is
   taken only as a model request goes out: one that no request follows (ADK
   asks the model nothing more after some tools) is a turn of its own. A
   LangGraph graph (`graph=`), an ADK agent whose root is a workflow, and a

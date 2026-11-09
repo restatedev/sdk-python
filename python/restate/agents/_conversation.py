@@ -691,7 +691,10 @@ class Turn:
         await self.append(self._ledger.items.prompt(text))
 
     async def steer(
-        self, messages: Sequence[Steer], sent: Callable[[Transaction, list[str]], None] | None = None
+        self,
+        messages: Sequence[Steer],
+        sent: Callable[[Transaction, list[str]], None] | None = None,
+        going: Callable[[], bool] | None = None,
     ) -> list[Entry]:
         """Store the steered ``messages`` that are not stored yet as messages of the user in the turn, and return them.
 
@@ -701,19 +704,25 @@ class Turn:
         adds what goes out with the transaction that stores them (the
         companion's ``taken``), which commits once.
 
-        The store finishes even if the turn stops meanwhile: the turn then
-        closes after it, at the positions after its messages.
+        ``going`` tells whether the turn still goes on: once it has the
+        ledger, a turn that stopped meanwhile takes none, which are then
+        answered as turns of their own. A store under way finishes even if the
+        turn stops: the turn then closes after it, at the positions after its
+        messages, and the messages are its own (stopped with it).
         """
         ledger = self._ledger
 
         async def store() -> list[Entry]:
             async with ledger.lock:
+                if going is not None and not going():
+                    return []
                 self._check_writable()
                 wanted = list({message["id"]: message for message in messages}.values())
                 if not wanted:
                     return []
                 ids = [message["id"] for message in wanted]
                 marks = ", ".join("?" for _ in ids)
+                # The database, not the turn: an id is stored once in the conversation, by whichever turn took it.
                 stored = await ledger.db.values(f"SELECT id FROM {STEERED} WHERE id IN ({marks})", ids)
                 known = {str(row[0]) for row in stored}
                 new = [message for message in wanted if message["id"] not in known]
@@ -726,10 +735,8 @@ class Turn:
                 ]
                 async with ledger.db.transaction() as tx:
                     for i, entry in enumerate(added, 1):
-                        await tx.execute(
-                            f"INSERT INTO {STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, NULL, NULL)",
-                            [entry.n, self.n, ledger.seq + i, ledger.items.dump(entry.item)],
-                        )
+                        dumped = ledger.items.dump(entry.item)
+                        await tx.execute(_INSERT_STEP, [entry.n, self.n, ledger.seq + i, dumped, None, None])
                         await tx.execute(
                             f"INSERT INTO {STEERED} (n, turn, id) VALUES (?, ?, ?)", [entry.n, self.n, entry.steer]
                         )
@@ -738,6 +745,8 @@ class Turn:
                 ledger.seq += len(added)
                 ledger.next = n + len(added)
                 self._add(added)
+                # The transcript's entry of the turn has them too, as the next turn loads it: for its size, say.
+                self.prompt.steers.extend(added)
                 return added
 
         # Shielded: a stop cancels the run, but a commit that is under way still lands, and the turn's own record of
@@ -799,6 +808,7 @@ class Turn:
                 await restart(tx, start)
             ledger.start = start
             ledger.next = min(ledger.next, reply)
+            self.prompt.steers = [steered for steered in self.prompt.steers if steered.n < reply]
             cut = bisect.bisect_left(self._entries, reply, key=_position)
             kept, dropped = self._entries[:cut], self._entries[cut:]
             # The dropped calls are not made: their ids may be made again, by the reply that replaces them.
@@ -1365,20 +1375,16 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
 
 async def _steps(db: DatabaseReader, items: Items, after: int) -> list[Entry]:
     """Return the trajectories' entries after position ``after``, in order, each steered message marked as one."""
-    stored = await db.values(f"SELECT n, item, reply, agent FROM {STEPS} WHERE n > ? ORDER BY n", [after])
-    steered = {
-        int(typing.cast(int, n)): str(i)
-        for n, i in await db.values(f"SELECT n, id FROM {STEERED} WHERE n > ?", [after])
-    }
+    stored = await db.values(
+        f"SELECT s.n, s.item, s.reply, s.agent, st.id FROM {STEPS} s LEFT JOIN {STEERED} st ON st.n = s.n "
+        "WHERE s.n > ? ORDER BY s.n",
+        [after],
+    )
     return [
         Entry(
-            int(typing.cast(int, n)),
-            load_item(items, str(item)),
-            reply=_int(reply),
-            agent=_str(agent),
-            steer=steered.get(int(typing.cast(int, n))),
+            int(typing.cast(int, n)), load_item(items, str(item)), reply=_int(reply), agent=_str(agent), steer=_str(i)
         )
-        for n, item, reply, agent in stored
+        for n, item, reply, agent, i in stored
     ]
 
 

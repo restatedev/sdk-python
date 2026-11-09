@@ -47,7 +47,9 @@ async def take_steers(ctx: SessionContext, conversation: Conversation) -> list[E
     the turn is not stopping, and each of its tool calls has a result.
 
     The messages are steps of the turn from then on: a retried attempt finds
-    them stored, in ``history``, and never takes them again.
+    them stored, in ``history``, and never takes them again. They share the
+    turn's fate: stopped, refused or failed with it, they are not answered
+    again.
     """
     steering = steering_of(ctx)
     if steering is None or not steering.messages:
@@ -65,7 +67,11 @@ async def take_steers(ctx: SessionContext, conversation: Conversation) -> list[E
     companion = _signals.signals_of(ctx)
 
     def sent(tx: Transaction, ids: list[str]) -> None:
-        # With the transaction that stores them: so they are forgotten once stored, and once.
+        # With the transaction that stores them: so they are marked taken once stored, and once.
         tx.send(_signals.taken, ids, key=companion, idempotency_key=f"taken:{ids[0]}")
 
-    return await turn.steer(fresh, sent)
+    def going() -> bool:
+        # A turn stopped while it waited to store them takes none: each is then answered as a turn of its own.
+        return stop is None or not stop.stopped
+
+    return await turn.steer(fresh, sent, going)

@@ -285,7 +285,9 @@ class _Restate(BasePlugin):
         # The turn's step: a model request is going out, which ADK built from the session's events. Once the
         # model's tool calls have their results, the messages steered to the turn join it, after the results. Here
         # rather than as the results are stored: ADK makes no request after some (a tool's skip_summarization, an
-        # output schema's set_model_response), and a message the turn took there would go unread.
+        # output schema's set_model_response), and a message the turn took there would go unread. The agent's own
+        # before_model_callback runs after this one, on the request with them: a response it gives in place of the
+        # model's answers them too, as the model would have.
         for event in await self.sessions.steered(callback_context.session):
             if event.content is not None:
                 llm_request.contents.append(event.content.model_copy(deep=True))

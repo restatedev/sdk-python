@@ -75,8 +75,9 @@ short journals.
 STEERS = 16
 """How many messages a turn takes by ``steer``, at most: past them, each is answered as a turn of its own.
 
-Each one the turn takes is one more model request in it, so they keep a turn
-that someone steers on and on within bounds."""
+The companion counts each message it holds for the turn, taken or not, until
+the turn ends: so a turn that someone steers on and on stays within bounds,
+and so does what the companion holds for it."""
 
 
 class _WaitRequest(TypedDict):
@@ -125,13 +126,19 @@ class SteerRequest(TypedDict):
     text: str
 
 
-class _Inboxed(TypedDict):
-    """A steered message the turn ``turn`` (an invocation id) has not taken yet, and when it was sent."""
+class _Held(TypedDict):
+    """A message steered to the turn ``turn`` (an invocation id), and when it was sent."""
 
     id: str
-    text: str
     since: str
     turn: str
+
+
+class _Inboxed(_Held, total=False):
+    """A message steered to a turn, as the companion holds it until the turn ends: with its text until the turn
+    takes it (``taken``), and then only as one of the turn's ``STEERS``."""
+
+    text: str
 
 
 def _shown(turn: Started | None) -> Answering | None:
@@ -140,16 +147,17 @@ def _shown(turn: Started | None) -> Answering | None:
 
 
 async def _inbox(ctx: Context) -> list[_Inboxed]:
-    """Return the steered messages that their turns have not taken yet, oldest first."""
+    """Return the messages steered to the turns not closed yet (the one being answered), taken or not, oldest
+    first."""
     return await _get(ctx, "inbox", typing.cast(list[_Inboxed], []))
 
 
-async def _steering(ctx: Context) -> list[_Inboxed]:
-    """Return the steered messages that the turn being answered has not taken yet, oldest first."""
-    answering = await _get(ctx, "turn", typing.cast(Started | None, None))
+def _waiting(inbox: list[_Inboxed], answering: Started | None) -> list[_Inboxed]:
+    """Return the messages of ``inbox`` steered to the turn being answered (``answering``) that it has not taken yet,
+    oldest first: those with their text."""
     if answering is None:
         return []
-    return [one for one in await _inbox(ctx) if one["turn"] == answering["invocationId"]]
+    return [one for one in inbox if one["turn"] == answering["invocationId"] and "text" in one]
 
 
 async def _get(ctx: Context, key: str, default: T) -> T:
@@ -194,9 +202,9 @@ async def _closed(ctx: ObjectContext, turn: str, gone: bool = False) -> None:
     agent is sent ``settle``, which closes the turn in its conversation too: if
     it said it has that handler as it started the turn.
 
-    The messages steered to the turn that it did not take are forgotten here:
-    each was queued as a turn of its own as it was sent (``steer``), and
-    is answered as one.
+    The messages steered to the turn are forgotten here: each that it did not
+    take was queued as a turn of its own as it was sent (``steer``), and is
+    answered as one.
     """
     answering = await _get(ctx, "turn", typing.cast(Started | None, None))
     is_answered = answering is not None and answering["invocationId"] == turn
@@ -249,6 +257,7 @@ async def steer(ctx: ObjectContext, request: SteerRequest) -> Steered:
     turn, inbox = answering["invocationId"], await _inbox(ctx)
     if any(one["id"] == message_id for one in inbox):
         return {"id": message_id, "turn": turn}
+    # Taken or not: the turn has room for so many in all.
     if sum(one["turn"] == turn for one in inbox) >= STEERS:
         return {"id": message_id, "turn": None}
     since = iso(await ctx.time())
@@ -259,16 +268,20 @@ async def steer(ctx: ObjectContext, request: SteerRequest) -> Steered:
 
 @signals.handler(ingress_private=True)
 async def taken(ctx: ObjectContext, ids: list[str]) -> None:
-    """Forget the steered messages ``ids``, which their turn has stored, and publish the change.
+    """Mark the steered messages ``ids`` taken, which their turn has stored, and publish the change, if any.
 
     The turn sends it with the transaction that stores them, so it comes once
-    they are stored, and once only.
+    they are stored, and once only. Each is kept without its text until the
+    turn ends, as one of its ``STEERS``; one already forgotten (its turn
+    closed first) is left so.
     """
     inbox = await _inbox(ctx)
-    left = [one for one in inbox if one["id"] not in ids]
-    if len(left) != len(inbox):
-        _set_inbox(ctx, left)
-    await _publish(ctx)
+    marked: list[_Inboxed] = [
+        {"id": one["id"], "since": one["since"], "turn": one["turn"]} if one["id"] in ids else one for one in inbox
+    ]
+    if marked != inbox:
+        _set_inbox(ctx, marked)
+        await _publish(ctx)
 
 
 @signals.handler(kind="shared", inactivity_timeout=PARKED)
@@ -388,11 +401,13 @@ async def await_turn(ctx: ObjectSharedContext, turn: str) -> None:
 async def status(ctx: ObjectSharedContext) -> Status:
     """Return what the agent is doing: the message it is answering, if any, its tools' waits, and the messages
     steered to it that it has not taken yet."""
+    answering = await _get(ctx, "turn", typing.cast(Started | None, None))
     shown: Status = {
-        "answering": _shown(await _get(ctx, "turn", typing.cast(Started | None, None))),
+        "answering": _shown(answering),
         "waiting": [_public(wait) for wait in await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))],
     }
-    steering: list[Steering] = [{"id": one["id"], "since": one["since"]} for one in await _steering(ctx)]
+    waiting = _waiting(await _inbox(ctx), answering)
+    steering: list[Steering] = [{"id": one["id"], "since": one["since"]} for one in waiting]
     if steering:
         shown["steering"] = steering
     return shown
@@ -432,8 +447,8 @@ async def ended(ctx: ObjectContext, turn: str) -> None:
 
 @signals.handler(ingress_private=True)
 async def reset(ctx: ObjectContext) -> None:
-    """Forget all waits, kept signals and steered messages not taken after the agent's ``clear``, and publish the
-    change. Each steered message was queued as a turn of its own as it was sent, before the ``clear``."""
+    """Forget all waits, kept signals and steered messages after the agent's ``clear``, and publish the change.
+    Each steered message was queued as a turn of its own as it was sent, before the ``clear``."""
     ctx.clear("waiting")
     ctx.clear("kept")
     ctx.clear("inbox")
@@ -457,9 +472,13 @@ async def publish(ctx: ObjectContext) -> Published:
     call's start and end, so it learns of them at no cost of its own.
     """
     published: Published = {**await _publish(ctx)}
-    steering: list[Steer] = [{"id": one["id"], "text": one["text"]} for one in await _steering(ctx)]
-    if steering:
-        published["steering"] = steering
+    inbox = await _inbox(ctx)
+    if any("text" in one for one in inbox):
+        # Only then is the turn read: a turn that nobody steers costs one read more, of the empty inbox.
+        answering = await _get(ctx, "turn", typing.cast(Started | None, None))
+        steering: list[Steer] = [{"id": one["id"], "text": one.get("text", "")} for one in _waiting(inbox, answering)]
+        if steering:
+            published["steering"] = steering
     return published
 
 

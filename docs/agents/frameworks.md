@@ -368,7 +368,9 @@ sequenceDiagram
   `skip_summarization`, an output schema's `set_model_response`), and a
   message taken there would go unread. It is added to the request and to the
   session, which ADK builds every later request from, so the run goes on
-  with it.
+  with it. The agent's own `before_model_callback` runs after the plugin's,
+  on the request with the message: a response it gives in place of the
+  model's answers the message too.
 - **A steered message starts an invocation of its own**, as a prompt does:
   after a crash ADK resumes the prompt's invocation from its events, and its
   classic runner (a workflow root's) fails on a user message last among

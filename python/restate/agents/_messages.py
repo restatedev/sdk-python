@@ -236,8 +236,7 @@ async def _summary_latest(db: DatabaseReader, items: Items, before: int | None, 
     earliest = int(typing.cast(int, rows[-1][0])) if rows else end
     steered = await db.values(f"{_STEERED} WHERE st.n >= ? AND st.n < ? ORDER BY st.n", [earliest, end])
     messages = [m for m in _summarized(items, rows[::-1], steered) if m.id < end]
-    first = int(typing.cast(int, rows[-1][0])) if rows else end
-    [[earlier]] = await db.values(f"SELECT EXISTS (SELECT 1 FROM {TURNS} WHERE n < ?)", [first])
+    [[earlier]] = await db.values(f"SELECT EXISTS (SELECT 1 FROM {TURNS} WHERE n < ?)", [earliest])
     return {
         "messages": [_chat(m) for m in _latest_of(messages, limit)],
         "more": len(messages) > limit or bool(earlier),

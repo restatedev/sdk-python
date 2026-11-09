@@ -292,8 +292,9 @@ In order of value for effort:
   their writes per turn, and the `restate_agent_calls` read at every turn.
 - **Steering** adds no request to a turn that nobody steers: the companion
   answers the `publish` a turn makes at each tool call's start and end with
-  the messages waiting for it, and a turn takes them at a step with no call
-  of its own; the `taken` that tells the companion is sent from the storing
+  the messages waiting for it (one state read more, of its inbox, which is
+  empty then), and a turn takes them at a step with no call of its own;
+  the `taken` that tells the companion is sent from the storing
   transaction's outbox. A steered message costs the `steer` view, one call
   to the companion (an inbox entry, a publish, and the placeholder sent to
   `steered`), the transaction that stores it (an item and a row of

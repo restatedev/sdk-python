@@ -276,6 +276,12 @@ async def test_a_steered_message_is_queued_as_a_turn_and_held_for_a_turn_that_st
     await harness.client.service_call(taken_by, arg={"key": k, "ids": ["s1"]})
     assert "steering" not in await published(harness, k)
     assert "steering" not in await harness.client.object_call(_signals.status, key=k, arg=None)
+    # Sent again, it is still the turn's, and not held again; marked taken again, nothing changes or publishes.
+    assert await steer(harness, k, "s1", "use Celsius") == {"id": "s1", "turn": "inv_steers"}
+    assert "steering" not in await published(harness, k)
+    now = (await harness.client.object_call(_signals.notifications, key=k, arg=None))["revision"]
+    await harness.client.service_call(taken_by, arg={"key": k, "ids": ["s1"]})
+    assert (await harness.client.object_call(_signals.notifications, key=k, arg=None))["revision"] == now
 
 
 async def test_a_turn_that_does_not_steer_holds_nothing_and_a_closed_turn_forgets_what_it_left(
@@ -315,3 +321,8 @@ async def test_a_turn_takes_at_most_its_share_of_steered_messages(harness: Harne
     # The same message sent again is held once.
     assert (await steer(harness, k, "s0", "message 0"))["turn"] == "inv_busy"
     assert len((await published(harness, k)).get("steering", [])) == STEERS
+    # The messages the turn took still count: it has taken its share, and the next is a turn of its own.
+    await harness.client.service_call(taken_by, arg={"key": k, "ids": [f"s{n}" for n in range(STEERS)]})
+    assert "steering" not in await published(harness, k)
+    assert await steer(harness, k, "later", "and more") == {"id": "later", "turn": None}
+    assert "steering" not in await published(harness, k)
