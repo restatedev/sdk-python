@@ -574,6 +574,12 @@ class VMWrapper:
         """
         return self.vm.attach_invocation(invocation_id)
 
+    def attach_workflow(self, name: str, key: str) -> int:
+        """
+        Attach to the run of the workflow ``name`` with the id ``key``
+        """
+        return self.vm.attach_workflow(name, key)
+
     def is_replaying(self) -> bool:
         """Returns true if the state machine is replaying."""
         return self.vm.is_replaying()

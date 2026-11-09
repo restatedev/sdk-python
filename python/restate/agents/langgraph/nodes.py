@@ -233,7 +233,10 @@ def workflow(
             takes one. Plain data (a dict, say) is validated into the
             handler's input type, such as a Pydantic model.
         key: The workflow id, from the state. Defaults to one of the node's
-            own, made of the agent's key and the node's task.
+            own, made of the agent's key and the node's task. A workflow
+            runs once per id: a node run again after a crash waits for the
+            run it started, and an id that already ran gets that run's
+            result.
 
     Returns:
         The node, for ``StateGraph.add_node``.

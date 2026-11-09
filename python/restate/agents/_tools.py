@@ -523,7 +523,9 @@ def workflow(
     """Create a tool that runs a workflow to completion and returns its result.
 
     Each tool call starts a workflow of its own, whose id is built from the
-    agent's key and the tool call's id, unless ``key`` is given.
+    agent's key and the tool call's id, unless ``key`` is given. A workflow
+    runs once per id: a tool call run again after a crash waits for the run
+    it started, and a ``key`` that already ran gets that run's result.
 
     Args:
         target: The workflow's main handler.

@@ -84,6 +84,26 @@ class Answer(restate.RestateDurableCallFuture[bytes]):
         pass
 
 
+class Refused(restate.RestateDurableCallFuture[bytes]):
+    """A call that Restate refused with ``error``."""
+
+    def __init__(self, error: TerminalError) -> None:
+        super().__init__()
+        self.error = error
+
+    def __await__(self):
+        async def refused() -> bytes:
+            raise self.error
+
+        return refused().__await__()
+
+    async def invocation_id(self) -> str:
+        return "inv_refused"
+
+    async def cancel_invocation(self) -> None:
+        pass
+
+
 @dataclass
 class Host:
     """An attempt's context over ``backend``, the object's state, as the SDK's gives it."""
@@ -95,6 +115,10 @@ class Host:
     sends: list[Send] = field(default_factory=list)
     calls: list[tuple[str, str, bytes, str | None, str | None]] = field(default_factory=list)
     answers: dict[str, bytes] = field(default_factory=dict)
+    # The calls Restate refuses, by handler: the error they fail with.
+    refusals: dict[str, TerminalError] = field(default_factory=dict)
+    # The workflow runs attached to, as (workflow, id); their results are the answers of "<workflow>/<id>".
+    attached: list[tuple[str, str]] = field(default_factory=list)
     cancelled: list[str] = field(default_factory=list)
     # How many more syncs go through before the process crashes: every sync after fails, losing its writes.
     _syncs_left: int | None = None
@@ -127,7 +151,13 @@ class Host:
 
     def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None):
         self.calls.append((service, handler, arg, key, idempotency_key))
+        if handler in self.refusals:
+            return Refused(self.refusals[handler])
         return Answer(self.answers[handler])
+
+    def attach_workflow(self, name: str, key: str):
+        self.attached.append((name, key))
+        return Answer(self.answers[f"{name}/{key}"])
 
     def generic_send(self, service, handler, arg, key=None, send_delay=None, idempotency_key=None, headers=None):
         self.sends.append(Send(service, handler, arg, key, send_delay, idempotency_key))
@@ -357,6 +387,66 @@ async def test_calls_are_typed_by_their_handler_and_checked_for_their_key():
     with pytest.raises(TerminalError, match="audit is an object: call it with its key"):
         await run(caller, "unkeyed", host)
     assert await run(caller, "literal", host) == 42
+
+
+payouts = restate.Workflow("payouts")
+
+
+@payouts.main()
+async def pay(ctx: restate.WorkflowContext, amount: int) -> str:
+    return f"paid {amount}"
+
+
+@payouts.handler()
+async def paid(ctx: restate.WorkflowSharedContext) -> str:
+    return "paid"
+
+
+ALREADY_INVOKED = TerminalError("the workflow method was already invoked", status_code=409)
+
+
+async def test_a_call_to_a_workflow_refused_as_already_invoked_waits_for_that_run():
+    """A session object runs again from its first line, so it calls a workflow again after a crash: Restate refuses the
+    second call to its main handler (it takes no idempotency key), and the call waits for the run it started."""
+    caller = sessions.SessionObject("caller")
+
+    @caller.handler()
+    async def refund(ctx: sessions.SessionContext, amount: int) -> str:
+        return await ctx.call(pay, amount, key="order-7")
+
+    host = Host(
+        Backend(), service="caller", refusals={"pay": ALREADY_INVOKED}, answers={"payouts/order-7": b'"paid 30"'}
+    )
+    assert await run(caller, "refund", host, 30) == "paid 30"
+    assert host.attached == [("payouts", "order-7")]
+
+
+async def test_only_a_workflows_main_handler_refused_as_already_invoked_is_rejoined():
+    caller = sessions.SessionObject("caller")
+
+    @caller.handler()
+    async def refund(ctx: sessions.SessionContext, amount: int) -> str:
+        return await ctx.call(pay, amount, key="order-7")
+
+    @caller.handler()
+    async def receipt(ctx: sessions.SessionContext) -> str:
+        return await ctx.call(paid, key="order-7")
+
+    @caller.handler()
+    async def by_name(ctx: sessions.SessionContext) -> str:
+        return await ctx.generic_call("payouts", "pay", 30, key="order-7")
+
+    cancelled = TerminalError("cancelled", status_code=409)
+    host = Host(Backend(), service="caller", refusals={"pay": cancelled})
+    with pytest.raises(TerminalError, match="cancelled"):
+        await run(caller, "refund", host, 30)
+    host = Host(Backend(), service="caller", refusals={"paid": ALREADY_INVOKED, "pay": ALREADY_INVOKED})
+    with pytest.raises(TerminalError, match="already invoked"):
+        await run(caller, "receipt", host)
+    # By name, the call can't tell a workflow's main handler from another: it is not rejoined.
+    with pytest.raises(TerminalError, match="already invoked"):
+        await run(caller, "by_name", host)
+    assert host.attached == []
 
 
 async def test_ctx_send_is_made_at_once_and_cancel_takes_an_invocation_id():

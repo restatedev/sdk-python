@@ -18,6 +18,13 @@ with ``generic_call`` and ``generic_send``::
     count = await ctx.call(increment, 5, key="a", idempotency_key=f"{ctx.request.id}:inc")
     ctx.send(record, entry, key="audit", delay=timedelta(hours=1))
     answer = await ctx.generic_call("Counter", "get", key="a")
+
+A workflow's main handler runs once per workflow id, and Restate takes no
+idempotency key for it: a second call is refused (409, "already invoked").
+A session object runs again from its first line after a crash, so it would
+make such a call again. ``call`` makes a call to a workflow's main handler
+that is refused this way wait for that run instead, and return its result:
+the run of that id, whoever started it.
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Protocol
 
-from restate.context import RestateDurableCallFuture
+from restate.context import RestateDurableCallFuture, RestateDurableFuture
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable
 from restate.serde import JsonSerde, Serde
@@ -74,9 +81,11 @@ class CallHost(Protocol):
         headers: dict[str, str] | None = None,
     ) -> Any: ...
 
+    def attach_workflow(self, name: str, key: str) -> RestateDurableFuture[bytes]: ...
 
-def _target(handler: Callable[..., Any], key: str | None) -> tuple[str, str, Serde[Any], Serde[Any]]:
-    """Return the service name, handler name and serdes of ``handler``, checking ``key``.
+
+def _target(handler: Callable[..., Any], key: str | None) -> tuple[Handler[Any, Any], str, str, Serde[Any], Serde[Any]]:
+    """Return ``handler``'s definition, its service name, handler name and serdes, checking ``key``.
 
     Raises ``TerminalError`` (since a retry would fail the same way) if
     ``handler`` is not a handler, if an object's or workflow's handler has no
@@ -93,7 +102,12 @@ def _target(handler: Callable[..., Any], key: str | None) -> tuple[str, str, Ser
         raise TerminalError(f"{service} is {what}: call it with its key")
     if not keyed and key is not None:
         raise TerminalError(f"{service} is a service: call it without a key")
-    return service, target.name, target.handler_io.input_serde, target.handler_io.output_serde
+    return target, service, target.name, target.handler_io.input_serde, target.handler_io.output_serde
+
+
+def already_invoked(error: TerminalError) -> bool:
+    """Whether ``error`` is Restate refusing a call to a workflow's main handler because that workflow's run started."""
+    return error.status_code == 409 and "already invoked" in error.message
 
 
 class CallFuture(RestateDurableCallFuture[O]):
@@ -101,15 +115,31 @@ class CallFuture(RestateDurableCallFuture[O]):
 
     Await it for the result. ``invocation_id()`` returns the id of the call's
     invocation, and ``cancel_invocation()`` cancels it.
+
+    With ``rejoin`` (a call to a workflow's main handler), a call that Restate
+    refuses because the workflow's run started waits for that run instead
+    (``rejoin()``), and returns its result.
     """
 
-    def __init__(self, call: RestateDurableCallFuture[bytes], serde: Serde[O]) -> None:
+    def __init__(
+        self,
+        call: RestateDurableCallFuture[bytes],
+        serde: Serde[O],
+        rejoin: Callable[[], Awaitable[bytes]] | None = None,
+    ) -> None:
         super().__init__()
         self._call: RestateDurableCallFuture[bytes] = call
         self._serde: Serde[O] = serde
+        self._rejoin = rejoin
 
     async def _result(self) -> O:
-        return typing.cast(O, self._serde.deserialize(await self._call))
+        try:
+            result = await self._call
+        except TerminalError as error:
+            if self._rejoin is None or not already_invoked(error):
+                raise
+            result = await self._rejoin()
+        return typing.cast(O, self._serde.deserialize(result))
 
     def __await__(self) -> Generator[Any, Any, O]:
         return self._result().__await__()
@@ -159,8 +189,12 @@ class Calls:
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
     ) -> CallFuture[Any]:
-        service, name, input_serde, output_serde = _target(handler, key)
+        target, service, name, input_serde, output_serde = _target(handler, key)
         future = self._call_host.generic_call(service, name, input_serde.serialize(arg), key, idempotency_key, headers)
+        if target.kind == "workflow" and key is not None:
+            # The main handler of a workflow: a call made again (after a crash) joins the run it started.
+            host, workflow_id = self._call_host, key
+            return CallFuture(future, output_serde, rejoin=lambda: host.attach_workflow(service, workflow_id))
         return CallFuture(future, output_serde)
 
     def generic_call(
@@ -225,7 +259,7 @@ class Sends:
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
     ) -> None:
-        service, name, input_serde, _ = _target(handler, key)
+        _, service, name, input_serde, _ = _target(handler, key)
         parameter = input_serde.serialize(arg)
         self._send_sink(GenericSend(service, name, parameter, key, delay, idempotency_key, headers))
 

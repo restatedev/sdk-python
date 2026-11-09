@@ -167,6 +167,9 @@ class _ContextHost:
     ) -> Any:
         return self.context.generic_call(service, handler, arg, key, idempotency_key, headers)
 
+    def attach_workflow(self, name: str, key: str) -> Any:
+        return self.context.attach_workflow(name, key)
+
     def generic_send(
         self,
         service: str,
