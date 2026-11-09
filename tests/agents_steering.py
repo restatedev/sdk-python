@@ -9,7 +9,8 @@
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
 """Steering, in process: a message steered to a turn is stored once, as a step of the turn, and the model keeps
-seeing it. The companion and the agent's ``steered`` are tested against a server in ``agents_object.py``."""
+seeing it. The companion is tested against a server in ``agents_signals.py``, and the agent's ``steered`` in
+``agents_steering_server.py``."""
 
 # pylint: disable=missing-function-docstring,import-error
 
