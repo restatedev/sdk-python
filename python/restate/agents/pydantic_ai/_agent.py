@@ -131,6 +131,7 @@ from pydantic_ai_harness.compaction import (
 )
 from pydantic_core import to_json, to_jsonable_python
 
+import pydantic_ai
 from pydantic_ai import (
     Agent,
     DeferredToolRequests,
@@ -164,6 +165,12 @@ from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_star
 from restate.agents.pydantic_ai._stores import TurnsHistorySource, calling, conversation_id_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
+
+# Pydantic AI shows a banner on a process's first agent run, unless an installed
+# package started the run. Ours start in a Restate handler, behind the event
+# loop, where it cannot tell: turn it off, as it advises a library that runs
+# agents on its users' behalf.
+pydantic_ai.BANNER_ENABLED = False
 
 M = typing.TypeVar("M", bound=BaseModel)
 
