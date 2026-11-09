@@ -632,6 +632,51 @@ async def test_settle_closes_only_the_turn_its_gone_invocation_left_and_only_onc
     assert results == {"c1": RETURNED_UNRECORDED, "c2": ENDED}
 
 
+async def test_a_turn_left_without_an_answer_is_closed_once_however_a_crash_cuts_the_close():
+    from restate.agents.internal import ENDED  # pylint: disable=import-outside-toplevel
+
+    async def run(conversation: Conversation) -> str:
+        if conversation.turn.prompt.item["text"] == "first":
+            await conversation.turn.append_reply(_calling("c1"))
+            raise RuntimeError("the invocation is gone")
+        return "fine"
+
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    @obj.handler
+    async def first(ctx: sessions.SessionContext) -> list[Any]:
+        conversation = await Conversation.load(ctx.db, ITEMS, "all")
+        return [entry.item for entry in conversation.entries if entry.turn == conversation.transcript[0].n]
+
+    def host(backend: Backend) -> Host:
+        return Host(backend, service="asker", answers=PUBLISHED)
+
+    crashes = 0
+    for syncs in range(100):
+        backend = Backend()
+        with pytest.raises(RuntimeError, match="gone"):
+            await invoke(obj, "ask", host(backend), request(), "first")
+        # The second prompt closes the first's turn, ended; its process crashes after ``syncs`` syncs.
+        second, crashing = request(), host(backend)
+        crashing.crash_after(syncs)
+        try:
+            assert await invoke(obj, "ask", crashing, second, "second") == "fine"
+            break
+        except RuntimeError as error:
+            assert str(error) == "the sync failed"
+        crashes += 1
+        assert await invoke(obj, "ask", host(backend), second, "second") == "fine"
+        items = await invoke(obj, "first", host(backend), request())
+        notes = [item for item in items if item == {"role": "assistant", "text": ENDED}]
+        results = [item for item in items if "result" in item]
+        assert (syncs, len(notes), results) == (syncs, 1, [{"result": "c1", "output": ENDED}])
+    assert crashes > 0
+
+
 async def test_a_window_of_all_loads_every_turn_whole():
     seen: list[Conversation] = []
 
