@@ -7,15 +7,15 @@ works the same way::
     OPENAI_API_KEY=... uv run --extra serve --with openai examples-agents/intermediate/loop.py
     npx @restatedev/restate-server                                                  # Restate, in another terminal
     npx @restatedev/restate -y deployments register --force http://localhost:9080
-    curl localhost:8080/refunds/alice/chat -d 'Order 103 arrived broken, can I get my $30 back?'
+    curl localhost:8080/refund_loop/alice/chat -d 'Order 103 arrived broken, can I get my $30 back?'
 
 The agent waits for a manager to approve the refund. In another terminal,
 approve it::
 
-    curl localhost:8080/refunds/alice/signal --json '{"name": "approval", "value": "approved"}'
+    curl localhost:8080/refund_loop/alice/signal --json '{"name": "approval", "value": "approved"}'
 
 Or talk with the agent, and approve, from the agents' command line:
-``python -m restate.agents chat refunds/alice``, then ``/signal approval approved``.
+``python -m restate.agents chat refund_loop/alice``, then ``/signal approval approved``.
 
 The loop is plain Python, and Restate makes it durable:
 
@@ -204,9 +204,9 @@ async def answer(ctx: sessions.SessionContext, text: str) -> str:
     return await answer_once(ctx, text, MESSAGES, run)
 
 
-refunds = AgentObject("refunds")
-refunds.chat(answer, items=MESSAGES)
+refund_loop = AgentObject("refund_loop")
+refund_loop.chat(answer, items=MESSAGES)
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(restate.app([refunds])))
+    asyncio.run(restate.serve(restate.app([refund_loop])))

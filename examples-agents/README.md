@@ -47,7 +47,7 @@ To talk with an agent from a terminal, as it works, run the agents' command
 line (it needs the `client` extra: `pip install "restate-sdk[client]"`):
 
 ```sh
-python -m restate.agents chat assistant/alice    # what you type goes to the agent; /help for the commands
+python -m restate.agents chat openai_assistant/alice    # what you type goes to the agent; /help for the commands
 ```
 
 It shows the conversation so far, then each message, tool call and wait as it

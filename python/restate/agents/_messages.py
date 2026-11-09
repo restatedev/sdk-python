@@ -30,7 +30,7 @@ import typing
 from dataclasses import dataclass, field
 
 from restate.agents._api import ChatMessage, Messages, MessagesRequest, Part, Role, ToolPart, text_part
-from restate.agents._conversation import SCHEMA, STEPS, TURNS, Items, last_of, start_of
+from restate.agents._conversation import SCHEMA, STEPS, TURNS, Items, last_of, load_item, start_of
 from restate.sessions import DatabaseReader
 
 
@@ -50,7 +50,7 @@ def render(items: Items, rows: typing.Sequence[typing.Sequence[typing.Any]]) -> 
     """Each tool call's message, by the call's id."""
     for n, seq, stored in rows:
         position, changed = int(n), int(seq)
-        said, calls, results = items.read(items.load(str(stored)))
+        said, calls, results = items.read(load_item(items, str(stored)))
         if said is not None:
             role, text = said
             messages.append(_Message(position, "user" if role == "user" else "assistant"))
@@ -187,7 +187,7 @@ def _summarized(items: Items, rows: typing.Sequence[typing.Sequence[typing.Any]]
     """
     messages: list[_Message] = []
     for n, seq, stored, answer, answered_at, answered_seq in rows:
-        said = items.read(items.load(str(stored))).said
+        said = items.read(load_item(items, str(stored))).said
         text = said[1] if said else ""
         messages.append(_Message(int(n), "user", [text_part(text)] if text.strip() else [], int(seq)))
         if answer is not None and answered_at is not None:

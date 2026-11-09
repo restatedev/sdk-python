@@ -42,7 +42,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai_harness.planning import PlanItem, TaskStatus
 from pydantic_ai_harness.step_persistence import RunRecord
 
-from restate.agents._conversation import STEPS, TURNS, Item, Items
+from restate.agents._conversation import STEPS, TURNS, Item, Items, load_item
 from restate.agents._tools import current_call
 from restate.sessions import SessionContext
 from restate.sessions.internal import Schema, definition_of
@@ -322,7 +322,8 @@ class TurnsHistorySource:
             steps = await db.values(f"SELECT item FROM {STEPS} WHERE n > ? ORDER BY n", [n])
         else:
             steps = await db.values(f"SELECT item FROM {STEPS} WHERE n > ? AND n < ? ORDER BY n", [n, end])
-        loaded: list[Item] = [self.items.load(str(row["item"]))] + [self.items.load(str(item)) for [item] in steps]
+        stored = [str(row["item"])] + [str(item) for [item] in steps]
+        loaded: list[Item] = [load_item(self.items, item) for item in stored]
         return typing.cast(list[ModelMessage], loaded)
 
 

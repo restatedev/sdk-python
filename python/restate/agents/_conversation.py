@@ -294,6 +294,22 @@ def summary_items(items: Items, summary: str) -> list[Item]:
     return [items.prompt(SUMMARY + summary), items.reply("Understood.")]
 
 
+def load_item(items: Items, stored: str) -> Item:
+    """Return the item stored as ``stored``, or fail for good: a retry would read the same row again.
+
+    A row that ``items`` cannot read was stored by another framework's agent of the same name, or by another
+    version of this framework, say.
+    """
+    try:
+        return items.load(stored)
+    except Exception as error:
+        raise TerminalError(
+            f"This conversation holds a message that this agent cannot read (stored by an agent of another "
+            f"framework under the same name, or by another version of its framework?): {type(error).__name__}: "
+            f"{error}"
+        ) from error
+
+
 @dataclass(frozen=True)
 class Start:
     """Where a conversation starts: its first position, the last ``seq`` given, and the summary of the earliest turns."""
@@ -370,7 +386,7 @@ async def latest_snapshot(db: DatabaseReader, items: Items) -> Snapshot | None:
     row = await db.get(f"SELECT covers, turn, items FROM {SNAPSHOTS} ORDER BY covers DESC, id DESC LIMIT 1")
     if row is None:
         return None
-    held = [items.load(str(stored)) for stored in json.loads(str(row["items"]))]
+    held = [load_item(items, str(stored)) for stored in json.loads(str(row["items"]))]
     return _snapshot_of(items, int(typing.cast(int, row["covers"])), _int(row["turn"]), held)
 
 
@@ -948,7 +964,7 @@ class Conversation:
         if whole:
             stored = await db.values(f"SELECT n, item, reply, agent FROM {STEPS} WHERE n > ? ORDER BY n", [whole[0].n])
             steps = [
-                Entry(int(typing.cast(int, n)), items.load(str(item)), reply=_int(reply), agent=_str(agent))
+                Entry(int(typing.cast(int, n)), load_item(items, str(item)), reply=_int(reply), agent=_str(agent))
                 for n, item, reply, agent in stored
             ]
         entries = sorted([*whole, *steps], key=_position)
@@ -976,7 +992,7 @@ class Conversation:
         if whole:
             stored = await db.values(f"SELECT n, item, reply, agent FROM {STEPS} WHERE n > ? ORDER BY n", [whole[0].n])
             steps = [
-                Entry(int(typing.cast(int, n)), items.load(str(item)), reply=_int(reply), agent=_str(agent))
+                Entry(int(typing.cast(int, n)), load_item(items, str(item)), reply=_int(reply), agent=_str(agent))
                 for n, item, reply, agent in stored
             ]
         entries = sorted([*whole, *steps], key=_position)
@@ -1245,7 +1261,7 @@ async def _transcript(db: DatabaseReader, items: Items, first: int, bounded: tup
             at = int(typing.cast(int, n))
             entry = Entry(
                 at,
-                items.load(str(item)),
+                load_item(items, str(item)),
                 str(prompt),
                 _str(answer),
                 agent=_str(agent),

@@ -228,6 +228,38 @@ async def test_a_retry_of_a_closed_turn_fails_as_the_prompt_did():
     assert await failure("gone", gone) == (ENDED, 500)
 
 
+class _OtherFramework(Items):
+    """Another framework's items, which have a ``kind``: it cannot read the made-up framework's."""
+
+    def load(self, stored: str) -> Item:
+        item = json.loads(stored)
+        if "kind" not in item:
+            raise ValueError("an item has a kind")
+        return item
+
+
+async def test_a_conversation_this_agent_cannot_read_fails_for_good():
+    """An agent of the same name on another framework fails with a terminal error: a retry would read the same row."""
+    obj = sessions.SessionObject("asker")
+
+    async def run(conversation: Conversation) -> str:
+        await conversation.turn.append_reply({"role": "assistant", "text": "hello"})
+        return "hello"
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    @obj.handler
+    async def ask_other(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, _OtherFramework(), run)
+
+    backend = Backend()
+    assert await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), "hi") == "hello"
+    with pytest.raises(restate.TerminalError, match="cannot read .* ValueError: an item has a kind"):
+        await invoke(obj, "ask_other", Host(backend, service="asker", answers=PUBLISHED), request(), "hi")
+
+
 async def test_a_dropped_reply_takes_what_followed_it_and_each_item_is_read_once():
     reads: list[Item] = []
 

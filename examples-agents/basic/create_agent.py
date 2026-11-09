@@ -1,7 +1,7 @@
 """
 LangChain's ``create_agent`` as a Restate agent: an order desk, each
 conversation in its key's database. Its tool is Restate's: a call to the
-``orders`` service, made once per tool call even if the process crashes
+``shipping`` service, made once per tool call even if the process crashes
 mid-turn::
 
     OPENAI_API_KEY=... uv run --extra langgraph --extra langchain --extra serve --with langchain-openai examples-agents/basic/create_agent.py
@@ -21,10 +21,10 @@ from langchain.agents import create_agent
 import restate
 from restate.agents import call, langgraph
 
-orders = restate.Service("orders")
+shipping = restate.Service("shipping")
 
 
-@orders.handler()
+@shipping.handler()
 async def status(_ctx: restate.Context, order: str) -> str:
     return f"Order {order} was delivered yesterday."
 
@@ -38,4 +38,4 @@ desk = langgraph.agent("desk", graph=graph)
 
 
 if __name__ == "__main__":
-    asyncio.run(restate.serve(restate.app([orders, desk])))
+    asyncio.run(restate.serve(restate.app([shipping, desk])))
