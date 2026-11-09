@@ -76,3 +76,13 @@ def test_a_message_from_elsewhere_is_shown_and_each_typed_message_is_hidden_once
     terminal.unsent("never sent")  # its send failed
     terminal.show(change(user(3, "never sent")))
     assert capsys.readouterr().out.splitlines() == ["support: ok", "you: again", "you: never sent"]
+
+
+def test_a_message_typed_before_the_conversation_so_far_came_is_shown_there_and_hides_no_later_one(
+    capsys: pytest.CaptureFixture[str],
+):
+    terminal = Terminal("support")
+    terminal.sending("Hi")  # typed before the first change came, which has it already
+    terminal.show(change(user(0, "Hi"), answer(1, "Hello")))
+    terminal.show(change(user(2, "Hi")))  # the same text, from another client: shown
+    assert capsys.readouterr().out.splitlines() == ["you: Hi", "support: Hello", "you: Hi"]

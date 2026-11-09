@@ -80,7 +80,10 @@ class Terminal:
 
     def show(self, change: Any) -> None:
         for message in change.messages:
-            if message["role"] == "user" and not self.history and self._typed(message):
+            # The conversation so far shows every message, but one typed here still uses up its text there, so that a
+            # later message of the same text (steered, or from another client) isn't hidden in its place.
+            typed = message["role"] == "user" and self._typed(message)
+            if typed and not self.history:
                 continue
             for i, part in enumerate(message["parts"]):
                 self._part(f"{message['id']}.{i}", message["role"], part)
