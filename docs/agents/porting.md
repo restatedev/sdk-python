@@ -108,6 +108,17 @@ Each step stands on its own, with its tests, and the earlier ones are small.
    if the TypeScript agents have `output=` or guardrails that ask again.
 7. **A framework's own approvals,** with `waitFor(..., { approval: true })`
    for any framework whose tool calls can wait for a person.
+8. **Steering** ([Steering a turn](turns.md#steering-a-turn)), on the
+   conversation store. The companion first, as its handlers are shared:
+   `steer` (the placeholder sent to the agent's `steered`, idempotency key
+   `steer:<id>`, and the inbox for a turn whose `start` says
+   `steers: true`), `taken`, `publish` answering `{revision, steering?}`,
+   `_closed` and `reset` forgetting the inbox, and `status.steering`. Then
+   the agent's `steer` view and private `steered` (it answers the message
+   as a turn unless `restate_agent_steers` has its id), `takeSteers` at a
+   step with the `taken` send in the storing transaction's outbox, and
+   each framework putting the messages in its next request in place: pi's
+   `whenBusy: "steer"` inbox may be that framework's way.
 
 ## What must hold afterwards
 

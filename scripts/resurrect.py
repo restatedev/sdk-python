@@ -67,6 +67,7 @@ EVERY_FRAMEWORK = (
     "tests/agents_langgraph_graph.py",
 )
 OBJECT = ("tests/agents_object.py", "tests/agents_signals.py")
+STEERING = ("tests/agents_steering.py", "tests/agents_steering_server.py", "tests/agents_signals.py")
 SNAPSHOTS = ("tests/agents_snapshots.py", "tests/agents_pydantic_ai_snapshots.py")
 WAITS = (*EVERY_FRAMEWORK, "tests/agents_snapshots.py")
 
@@ -670,6 +671,71 @@ MUTANTS = [
         "if isinstance(error, asyncio.CancelledError) and task is not None and task.cancelling():",
         "if False:",
         EVERY_FRAMEWORK,
+    ),
+    # --- Durability: steering, from no fix ---
+    Mutant(
+        "steer-placeholder-runs-taken",
+        "a steered message the turn took is answered again, as a turn of its own",
+        f"{AGENTS}/_object.py",
+        '            if await steer_stored(ctx.db, message["id"]):\n                return\n',
+        "            if False:\n                return\n",
+        STEERING,
+    ),
+    Mutant(
+        "steer-latest-ask-counts-steers",
+        "a steered message counts as the turn's ask: the output check never asks again, ADK resumes another invocation",
+        f"{AGENTS}/_conversation.py",
+        '(e for e in reversed(self.items) if e.steer is None and e.said is not None and e.said[0] == "user"),',
+        '(e for e in reversed(self.items) if e.said is not None and e.said[0] == "user"),',
+        STEERING,
+    ),
+    Mutant(
+        "steer-history-drops-steers",
+        "the model forgets the messages steered to a turn once it leaves the window",
+        f"{AGENTS}/_conversation.py",
+        "            out.extend(steered.item for steered in turn.steers)\n",
+        "",
+        STEERING,
+    ),
+    Mutant(
+        "steer-taken-with-open-calls",
+        "a steered message is taken while a tool call has no result, between a call and its result",
+        f"{AGENTS}/_steering.py",
+        "    if turn is None or turn.open_calls():\n",
+        "    if turn is None:\n",
+        STEERING,
+    ),
+    Mutant(
+        "steer-publish-without-steering",
+        "the turn never learns of a steered message: each is answered as a turn of its own",
+        f"{AGENTS}/_signals.py",
+        '    if steering:\n        published["steering"] = steering\n',
+        '    if False:\n        published["steering"] = steering\n',
+        STEERING,
+    ),
+    Mutant(
+        "steer-taken-never-sent",
+        "the companion keeps a message the turn took, and status shows it waiting",
+        f"{AGENTS}/_steering.py",
+        '        tx.send(_signals.taken, ids, key=companion, idempotency_key=f"taken:{ids[0]}")\n',
+        "        pass\n",
+        STEERING,
+    ),
+    Mutant(
+        "steer-drop-keeps-steers",
+        "a dropped reply leaves the message steered after it marked as taken, so it is never answered",
+        f"{AGENTS}/_conversation.py",
+        '                await tx.execute(f"DELETE FROM {STEERED} WHERE n >= ?", [reply])\n',
+        "",
+        STEERING,
+    ),
+    Mutant(
+        "steer-summary-hides-steers",
+        "the summary view leaves out the messages steered to a turn",
+        f"{AGENTS}/_messages.py",
+        "    for n, seq, stored in steered:\n",
+        "    for n, seq, stored in ():\n",
+        STEERING,
     ),
 ]
 

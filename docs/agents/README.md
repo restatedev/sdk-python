@@ -17,6 +17,10 @@ building it, and how to port it.
 - **A conversation is a sequence of turns.** A turn is one prompt and what
   answers it: its steps (the model's replies, tool calls and results) and its
   answer. Turns never overlap, so at most one turn has no answer: the latest.
+- **A message can join the turn being answered.** Sent to `steer` rather than
+  `chat`, the turn takes it at its next step, once the model's tool calls
+  have their results, and the model's next request has it; otherwise it is
+  answered as a turn of its own, in order. Either way, once.
 - **The turn is the unit of storage.** One row per turn (the transcript),
   and every other item tagged with its turn (the trajectories), in one
   sequence of positions that are the message ids clients see.
@@ -77,6 +81,7 @@ then the same.
 | [`_conversation.py`](../../python/restate/agents/_conversation.py) | the conversation: its tables, `Conversation`, `Turn`, `answer_once`, `compact`, `settle` |
 | [`_messages.py`](../../python/restate/agents/_messages.py) | the conversation as clients read it (`messages`, `sync`) |
 | [`_signals.py`](../../python/restate/agents/_signals.py) | the companion |
+| [`_steering.py`](../../python/restate/agents/_steering.py) | the messages steered to a turn: `take_steers`, at its steps |
 | [`_object.py`](../../python/restate/agents/_object.py) | the agent object: `chat`, the views, the private handlers |
 | [`_calls.py`](../../python/restate/agents/_calls.py) | the call records: a tool's Restate calls, made once |
 | [`_tools.py`](../../python/restate/agents/_tools.py) | the tools built on Restate (`call`, `send`, `workflow`, `subagent`, `wait_for_signal`), and `wait_for` |
