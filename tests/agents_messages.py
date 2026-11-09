@@ -125,6 +125,17 @@ async def test_a_page_reads_back_only_as_many_prompts_as_it_shows():
     assert texts(first) == [(0, "question 0"), (1, "answer 0")] and not first["more"]
 
 
+async def test_a_page_of_no_messages_has_the_cursor_and_whether_there_are_any():
+    host = Host(Backend(), service="rendered")
+    for n in range(2):
+        await run(chat, "ask", host, f"question {n}")
+        await run(chat, "reply", host, [{"role": "assistant", "text": f"answer {n}"}])
+    every = await run(chat, "read", host.view(), {})
+    for view in ("full", "summary"):
+        none = await run(chat, "read", host.view(), {"limit": 0, "view": view})
+        assert (view, none["messages"], none["more"], none["cursor"]) == (view, [], True, every["cursor"])
+
+
 async def test_an_error_output_is_marked_and_is_a_calls_result_only_if_it_is_its_own_error():
     host = Host(Backend(), service="rendered")
     await run(chat, "ask", host, "Charge me")
