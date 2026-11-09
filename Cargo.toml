@@ -18,7 +18,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # The feature `sql` is the sessions' storage: the SQLite-compatible database kept in an
 # object's state, with its page cache (foyer); `tunnel` is Restate Cloud's.
-restate-sdk-shared-core = { version = "8.3.1", features = [
+restate-sdk-shared-core = { version = "8.4.0", features = [
     "request_identity",
     "sha2_random_seed",
     "rust_crypto",
