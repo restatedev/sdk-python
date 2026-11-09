@@ -144,7 +144,6 @@ from pydantic_ai import (
 )
 from pydantic_ai import Tool as PydanticTool
 from restate.agents._common import (
-    CANCELLATION,
     Check,
     CompactHistory,
     ErrorSet,
@@ -154,6 +153,7 @@ from restate.agents._common import (
     check_own,
     configured,
     from_tool,
+    is_cancellation,
     model_of,
     provider_of,
 )
@@ -435,7 +435,7 @@ class _Restate(AbstractCapability[Any]):
         stop = stop_signal_of(self.ctx)
         if stop is not None and stop.reason is not None:
             raise stop.reason from error
-        if isinstance(error, TerminalError) and error.status_code != CANCELLATION:
+        if isinstance(error, TerminalError) and not is_cancellation(error):
             await tool_call_ended(self.ctx)
             return f"Error: {error.message}"
         # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.

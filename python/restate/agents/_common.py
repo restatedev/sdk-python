@@ -220,6 +220,16 @@ def check_window(window: Window) -> Window:
 CANCELLATION = 409
 """The status code of Restate's cancellation error, which a stopped turn fails with."""
 
+
+def is_cancellation(error: BaseException) -> bool:
+    """Return whether ``error`` is Restate's cancellation error, which a stopped turn fails with too.
+
+    Its status code alone does not tell: a call fails with 409 for other reasons, such as a workflow run a second
+    time, which fail the turn rather than stop it.
+    """
+    return isinstance(error, TerminalError) and error.status_code == CANCELLATION and error.message == "cancelled"
+
+
 CANCELLED = "Cancelled: the turn was stopped before it finished."
 """The answer of a cancelled turn, and the result of each tool call it cut off, which the model sees later in the conversation."""
 

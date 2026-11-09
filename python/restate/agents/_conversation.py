@@ -94,7 +94,6 @@ from typing import Any, Literal, Protocol
 from restate.agents._calls import outcomes
 from restate.agents._common import (
     BUDGET,
-    CANCELLATION,
     CANCELLED,
     ENDED,
     SUMMARIZE,
@@ -103,6 +102,7 @@ from restate.agents._common import (
     Window,
     check_window,
     cut_off_result,
+    is_cancellation,
     next_prompt_id,
     refusal_of,
     stored_answer,
@@ -1402,7 +1402,7 @@ async def _answer(
         # The attempt ended: stop here, and let the next attempt carry on the run.
         raise
     except TerminalError as error:
-        if error.status_code == CANCELLATION:
+        if is_cancellation(error):
             # Cancelled: close the turn, so that the next prompt starts afresh.
             await turn.close(ctx, "cancelled", CANCELLED)
             await conversation.seal()
