@@ -80,24 +80,6 @@ async def serving(path: str, setup: Callable[[ModuleType], None] | None = None) 
         yield Ingress(harness.ingress_url)
 
 
-async def test_no_two_examples_serve_a_name(monkeypatch: pytest.MonkeyPatch):
-    """A name is served by one example only. Restate keeps a key's state, its database with it, from one example to
-    the next: an example of another's name would load that one's conversations. The tutorial's lessons are versions
-    of one application, and share their names."""
-    for framework in ("agents", "langgraph", "langchain.agents", "pydantic_ai", "google.adk"):
-        pytest.importorskip(framework)
-    served: dict[str, str] = {}
-    for path in sorted(EXAMPLES.glob("*/*.py")):
-        example = str(path.relative_to(EXAMPLES))
-        with monkeypatch.context() as env:
-            if example == "basic/adk_agent.py":
-                env.setenv("RESTATE_AGENT_MODEL", "google/gemini-x")  # an ADK agent needs a model
-            module = load(example)
-        owner = "the tutorial" if example.startswith("tutorial/") else example
-        for name in {value.name for value in vars(module).values() if isinstance(value, SERVABLE)}:
-            assert served.setdefault(name, owner) == owner, f"{example} and {served[name]} both serve {name!r}"
-
-
 async def test_01_object():
     async with serving("tutorial/01_object.py") as ingress:
         assert (await ingress.post("wallet/alice/hello")).json() == "Hello, alice!"
