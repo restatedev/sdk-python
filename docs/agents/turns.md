@@ -444,8 +444,13 @@ sequenceDiagram
 - **Limits.** A step comes once a reply's tool calls all have results: a
   tool that waits a day for an approval holds the message until it
   returns (stop the turn to change course sooner). A turn takes at most 16
-  messages (`STEERS`); past them, each is a turn of its own. A LangGraph
-  graph (`graph=`) and a background agent take none.
+  messages (`STEERS`); past them, each is a turn of its own. A message is
+  taken only as a model request goes out: one that no request follows (ADK
+  asks the model nothing more after some tools) is a turn of its own. A
+  LangGraph graph (`graph=`), an ADK agent whose root is a workflow, and a
+  background agent take none; an OpenAI run takes none after a handoff
+  whose `input_filter` drops the handoff's own output
+  ([The frameworks](frameworks.md)).
 
 ## The turn model
 
