@@ -39,6 +39,7 @@ from restate.agents._conversation import (
     answer_once,
     last_of,
 )
+from restate.agents._common import Check
 from restate.agents.internal import CANCELLED, from_tool, refusal_of
 from restate.sessions.internal import invoke
 
@@ -86,11 +87,16 @@ Run = Callable[[Conversation], Awaitable[str]]
 
 def asking(run: Run) -> Callable[..., Awaitable[Any]]:
     """Return how to ask an object whose handler answers each prompt with ``run``, in one backend."""
+    return asking_with(run, None)
+
+
+def asking_with(run: Run, check: Check | None) -> Callable[..., Awaitable[Any]]:
+    """Return how to ask an object whose handler answers each prompt with ``run``, checked with ``check``."""
     obj = sessions.SessionObject("asker")
 
     @obj.handler
     async def ask(ctx: sessions.SessionContext, text: str) -> str:
-        return await answer_once(ctx, text, ITEMS, run)
+        return await answer_once(ctx, text, ITEMS, run, check=check)
 
     backend = Backend()
 
@@ -770,7 +776,7 @@ async def test_a_turn_asks_again_within_itself_once_across_attempts():
         await conversation.turn.append_reply({"role": "assistant", "text": reply})
         return reply
 
-    def check(answer: str) -> str | None:
+    def check(answer: str, last: bool) -> str | None:
         return None if answer.startswith("{") else "Reply again, with JSON only."
 
     obj = sessions.SessionObject("asker")
@@ -794,6 +800,39 @@ async def test_a_turn_asks_again_within_itself_once_across_attempts():
         {"role": "assistant", "text": "still prose"},
     ]
     assert turn.latest_ask().item == {"role": "user", "text": "Reply again, with JSON only."}
+
+
+async def test_a_turn_whose_reply_is_still_not_what_was_asked_for_after_asking_again_fails_with_its_checks_error():
+    replies = iter(["prose", "still prose"])
+    seen: list[Conversation] = []
+
+    async def run(conversation: Conversation) -> str:
+        seen.append(conversation)
+        reply = next(replies)
+        await conversation.turn.append_reply({"role": "assistant", "text": reply})
+        return reply
+
+    def check(answer: str, last: bool) -> str | None:
+        if answer.startswith("{"):
+            return None
+        if last:
+            raise restate.TerminalError("not JSON, asked again")
+        return "Reply again, with JSON only."
+
+    ask = asking_with(run, check)
+    invocation = request()
+    with pytest.raises(restate.TerminalError, match="^not JSON, asked again$"):
+        await ask("plan", invocation)
+    # The turn ends failed, with the error: not answered with a reply the caller never got.
+    turn = seen[-1].turn
+    assert (turn.status, turn.answer) == ("failed", "Error: not JSON, asked again")
+    assert [e.item for e in turn.items][-2:] == [
+        {"role": "assistant", "text": "still prose"},
+        {"role": "assistant", "text": "Error: not JSON, asked again"},
+    ]
+    # Retried (a crash right after the close, say): it fails as it did.
+    with pytest.raises(restate.TerminalError, match="^not JSON, asked again$"):
+        await ask("plan", invocation)
 
 
 async def test_a_turn_that_ends_with_a_tool_after_a_message_ends_with_its_answer():

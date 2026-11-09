@@ -431,7 +431,9 @@ the person's message and the answer, and the full view shows the ask as a
 step of the turn. A framework that runs from a message of its own (ADK's
 invocation, a LangGraph graph's input) runs from the turn's latest message of
 the user (`latest_ask`). A retried attempt that finds the ask stored does
-not ask again.
+not ask again. The check reads the reply to the ask too (`last`): a
+`TerminalError` it raises fails the turn, which is closed `failed` with it,
+as `output=` does for a reply that still does not validate.
 
 **Names.** A turn is the conversation's (`restate.agents.internal.Turn`).
 What `status` reports, `answering`, is the invocation being answered

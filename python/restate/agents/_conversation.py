@@ -1366,10 +1366,16 @@ async def _answer(
 
     async def answering() -> str:
         answer = await run(conversation)
-        # Once at most: a turn that asked again (in an earlier attempt, say) answers with the reply to that.
-        while check is not None and (again := check(answer)) is not None and turn.latest_ask() is turn.prompt:
+        if check is None:
+            return answer
+        # Once at most: a turn that asked again (in an earlier attempt, say) answers with the reply to that, or
+        # its check fails it (a terminal error, which closes it failed, below).
+        asked = turn.latest_ask() is not turn.prompt
+        again = check(answer, asked)
+        if again is not None and not asked:
             await turn.ask_again(again)
             answer = await run(conversation)
+            check(answer, True)
         return answer
 
     stop = stop_signal_of(ctx)
