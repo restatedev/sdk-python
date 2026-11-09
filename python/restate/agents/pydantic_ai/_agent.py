@@ -222,6 +222,9 @@ APPROVAL = "approval"
 _APPROVED = frozenset({"approved", "approve", "yes", "ok", "allow", "allowed"})
 """The texts that approve a tool call, whatever their case; any other text denies it, with that reason."""
 
+_DENIED = frozenset({"", "denied", "deny", "no", "rejected", "reject", "declined", "decline", "refused", "refuse"})
+"""The texts that deny a tool call with no reason of their own, whatever their case: the model is told it was denied."""
+
 
 def approval_of(value: Any) -> ToolApproved | ToolDenied:
     """Return what the value of an ``approval`` signal decides about its tool call.
@@ -230,12 +233,16 @@ def approval_of(value: Any) -> ToolApproved | ToolDenied:
     ``{"approved": true, "args": {...}}`` approves it with other arguments.
     ``false`` or ``{"approved": false, "reason": "..."}`` denies it, and so
     does any other text, which is the denial's reason for the model: a value
-    that does not say "approved" never runs the tool.
+    that does not say "approved" never runs the tool. A text that only says
+    "no" (``"denied"``, ``"rejected"``...) tells the model the call was denied.
     """
     if value is True:
         return ToolApproved()
     if isinstance(value, str):
-        return ToolApproved() if value.strip().lower() in _APPROVED else ToolDenied(value)
+        said = value.strip().lower()
+        if said in _APPROVED:
+            return ToolApproved()
+        return ToolDenied() if said in _DENIED else ToolDenied(value)
     if isinstance(value, dict):
         decision = typing.cast(dict[str, Any], value)
         if decision.get("approved") is True:
