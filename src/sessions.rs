@@ -13,10 +13,12 @@
 //! task that polls it. A call that needs nothing it must wait for, such as SQL
 //! on cached pages or a statement inside a transaction, returns its value at
 //! once, or raises its error ([`answer`]); one that waits returns an asyncio
-//! future, and is polled again on the loop as what it waits for completes. The
-//! one other thread is the page cache's disk tier (foyer's runtime): its
-//! wake-ups reach the loop through a thread of their own, so that the cache
-//! never waits for the GIL.
+//! future, and is polled again on the loop as what it waits for completes.
+//! Two other kinds of thread wake a call: the page cache's disk tier
+//! (foyer's runtime), and, with an object store, the tokio runtime that
+//! drives its requests' connections and timers ([`InRuntime`]). Their
+//! wake-ups reach the loop through a thread of their own ([`foreign_wakes`]),
+//! so that neither ever waits for the GIL.
 //!
 //! # The store
 //!
@@ -38,7 +40,10 @@
 //! in the order of the requests, so that a read sees the writes before it.
 //!
 //! Every database of the process is kept warm in one page cache
-//! ([`page_cache`]).
+//! ([`page_cache`]), and keeps the checkpoints it outgrows Restate with in
+//! the object store `RESTATE_SQL_OBJECT_STORE` names, if any
+//! ([`object_store`]). That store's requests are reqwest's, which need a
+//! tokio runtime: they alone are polled inside one ([`InRuntime`]).
 use crate::PyVM;
 use bytes::Bytes;
 use futures::channel::oneshot;
@@ -50,12 +55,15 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
 use restate_sdk_shared_core::sql::{self, Numeric, Value};
-use restate_sdk_shared_core::state::{self, KvStore, PageCache, PageCacheConfig};
+use restate_sdk_shared_core::state::{
+    self, BlobStore, KvStore, ObjectStoreBlobs, ObjectStoreL1, PageCache, PageCacheConfig,
+};
 use restate_sdk_shared_core::{Value as VmValue, VM};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::ops::Range;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -174,9 +182,9 @@ fn poll(py: Python<'_>, task: &Py<SqlTask>) -> PyResult<()> {
 
 /// Wakes a [`SqlTask`]: a poll on its loop, scheduled once however often it
 /// is woken before it runs. Woken on the loop's thread, it schedules it
-/// there; woken on another (the page cache's disk tier), it hands the
-/// scheduling to [`foreign_wakes`], so that the waking thread never waits
-/// for the GIL.
+/// there; woken on another (the page cache's disk tier, or the object
+/// store's tokio runtime), it hands the scheduling to [`foreign_wakes`], so
+/// that the waking thread never waits for the GIL.
 struct TaskWaker(Py<SqlTask>);
 
 impl Wake for TaskWaker {
@@ -594,7 +602,65 @@ fn cache_config() -> io::Result<Option<PageCacheConfig>> {
     }))
 }
 
+/// The process's object store, the one `RESTATE_SQL_OBJECT_STORE` names
+/// ([`ObjectStoreL1::from_env`]: `s3://bucket/path`, `gs://bucket/path`,
+/// `az://container/path` or `file:///a/directory`, with the provider's own
+/// `AWS_*`, `GOOGLE_*` or `AZURE_*` variables), made once: `None` when it is
+/// unset or empty, and every pack stays in Restate. Its databases share it,
+/// and its HTTP client. A value that names no store fails every open, with
+/// its message, as a page cache size that is not one does. Once a database
+/// has moved packs to the store, every process that serves it needs the same
+/// value, or its opens fail.
+fn object_store() -> io::Result<Option<ObjectStoreL1>> {
+    static L1: Mutex<Option<Option<ObjectStoreL1>>> = Mutex::new(None);
+    let mut l1 = L1.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(l1) = &*l1 {
+        return Ok(l1.clone());
+    }
+    Ok(l1.insert(ObjectStoreL1::from_env()?).clone())
+}
+
+/// A database's packs in the object store, each request polled inside
+/// pyo3-async-runtimes' tokio runtime (the tunnel's too). The store's HTTP
+/// client, reqwest, takes its connections and timers from the current
+/// runtime, and a call is polled on the asyncio loop's thread, outside any
+/// ([`SqlTask`]); the runtime's threads drive them, and wake the call as
+/// any other thread does ([`TaskWaker`]). Nothing else is polled inside it.
+struct InRuntime(ObjectStoreBlobs);
+
+impl BlobStore for InRuntime {
+    fn get_range<'a>(
+        &'a self,
+        key: &'a str,
+        range: Range<u64>,
+    ) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+        in_runtime(self.0.get_range(key, range))
+    }
+
+    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
+        in_runtime(self.0.put(key, value))
+    }
+
+    fn delete<'a>(&'a self, keys: &'a [String]) -> BoxFuture<'a, io::Result<()>> {
+        in_runtime(self.0.delete(keys))
+    }
+
+    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
+        in_runtime(self.0.list(prefix))
+    }
+}
+
+/// `future`, each poll inside the runtime's context.
+fn in_runtime<'a, T: 'a>(mut future: BoxFuture<'a, T>) -> BoxFuture<'a, T> {
+    let runtime = pyo3_async_runtimes::tokio::get_runtime();
+    Box::pin(std::future::poll_fn(move |cx| {
+        let _entered = runtime.enter();
+        future.as_mut().poll(cx)
+    }))
+}
+
 /// Open the database of `namespace`, kept warm in the process's page cache,
+/// with its packs past L0 in the process's object store, if any ([`object_store`]),
 /// over the invocation's `vm` if given (with `name`, the key's database
 /// `name`), or else over the store behind `dispatch` (`lists_keys` if it has
 /// `keys`): see the module's doc. See [`sql::Open::reader`] for a `reader`.
@@ -629,6 +695,10 @@ pub(crate) fn sql_open<'py>(
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         if let Some(cache) = &cache {
             open = open.cached(cache, &namespace);
+        }
+        let l1 = object_store().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        if let Some(l1) = l1 {
+            open = open.checkpoints(Arc::new(InRuntime(l1.blobs(&namespace))));
         }
         if reader {
             open = open.reader();

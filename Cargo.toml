@@ -17,13 +17,19 @@ pyo3-async-runtimes = { version = "0.30", features = ["tokio-runtime"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # The feature `sql` is the sessions' storage: the SQLite-compatible database kept in an
-# object's state, with its page cache (foyer); `tunnel` is Restate Cloud's.
-restate-sdk-shared-core = { version = "8.4.0", features = [
+# object's state, with its page cache (foyer); `object_store_*`, the object stores its
+# checkpoints may outgrow Restate into (RESTATE_SQL_OBJECT_STORE: S3, GCS, Azure, or a
+# directory); `tunnel` is Restate Cloud's. `aws_lc_rs` is the crypto of all of them (the
+# tunnel's TLS, request identity's signatures), as the object stores' must be aws-lc.
+restate-sdk-shared-core = { version = "8.5.0", features = [
     "request_identity",
     "sha2_random_seed",
-    "rust_crypto",
+    "aws_lc_rs",
     "tunnel",
     "sql",
+    "object_store_aws",
+    "object_store_gcp",
+    "object_store_azure",
 ] }
 
 # ASGI bridge for the tunnel
