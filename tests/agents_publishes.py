@@ -191,7 +191,9 @@ def openai_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **
 
 
 def adk_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **options: Any) -> AgentObject:
-    from google.adk.models import BaseLlm, LlmRequest, LlmResponse
+    from google.adk.models import BaseLlm
+    from google.adk.models.llm_request import LlmRequest
+    from google.adk.models.llm_response import LlmResponse
     from google.genai import types
 
     from restate.agents import adk

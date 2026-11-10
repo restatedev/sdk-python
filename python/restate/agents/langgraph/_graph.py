@@ -216,7 +216,8 @@ async def _copied(
     may not have loaded. If the graph trimmed the prompt away, they are the
     messages whose ids are not ``known``. ``known`` is the ids the
     conversation has, which this adds to; the messages the conversation gave
-    the graph are not copied back. Each copy that commits publishes (``Conversation.hold``).
+    the graph are not copied back. Tool messages that follow one another (a step's results) are copied in one
+    write. Each write that commits publishes (``Conversation.hold``).
     """
     at = next((i for i, m in enumerate(messages) if m.id == prompt), None)
     new = [
@@ -227,12 +228,23 @@ async def _copied(
         and m.id not in known
         and not m.id.startswith(_CARRIED)
     ]
+    results: list[ToolMessage] = []
+
+    async def stored() -> None:
+        # The results of a step in one write: one commit and one publish, however many tools ran.
+        if results:
+            await turn.append(*results)
+            known.update(typing.cast(str, m.id) for m in results)
+            results.clear()
+
     for message in new:
-        if isinstance(message, AIMessage):
-            await turn.append_reply(message)
-        else:
-            await turn.append(message)
+        if isinstance(message, ToolMessage):
+            results.append(message)
+            continue
+        await stored()
+        await turn.append_reply(message)
         known.add(typing.cast(str, message.id))
+    await stored()
 
 
 def _prompt_id(turn: Turn) -> str:

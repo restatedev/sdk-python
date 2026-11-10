@@ -1299,7 +1299,7 @@ class Conversation:
         handed back.
         """
         running = self.running()
-        open_ids = {call.id for call in running.open_calls()} if running is not None else set()
+        open_ids: set[str] = {call.id for call in running.open_calls()} if running is not None else set()
         parsed = [self.items.read(item) for item in items]
         latest = {call.id: i for i, read in enumerate(parsed) for call in read.calls}
 
