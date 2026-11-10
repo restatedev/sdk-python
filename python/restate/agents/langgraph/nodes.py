@@ -60,6 +60,7 @@ from pydantic import PydanticSchemaGenerationError, TypeAdapter, ValidationError
 from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
+from restate.agents._common import flush_held
 from restate.agents._tools import handler_of, input_type_of, inputs_of, keyed, run_workflow, untyped
 from restate.agents.langgraph._context import handler_context
 from restate.exceptions import TerminalError
@@ -86,7 +87,11 @@ class _Step(typing.NamedTuple):
 
 
 def _step(runtime: Runtime[Any], kind: str) -> _Step:
-    """Return the run of a node of ``kind``, from LangGraph's runtime and config."""
+    """Return the run of a node of ``kind``, from LangGraph's runtime and config.
+
+    Each node then writes the rows the turn holds back (``flush_held``) before its call, send or wait, which
+    outlives the attempt.
+    """
     ctx = handler_context(runtime.context)
     if ctx is None:
         raise TypeError(
@@ -200,6 +205,7 @@ def wait_for_signal(
 
     async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
         step = _step(runtime, "wait_for_signal")
+        await flush_held(step.ctx)
         # The wait's id starts with the invocation's (the same in each attempt), as the waits of tools do, so that a
         # turn that ends without it (killed, say) has it closed: the companion closes the waits whose ids start
         # with the turn's.
@@ -252,6 +258,7 @@ def workflow(
 
     async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
         step = _step(runtime, "workflow")
+        await flush_held(step.ctx)
         workflow_id = key(state) if key is not None else step.idempotency_key
         value = called.validated(input(state)) if input is not None else None
         result = await run_workflow(step.ctx, target, value, workflow_id)
@@ -295,6 +302,7 @@ def call(
 
     async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
         step = _step(runtime, "call")
+        await flush_held(step.ctx)
         value = called.validated(input(state)) if input is not None else None
         result = await untyped(step.ctx).call(
             target,
@@ -341,6 +349,7 @@ def send(
 
     async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
         step = _step(runtime, "send")
+        await flush_held(step.ctx)
         value = called.validated(input(state)) if input is not None else None
         untyped(step.ctx).send(
             target,
@@ -385,6 +394,7 @@ def subagent(
 
     async def node(state: Any, *, runtime: Runtime[Any]) -> dict[str, Any]:
         step = _step(runtime, "subagent")
+        await flush_held(step.ctx)
         agent_key = key(state) if key is not None else f"{step.ctx.key}.{step.node}"
         answer = await step.ctx.generic_call(
             agent_name, handler, message(state), key=agent_key, idempotency_key=step.idempotency_key

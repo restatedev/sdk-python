@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from restate.agents import _signals
 from restate.agents._api import Answering, Published, Steer
 from restate.agents._calls import settle
-from restate.agents._common import BUDGET, WINDOW, CompactHistory, Summarize, Window, refusal_of
+from restate.agents._common import BUDGET, WINDOW, CompactHistory, Summarize, Window, flush_held, refusal_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 from restate.sessions._link import Link
@@ -224,8 +224,10 @@ async def publish(ctx: SessionContext) -> None:
     """Publish a change to the conversation of ``ctx``: the revision increases, and the clients read it again.
 
     While a framework is answering (inside ``answering``), the calls whose
-    results are stored are first forgotten.
+    results are stored are first forgotten. The rows the conversation holds
+    back are written first: the clients read them once told to.
     """
+    await flush_held(ctx)
     stored = _ANSWERING.get(ctx)
     if stored is not None:
         await _settled(ctx, stored)

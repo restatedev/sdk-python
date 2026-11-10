@@ -118,7 +118,7 @@ from langgraph.types import Command, StateSnapshot
 from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
-from restate.agents._common import from_tool
+from restate.agents._common import flush_held, from_tool
 from restate.agents._conversation import Conversation, Run, Turn
 from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
@@ -313,6 +313,8 @@ async def _resumed(ctx: SessionContext, snapshot: StateSnapshot) -> dict[str, An
     pending = _interrupts(snapshot)
     if not pending:
         return None
+    # What the turn holds back is written before it waits: the waits outlive the attempt.
+    await flush_held(ctx)
     waits: dict[str, Any] = {}
     for interrupted in pending:
         wait_id = f"{ctx.request.id}:interrupt:{interrupted.id}"

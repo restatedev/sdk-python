@@ -960,6 +960,40 @@ def test_the_openai_sdks_error_for_a_missing_key_is_a_refusal(monkeypatch: pytes
     assert refused is not None and refused.status_code == 424
 
 
+async def test_a_turn_that_ends_with_a_reply_commits_the_reply_and_its_answer_at_once():
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    class Syncing(Host):
+        syncs: int = 0
+
+        async def sync(self) -> None:
+            await super().sync()
+            self.syncs += 1
+
+    host: list[Syncing] = []
+    asked: list[int] = []
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        asked.append(host[0].syncs)
+        return ModelResponse(parts=[TextPart("hello")])
+
+    asker = sessions.SessionObject("asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await pydantic_ai.prompt(ctx, text, model=FunctionModel(answer))
+
+    backend = Backend()
+    for text in ("first", "second"):
+        host[:] = [Syncing(backend, service="asker")]
+        assert await invoke(asker, "ask", host[0], request(), text) == "hello"
+    # The second turn (the conversation's tables exist): from the model's reply on, one commit, with the answer.
+    assert host[0].syncs - asked[-1] == 1
+
+
 async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatch: pytest.MonkeyPatch):
     from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel

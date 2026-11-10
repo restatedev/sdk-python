@@ -615,6 +615,54 @@ async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(
     assert replies == ["asked"]
 
 
+async def test_a_plain_turn_commits_its_final_response_end_of_agent_and_answer_at_once():
+    from google.adk.events import Event  # pylint: disable=import-outside-toplevel
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    class Syncing(Host):
+        syncs: int = 0
+
+        async def sync(self) -> None:
+            await super().sync()
+            self.syncs += 1
+
+    host: list[Syncing] = []
+    asked: list[int] = []
+
+    class Answering(BaseLlm):
+        model: str = "answering"
+
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            asked.append(host[0].syncs)
+            yield LlmResponse(content=types.Content(role="model", parts=[types.Part(text="hello")]))
+
+    asker = sessions.SessionObject("asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await adk.prompt(ctx, text, model=Answering())
+
+    @asker.handler
+    async def stored(ctx: sessions.SessionContext) -> list[bool]:
+        rows = await ctx.db.values("SELECT item FROM restate_agent_items ORDER BY n")
+        return [end_of_agent(Event.model_validate_json(str(item))) for [item] in rows]
+
+    backend = Backend()
+    for text in ("first", "second"):
+        host[:] = [Syncing(backend, service="asker", answers={"publish": b"null"})]
+        assert await invoke(asker, "ask", host[0], request(), text) == "hello"
+    # The second turn (the conversation's tables exist): from the model's response on, one commit, which has the
+    # final response, the end of the agent and the answer.
+    assert host[0].syncs - asked[-1] == 1
+    ends = await invoke(asker, "stored", Syncing(backend, service="asker"), request())
+    assert ends.count(True) == 2 and len(ends) == 4
+
+
 async def test_an_app_of_your_own_keeps_its_plugins_and_gets_this_packages_tools():
     from google.adk.apps import App  # pylint: disable=import-outside-toplevel
     from google.adk.plugins import BasePlugin  # pylint: disable=import-outside-toplevel

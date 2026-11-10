@@ -57,9 +57,11 @@ agent's ``messages`` and ``sync`` views render for clients (``_messages.py``).
 
 Each row has a ``seq``, which increases with every row written, so that a
 client can ask what changed since a cursor. Rows are only ever appended, in
-one transaction per step, but for a reply at the end that is dropped (to ask
-the model again), which is one range delete on the primary key; and a
-turn's answer is one update of its row, by its unique prompt id.
+one transaction per step (a step that no tool waits for, such as the final
+reply, is held for the next one: see ``_Ledger``), but for a reply at the end
+that is dropped (to ask the model again), which is one range delete on the
+primary key; and a turn's answer is one update of its row, by its unique
+prompt id.
 
 ``restate_agent_conversation_start`` has one row: the first position of the
 conversation (``clear`` deletes the rows, and positions carry on), the last
@@ -83,11 +85,12 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import contextlib
 import json
 import logging
 import time
 import typing
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol
 
@@ -103,6 +106,7 @@ from restate.agents._common import (
     Window,
     check_window,
     cut_off_result,
+    holding,
     is_cancellation,
     next_prompt_id,
     refusal_of,
@@ -110,7 +114,7 @@ from restate.agents._common import (
 )
 from restate.agents._turn import AttemptEnded, answering, settings_of, stop_signal_of
 from restate.exceptions import TerminalError
-from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext, Transaction
+from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext, SqlParam, Transaction
 from restate.sessions.internal import Schema, definition_of
 
 _logger = logging.getLogger(__name__)
@@ -470,6 +474,16 @@ class _Ledger:
 
     Writes take the lock one after another (tool calls run at once append
     their results one after another), so each gets positions of its own.
+
+    In ``answer_once``'s run (``Conversation.hold``), a step that no tool waits
+    for (a reply without tool calls, say) is held rather than written
+    (``held``): every write writes the held rows first, in its own
+    transaction, so that a turn's final reply commits with its answer, in one
+    flush rather than two. A held row is in memory only: lost in a crash, it
+    is made again by the retried attempt, which runs from what the database
+    holds. So the run writes them (``flush``) before anything another party
+    sees or that outlives the attempt: a publish, a Restate call of the
+    library, the attempt failing.
     """
 
     def __init__(self, db: Database, items: Items, start: Start, transcript: list[Entry], next: int, seq: int) -> None:
@@ -495,6 +509,37 @@ class _Ledger:
         """The latest snapshot, if the conversation was loaded with snapshots and has one."""
         self.compaction = False
         """Whether the run asked for the history to be compacted after the turn (``Conversation.compact_after``)."""
+        self.holds = False
+        """Whether steps that no tool waits for are held (``Conversation.hold``), rather than written at once."""
+        self.held: list[list[SqlParam]] = []
+        """The rows of the trajectories given positions but not written yet, in order of position (``_INSERT_STEP``'s
+        parameters): the next write writes them first."""
+
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> AsyncIterator[Transaction]:
+        """Open a transaction that writes the held rows first; hold the lock.
+
+        They are no longer held once it commits; if it rolls back, they still are.
+        """
+        async with self.db.transaction() as tx:
+            for row in self.held:
+                await tx.execute(_INSERT_STEP, row)
+            yield tx
+        self.held = []
+
+    async def write(self, *statements: tuple[str, Sequence[SqlParam]]) -> None:
+        """Run ``statements`` after the held rows, in one transaction; hold the lock.
+
+        A single statement (one held row, say, or an answer when no row is held) commits on its own.
+        """
+        if len(self.held) + len(statements) == 1:
+            sql, params = statements[0] if statements else (_INSERT_STEP, self.held[0])
+            await self.db.execute(sql, params)
+            self.held = []
+        elif self.held or statements:
+            async with self.transaction() as tx:
+                for sql, params in statements:
+                    await tx.execute(sql, params)
 
     def called(self, call_id: str) -> None:
         """Note a tool call's id, and log one that an earlier call has (once)."""
@@ -514,11 +559,12 @@ class _Ledger:
     async def store_snapshot(self, held: Sequence[Item], turn: int | None) -> Snapshot:
         """Store ``held`` as the snapshot that covers every position given so far, in turn ``turn``; hold the lock.
 
-        It takes the place of the earlier snapshots: only the latest is read.
+        It takes the place of the earlier snapshots: only the latest is read. The rows held so far, which it covers,
+        are written with it.
         """
         covers = self.next - 1
         stored = json.dumps([self.items.dump(item) for item in held])
-        async with self.db.transaction() as tx:
+        async with self.transaction() as tx:
             await tx.execute(f"DELETE FROM {SNAPSHOTS}")
             await tx.execute(f"INSERT INTO {SNAPSHOTS} (covers, turn, items) VALUES (?, ?, ?)", [covers, turn, stored])
         self.snapshot = _snapshot_of(self.items, covers, turn, held)
@@ -597,9 +643,15 @@ class Turn:
         """The turn's items, in order: the model's replies, the tool calls' results, ..."""
         return self._entries[1:]
 
-    def _add(self, entries: list[Entry]) -> None:
+    def _read(self, entries: list[Entry]) -> None:
+        """Read what each of ``entries`` says, and the tool calls and results it holds, once."""
         for entry in entries:
             entry.said, entry.calls, entry.results = self._ledger.items.read(entry.item)
+
+    def _add(self, entries: list[Entry], *, read: bool = True) -> None:
+        if read:
+            self._read(entries)
+        for entry in entries:
             entry.turn = self.n
             self._index(entry)
         self._entries.extend(entries)
@@ -748,7 +800,7 @@ class Turn:
                 Entry(n + i, steered_item(items, message["text"], message["id"]), steer=message["id"])
                 for i, message in enumerate(new)
             ]
-            async with ledger.db.transaction() as tx:
+            async with ledger.transaction() as tx:
                 for i, entry in enumerate(added, 1):
                     await tx.execute(
                         _INSERT_STEP, [entry.n, self.n, ledger.seq + i, items.dump(entry.item), None, None]
@@ -811,7 +863,9 @@ class Turn:
         async with ledger.lock:
             self._check_writable()
             start = replace(ledger.start, seq=ledger.seq)
-            async with ledger.db.transaction() as tx:
+            # The held rows it drops are never written; those before it are, with the deletes.
+            ledger.held = [row for row in ledger.held if typing.cast(int, row[0]) < reply]
+            async with ledger.transaction() as tx:
                 await tx.execute(f"DELETE FROM {STEPS} WHERE n >= ?", [reply])
                 await tx.execute(f"DELETE FROM {STEERED} WHERE n >= ?", [reply])
                 await restart(tx, start)
@@ -834,6 +888,8 @@ class Turn:
         ends with, whose id the ``messages`` view's summary gives it. A turn
         that ends otherwise gets ``answer`` as its reply first, from the agent
         the turn is with; an empty answer gets none, and has no message.
+
+        The final reply, which is held (see ``_Ledger``), commits with the update: in one transaction.
         """
         at = self._answer_message()
         if at is None and answer.strip():
@@ -845,7 +901,7 @@ class Turn:
             agent = self._agent()
             carried = self._carried.get("carried", ledger.carried()[1])
             seq = ledger.seq + 1
-            await ledger.db.execute(_ANSWER, [status, answer, agent, carried, at, seq, self.n])
+            await ledger.write((_ANSWER, [status, answer, agent, carried, at, seq, self.n]))
             ledger.seq = seq
             prompt = self.prompt
             prompt.status, prompt.answer, prompt.agent, prompt.carried = status, answer, agent, carried
@@ -903,7 +959,7 @@ class Turn:
             answered_seq = seq + len(added) + 1
             agent = self._agent()
             carried = self._carried.get("carried", ledger.carried()[1])
-            async with ledger.db.transaction() as tx:
+            async with ledger.transaction() as tx:
                 for i, entry in enumerate(added, 1):
                     await tx.execute(_INSERT_STEP, [entry.n, self.n, seq + i, items.dump(entry.item), None, None])
                 await tx.execute(_ANSWER, [status, note, agent, carried, at, answered_seq, self.n])
@@ -925,27 +981,30 @@ class Turn:
 
         The position is taken once the appends before have stored theirs, so
         appends that run at once each get places of their own.
+
+        Entries that hold no tool call nor result (a reply that ends the run,
+        say) are held, not written, in a conversation that holds them (see
+        ``_Ledger``): no tool waits for them, and the next write writes them.
+        Tool calls are written before their tools run, and results before the
+        model is asked again, with the rows held before them.
         """
         ledger = self._ledger
         async with ledger.lock:
             self._check_writable()
             n = ledger.next
             added = made(n)
-            rows = [
+            self._read(added)
+            rows: list[list[SqlParam]] = [
                 [e.n, self.n, ledger.seq + i, ledger.items.dump(e.item), e.reply, e.agent]
                 for i, e in enumerate(added, 1)
             ]
-            if len(rows) == 1:
-                # One statement commits on its own.
-                await ledger.db.execute(_INSERT_STEP, rows[0])
+            if ledger.holds and not any(e.calls or e.results for e in added):
+                ledger.held.extend(rows)
             else:
-                async with ledger.db.transaction() as tx:
-                    # The same SQL for each row: the database prepares it once.
-                    for row in rows:
-                        await tx.execute(_INSERT_STEP, row)
+                await ledger.write(*((_INSERT_STEP, row) for row in rows))
             ledger.seq += len(rows)
             ledger.next = n + len(rows)
-            self._add(added)
+            self._add(added, read=False)
             return n
 
 
@@ -1308,6 +1367,26 @@ class Conversation:
         """Whether the run asked for the history to be compacted after the turn (``compact_after``)."""
         return self._ledger.compaction
 
+    def hold(self) -> None:
+        """Hold the steps that no tool waits for, rather than write each at once: the next write writes them.
+
+        For a run that writes them (``flush``) before each publish and Restate
+        call of the library, and before its attempt fails: ``answer_once``'s.
+        A conversation that is written otherwise (step by step, from handlers
+        of its own) writes each step as it comes.
+        """
+        self._ledger.holds = True
+
+    async def flush(self) -> None:
+        """Write the rows the turn's run holds (see ``_Ledger``), if any.
+
+        Before whatever another party sees, or outlives the attempt: a publish
+        tells the clients to read them, and a Restate call is made once, while
+        a held row would be lost in a crash.
+        """
+        async with self._ledger.lock:
+            await self._ledger.write()
+
     async def seal(self) -> None:
         """Close the conversation to writes, once those under way are stored.
 
@@ -1498,9 +1577,22 @@ async def answer_once(
         answer, status = found
         return stored_answer(answer, status)
     conversation = await Conversation.load(ctx.db, items, window, budget, snapshots=settings.snapshots)
+    # The turn's final reply commits with its answer; the library's publishes and Restate calls write what the run
+    # holds back first.
+    conversation.hold()
+    holding(ctx, conversation.flush)
 
     async def work() -> str:
-        return await _answer(ctx, conversation, prompt_id, text, run, check)
+        try:
+            return await _answer(ctx, conversation, prompt_id, text, run, check)
+        except AttemptEnded:
+            # Its session ended with it: nothing more is stored.
+            raise
+        except Exception:
+            # The attempt fails, and its retry carries on from what is stored: so what the run made so far is,
+            # as when each step was written as it came. A turn that was closed holds nothing back.
+            await _flushed(conversation)
+            raise
 
     def stored(call_id: str, failed: str | None) -> bool:
         # The Restate calls of this invocation are its turn's.
@@ -1568,6 +1660,17 @@ async def _answer(
         raise refused from error
     await turn.answered(answer)
     return stored_answer(answer)
+
+
+async def _flushed(conversation: Conversation) -> None:
+    """Write what the run holds back, as its attempt fails: never in place of the attempt's own error.
+
+    The attempt's session may have ended with it (the error is its sync's, say), and then nothing more is stored.
+    """
+    try:
+        await conversation.flush()
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        _logger.debug("The rows the run held were not stored as its attempt failed: %r", error)
 
 
 async def settle(ctx: SessionContext, items: Items, invocation_id: str) -> bool:
