@@ -86,13 +86,14 @@ from __future__ import annotations
 import asyncio
 import bisect
 import contextlib
+import functools
 import json
 import logging
 import time
 import typing
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
 from restate.agents._api import Steer
 from restate.agents._calls import outcomes
@@ -585,6 +586,29 @@ class _Ledger:
         return (latest.agent, latest.carried) if latest is not None else (None, None)
 
 
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+
+def _shielded(write: Callable[_P, Coroutine[Any, Any, _T]]) -> Callable[_P, Coroutine[Any, Any, _T]]:
+    """Make ``write``, a write of the ledger, finish once it started, even if its caller is cancelled meanwhile.
+
+    A stop cancels the run's task (``Stop.guard``). Cancelled while it waits
+    for its commit, a write would leave its rows committed but the ledger's
+    bookkeeping (the next position, the last ``seq``, the held rows) as it
+    was, and the next write (the turn's close) would store over them. So a
+    write and its bookkeeping happen together, or not at all: the caller gets
+    the cancellation at once, and the write finishes meanwhile, holding the
+    ledger's lock, so that whatever writes next (the close) writes after it.
+    """
+
+    @functools.wraps(write)
+    async def shielded(*args: _P.args, **kwargs: _P.kwargs) -> _T:
+        return await asyncio.shield(write(*args, **kwargs))
+
+    return shielded
+
+
 _INSERT_STEP = f"INSERT INTO {STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)"
 """Store a step of a turn: its position, its turn's, its ``seq``, its item, and the reply and agent it is of."""
 
@@ -837,6 +861,7 @@ class Turn:
         if state is not None:
             self._carried["carried"] = state
 
+    @_shielded
     async def snapshot(self, items: Sequence[Item]) -> None:
         """Store ``items`` as a snapshot of the conversation, as the framework's own compaction left it.
 
@@ -851,6 +876,7 @@ class Turn:
             self._check_writable()
             await ledger.store_snapshot(list(items), self.n)
 
+    @_shielded
     async def drop(self, reply: int) -> None:
         """Drop the turn's reply ``reply``, and what came after it, to ask the model again.
 
@@ -890,6 +916,7 @@ class Turn:
             for entry in kept:
                 self._index(entry, note=False)
 
+    @_shielded
     async def answered(self, answer: str, status: Status = "answered") -> None:
         """Store the turn's ``answer``, how it ended (``status``) and what it carries, in one update of its row.
 
@@ -936,6 +963,7 @@ class Turn:
         replied = next((e.agent for e in reversed(self._entries) if e.reply is not None), None)
         return self._carried.get("agent") or replied or self._ledger.carried()[0]
 
+    @_shielded
     async def close(self, ctx: SessionContext, status: Status, note: str) -> None:
         """Close the turn (stopped, refused, failed, or ended once its invocation is gone) with ``note``.
 
@@ -950,18 +978,20 @@ class Turn:
         crash between them would leave the turn without its answer, and the
         next attempt would close it again, with a second note.
         """
-        if self.status is not None:
-            return
         ledger = self._ledger
         items = ledger.items
-        calls = self.open_calls()
-        returned = await outcomes(ctx, [call.id for call in calls], invocation_of(self.id))
-        closing = [
-            *items.results([(call, cut_off_result(returned, call.id, note)) for call in calls]),
-            items.reply(note),
-        ]
+        # The lock first: a write under way when the run was cancelled finishes (see ``_shielded``), and the turn
+        # closes after it, with the calls it made, or its answer.
         async with ledger.lock:
+            if self.status is not None:
+                return
             self._check_writable()
+            calls = self.open_calls()
+            returned = await outcomes(ctx, [call.id for call in calls], invocation_of(self.id))
+            closing = [
+                *items.results([(call, cut_off_result(returned, call.id, note)) for call in calls]),
+                items.reply(note),
+            ]
             n, seq = ledger.next, ledger.seq
             added = [Entry(n + i, item) for i, item in enumerate(closing)]
             at = added[-1].n  # the note: the turn's last message, and its answer
@@ -1006,6 +1036,7 @@ class Turn:
             await published()
         return n
 
+    @_shielded
     async def _insert(self, made: Callable[[int], list[Entry]]) -> int:
         """Store the entries that ``made`` makes from the next position, and return that position.
 
@@ -1368,6 +1399,7 @@ class Conversation:
 
     # --- Writing ---
 
+    @_shielded
     async def ask(self, prompt_id: str, text: str) -> Turn:
         """Start the turn of prompt ``prompt_id``, with ``text``, and return it: the latest turn now."""
         ledger = self._ledger
@@ -1389,6 +1421,7 @@ class Conversation:
             ledger.latest = turn
             return turn
 
+    @_shielded
     async def snapshot_between(self, items: Sequence[Item]) -> None:
         """Store ``items`` as a snapshot of the whole conversation, between turns (in ``compact``, say).
 
@@ -1433,6 +1466,7 @@ class Conversation:
         self._ledger.holds = True
         self._ledger.published = published
 
+    @_shielded
     async def flush(self) -> None:
         """Write the rows the turn's run holds (see ``_Ledger``), if any.
 

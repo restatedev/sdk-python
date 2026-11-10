@@ -1146,3 +1146,57 @@ async def test_appends_at_once_with_steps_held_back_get_positions_of_their_own_i
     assert positions == list(range(1, 8))
     assert [tuple(entry) for entry in stored] == seen[0]
     assert await invoke(obj, "seqs", _syncing(backend), request()) == list(range(2, 9))
+
+
+@pytest.mark.parametrize("write", ["append", "answered", "snapshot", "drop"])
+async def test_a_write_cancelled_while_it_commits_keeps_its_bookkeeping_and_the_turn_closes_after_it(write: str):
+    """A stop cancels the run (``Stop.guard``), here while a write waits for its commit: the write lands with the
+    ledger's positions, ``seq`` and held rows, and the turn's close stores after it rather than over it."""
+    gate: dict[str, Any] = {}
+
+    class Gated(Host):
+        async def sync(self) -> None:
+            if gate.pop("armed", False):
+                gate["blocked"].set()
+                await gate["release"].wait()
+            await super().sync()
+
+    async def run(conversation: Conversation) -> str:
+        turn = conversation.turn
+        await turn.append_reply(_calling("c1"))
+        await turn.append({"result": "c1", "output": "done"})
+        # Held: written with the next write.
+        await turn.append_reply({"role": "assistant", "text": "noted"})
+        writes = {
+            "append": lambda: turn.append_reply(_calling("c2")),
+            "answered": lambda: turn.answered("noted"),
+            "snapshot": lambda: turn.snapshot([{"role": "user", "text": "summary"}]),
+            "drop": lambda: turn.drop(typing.cast(int, turn.last_reply())),
+        }
+        gate.update(armed=True, blocked=asyncio.Event(), release=asyncio.Event())
+        task = asyncio.ensure_future(writes[write]())
+        await gate["blocked"].wait()
+        task.cancel()
+        gate["release"].set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        raise restate.TerminalError("cancelled", status_code=409)
+
+    obj = _turn_rows()
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    backend = Backend()
+    with pytest.raises(restate.TerminalError, match="cancelled"):
+        await invoke(obj, "ask", Gated(backend, service="asker", answers=PUBLISHED), request(), "hi")
+    [turn] = await invoke(obj, "rows", _syncing(backend), request())
+    texts = [item.get("text", item.get("output")) for _, item in turn["items"]]
+    expected = {
+        "append": (CANCELLED, ["", "done", "noted", "", CANCELLED, CANCELLED]),
+        "answered": ("noted", ["", "done", "noted"]),
+        "snapshot": (CANCELLED, ["", "done", "noted", CANCELLED]),
+        "drop": (CANCELLED, ["", "done", CANCELLED]),
+    }
+    assert (turn["answer"], texts) == expected[write]
