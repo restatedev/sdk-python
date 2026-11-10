@@ -17,12 +17,14 @@ durable, wrap them with `restate_context().run_typed("name", ...)` inside
 the tool body.
 """
 
+import os
 import typing
 
 from restate import Context, ObjectContext
 from restate.server_context import current_context
 
 from ._middleware import RestateMiddleware
+from ._stategraph import durable_scope, enable
 
 
 def restate_context() -> Context:
@@ -51,4 +53,16 @@ __all__ = [
     "RestateMiddleware",
     "restate_context",
     "restate_object_context",
+    "durable_scope",
+    "enable",
 ]
+
+
+# Zero-config: importing the LangGraph integration is enough. Parallel StateGraph
+# nodes journal deterministically with NO user code — no wrappers, no startup call.
+# Set RESTATE_STATEGRAPH_DETERMINISM=0 to opt out. Never let this break the import.
+if os.environ.get("RESTATE_STATEGRAPH_DETERMINISM", "1") != "0":
+    try:
+        enable()
+    except Exception:  # pragma: no cover  pylint: disable=broad-except
+        pass
