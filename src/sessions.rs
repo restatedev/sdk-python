@@ -13,10 +13,12 @@
 //! task that polls it. A call that needs nothing it must wait for, such as SQL
 //! on cached pages or a statement inside a transaction, returns its value at
 //! once, or raises its error ([`answer`]); one that waits returns an asyncio
-//! future, and is polled again on the loop as what it waits for completes. The
-//! one other thread is the page cache's disk tier (foyer's runtime): its
-//! wake-ups reach the loop through a thread of their own, so that the cache
-//! never waits for the GIL.
+//! future, and is polled again on the loop as what it waits for completes.
+//! Two other kinds of thread wake a call: the page cache's disk tier
+//! (foyer's runtime), and, with an object store, the tokio runtime that
+//! drives its requests' connections and timers ([`InRuntime`]). Their
+//! wake-ups reach the loop through a thread of their own ([`foreign_wakes`]),
+//! so that neither ever waits for the GIL.
 //!
 //! # The store
 //!
@@ -180,9 +182,9 @@ fn poll(py: Python<'_>, task: &Py<SqlTask>) -> PyResult<()> {
 
 /// Wakes a [`SqlTask`]: a poll on its loop, scheduled once however often it
 /// is woken before it runs. Woken on the loop's thread, it schedules it
-/// there; woken on another (the page cache's disk tier), it hands the
-/// scheduling to [`foreign_wakes`], so that the waking thread never waits
-/// for the GIL.
+/// there; woken on another (the page cache's disk tier, or the object
+/// store's tokio runtime), it hands the scheduling to [`foreign_wakes`], so
+/// that the waking thread never waits for the GIL.
 struct TaskWaker(Py<SqlTask>);
 
 impl Wake for TaskWaker {
