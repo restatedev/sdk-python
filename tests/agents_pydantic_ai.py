@@ -1301,3 +1301,40 @@ async def test_a_chat_without_snapshots_that_answers_with_prompt_takes_steered_m
         "and be brief",
         "and then?",
     ]
+
+
+async def test_a_tool_call_whose_id_an_earlier_turns_call_had_still_gets_its_result_stored():
+    """A provider may give a call the id of an earlier turn's call: its result is the turn's own, and stored."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    requests: list[list[ModelMessage]] = []
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        requests.append(list(messages))
+        last = messages[-1]
+        if isinstance(last, ModelRequest) and any(isinstance(p, UserPromptPart) for p in last.parts):
+            word = _prompts(messages)[-1]
+            return ModelResponse(parts=[ToolCallPart("lookup", {"about": word}, tool_call_id="call-1")])
+        return ModelResponse(parts=[TextPart("answered")])
+
+    def lookup(about: str) -> str:
+        """Look something up."""
+        return f"found {about}"
+
+    obj = pydantic_ai.agent("pai_reused_ids", model=FunctionModel(model), tools=[lookup])
+    backend = Backend()
+    for word in ("one", "two", "three"):
+        host = Host(backend, service=obj.name, answers={"publish": b"null", "start": b"null", "close": b"null"})
+        assert await invoke(obj, "chat", host, request(), word) == "answered"
+    # The last request has each turn's result, its own, and none taken for interrupted.
+    returned = [
+        str(part.content)
+        for m in requests[-1]
+        if isinstance(m, ModelRequest)
+        for part in m.parts
+        if isinstance(part, ToolReturnPart)
+    ]
+    assert returned == ["found one", "found two", "found three"]

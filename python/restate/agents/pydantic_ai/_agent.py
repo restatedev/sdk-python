@@ -346,13 +346,6 @@ def _feedback_of(message: ModelMessage) -> list[str]:
     return [to_json(p, bytes_mode="base64").decode() for p in message.parts if isinstance(p, RetryFeedbackPart)]
 
 
-def _result_ids(message: ModelMessage) -> set[str]:
-    """Return the ids of the tool calls whose results ``message`` holds."""
-    if not isinstance(message, ModelRequest):
-        return set()
-    return {p.tool_call_id for p in message.parts if isinstance(p, ToolReturnPart) and p.tool_call_id}
-
-
 class _Restate(AbstractCapability[Any]):
     """Make a Pydantic AI run durable in a Restate handler.
 
@@ -372,9 +365,7 @@ class _Restate(AbstractCapability[Any]):
         self.feedback = {feedback for m in history for feedback in _feedback_of(m)}
         """Pydantic AI's feedback that the conversation has (each ``RetryFeedbackPart``), as JSON."""
 
-    def _new(self, message: ModelMessage) -> bool:
-        if any(not self.conversation.knows_result(i) for i in _result_ids(message)):
-            return True
+    def _new_feedback(self, message: ModelMessage) -> bool:
         # Found by its parts, not the whole request: the run's request may be a stored one, merged or resumed.
         return any(feedback not in self.feedback for feedback in _feedback_of(message))
 
@@ -391,7 +382,8 @@ class _Restate(AbstractCapability[Any]):
         a request of its own. What it makes of them is the model's to see, not
         the conversation's.
         """
-        new = [m for m in messages if self._new(m)]
+        results = {id(m) for m in self.conversation.new_results(messages)}
+        new = [m for m in messages if id(m) in results or self._new_feedback(m)]
         if new:
             await self.conversation.turn.append(*new)
             self.feedback.update(feedback for m in new for feedback in _feedback_of(m))

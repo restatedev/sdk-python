@@ -1259,8 +1259,28 @@ class Conversation:
 
         Results are found by their calls' ids, not by their place: what a
         framework hands back may be trimmed, or be the whole conversation again.
+
+        But a provider may give a call of the turn being answered the id of an
+        earlier turn's call, whose result the window has: a result for a call
+        the turn has open is the turn's own once it comes after the latest
+        call of that id in ``items``. One before it is the earlier turn's,
+        handed back.
         """
-        return [item for item in items if any(not self.knows_result(r.id) for r in self.items.read(item).results)]
+        running = self.running()
+        open_ids = {call.id for call in running.open_calls()} if running is not None else set()
+        parsed = [self.items.read(item) for item in items]
+        latest = {call.id: i for i, read in enumerate(parsed) for call in read.calls}
+
+        def new(i: int, call_id: str) -> bool:
+            if call_id in open_ids and i > latest.get(call_id, -1):
+                return True
+            return not self.knows_result(call_id)
+
+        return [
+            item
+            for i, (item, read) in enumerate(zip(items, parsed, strict=True))
+            if any(new(i, r.id) for r in read.results)
+        ]
 
     def window(self) -> int:
         """Return the position of the window's first turn: the turns before it are in the transcript only."""
