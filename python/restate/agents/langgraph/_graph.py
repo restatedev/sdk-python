@@ -118,9 +118,8 @@ from langgraph.types import Command, StateSnapshot
 from pydantic_core import to_jsonable_python
 
 from restate.agents import _signals
-from restate.agents._common import from_tool
+from restate.agents._common import flush_held, from_tool
 from restate.agents._conversation import Conversation, Run, Turn
-from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
 from restate.agents.langgraph._context import running as running_graph
 from restate.agents.langgraph._errors import terminal_of
@@ -217,7 +216,8 @@ async def _copied(
     may not have loaded. If the graph trimmed the prompt away, they are the
     messages whose ids are not ``known``. ``known`` is the ids the
     conversation has, which this adds to; the messages the conversation gave
-    the graph are not copied back. Then publish.
+    the graph are not copied back. Tool messages that follow one another (a step's results) are copied in one
+    write. Each write that commits publishes (``Conversation.hold``).
     """
     at = next((i for i, m in enumerate(messages) if m.id == prompt), None)
     new = [
@@ -228,14 +228,23 @@ async def _copied(
         and m.id not in known
         and not m.id.startswith(_CARRIED)
     ]
+    results: list[ToolMessage] = []
+
+    async def stored() -> None:
+        # The results of a step in one write: one commit and one publish, however many tools ran.
+        if results:
+            await turn.append(*results)
+            known.update(typing.cast(str, m.id) for m in results)
+            results.clear()
+
     for message in new:
-        if isinstance(message, AIMessage):
-            await turn.append_reply(message)
-        else:
-            await turn.append(message)
+        if isinstance(message, ToolMessage):
+            results.append(message)
+            continue
+        await stored()
+        await turn.append_reply(message)
         known.add(typing.cast(str, message.id))
-    if new:
-        await stepped(ctx)
+    await stored()
 
 
 def _prompt_id(turn: Turn) -> str:
@@ -313,6 +322,8 @@ async def _resumed(ctx: SessionContext, snapshot: StateSnapshot) -> dict[str, An
     pending = _interrupts(snapshot)
     if not pending:
         return None
+    # What the turn holds back is written before it waits: the waits outlive the attempt.
+    await flush_held(ctx)
     waits: dict[str, Any] = {}
     for interrupted in pending:
         wait_id = f"{ctx.request.id}:interrupt:{interrupted.id}"

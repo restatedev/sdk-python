@@ -46,6 +46,7 @@ import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
+from restate.agents._common import flush_held
 from restate.sessions import SessionContext
 from restate.sessions.internal import Schema, ScopeKey
 
@@ -91,7 +92,12 @@ class _Calls:
 
 
 async def _store(ctx: SessionContext, state: _Calls) -> None:
-    """Store ``state``; it is committed before the call it records is made."""
+    """Store ``state``; it is committed before the call it records is made.
+
+    The rows the conversation holds back are written first: the call outlives the attempt, and what led to it must
+    too.
+    """
+    await flush_held(ctx)
     await ctx.db.execute(
         "INSERT OR REPLACE INTO restate_agent_calls (row, invocation, calls) VALUES (0, ?, ?)",
         [state.invocation, json.dumps(state.calls)],

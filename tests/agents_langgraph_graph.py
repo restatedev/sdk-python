@@ -48,7 +48,7 @@ from restate.agents import langgraph  # noqa: E402
 from restate.agents.internal import CANCELLED, ENDED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
 from restate.agents.langgraph._errors import terminal_of  # noqa: E402
-from restate.agents.langgraph._graph import at_breakpoint  # noqa: E402
+from restate.agents.langgraph._graph import _copied, at_breakpoint  # noqa: E402  # pyright: ignore[reportPrivateUsage]
 from restate.exceptions import TerminalError  # noqa: E402
 
 
@@ -869,6 +869,35 @@ async def test_a_graph_has_its_own_context_and_the_prebuilt_nodes_still_work(har
 async def test_output_validates_the_last_ai_message(harness: HarnessEnvironment):
     key = uuid.uuid4().hex
     assert (await chat(harness, "graph_planner", key, f"plan {key}")).json() == {"title": key}
+
+
+async def test_a_steps_tool_messages_are_copied_in_one_write():
+    """The results of tools that ran at once are one write of the conversation: one commit, and one publish."""
+    writes: list[list[str]] = []
+
+    class Recording:
+        async def append(self, *items: BaseMessage) -> None:
+            writes.append([f"result {m.id}" for m in items])
+
+        async def append_reply(self, *items: BaseMessage) -> int:
+            writes.append([f"reply {m.id}" for m in items])
+            return 0
+
+    calls = [{"name": "lookup", "args": {}, "id": f"c{i}"} for i in range(3)]
+    messages: list[BaseMessage] = [
+        HumanMessage("hi", id="prompt:1"),
+        AIMessage("", id="a1", tool_calls=calls),
+        *(ToolMessage("done", id=f"t{i}", tool_call_id=f"c{i}") for i in range(3)),
+        AIMessage("all three are done", id="a2"),
+    ]
+    known: set[str] = set()
+    await _copied(typing.cast(Any, None), typing.cast(Any, Recording()), known, messages, "prompt:1")
+    assert writes == [["reply a1"], ["result t0", "result t1", "result t2"], ["reply a2"]]
+    assert known == {"a1", "t0", "t1", "t2", "a2"}
+    # Results that end the state (the step's, before the model is asked again) are written too.
+    writes.clear()
+    await _copied(typing.cast(Any, None), typing.cast(Any, Recording()), set(), messages[:-1], "prompt:1")
+    assert writes == [["reply a1"], ["result t0", "result t1", "result t2"]]
 
 
 async def test_langgraph_streams_a_step_only_once_its_checkpoint_is_stored():

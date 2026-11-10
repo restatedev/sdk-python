@@ -65,6 +65,27 @@ def next_prompt_id(ctx: SessionContext) -> str:
     return ctx.request.id if n == 1 else f"{ctx.request.id}:{n}"
 
 
+_HELD: ScopeKey[Callable[[], Awaitable[None]]] = ScopeKey("the held rows of the conversation")
+
+
+def holding(ctx: SessionContext, flush: Callable[[], Awaitable[None]]) -> None:
+    """Have ``flush_held`` write, with ``flush``, the rows that the conversation of the attempt's turn holds back."""
+    _HELD.set(ctx, flush)
+
+
+async def flush_held(ctx: SessionContext) -> None:
+    """Write the rows that the conversation of the attempt's turn holds back, if any (see ``_conversation._Ledger``).
+
+    Call it before what another party sees or what outlives the attempt: a
+    publish, a Restate call or send. A held row is lost in a crash, and the
+    retried attempt makes it again; what was seen or called must not
+    depend on it.
+    """
+    flush = _HELD.get(ctx)
+    if flush is not None:
+        await flush()
+
+
 MODEL_ENV = "RESTATE_AGENT_MODEL"
 """The environment variable that names the model agents use when none is given."""
 

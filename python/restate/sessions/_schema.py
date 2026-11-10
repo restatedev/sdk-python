@@ -97,8 +97,22 @@ class Schema:
         Args:
             db: A session object's ``ctx.db``, or a database from ``database``.
         """
-        ensure = ensure_of(db)
-        await (ensure([self]) if ensure is not None else apply(db, [self]))
+        await ensure_schemas(db, [self])
+
+
+async def ensure_schemas(db: Any, schemas: Sequence[Schema]) -> None:
+    """Apply the migrations of ``schemas`` that ``db`` has not applied yet, as ``Schema.ensure`` does each.
+
+    Those missing are applied in one transaction: a database that lacks
+    several schemas (a key's first handler, say) gets them in one commit
+    rather than one each.
+
+    Args:
+        db: A session object's ``ctx.db``, or a database from ``database``.
+        schemas: The schemas.
+    """
+    ensure = ensure_of(db)
+    await (ensure(schemas) if ensure is not None else apply(db, schemas))
 
 
 Ensure = Callable[[Sequence[Schema]], Awaitable[None]]

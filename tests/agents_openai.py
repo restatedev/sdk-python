@@ -1573,3 +1573,47 @@ def test_steered_messages_keep_their_order_and_go_after_their_item_or_before_wha
     # The item they came after taken out: before the first item that came after them, in order; else at the end.
     assert spliced([hi, later], taken, seen) == [hi, first, second, later]
     assert spliced([hi], taken, seen) == [hi, first, second]
+
+
+async def test_a_tool_call_whose_id_an_earlier_turns_call_had_still_gets_its_output_stored():
+    """A provider may give a call the id of an earlier turn's call: its output is the turn's own, and stored."""
+
+    def answer(system: str | None, items: list[Item]) -> list[Output]:
+        calls_made = [i["call_id"] for i in items if i.get("type") == "function_call"]
+        outputs = [i["call_id"] for i in items if i.get("type") == "function_call_output"]
+        # As a strict provider checks a request: each call has its output.
+        assert len(calls_made) == len(outputs), f"a call has no output: {items}"
+        last = items[-1]
+        if last.get("role") == "user":
+            return [calls("call-1", "lookup", json.dumps({"about": last["content"]}))]
+        return [said(f"answer: {last['output']}")]
+
+    @tool
+    async def lookup(about: str) -> str:
+        """Look something up."""
+        return f"found {about}"
+
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents._conversation import STEPS  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    obj = asker(model=Scripted(answer), tools=[lookup])
+
+    @obj.handler
+    async def outputs(ctx: sessions.SessionContext, _: Any = None) -> list[str]:
+        stored = [json.loads(str(item)) for [item] in await ctx.db.values(f"SELECT item FROM {STEPS} ORDER BY n")]
+        return [item["output"] for item in stored if item.get("type") == "function_call_output"]
+
+    backend = Backend()
+    answers = [
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request(), w)
+        for w in ("one", "two", "three")
+    ]
+    assert answers == ["answer: found one", "answer: found two", "answer: found three"]
+    assert await invoke(obj, "outputs", Host(backend, service="asker"), request(), None) == [
+        "found one",
+        "found two",
+        "found three",
+    ]

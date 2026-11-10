@@ -957,3 +957,269 @@ async def test_the_last_position_and_seq_are_read_from_the_ends_of_the_tables_wi
     # they come from (both tables, and the seq and answered_seq indexes). A SELECT of several maxima scanned.
     assert scanned >= 20
     assert read <= 5
+
+
+# --- A step that no tool waits for commits with the next write --------------------------------------
+
+
+class Syncing(Host):
+    """A host that counts its syncs (each a commit of the database), and crashes at a publish once armed."""
+
+    syncs: int = 0
+    crash_at_publish: bool = False
+
+    async def sync(self) -> None:
+        await super().sync()
+        self.syncs += 1
+
+    def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None):
+        if handler == "publish" and self.crash_at_publish:
+            # The process crashes once the clients were told to read: every later sync fails.
+            self.crash_after(0)
+        return super().generic_call(service, handler, arg, key, idempotency_key, headers)
+
+
+def _turn_rows() -> sessions.SessionObject:
+    """An object whose ``ask`` answers with the run that ``runs`` holds, and whose ``rows`` reads each turn back."""
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def rows(ctx: sessions.SessionContext) -> list[dict[str, Any]]:
+        conversation = await Conversation.load(ctx.db, ITEMS, "all")
+        return [
+            {"answer": turn.answer, "items": [[entry.n, entry.item] for entry in turn.items]}
+            for turn in conversation.turns
+        ]
+
+    return obj
+
+
+def _syncing(backend: Backend) -> Syncing:
+    return Syncing(backend, service="asker", answers=PUBLISHED)
+
+
+async def test_a_turn_that_ends_with_a_reply_commits_the_reply_and_its_answer_at_once():
+    host: list[Syncing] = []
+    before: list[int] = []
+
+    async def run(conversation: Conversation) -> str:
+        before.append(host[0].syncs)
+        await conversation.turn.append_reply({"role": "assistant", "text": "hello"})
+        return "hello"
+
+    obj = _turn_rows()
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    backend = Backend()
+    for text in ("first", "second"):
+        host[:] = [_syncing(backend)]
+        assert await invoke(obj, "ask", host[0], request(), text) == "hello"
+    # The second turn (the conversation's tables exist): from the reply on, one commit, with the answer.
+    assert host[0].syncs - before[-1] == 1
+    turns = await invoke(obj, "rows", _syncing(backend), request())
+    assert [turn["answer"] for turn in turns] == ["hello", "hello"]
+
+
+async def test_a_crash_at_the_final_commit_stores_neither_the_reply_nor_the_answer_and_the_retry_asks_again():
+    runs: list[str] = []
+
+    async def run(conversation: Conversation) -> str:
+        runs.append("ran")
+        await conversation.turn.append_reply({"role": "assistant", "text": f"hello {len(runs)}"})
+        return f"hello {len(runs)}"
+
+    obj = _turn_rows()
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    crashed = 0
+    for syncs in range(20):
+        backend, invocation = Backend(), request()
+        runs.clear()
+        crashing = _syncing(backend)
+        crashing.crash_after(syncs)
+        try:
+            await invoke(obj, "ask", crashing, invocation, "hi")
+            break
+        except RuntimeError as error:
+            assert str(error) == "the sync failed"
+        stored = await invoke(obj, "rows", _syncing(backend), request())
+        # Never a reply without its answer: the two commit together, or not at all.
+        answered = [{"answer": "hello 1", "items": [[1, {"role": "assistant", "text": "hello 1"}]]}]
+        assert stored in ([], [{"answer": None, "items": []}], answered), stored
+        # A crash after the model answered, at the final commit: neither was stored.
+        crashed += len(runs) == 1 and stored != answered
+        answer = await invoke(obj, "ask", _syncing(backend), invocation, "hi")
+        # The retried attempt asked the model again, or returned the stored answer; one reply, one answer.
+        assert answer == f"hello {len(runs)}"
+        assert len(runs) == (2 if stored == [{"answer": None, "items": []}] else 1)
+        turns = await invoke(obj, "rows", _syncing(backend), request())
+        assert turns == [{"answer": answer, "items": [[1, {"role": "assistant", "text": answer}]]}]
+    assert crashed == 1
+
+
+async def test_a_reply_held_back_is_stored_before_a_publish_that_follows_it():
+    from restate.agents._turn import stepped  # pylint: disable=import-outside-toplevel
+
+    obj = _turn_rows()
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        async def run(conversation: Conversation) -> str:
+            await conversation.turn.append_reply({"role": "assistant", "text": "on it"})
+            # The clients are told to read the reply: it is stored by then, even if the process crashes after.
+            await stepped(ctx)
+            await conversation.turn.append_reply({"role": "assistant", "text": "done"})
+            return "done"
+
+        return await answer_once(ctx, text, ITEMS, run)
+
+    backend = Backend()
+    host = _syncing(backend)
+    host.crash_at_publish = True
+    with pytest.raises(RuntimeError, match="the sync failed"):
+        await invoke(obj, "ask", host, request(), "hi")
+    turns = await invoke(obj, "rows", _syncing(backend), request())
+    assert turns == [{"answer": None, "items": [[1, {"role": "assistant", "text": "on it"}]]}]
+
+
+async def test_a_run_that_fails_its_attempt_after_a_reply_leaves_the_reply_stored():
+    async def run(conversation: Conversation) -> str:
+        await conversation.turn.append_reply({"role": "assistant", "text": "half way"})
+        raise RuntimeError("the run failed")
+
+    obj = _turn_rows()
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    backend = Backend()
+    with pytest.raises(RuntimeError, match="the run failed"):
+        await invoke(obj, "ask", _syncing(backend), request(), "hi")
+    # The retry carries on from it, as from any step stored before the attempt failed.
+    turns = await invoke(obj, "rows", _syncing(backend), request())
+    assert turns == [{"answer": None, "items": [[1, {"role": "assistant", "text": "half way"}]]}]
+
+
+async def test_appends_at_once_with_steps_held_back_get_positions_of_their_own_in_order():
+    seen: list[list[tuple[int, Item]]] = []
+
+    async def run(conversation: Conversation) -> str:
+        turn = conversation.turn
+        await turn.append_reply(_calling("c1", "c2"))
+        rng = random.Random(7)
+
+        async def appended(item: Item) -> None:
+            for _ in range(rng.randrange(3)):
+                await asyncio.sleep(0)
+            await turn.append(item)
+
+        notes = [{"role": "assistant", "text": f"note {i}"} for i in range(4)]
+        results = [{"result": call_id, "output": "done"} for call_id in ("c1", "c2")]
+        await asyncio.gather(*(appended(item) for item in [notes[0], results[0], notes[1], notes[2], results[1]]))
+        await turn.append_reply(notes[3])
+        seen.append([(entry.n, entry.item) for entry in turn.items])
+        return "note 3"
+
+    obj = _turn_rows()
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    @obj.handler
+    async def seqs(ctx: sessions.SessionContext) -> list[Any]:
+        return [row[0] for row in await ctx.db.values(f"SELECT seq FROM {STEPS} ORDER BY n")]
+
+    backend = Backend()
+    assert await invoke(obj, "ask", _syncing(backend), request(), "hi") == "note 3"
+    [turn] = await invoke(obj, "rows", _syncing(backend), request())
+    stored = [(n, item) for n, item in turn["items"]]
+    positions = [n for n, _ in stored]
+    # Each item has a position of its own, the next one, and is stored where the run saw it, its seq in order.
+    assert positions == list(range(1, 8))
+    assert [tuple(entry) for entry in stored] == seen[0]
+    assert await invoke(obj, "seqs", _syncing(backend), request()) == list(range(2, 9))
+
+
+@pytest.mark.parametrize("write", ["append", "answered", "snapshot", "drop"])
+async def test_a_write_cancelled_while_it_commits_keeps_its_bookkeeping_and_the_turn_closes_after_it(write: str):
+    """A stop cancels the run (``Stop.guard``), here while a write waits for its commit: the write lands with the
+    ledger's positions, ``seq`` and held rows, and the turn's close stores after it rather than over it."""
+    gate: dict[str, Any] = {}
+
+    class Gated(Host):
+        async def sync(self) -> None:
+            if gate.pop("armed", False):
+                gate["blocked"].set()
+                await gate["release"].wait()
+            await super().sync()
+
+    async def run(conversation: Conversation) -> str:
+        turn = conversation.turn
+        await turn.append_reply(_calling("c1"))
+        await turn.append({"result": "c1", "output": "done"})
+        # Held: written with the next write.
+        await turn.append_reply({"role": "assistant", "text": "noted"})
+        writes = {
+            "append": lambda: turn.append_reply(_calling("c2")),
+            "answered": lambda: turn.answered("noted"),
+            "snapshot": lambda: turn.snapshot([{"role": "user", "text": "summary"}]),
+            "drop": lambda: turn.drop(typing.cast(int, turn.last_reply())),
+        }
+        gate.update(armed=True, blocked=asyncio.Event(), release=asyncio.Event())
+        task = asyncio.ensure_future(writes[write]())
+        await gate["blocked"].wait()
+        task.cancel()
+        gate["release"].set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        raise restate.TerminalError("cancelled", status_code=409)
+
+    obj = _turn_rows()
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    backend = Backend()
+    with pytest.raises(restate.TerminalError, match="cancelled"):
+        await invoke(obj, "ask", Gated(backend, service="asker", answers=PUBLISHED), request(), "hi")
+    [turn] = await invoke(obj, "rows", _syncing(backend), request())
+    texts = [item.get("text", item.get("output")) for _, item in turn["items"]]
+    expected = {
+        "append": (CANCELLED, ["", "done", "noted", "", CANCELLED, CANCELLED]),
+        "answered": ("noted", ["", "done", "noted"]),
+        "snapshot": (CANCELLED, ["", "done", "noted", CANCELLED]),
+        "drop": (CANCELLED, ["", "done", CANCELLED]),
+    }
+    assert (turn["answer"], texts) == expected[write]
+
+
+async def test_a_keys_first_turn_applies_its_schemas_in_one_commit():
+    """The conversation's tables and the tool calls' (``_calls.py``), which the turn reads as it ends, are made in
+    one commit, though no tool runs: a key's first turn pays one commit for its schemas, not two."""
+
+    async def run(conversation: Conversation) -> str:
+        await conversation.turn.append_reply({"role": "assistant", "text": "hello"})
+        return "hello"
+
+    obj = _turn_rows()
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    backend = Backend()
+    syncs: list[int] = []
+    for text in ("first", "second"):
+        host = _syncing(backend)
+        assert await invoke(obj, "ask", host, request(), text) == "hello"
+        syncs.append(host.syncs)
+    assert syncs[0] - syncs[1] == 1

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from restate.agents import _signals
 from restate.agents._api import Answering, Published, Steer
 from restate.agents._calls import settle
-from restate.agents._common import BUDGET, WINDOW, CompactHistory, Summarize, Window, refusal_of
+from restate.agents._common import BUDGET, WINDOW, CompactHistory, Summarize, Window, flush_held, refusal_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 from restate.sessions._link import Link
@@ -171,10 +171,11 @@ def _unfollowed(ctx: SessionContext) -> bool:
 class Inbox:
     """The messages steered to a ``chat`` turn that it has not taken yet, as the companion last published them.
 
-    The companion returns them from every ``publish``, which a turn makes at
-    each tool call's start and end: so the turn knows of them without a call
-    of its own, and finds them at its next step (``take_steers``). The
-    newest revision wins, as tool calls that run at once publish at once.
+    The companion returns them from every ``publish``, which a turn makes as
+    it starts and after each step it stores that a tool waits for (a reply
+    with tool calls, the tools' results): so the turn knows of them without a
+    call of its own, and finds them at its next step (``take_steers``). The
+    newest revision wins, as writes that run at once publish at once.
     """
 
     revision: int = -1
@@ -202,7 +203,7 @@ _ANSWERING: ScopeKey[Stored] = ScopeKey("answering")
 """What the attempt's turn has stored, while it answers."""
 
 _SETTLING: ScopeKey[asyncio.Future[None]] = ScopeKey("settling")
-"""The attempt's latest settling of calls; they run one after another, as parallel tool calls publish at once."""
+"""The attempt's latest settling of calls; they run one after another, as parallel tool calls settle at once."""
 
 
 def _settled(ctx: SessionContext, stored: Stored) -> Awaitable[None]:
@@ -224,8 +225,10 @@ async def publish(ctx: SessionContext) -> None:
     """Publish a change to the conversation of ``ctx``: the revision increases, and the clients read it again.
 
     While a framework is answering (inside ``answering``), the calls whose
-    results are stored are first forgotten.
+    results are stored are first forgotten. The rows the conversation holds
+    back are written first: the clients read them once told to.
     """
+    await flush_held(ctx)
     stored = _ANSWERING.get(ctx)
     if stored is not None:
         await _settled(ctx, stored)
@@ -236,37 +239,40 @@ async def publish(ctx: SessionContext) -> None:
 
 
 async def stepped(ctx: SessionContext) -> None:
-    """Publish a step of the turn, unless the agent runs in the background."""
+    """Publish a step of the turn, unless the agent runs in the background.
+
+    ``answer_once`` has it made after each write of the turn's steps that
+    commits (see ``Conversation.hold``): a reply with tool calls, the tools'
+    results.
+    """
     if not _unfollowed(ctx):
         await publish(ctx)
 
 
 async def tool_call_started(ctx: SessionContext) -> None:
-    """Publish that a tool call of the turn is starting.
+    """Forget the earlier calls whose results are stored, before a tool call of the turn makes calls of its own.
 
-    Publishing also forgets the earlier calls whose results are stored, before
-    the tool makes calls of its own. A background agent only forgets them,
-    without publishing.
+    It publishes nothing: the turn publishes once the tool call is stored
+    (with its reply), and once its result is.
     """
-    if not _unfollowed(ctx):
-        await publish(ctx)
-        return
     stored = _ANSWERING.get(ctx)
     if stored is not None:
         await _settled(ctx, stored)
 
 
 async def tool_call_ended(ctx: SessionContext) -> None:
-    """Publish that a tool call of the turn has ended, unless the agent runs in the background."""
-    await stepped(ctx)
+    """Do nothing: kept for integrations of an earlier version, which called it as a tool call ended.
+
+    The turn publishes once the call's result is stored, not as the call ends.
+    """
 
 
 async def answering(ctx: SessionContext, stored: Stored, work: Callable[[], Awaitable[T]]) -> T:
     """Run ``work``, a framework's turn, forgetting the calls whose results it stores as it goes.
 
-    Every publish while ``work`` runs (such as a tool call's start and end),
-    and the end of ``work``, forget the Restate calls of the tool calls whose
-    results ``stored`` says are stored (see ``_calls.py``).
+    Every publish while ``work`` runs (after a step is stored), each tool
+    call's start, and the end of ``work``, forget the Restate calls of the
+    tool calls whose results ``stored`` says are stored (see ``_calls.py``).
 
     Args:
         ctx: The handler's context.
@@ -308,7 +314,8 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     and cancels the calls its tools made; the handler then fails with the
     cancellation. If the attempt ends first, the turn stops with
     ``AttemptEnded`` and the next attempt carries on. The turn publishes when
-    it starts and when it ends.
+    it starts (the companion's ``start`` does) and when it ends (its
+    ``close``).
 
     An error ends the turn for good if it is a ``TerminalError``, or a model
     provider's refusal (``refusal_of``), as a 424. Any other error fails the
@@ -329,9 +336,17 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
         _INBOX.set(ctx, Inbox())
     # From here until the turn closes, the companion knows about it: `status` and `stop` ask it.
     # The agent has ``settle`` (``chat()`` adds it), so the companion may send it this turn once it is gone.
-    started: _signals.Started = {**turn, "settles": True, "steers": steers}
-    await ctx.call(_signals.start, started, key=companion)
-    await stepped(ctx)
+    followed = not _unfollowed(ctx)
+    started: _signals.Started = {**turn, "settles": True, "steers": steers, "publishes": followed}
+    published = await ctx.call(_signals.start, started, key=companion)
+    if isinstance(published, dict):
+        # The companion published the turn's start as it started it.
+        inbox = _INBOX.get(ctx)
+        if inbox is not None:
+            inbox.saw(published)
+    else:
+        # A companion that does not publish as it starts a turn (of an earlier deployment): publish here.
+        await stepped(ctx)
 
     async def end() -> None:
         # Have the companion close the turn, which publishes its last change

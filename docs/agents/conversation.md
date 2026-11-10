@@ -524,9 +524,10 @@ invocation (the next invocation's first call replaces it):
   again under the same id; a new call with the same input (the model asking
   again after the first's answer) waits anew, and never gets an earlier
   call's approval or denial.
-- **Forgetting.** At each publish and before each tool call, a record whose
-  Restate call returned is forgotten once the transcript has its result
-  under the latest id it was made with: a success, or the very error the call
+- **Forgetting.** At each publish (after each write of steps that commits)
+  and before each tool call, a record whose Restate call returned is
+  forgotten once the transcript has its result under the latest id it was
+  made with: a success, or the very error the call
   returned. Another error in the transcript (one the framework made up for a
   cut-off call) doesn't count: the call may be made again under a new id, and
   must find its record.
@@ -550,6 +551,9 @@ invocation (the next invocation's first call replaces it):
   discards, so a key never written reads as empty tables. The names are
   `restate_agents.turns`, `restate-agents.calls`, `restate_agents.langgraph`,
   `restate_agents.pydantic_ai` and `restate_agents.pydantic_ai.memory`.
+  A turn (`answer_once`) applies the conversation's and the tool calls'
+  together (`ensure_schemas`), as it reads the call records as it ends,
+  whether or not a tool ran: a key's first turn pays one schema commit.
 - **Migrations.** `restate.sessions`' rule is: never change a migration that
   has run; append one. This release is the exception (D1 in
   [What we learned](learnings.md#decisions)): its schemas are written for new

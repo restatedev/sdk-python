@@ -172,7 +172,7 @@ from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._steering import take_steers
 from restate.agents._tools import Tool, current_call, tools_in, wait_for
-from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
+from restate.agents._turn import stop_signal_of, tool_call_started
 from restate.agents.pydantic_ai._stores import TurnsHistorySource, calling, conversation_id_of
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
@@ -346,19 +346,13 @@ def _feedback_of(message: ModelMessage) -> list[str]:
     return [to_json(p, bytes_mode="base64").decode() for p in message.parts if isinstance(p, RetryFeedbackPart)]
 
 
-def _result_ids(message: ModelMessage) -> set[str]:
-    """Return the ids of the tool calls whose results ``message`` holds."""
-    if not isinstance(message, ModelRequest):
-        return set()
-    return {p.tool_call_id for p in message.parts if isinstance(p, ToolReturnPart) and p.tool_call_id}
-
-
 class _Restate(AbstractCapability[Any]):
     """Make a Pydantic AI run durable in a Restate handler.
 
     It stores the requests before each model request and each response as it
-    arrives, and publishes each tool call as it starts and ends for clients
-    that follow the conversation. A tool's ``restate.TerminalError`` becomes its
+    arrives (each write that commits publishes, for clients that follow the
+    conversation), and settles the earlier calls as each tool call starts. A
+    tool's ``restate.TerminalError`` becomes its
     answer to the model; any other error fails the attempt. It records the
     errors of model requests, the only ones that can be a refusal.
     """
@@ -371,9 +365,7 @@ class _Restate(AbstractCapability[Any]):
         self.feedback = {feedback for m in history for feedback in _feedback_of(m)}
         """Pydantic AI's feedback that the conversation has (each ``RetryFeedbackPart``), as JSON."""
 
-    def _new(self, message: ModelMessage) -> bool:
-        if any(not self.conversation.knows_result(i) for i in _result_ids(message)):
-            return True
+    def _new_feedback(self, message: ModelMessage) -> bool:
         # Found by its parts, not the whole request: the run's request may be a stored one, merged or resumed.
         return any(feedback not in self.feedback for feedback in _feedback_of(message))
 
@@ -390,7 +382,8 @@ class _Restate(AbstractCapability[Any]):
         a request of its own. What it makes of them is the model's to see, not
         the conversation's.
         """
-        new = [m for m in messages if self._new(m)]
+        results = {id(m) for m in self.conversation.new_results(messages)}
+        new = [m for m in messages if id(m) in results or self._new_feedback(m)]
         if new:
             await self.conversation.turn.append(*new)
             self.feedback.update(feedback for m in new for feedback in _feedback_of(m))
@@ -426,7 +419,6 @@ class _Restate(AbstractCapability[Any]):
         self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any, result: Any
     ) -> Any:
         calling(None)
-        await tool_call_ended(self.ctx)
         return result
 
     async def handle_deferred_tool_calls(
@@ -464,7 +456,6 @@ class _Restate(AbstractCapability[Any]):
         if stop is not None and stop.reason is not None:
             raise stop.reason from error
         if isinstance(error, TerminalError) and not is_cancellation(error):
-            await tool_call_ended(self.ctx)
             return f"Error: {error.message}"
         # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
         from_tool(self.ctx, error)

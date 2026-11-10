@@ -960,6 +960,40 @@ def test_the_openai_sdks_error_for_a_missing_key_is_a_refusal(monkeypatch: pytes
     assert refused is not None and refused.status_code == 424
 
 
+async def test_a_turn_that_ends_with_a_reply_commits_the_reply_and_its_answer_at_once():
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    class Syncing(Host):
+        syncs: int = 0
+
+        async def sync(self) -> None:
+            await super().sync()
+            self.syncs += 1
+
+    host: list[Syncing] = []
+    asked: list[int] = []
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        asked.append(host[0].syncs)
+        return ModelResponse(parts=[TextPart("hello")])
+
+    asker = sessions.SessionObject("asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await pydantic_ai.prompt(ctx, text, model=FunctionModel(answer))
+
+    backend = Backend()
+    for text in ("first", "second"):
+        host[:] = [Syncing(backend, service="asker")]
+        assert await invoke(asker, "ask", host[0], request(), text) == "hello"
+    # The second turn (the conversation's tables exist): from the model's reply on, one commit, with the answer.
+    assert host[0].syncs - asked[-1] == 1
+
+
 async def test_an_answer_stored_before_a_crash_is_not_asked_for_again(monkeypatch: pytest.MonkeyPatch):
     from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
     from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
@@ -1267,3 +1301,40 @@ async def test_a_chat_without_snapshots_that_answers_with_prompt_takes_steered_m
         "and be brief",
         "and then?",
     ]
+
+
+async def test_a_tool_call_whose_id_an_earlier_turns_call_had_still_gets_its_result_stored():
+    """A provider may give a call the id of an earlier turn's call: its result is the turn's own, and stored."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    requests: list[list[ModelMessage]] = []
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        requests.append(list(messages))
+        last = messages[-1]
+        if isinstance(last, ModelRequest) and any(isinstance(p, UserPromptPart) for p in last.parts):
+            word = _prompts(messages)[-1]
+            return ModelResponse(parts=[ToolCallPart("lookup", {"about": word}, tool_call_id="call-1")])
+        return ModelResponse(parts=[TextPart("answered")])
+
+    def lookup(about: str) -> str:
+        """Look something up."""
+        return f"found {about}"
+
+    obj = pydantic_ai.agent("pai_reused_ids", model=FunctionModel(model), tools=[lookup])
+    backend = Backend()
+    for word in ("one", "two", "three"):
+        host = Host(backend, service=obj.name, answers={"publish": b"null", "start": b"null", "close": b"null"})
+        assert await invoke(obj, "chat", host, request(), word) == "answered"
+    # The last request has each turn's result, its own, and none taken for interrupted.
+    returned = [
+        str(part.content)
+        for m in requests[-1]
+        if isinstance(m, ModelRequest)
+        for part in m.parts
+        if isinstance(part, ToolReturnPart)
+    ]
+    assert returned == ["found one", "found two", "found three"]

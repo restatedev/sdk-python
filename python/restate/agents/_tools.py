@@ -41,7 +41,7 @@ from typing import Any
 from restate.agents import _signals
 from restate.agents._calls import call_of
 from restate.agents._common import PerSession, ToolError, configured
-from restate.agents._turn import stop_signal_of, tool_call_ended, tool_call_started
+from restate.agents._turn import stop_signal_of, tool_call_started
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable
 from restate.sessions import SessionContext
@@ -184,9 +184,9 @@ class Tool:
 async def run_tool(tool: Tool, args: object, call: ToolCall) -> str:
     """Run ``tool`` for a tool call, the way a framework integration should.
 
-    Unlike ``Tool.run``, it publishes the tool call's start and end to the
-    clients that follow the conversation, and first settles the earlier calls
-    whose results the framework has stored.
+    Unlike ``Tool.run``, it first settles the earlier calls whose results the
+    framework has stored (``tool_call_started``). It publishes nothing: the
+    turn publishes as it stores the call, and its result.
 
     Args:
         tool: The tool to run.
@@ -197,10 +197,7 @@ async def run_tool(tool: Tool, args: object, call: ToolCall) -> str:
         The tool's result as text, as ``Tool.run`` returns it.
     """
     await tool_call_started(call.ctx)
-    try:
-        return await tool.run(args, call)
-    finally:
-        await tool_call_ended(call.ctx)
+    return await tool.run(args, call)
 
 
 def _text(value: object) -> str:

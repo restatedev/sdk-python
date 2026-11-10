@@ -176,33 +176,44 @@ and it leans on the harness wherever a capability does what our code would
 ### The design
 
 **History from snapshots.** The harness's compaction replaces our window,
-budget and summaries. When compaction rewrote the history, `_Restate`, which
-runs innermost, stores the rewritten list as a snapshot of the turn before the
-request goes out; the next turn starts from it, and its input only grows until
-the next compaction. An `Agent` of your own with no compaction capability gets
-the same default (Q3).
+budget and summaries. `_Restate` comes first of the run's capabilities (it
+has no position of its own): before each request it stores the run's new tool
+results, and after it the response. When compaction rewrote the
+history, `_Snapshots`, which runs after every other capability's
+`before_model_request` but `_Steering`'s, stores the rewritten list as a
+snapshot of the turn before the request goes out; the next turn starts from
+it, and its input only grows until the next compaction. `_Steering`, innermost
+inside it, takes the messages steered to the turn last, so that a snapshot
+this request stores comes before them. An `Agent` of your own with no
+compaction capability gets the same default (Q3).
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant R as Run (turn N)
+  participant G as _Restate (first)
   participant T as TieredCompaction
-  participant G as _Restate (innermost)
+  participant S as _Snapshots
+  participant St as _Steering (innermost)
   participant DB as Key's database
   participant M as Model
   R->>DB: load: the latest snapshot, then every row after it, whole
   loop each model request
-    R->>T: before_model_request
+    R->>G: before_model_request
+    G->>DB: store new tool results, by call id
+    G->>T: before_model_request
     opt over the target
       T->>T: clamp, clear old tool results, then summarize if needed
     end
-    T->>G: before_model_request (the messages as they will be sent)
+    T->>S: before_model_request (the messages as they will be sent)
     opt the history was rewritten, not extended
-      G->>DB: store a snapshot of the turn: the compacted history, minus system prompt parts
+      S->>DB: store a snapshot of the turn: the compacted history, minus system prompt parts
     end
-    G->>DB: store new tool results, by call id
-    G->>M: the request
-    M-->>G: the response
+    S->>St: before_model_request
+    St->>DB: store the messages steered to the turn (take_steers), then enqueue them
+    R->>M: the request, with the enqueued messages
+    M-->>R: the response
+    R->>G: after_model_request
     G->>DB: store the response
   end
   Note over DB: turn N+1 loads from this snapshot: its input only grows until the next compaction
@@ -265,7 +276,9 @@ handlers have no `ctx.run`; it disables harness features), `StepPersistence`
   order in the call. Replaying only the writes isn't enough: the call's
   earlier writes are committed, and reading them changes what it writes next
   (which steps a status change unblocks), so its writes no longer line up.
-  This is what the harness's own durable stores assume ("the store's
+  A read's journal row is kept in memory and written with the call's next
+  write: only a write makes it matter, so a call that only reads commits
+  nothing. This is what the harness's own durable stores assume ("the store's
   recorded result keeps the original ids").
 - **A snapshot is the history the model will get,** so: strip system prompt
   parts (or `ReinjectSystemPrompt` stops reinjecting it); drop the input

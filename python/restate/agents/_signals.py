@@ -117,6 +117,10 @@ class Started(Answering, total=False):
     steers: bool
     """Whether the turn takes steered messages at its steps (``steer``). A turn that does not say so (of another
     SDK, or of an agent whose framework cannot take them) gets none: each is answered as a turn of its own."""
+    publishes: bool
+    """Whether ``start`` publishes the turn's start, and returns what ``publish`` returns: a followed turn of this
+    SDK's agents, which then makes no publish of its own. A turn that does not say so (of another SDK, or of an
+    agent that runs in the background) is not published by ``start``, which returns nothing."""
 
 
 class _Held(TypedDict):
@@ -178,9 +182,11 @@ async def _publish(ctx: ObjectContext) -> Notifications:
     revision = await _get(ctx, "revision", 0) + 1
     ctx.set("revision", revision)
     notified: Notifications = {"revision": revision}
-    for watching in await _get(ctx, "watching", typing.cast(list[_Watching], [])):
-        ctx.resolve_awakeable(watching["awakeable"], notified)
-    ctx.clear("watching")
+    watching = await _get(ctx, "watching", typing.cast(list[_Watching], []))
+    for one in watching:
+        ctx.resolve_awakeable(one["awakeable"], notified)
+    if watching:
+        ctx.clear("watching")
     return notified
 
 
@@ -339,21 +345,27 @@ async def listen(ctx: ObjectContext, waiting: _WaitingOn) -> None:
 
 
 @signals.handler(ingress_private=True)
-async def start(ctx: ObjectContext, turn: Started) -> None:
-    """Record that the agent's ``chat`` started answering ``turn``.
+async def start(ctx: ObjectContext, turn: Started) -> Published | None:
+    """Record that the agent's ``chat`` started answering ``turn``, and publish it if the turn ``publishes``.
 
     A retry of the same invocation keeps the original start time. A previous
     turn that never closed itself (because its invocation was killed) is
     closed now. ``awaitTurn`` then watches the new turn, so that it is closed
     even if no other turn follows it.
+
+    A turn that ``publishes`` gets what ``publish`` returns (the turn's first
+    publish, made here rather than by a call of its own); any other gets
+    ``None``, and publishes itself if it is followed.
     """
     before = await _get(ctx, "turn", typing.cast(Started | None, None))
-    if before is not None and before["invocationId"] == turn["invocationId"]:
-        return
-    if before is not None:
-        await _closed(ctx, before["invocationId"], gone=True)
-    ctx.set("turn", turn)
-    ctx.object_send(await_turn, ctx.key(), turn["invocationId"])
+    if before is None or before["invocationId"] != turn["invocationId"]:
+        if before is not None:
+            await _closed(ctx, before["invocationId"], gone=True)
+        ctx.set("turn", turn)
+        ctx.object_send(await_turn, ctx.key(), turn["invocationId"])
+    if not turn.get("publishes", False):
+        return None
+    return await _published(ctx)
 
 
 @signals.handler(
@@ -461,9 +473,15 @@ async def publish(ctx: ObjectContext) -> Published:
     """Increase the conversation's revision after a change, and wake up every waiting ``watch``.
 
     It returns the new revision, and the messages steered to the turn being
-    answered that it has not taken yet, if any: a turn publishes at each tool
-    call's start and end, so it learns of them at no cost of its own.
+    answered that it has not taken yet, if any: a turn publishes as it starts
+    and after each step it stores that a tool waits for (a reply with tool
+    calls, the tools' results), so it learns of them at no cost of its own.
     """
+    return await _published(ctx)
+
+
+async def _published(ctx: ObjectContext) -> Published:
+    """Publish (``_publish``), and return the new revision and the messages the turn being answered has not taken."""
     published: Published = {**await _publish(ctx)}
     inbox = await _inbox(ctx)
     if any("text" in one for one in inbox):

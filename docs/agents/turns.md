@@ -112,16 +112,16 @@ sequenceDiagram
   participant DB as Key's database
   participant S as Companion (signals)
   C->>A: chat("Plan my week")
-  A->>S: start(turn, settles)
+  A->>S: start(turn, settles, publishes)
   S-)S: awaitTurn(turn)
-  Note over S: status.answering = turn
-  A->>S: publish
+  Note over S: status.answering = turn, publish
+  S-->>A: the revision, and the messages steered to the turn, if any
   A->>DB: the prompt's answer? (none yet)
   A->>DB: load the transcript and the window
   A->>DB: ask: the turn's row
   loop each step of the framework
-    A->>DB: append the model's reply, the tool calls' results
-    A->>S: publish (a tool call starts, ends)
+    A->>DB: append the model's reply with tool calls, or the tools' results
+    A->>S: publish (after the commit)
     S-->>A: the revision, and the messages steered to the turn, if any
     opt messages steered to the turn wait, at the step
       A->>DB: take them: steps of the turn, and taken in the outbox
@@ -143,7 +143,11 @@ sequenceDiagram
    It also says the agent has `settle` (see [Dead turns](#dead-turns)). A
    retried attempt calls `start` again with the same invocation, which
    changes nothing (it keeps when the turn started). `start` sends
-   `awaitTurn(turn)`, the turn's watch.
+   `awaitTurn(turn)`, the turn's watch. It also publishes, as the turn's
+   first revision, and returns what `publish` returns: the turn makes no
+   publish of its own to start. A companion that returns nothing from
+   `start` (an older deployment, or the TypeScript SDK's) gets a `publish`
+   from the turn instead.
 2. **The prompt.** `answer_once` reads the prompt's answer by its id, one
    indexed read: a retried attempt of an answered turn returns it, and reads
    nothing more; one of a turn that was closed (cancelled, failed, refused, or
@@ -152,12 +156,15 @@ sequenceDiagram
    ([Which turns a turn loads](conversation.md#which-turns-a-turn-loads)), closes a turn
    left without an answer, and stores the prompt as the turn's row.
 3. **Steps.** The framework answers: model calls and tool calls. Each step
-   is stored as it comes (a reply in one transaction, each result as it
-   comes back), and each tool call publishes as it starts and as it ends,
-   so a follower sees the call start and its result. The companion answers
-   each `publish` with the messages steered to the turn that wait: at its
-   next step, the turn takes them, and the model's next request has them
-   ([Steering a turn](#steering-a-turn)).
+   is stored as it comes: a reply with tool calls in one transaction, before
+   its tools run; the tools' results before the model is asked again. A
+   final reply, which no tool waits for, is held and commits with the
+   answer. After each write that commits, the turn publishes once, and
+   waits for it: so a follower sees the calls as their tools start, and
+   their results before the model's next request returns. The companion
+   answers each `publish` with the messages steered to the turn that wait:
+   at its next step, the turn takes them, and the model's next request has
+   them ([Steering a turn](#steering-a-turn)).
 4. **Answer.** The answer is stored on the turn's row, with what the turn
    carries. If the turns before the next turn's window outgrow the agent's
    budget, the agent sends itself `compact`
@@ -168,8 +175,8 @@ sequenceDiagram
    turn's error.
 
 A **background** agent (`background=True`, a subagent say) publishes its
-turn's end only: no step, nor its start, wakes a follower. Its turns take no
-steered messages.
+turn's end only: no step, nor its start, wakes a follower (its `start` says
+it does not publish). Its turns take no steered messages.
 
 ## How a turn ends
 
@@ -450,9 +457,9 @@ sequenceDiagram
   V->>S: steer(id, text)
   S-)P: steered(id, text): queued now, behind the turn
   Note over S: inbox: the message, for this turn
-  A->>S: publish (the tool call ends)
-  S-->>A: revision, steering: [the message]
   A->>DB: the tool's result
+  A->>S: publish (after the result's commit)
+  S-->>A: revision, steering: [the message]
   A->>DB: the message, a step of the turn, and taken(id) in the transaction's outbox
   DB--)S: taken(id), once the transaction commits
   A->>A: the model's next request has it
@@ -520,10 +527,12 @@ sequenceDiagram
   queue as it is sent; and, if the turn being answered takes steered
   messages (its `start` says so, `Started.steers`), it holds the message for
   that turn (`inbox`), 16 at most (`STEERS`).
-- **How the turn learns of it.** From `publish`, which the turn makes at
-  each tool call's start and end anyway: the companion answers it with the
-  messages waiting for the turn. A turn that nobody steers makes no call
-  more.
+- **How the turn learns of it.** From `publish`, which the turn makes
+  anyway as it starts (its `start`) and after each write of steps that
+  commits (a reply with tool calls, the tools' results): the companion
+  answers it with the messages waiting for the turn. The turn waits for the
+  publish after the results, and its next step then takes what it returned.
+  A turn that nobody steers makes no call more.
 - **Taken once.** At a step, the framework's integration calls
   `take_steers`: the turn stores each waiting message by its id, once, as a
   message of the user that is a step of the turn, and the integration puts it
@@ -657,8 +666,8 @@ own answer, and the companion's turn is the invocation, all of them.
 
 The revision increases at:
 
-- a turn's start, and each of its tool calls' start and end (not in the
-  background);
+- a turn's start (its `start`), and each write of its steps that commits:
+  a reply with tool calls, the tools' results (not in the background);
 - a turn's close: its own, its watch's, or the next turn's `start` closing
   it;
 - `settle`, once it closed a dead turn in the conversation;
@@ -668,7 +677,9 @@ The revision increases at:
 - `clear`.
 
 So a follower that reads each new revision sees every turn begin, its tool
-calls, its end, and a killed turn end.
+calls as their tools start, their results before the model's next request
+returns, its end, and a killed turn end. A final reply, held until the
+answer, shows with the turn's end.
 
 ## Agents of the TypeScript SDK
 
@@ -684,7 +695,11 @@ does not show), and only such a turn is sent it:
 
 A turn says it takes steered messages the same way (`Started.steers`): the
 companion holds messages only for such a turn, and every other gets them as
-turns of their own. A TypeScript companion, which has no `steer`, answers
+turns of their own. And it says whether `start` publishes
+(`Started.publishes`): this SDK's companion then publishes and returns what
+`publish` returns; a TypeScript companion returns nothing from `start`, and
+this SDK's turn then publishes its start itself. A TypeScript agent's turn
+does not say so, and this SDK's companion publishes nothing at its `start`. A TypeScript companion, which has no `steer`, answers
 `publish` with no `steering`, so this SDK's turns take none from it; and the
 `steer` view fails there, as the companion has no such handler.
 

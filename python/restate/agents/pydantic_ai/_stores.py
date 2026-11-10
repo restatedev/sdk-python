@@ -22,7 +22,9 @@ They find the key's database in the run of ``agent`` or ``prompt`` in
 progress, and ``clear`` empties them with the rest of the conversation. A
 tool call runs again after a crash, so the plan's reads and writes in a tool
 call are journaled: the call gets what each returned before, and so makes the
-writes it made before, each done once (see ``_journaled``). A spill is named
+writes it made before, each done once (see ``_journaled``). A read is
+journaled with the write that follows it: a call that only reads commits
+nothing. A spill is named
 by the tool call, as the harness's keys are made of the run's id, which every
 attempt has its own of.
 """
@@ -77,6 +79,9 @@ class _Call:
     id: str
     steps: int = 0
     """How many reads and writes of the plan it made (``_journaled``)."""
+    reads: list[tuple[int, str]] = dataclasses.field(default_factory=list[tuple[int, str]])
+    """The reads of the plan it made since its last write, by their order in it, with what each returned: journaled
+    with its next write, if it makes one (``_journaled``)."""
     writes: int = 0
     """How many writes of memory it made (``_memory.py``)."""
 
@@ -123,9 +128,13 @@ async def _journaled(
     writes it made before, each done once. Its reads are journaled too: its
     earlier writes are committed, and reading them would change what it writes
     next (which steps a status change unblocks, say), so that its writes would
-    not line up with those it made before. Outside a tool call, ``op`` is done
-    as it comes. The journals of earlier invocations, whose calls no longer
-    run, are dropped.
+    not line up with those it made before. A read's journal row matters only
+    if a write follows it, so it is kept on the call and written in the next
+    write's transaction: a call that only reads commits nothing, and one that
+    crashes before its next write did not change the plan since those reads,
+    and so reads it as it did. Outside a tool call, ``op`` is done as it
+    comes. The journals of earlier invocations, whose calls no longer run,
+    are dropped.
     """
     ctx = running()
     await SCHEMA.ensure(ctx.db)
@@ -142,13 +151,19 @@ async def _journaled(
     )
     if done is not None:
         return load(str(done["result"]))
+    if not writes:
+        result = await op(ctx.db)
+        call.reads.append((n, dump(result)))
+        return result
     async with ctx.db.transaction() as tx:
         result = await op(tx)
         await tx.execute(f"DELETE FROM {JOURNAL} WHERE invocation != ?", [invocation])
-        await tx.execute(
-            f"INSERT INTO {JOURNAL} (invocation, call, n, result) VALUES (?, ?, ?, ?)",
-            [invocation, call.id, n, dump(result)],
-        )
+        for step, read in [*call.reads, (n, dump(result))]:
+            await tx.execute(
+                f"INSERT INTO {JOURNAL} (invocation, call, n, result) VALUES (?, ?, ?, ?)",
+                [invocation, call.id, step, read],
+            )
+    call.reads = []
     return result
 
 
