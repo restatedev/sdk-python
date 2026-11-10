@@ -40,13 +40,15 @@ driver = restate.Service("driver")
 
 
 @driver.handler()
-async def start_turn(ctx: restate.Context, request: dict[str, str]) -> None:
+async def start_turn(ctx: restate.Context, request: dict[str, str]) -> Published | None:
     turn: Started = {"invocationId": request["invocation"], "since": "2026-11-04T00:00:00.000Z"}
     if request.get("settles"):
         turn["settles"] = True
     if request.get("steers"):
         turn["steers"] = True
-    await ctx.object_call(_signals.start, key=request["key"], arg=turn)
+    if request.get("publishes"):
+        turn["publishes"] = True
+    return await ctx.object_call(_signals.start, key=request["key"], arg=turn)
 
 
 @driver.handler()
@@ -326,3 +328,35 @@ async def test_a_turn_takes_at_most_its_share_of_steered_messages(harness: Harne
     assert "steering" not in await published(harness, k)
     assert await steer(harness, k, "later", "and more") == {"id": "later", "turn": None}
     assert "steering" not in await published(harness, k)
+
+
+async def test_a_turn_that_publishes_is_published_as_it_starts_and_gets_what_publish_returns(
+    harness: HarnessEnvironment,
+):
+    k = key()
+
+    async def revision() -> int:
+        return (await harness.client.object_call(_signals.notifications, key=k, arg=None))["revision"]
+
+    # A turn that does not say it publishes (of another SDK, or a background agent's): nothing is published.
+    before = await revision()
+    assert await harness.client.service_call(start_turn, arg={"key": k, "invocation": "inv_quiet"}) is None
+    assert await revision() == before
+    await harness.client.service_call(close_turn, arg={"key": k, "invocation": "inv_quiet"})
+
+    # A followed turn: its start is its first publish, with the new revision.
+    before = await revision()
+    started = await harness.client.service_call(
+        start_turn, arg={"key": k, "invocation": "inv_loud", "steers": "yes", "publishes": "yes"}
+    )
+    assert started == {"revision": before + 1}
+    # A retried attempt starts it again: it publishes again, with the messages steered to it meanwhile.
+    await steer(harness, k, "s1", "use Celsius")
+    again = await harness.client.service_call(
+        start_turn, arg={"key": k, "invocation": "inv_loud", "steers": "yes", "publishes": "yes"}
+    )
+    assert again is not None and again["revision"] == await revision()
+    assert again.get("steering") == [{"id": "s1", "text": "use Celsius"}]
+    status = typing.cast(Status, await harness.client.object_call(_signals.status, key=k, arg=None))
+    assert status["answering"] is not None and status["answering"]["invocationId"] == "inv_loud"
+    await harness.client.service_call(close_turn, arg={"key": k, "invocation": "inv_loud"})

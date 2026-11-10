@@ -112,7 +112,7 @@ from restate.agents._common import (
     refusal_of,
     stored_answer,
 )
-from restate.agents._turn import AttemptEnded, answering, settings_of, stop_signal_of
+from restate.agents._turn import AttemptEnded, answering, settings_of, stepped, stop_signal_of
 from restate.exceptions import TerminalError
 from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext, SqlParam, Transaction
 from restate.sessions.internal import Schema, definition_of
@@ -484,6 +484,9 @@ class _Ledger:
     holds. So the run writes them (``flush``) before anything another party
     sees or that outlives the attempt: a publish, a Restate call of the
     library, the attempt failing.
+
+    The run publishes after each write of steps that commits (``published``),
+    not after the held rows: they are no step that anyone waits for.
     """
 
     def __init__(self, db: Database, items: Items, start: Start, transcript: list[Entry], next: int, seq: int) -> None:
@@ -514,6 +517,12 @@ class _Ledger:
         self.held: list[list[SqlParam]] = []
         """The rows of the trajectories given positions but not written yet, in order of position (``_INSERT_STEP``'s
         parameters): the next write writes them first."""
+        self.published: Callable[[], Awaitable[None]] | None = None
+        """What the run makes after each write of steps that commits (a publish, ``Conversation.hold``), if anything."""
+
+    def holds_back(self, entries: Sequence[Entry]) -> bool:
+        """Return whether ``entries``, which are read, are held rather than written: no tool call nor result."""
+        return self.holds and not any(e.calls or e.results for e in entries)
 
     @contextlib.asynccontextmanager
     async def transaction(self) -> AsyncIterator[Transaction]:
@@ -740,11 +749,11 @@ class Turn:
         Appends may run at once, such as those of tool calls that run at once:
         each is stored after the ones before it.
         """
-        await self._insert(lambda n: [Entry(n + i, item) for i, item in enumerate(items)])
+        await self._stored(lambda n: [Entry(n + i, item) for i, item in enumerate(items)])
 
     async def append_reply(self, *items: Item, agent: str | None = None) -> int:
         """Append the model's reply, of ``items`` (given by ``agent``), to the turn, and return its id."""
-        return await self._insert(lambda n: [Entry(n + i, item, reply=n, agent=agent) for i, item in enumerate(items)])
+        return await self._stored(lambda n: [Entry(n + i, item, reply=n, agent=agent) for i, item in enumerate(items)])
 
     async def ask_again(self, text: str) -> None:
         """Ask the model again within the turn, with ``text``: a message of the user that is a step of the turn.
@@ -976,6 +985,27 @@ class Turn:
         if self._ledger.latest is not self or self.status is not None:
             raise RuntimeError(f"turn {self.id!r} is not the turn being answered: only that turn is written")
 
+    async def _stored(self, made: Callable[[int], list[Entry]]) -> int:
+        """Store the entries that ``made`` makes (``_insert``), and return their position; then, if they committed
+        (they are not held), make what the run makes after a commit (``_Ledger.published``).
+
+        That is a publish, outside the lock, awaited before the caller goes on:
+        the companion returns the messages steered to the turn from it, which
+        the caller's next step takes. Writes that run at once each make their
+        own.
+        """
+        added: list[Entry] = []
+
+        def making(n: int) -> list[Entry]:
+            added[:] = made(n)
+            return added
+
+        n = await self._insert(making)
+        published = self._ledger.published
+        if published is not None and not self._ledger.holds_back(added):
+            await published()
+        return n
+
     async def _insert(self, made: Callable[[int], list[Entry]]) -> int:
         """Store the entries that ``made`` makes from the next position, and return that position.
 
@@ -998,7 +1028,7 @@ class Turn:
                 [e.n, self.n, ledger.seq + i, ledger.items.dump(e.item), e.reply, e.agent]
                 for i, e in enumerate(added, 1)
             ]
-            if ledger.holds and not any(e.calls or e.results for e in added):
+            if ledger.holds_back(added):
                 ledger.held.extend(rows)
             else:
                 await ledger.write(*((_INSERT_STEP, row) for row in rows))
@@ -1367,15 +1397,21 @@ class Conversation:
         """Whether the run asked for the history to be compacted after the turn (``compact_after``)."""
         return self._ledger.compaction
 
-    def hold(self) -> None:
+    def hold(self, published: Callable[[], Awaitable[None]] | None = None) -> None:
         """Hold the steps that no tool waits for, rather than write each at once: the next write writes them.
 
         For a run that writes them (``flush``) before each publish and Restate
         call of the library, and before its attempt fails: ``answer_once``'s.
         A conversation that is written otherwise (step by step, from handlers
         of its own) writes each step as it comes.
+
+        ``published``, if given, is awaited after each write of steps that
+        commits (a reply with tool calls, the tools' results, with the rows
+        held before them): ``answer_once`` publishes there. Held rows make
+        none, nor does ``flush``.
         """
         self._ledger.holds = True
+        self._ledger.published = published
 
     async def flush(self) -> None:
         """Write the rows the turn's run holds (see ``_Ledger``), if any.
@@ -1578,8 +1614,8 @@ async def answer_once(
         return stored_answer(answer, status)
     conversation = await Conversation.load(ctx.db, items, window, budget, snapshots=settings.snapshots)
     # The turn's final reply commits with its answer; the library's publishes and Restate calls write what the run
-    # holds back first.
-    conversation.hold()
+    # holds back first. Each write of steps that commits publishes, unless the agent runs in the background.
+    conversation.hold(lambda: stepped(ctx))
     holding(ctx, conversation.flush)
 
     async def work() -> str:

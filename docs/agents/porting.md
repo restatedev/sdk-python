@@ -57,6 +57,15 @@ Each step stands on its own, with its tests, and the earlier ones are small.
      terms (`checkpointer.ts` builds such `OR`s); and, if the TypeScript
      LangGraph has `DeltaChannel`, keep what it is rebuilt from when pruning
      (`_kept` in `_checkpointer.py`).
+   - **The companion's `start` publishes.** A turn that says so
+     (`Started.publishes`, a followed turn) is published as `start` starts
+     it, and `start` returns what `publish` returns (`{revision,
+     steering?}`): the turn makes no publish of its own to start. A turn that
+     doesn't say so gets nothing back, and is not published: so a TypeScript
+     turn that this SDK's companion holds publishes its start as before, and
+     this SDK's turn publishes its own start when the TypeScript companion
+     returns nothing. `publish` (and `start`) clear `watching` only when a
+     watch waits.
 2. **The companion's `settle`.** A turn's start says whether its agent
    settles (`Started.settles`); when `awaitTurn` finds the invocation gone,
    the companion closes the turn and sends such an agent `settle(turn)`, a

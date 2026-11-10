@@ -15,8 +15,9 @@ queues it at once as a turn of its own (the agent's private ``steered``), in
 order with the messages sent after it, and, if the turn being answered takes
 steered messages, holds it for that turn too (see ``_signals.steer``).
 
-The turn learns of it from its next ``publish``, which it makes at each tool
-call's start and end anyway. At its next step, once the model's reply has a
+The turn learns of it from its next ``publish``, which it makes anyway as it
+starts and after each write of steps that commits (a reply with tool calls,
+the tools' results), and waits for. At its next step, once the model's reply has a
 result for each of its tool calls and before the next model request, the
 framework integration calls ``take_steers``: the turn stores each message
 once, as a message of the user that is a step of the turn, and the

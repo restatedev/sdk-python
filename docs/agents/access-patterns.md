@@ -291,9 +291,10 @@ In order of value for effort:
 - **The companion and the call records**, not exercised by this harness:
   their writes per turn, and the `restate_agent_calls` read at every turn.
 - **Steering** adds no request to a turn that nobody steers: the companion
-  answers the `publish` a turn makes at each tool call's start and end with
-  the messages waiting for it (one state read more, of its inbox, which is
-  empty then), and a turn takes them at a step with no call of its own;
+  answers the publishes a turn makes anyway (its `start`, and one after each
+  write of steps that commits: a reply with tool calls, the tools' results)
+  with the messages waiting for it (one state read more, of its inbox, which
+  is empty then), and a turn takes them at a step with no call of its own;
   the `taken` that tells the companion is sent from the storing
   transaction's outbox. A steered message costs the `steer` view, one call
   to the companion (an inbox entry, a publish, and the placeholder sent to
@@ -303,11 +304,12 @@ In order of value for effort:
   transcript it loads as one range of that table per page; the summary
   view, one range. Measured on a real server with
   `scripts/steering_traffic.py` (a turn of one tool call): a turn nobody
-  steers is what it is before steering, 47 journal entries and 5 companion
-  calls (`start`, 3 `publish`, `close`); a turn that takes a steered
-  message, 57 entries and 6 calls (the outbox's `taken`); the message
-  itself, the `steer` view (5 entries), the companion's `steer` (13), and
-  the placeholder that finds it taken (3).
+  steers, 40 journal entries and 4 companion calls (`start`, which
+  publishes; a `publish` after the reply with the call, and one after its
+  result; `close`); a turn that takes a steered message, 50 entries and 5
+  calls (the outbox's `taken`); the message itself, the `steer` view (5
+  entries), the companion's `steer` (12), and the placeholder that finds it
+  taken (3).
 - **Snapshots and `compact`:** a snapshot replaces the previous one (one
   `DELETE` and one `INSERT` of the whole compacted history), and `compact`
   reads the transcript from the summary's start. Both are occasional, but

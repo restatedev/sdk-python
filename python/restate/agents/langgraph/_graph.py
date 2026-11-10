@@ -120,7 +120,6 @@ from pydantic_core import to_jsonable_python
 from restate.agents import _signals
 from restate.agents._common import flush_held, from_tool
 from restate.agents._conversation import Conversation, Run, Turn
-from restate.agents._turn import stepped
 from restate.agents.langgraph._checkpointer import SqlCheckpointSaver
 from restate.agents.langgraph._context import running as running_graph
 from restate.agents.langgraph._errors import terminal_of
@@ -217,7 +216,7 @@ async def _copied(
     may not have loaded. If the graph trimmed the prompt away, they are the
     messages whose ids are not ``known``. ``known`` is the ids the
     conversation has, which this adds to; the messages the conversation gave
-    the graph are not copied back. Then publish.
+    the graph are not copied back. Each copy that commits publishes (``Conversation.hold``).
     """
     at = next((i for i, m in enumerate(messages) if m.id == prompt), None)
     new = [
@@ -234,8 +233,6 @@ async def _copied(
         else:
             await turn.append(message)
         known.add(typing.cast(str, message.id))
-    if new:
-        await stepped(ctx)
 
 
 def _prompt_id(turn: Turn) -> str:

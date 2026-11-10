@@ -113,7 +113,7 @@ from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._steering import take_steers
 from restate.agents._tools import Tool, current_call, tools_in
-from restate.agents._turn import tool_call_ended, tool_call_started
+from restate.agents._turn import tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 
@@ -266,7 +266,7 @@ class _Sessions(BaseSessionService):
 
 
 class _Restate(BasePlugin):
-    """Publish each tool call as it starts and ends, mark a tool's error as the tool's, and give the model the
+    """Settle the earlier calls as each tool call starts, mark a tool's error as the tool's, and give the model the
     messages steered to the turn."""
 
     def __init__(self, ctx: SessionContext, sessions: _Sessions) -> None:
@@ -293,11 +293,6 @@ class _Restate(BasePlugin):
         self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext
     ) -> None:
         await tool_call_started(self.ctx)
-
-    async def after_tool_callback(
-        self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext, result: dict[str, Any]
-    ) -> None:
-        await tool_call_ended(self.ctx)
 
     async def on_tool_error_callback(
         self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext, error: Exception

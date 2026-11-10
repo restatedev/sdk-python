@@ -158,7 +158,7 @@ from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with
 from restate.agents._steering import take_steers
 from restate.agents._tools import Tool, current_call, tools_in
-from restate.agents._turn import tool_call_ended, tool_call_started
+from restate.agents._turn import tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 
@@ -296,7 +296,8 @@ def _current(conversation: Conversation, root: Agent[Any], everyone: dict[str, A
 
 
 class _Hooks(RunHooks[Any]):
-    """Store each step of a run as it comes, and publish each tool call as it starts and ends."""
+    """Store each step of a run as it comes (each write that commits publishes), and settle the earlier calls as
+    each tool call starts."""
 
     def __init__(self, ctx: SessionContext, conversation: Conversation, config: RunConfig) -> None:
         self.ctx = ctx
@@ -365,7 +366,6 @@ class _Hooks(RunHooks[Any]):
 
     async def on_tool_end(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool, result: Any) -> None:
         self.running -= 1
-        await tool_call_ended(self.ctx)
 
 
 class _Steers:
@@ -501,7 +501,6 @@ async def _resume(
                 # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
                 from_tool(ctx, error)
                 raise
-            await tool_call_ended(ctx)
         outputs.extend(ITEMS.results([(call, output)]))
     await turn.append(*outputs)
     return agent

@@ -106,7 +106,7 @@ from restate.agents._object import AgentObject, AgentOptions
 from restate.agents._output import answer_with, asking
 from restate.agents._steering import take_steers
 from restate.agents._tools import Tool, ToolCall
-from restate.agents._turn import settings_of, tool_call_ended, tool_call_started
+from restate.agents._turn import settings_of, tool_call_started
 from restate.agents.langgraph._context import handler_context
 from restate.agents.langgraph._errors import terminal_of
 from restate.agents.langgraph._graph import AnyGraph, check, run_of
@@ -364,7 +364,6 @@ def _graph(
             from_tool(ctx, error)
             raise
         await conversation.turn.append(*_tool_messages(ran))
-        await tool_call_ended(ctx)
         return ran
 
     def start(state: State) -> str:
