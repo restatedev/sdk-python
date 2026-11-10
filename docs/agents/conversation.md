@@ -551,6 +551,9 @@ invocation (the next invocation's first call replaces it):
   discards, so a key never written reads as empty tables. The names are
   `restate_agents.turns`, `restate-agents.calls`, `restate_agents.langgraph`,
   `restate_agents.pydantic_ai` and `restate_agents.pydantic_ai.memory`.
+  A turn (`answer_once`) applies the conversation's and the tool calls'
+  together (`ensure_schemas`), as it reads the call records as it ends,
+  whether or not a tool ran: a key's first turn pays one schema commit.
 - **Migrations.** `restate.sessions`' rule is: never change a migration that
   has run; append one. This release is the exception (D1 in
   [What we learned](learnings.md#decisions)): its schemas are written for new

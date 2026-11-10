@@ -1200,3 +1200,26 @@ async def test_a_write_cancelled_while_it_commits_keeps_its_bookkeeping_and_the_
         "drop": (CANCELLED, ["", "done", CANCELLED]),
     }
     assert (turn["answer"], texts) == expected[write]
+
+
+async def test_a_keys_first_turn_applies_its_schemas_in_one_commit():
+    """The conversation's tables and the tool calls' (``_calls.py``), which the turn reads as it ends, are made in
+    one commit, though no tool runs: a key's first turn pays one commit for its schemas, not two."""
+
+    async def run(conversation: Conversation) -> str:
+        await conversation.turn.append_reply({"role": "assistant", "text": "hello"})
+        return "hello"
+
+    obj = _turn_rows()
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await answer_once(ctx, text, ITEMS, run)
+
+    backend = Backend()
+    syncs: list[int] = []
+    for text in ("first", "second"):
+        host = _syncing(backend)
+        assert await invoke(obj, "ask", host, request(), text) == "hello"
+        syncs.append(host.syncs)
+    assert syncs[0] - syncs[1] == 1

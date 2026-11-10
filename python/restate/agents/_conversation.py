@@ -96,6 +96,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
 from restate.agents._api import Steer
+from restate.agents._calls import SCHEMA as CALLS_SCHEMA
 from restate.agents._calls import outcomes
 from restate.agents._common import (
     BUDGET,
@@ -116,7 +117,7 @@ from restate.agents._common import (
 from restate.agents._turn import AttemptEnded, answering, settings_of, stepped, stop_signal_of
 from restate.exceptions import TerminalError
 from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext, SqlParam, Transaction
-from restate.sessions.internal import Schema, definition_of
+from restate.sessions.internal import Schema, definition_of, ensure_schemas
 
 _logger = logging.getLogger(__name__)
 
@@ -1661,7 +1662,9 @@ async def answer_once(
     window = check_window(settings.window if window is None else window)
     budget = settings.budget if budget is None else budget
     prompt_id = next_prompt_id(ctx)
-    await SCHEMA.ensure(ctx.db)
+    # With the tool calls' (``_calls.py``), which the turn reads as it ends, whether or not a tool ran: a key's
+    # first turn applies both in one commit.
+    await ensure_schemas(ctx.db, [SCHEMA, CALLS_SCHEMA])
     if (found := await answer_in(ctx.db, prompt_id)) is not None:
         # Answered (or closed) already: a retry answers, or fails, as the turn ended.
         answer, status = found

@@ -14,7 +14,8 @@ Application code should not need this module; ``restate.agents`` is built on
 it. It provides:
 
 - ``Schema``: tables that a library owns and creates where it uses them
-  (``await schema.ensure(ctx.db)``).
+  (``await schema.ensure(ctx.db)``), and ``ensure_schemas``, which applies
+  several in one commit.
 - ``database``: another named database under the same key.
 - ``reset``: empty the key's database inside a transaction.
 - ``cancelled`` and ``cancel_calls``: explicit cancellation, for handlers
@@ -29,7 +30,7 @@ it. It provides:
 """
 
 from restate.sessions._object import attach_invocation, cancel_calls, cancelled, definition_of, invoke, start
-from restate.sessions._schema import Schema
+from restate.sessions._schema import Schema, ensure_schemas
 from restate.sessions._scope import ScopeKey
 from restate.sessions._session import ObjectConfig, SqlHost, database, reset
 
@@ -43,6 +44,7 @@ __all__ = [
     "cancelled",
     "database",
     "definition_of",
+    "ensure_schemas",
     "invoke",
     "reset",
     "start",
