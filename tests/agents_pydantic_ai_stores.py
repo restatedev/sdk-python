@@ -296,3 +296,47 @@ async def test_search_finds_a_tool_result_that_a_compaction_summarized_and_lists
     # Each run's messages are its turn's, as stored: the search's own run has its prompt first.
     history = await _history(chat, runs[-1].run_id)
     assert _prompt(history[:1]) == "search fact"
+
+
+async def test_a_tool_call_that_only_reads_the_plan_commits_nothing(monkeypatch: pytest.MonkeyPatch):
+    """A read's journal row is needed only if a write follows in the same tool call: it is written with that write."""
+    from restate.agents.pydantic_ai import _stores  # pylint: disable=import-outside-toplevel
+
+    model = calls(
+        {
+            "plan": ("write_plan", {"items": [{"content": "Pack"}, {"content": "Travel"}]}),
+            "read": ("read_plan", {}),
+        }
+    )
+    mine: Any = Agent(model, capabilities=[Planning(store=pydantic_ai.plan_store())])
+    chat = Chat(pydantic_ai.agent("pai_plans_read", agent=mine))
+    await chat("plan the trip")
+
+    @chat.obj.handler(name="journal")
+    async def journal(ctx: Any, _: Any = None) -> int:
+        [[count]] = await ctx.db.values(f"SELECT COUNT(*) FROM {_stores.JOURNAL}")
+        return int(count)
+
+    journaled = await invoke(chat.obj, "journal", chat.host(), request(), None)
+    syncs: list[bool] = []
+    reading: list[bool] = []
+    sync, get_items = Host.sync, _stores.KeyPlanStore.get_items
+
+    async def counted(self: Any) -> None:
+        syncs.extend(reading)
+        await sync(self)
+
+    async def read(self: Any) -> Any:
+        reading.append(True)
+        try:
+            return await get_items(self)
+        finally:
+            reading.clear()
+
+    monkeypatch.setattr(Host, "sync", counted)
+    monkeypatch.setattr(_stores.KeyPlanStore, "get_items", read)
+    answer = await chat("read it")
+    assert "Pack" in answer and "Travel" in answer
+    # No commit while the plan was read, and no journal row for the read.
+    assert syncs == []
+    assert await invoke(chat.obj, "journal", chat.host(), request(), None) == journaled

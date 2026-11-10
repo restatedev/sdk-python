@@ -265,7 +265,9 @@ handlers have no `ctx.run`; it disables harness features), `StepPersistence`
   order in the call. Replaying only the writes isn't enough: the call's
   earlier writes are committed, and reading them changes what it writes next
   (which steps a status change unblocks), so its writes no longer line up.
-  This is what the harness's own durable stores assume ("the store's
+  A read's journal row is kept in memory and written with the call's next
+  write: only a write makes it matter, so a call that only reads commits
+  nothing. This is what the harness's own durable stores assume ("the store's
   recorded result keeps the original ids").
 - **A snapshot is the history the model will get,** so: strip system prompt
   parts (or `ReinjectSystemPrompt` stops reinjecting it); drop the input
