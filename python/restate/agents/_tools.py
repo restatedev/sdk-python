@@ -688,12 +688,15 @@ async def _wait(
     """Wait for signal ``signal`` as tool call ``call``, once however often it runs; ``pending`` shows ``input`` if
     ``shown``. ``rejoin`` and ``approval`` are ``call_of``'s."""
 
+    # Before the call is recorded: from a session object that is no agent, the wait fails for good, as a retry would.
+    waiting = "waiting for an approval" if approval else f"waiting for signal {signal!r}"
+    wait = _signals.waits_in(call.ctx, waiting).wait
+
     async def made(c: ToolCall) -> Any:
         wait_id = c.idempotency_key
         request: _signals.WaitRequest = {"id": wait_id, "name": signal}
         if shown:
             request["input"] = input
-        wait = _signals.companion_in(c.ctx).wait
         return await c.ctx.call(wait, request, key=c.ctx.key, idempotency_key=wait_id)
 
     return await _once(f"signal/{signal}", input, call, made, rejoin=rejoin, approval=approval)

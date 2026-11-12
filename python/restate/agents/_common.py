@@ -86,6 +86,25 @@ async def flush_held(ctx: SessionContext) -> None:
         await flush()
 
 
+_AFTER_STEPS: ScopeKey[Callable[[], Awaitable[None]]] = ScopeKey("what follows each commit of the turn's steps")
+
+
+def after_steps(ctx: SessionContext, then: Callable[[], Awaitable[None]]) -> None:
+    """Have ``then`` run after each write of the attempt's turn's steps that commits (see ``Conversation.hold``).
+
+    The caller of ``answer_once`` sets it, before the turn runs: an agent's
+    ``chat`` turn publishes there, for the clients that follow it. The
+    conversation itself only stores: without it, a commit is followed by
+    nothing.
+    """
+    _AFTER_STEPS.set(ctx, then)
+
+
+def after_steps_of(ctx: SessionContext) -> Callable[[], Awaitable[None]] | None:
+    """Return what follows each commit of the attempt's turn's steps (``after_steps``), or ``None``."""
+    return _AFTER_STEPS.get(ctx)
+
+
 MODEL_ENV = "RESTATE_AGENT_MODEL"
 """The environment variable that names the model agents use when none is given."""
 

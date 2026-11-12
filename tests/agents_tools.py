@@ -265,3 +265,41 @@ async def test_a_returned_call_is_kept_until_its_result_is_stored_and_forgotten_
     assert [c[4] for c in made] == [f"{req.id}:t1", f"{req.id}:t1"]
     # Its result is stored, and so its record is forgotten.
     assert await internal.invoke(obj, "records", Host(backend, service="crashed_caller"), req) == []
+
+
+# --- Waits need an agent ------------------------------------------------------------------------------------------
+
+NEEDS_AGENT = "needs an agent, whose companion holds its waits: 'desk' is a plain session object"
+
+
+async def test_a_wait_for_a_signal_from_a_session_object_that_is_no_agent_fails_for_good_with_what_to_do():
+    """A ``wait_for_signal`` tool's call fails with a terminal error, which is its result: a retry would fail again.
+    It makes no call, nor records one."""
+    from restate.agents._tools import wait_for  # pylint: disable=import-outside-toplevel
+    from restate.exceptions import TerminalError  # pylint: disable=import-outside-toplevel
+
+    approval = wait_for_signal("approval", description="Wait for an approval.")
+    desk = sessions.SessionObject("desk")
+    waited: list[str] = []
+
+    @desk.handler
+    async def tool_call(ctx: sessions.SessionContext) -> str:
+        return await approval.run({}, ToolCall(ctx, "c1"))
+
+    @desk.handler
+    async def deferred(ctx: sessions.SessionContext) -> None:
+        try:
+            await wait_for(ctx, "c2", "refund", {"order": "o1"})
+        except TerminalError as error:
+            waited.append(error.message)
+            raise
+
+    backend = Backend()
+    host = Host(backend, service="desk")
+    result = await internal.invoke(desk, "tool_call", host, request())
+    assert result.startswith(f"Error: waiting for signal 'approval' {NEEDS_AGENT}"), result
+    assert "`<framework>.agent(...)`" in result and "`AgentObject`" in result
+    with pytest.raises(TerminalError):
+        await internal.invoke(desk, "deferred", host, request())
+    assert waited and waited[0].startswith(f"waiting for signal 'refund' {NEEDS_AGENT}")
+    assert host.calls == []

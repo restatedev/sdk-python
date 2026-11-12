@@ -106,6 +106,7 @@ from restate.agents._common import (
     UNANSWERED,
     Check,
     Window,
+    after_steps_of,
     check_window,
     cut_off_result,
     holding,
@@ -114,7 +115,7 @@ from restate.agents._common import (
     refusal_of,
     stored_answer,
 )
-from restate.agents._turn import AttemptEnded, answering, settings_of, stepped, stop_signal_of
+from restate.agents._turn import AttemptEnded, answering, settings_of, settled, stop_signal_of
 from restate.exceptions import TerminalError
 from restate.sessions import Database, DatabaseReader, DatabaseWriter, SessionContext, SqlParam, Transaction
 from restate.sessions.internal import Schema, definition_of, ensure_schemas
@@ -487,8 +488,9 @@ class _Ledger:
     sees or that outlives the attempt: a publish, a Restate call of the
     library, the attempt failing.
 
-    The run publishes after each write of steps that commits (``published``),
-    not after the held rows: they are no step that anyone waits for.
+    What the run's caller asks for after each write of steps that commits
+    (``committed``: an agent's ``chat`` turn publishes there) follows that
+    write, not the held rows: they are no step that anyone waits for.
     """
 
     def __init__(self, db: Database, items: Items, start: Start, transcript: list[Entry], next: int, seq: int) -> None:
@@ -519,8 +521,8 @@ class _Ledger:
         self.held: list[list[SqlParam]] = []
         """The rows of the trajectories given positions but not written yet, in order of position (``_INSERT_STEP``'s
         parameters): the next write writes them first."""
-        self.published: Callable[[], Awaitable[None]] | None = None
-        """What the run makes after each write of steps that commits (a publish, ``Conversation.hold``), if anything."""
+        self.committed: Callable[[], Awaitable[None]] | None = None
+        """What follows each write of steps that commits (``Conversation.hold``), if anything."""
 
     def holds_back(self, entries: Sequence[Entry]) -> bool:
         """Return whether ``entries``, which are read, are held rather than written: no tool call nor result."""
@@ -1018,12 +1020,12 @@ class Turn:
 
     async def _stored(self, made: Callable[[int], list[Entry]]) -> int:
         """Store the entries that ``made`` makes (``_insert``), and return their position; then, if they committed
-        (they are not held), make what the run makes after a commit (``_Ledger.published``).
+        (they are not held), run what follows a commit (``_Ledger.committed``).
 
-        That is a publish, outside the lock, awaited before the caller goes on:
-        the companion returns the messages steered to the turn from it, which
-        the caller's next step takes. Writes that run at once each make their
-        own.
+        It runs outside the lock, awaited before the caller goes on: for an
+        agent's ``chat`` turn it is a publish, which also learns of the
+        messages steered to the turn, for the caller's next step to take.
+        Writes that run at once each run it.
         """
         added: list[Entry] = []
 
@@ -1032,9 +1034,9 @@ class Turn:
             return added
 
         n = await self._insert(making)
-        published = self._ledger.published
-        if published is not None and not self._ledger.holds_back(added):
-            await published()
+        committed = self._ledger.committed
+        if committed is not None and not self._ledger.holds_back(added):
+            await committed()
         return n
 
     @_shielded
@@ -1451,7 +1453,7 @@ class Conversation:
         """Whether the run asked for the history to be compacted after the turn (``compact_after``)."""
         return self._ledger.compaction
 
-    def hold(self, published: Callable[[], Awaitable[None]] | None = None) -> None:
+    def hold(self, committed: Callable[[], Awaitable[None]] | None = None) -> None:
         """Hold the steps that no tool waits for, rather than write each at once: the next write writes them.
 
         For a run that writes them (``flush``) before each publish and Restate
@@ -1459,13 +1461,14 @@ class Conversation:
         A conversation that is written otherwise (step by step, from handlers
         of its own) writes each step as it comes.
 
-        ``published``, if given, is awaited after each write of steps that
+        ``committed``, if given, is awaited after each write of steps that
         commits (a reply with tool calls, the tools' results, with the rows
-        held before them): ``answer_once`` publishes there. Held rows make
-        none, nor does ``flush``.
+        held before them): ``answer_once`` passes what its caller set
+        (``after_steps``), where an agent's ``chat`` turn publishes. Held rows
+        run none, nor does ``flush``.
         """
         self._ledger.holds = True
-        self._ledger.published = published
+        self._ledger.committed = committed
 
     @_shielded
     async def flush(self) -> None:
@@ -1671,8 +1674,17 @@ async def answer_once(
         return stored_answer(answer, status)
     conversation = await Conversation.load(ctx.db, items, window, budget, snapshots=settings.snapshots)
     # The turn's final reply commits with its answer; the library's publishes and Restate calls write what the run
-    # holds back first. Each write of steps that commits publishes, unless the agent runs in the background.
-    conversation.hold(lambda: stepped(ctx))
+    # holds back first. Each write of steps that commits forgets the calls whose results it stored (`_calls.py`),
+    # then runs what the caller set (`after_steps`): an agent's `chat` turn publishes there; a handler of one's own
+    # sets nothing, and its turn is only stored.
+    after = after_steps_of(ctx)
+
+    async def committed() -> None:
+        await settled(ctx)
+        if after is not None:
+            await after()
+
+    conversation.hold(committed)
     holding(ctx, conversation.flush)
 
     async def work() -> str:

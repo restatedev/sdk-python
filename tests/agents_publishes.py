@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from restate import sessions
 from restate.agents import tool
 from restate.agents._object import AgentObject
 
@@ -134,11 +135,9 @@ def lookup_of(seen: Seen, steer: str | None = None):
 # --- The frameworks' agents, each with a model that calls ``lookup`` CALLS times at once, then answers ----------
 
 
-def pydantic_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **options: Any) -> AgentObject:
+def pydantic_model(seen: Seen, calls: int = CALLS) -> Any:
     from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, UserPromptPart
     from pydantic_ai.models.function import AgentInfo, FunctionModel
-
-    from restate.agents import pydantic_ai
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         seen.events.append(("model", 0))
@@ -149,14 +148,18 @@ def pydantic_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, 
             parts=[ToolCallPart("lookup", {"about": f"t{i}"}, tool_call_id=f"c{i}") for i in range(calls)]
         )
 
-    return pydantic_ai.agent("followed", model=FunctionModel(model), tools=[lookup_of(seen, steer)], **options)
+    return FunctionModel(model)
 
 
-def openai_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **options: Any) -> AgentObject:
+def pydantic_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **options: Any) -> AgentObject:
+    from restate.agents import pydantic_ai
+
+    return pydantic_ai.agent("followed", model=pydantic_model(seen, calls), tools=[lookup_of(seen, steer)], **options)
+
+
+def openai_model(seen: Seen, calls: int = CALLS) -> Any:
     from agents import Model, ModelResponse, Usage
     from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText
-
-    from restate.agents import openai
 
     class Scripted(Model):
         async def get_response(self, system_instructions, input, *args, **kwargs):  # noqa: A002
@@ -186,16 +189,20 @@ def openai_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **
         def stream_response(self, *args, **kwargs):
             raise NotImplementedError
 
-    return openai.agent("followed", model=Scripted(), tools=[lookup_of(seen, steer)], **options)
+    return Scripted()
 
 
-def adk_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **options: Any) -> AgentObject:
+def openai_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **options: Any) -> AgentObject:
+    from restate.agents import openai
+
+    return openai.agent("followed", model=openai_model(seen, calls), tools=[lookup_of(seen, steer)], **options)
+
+
+def adk_model(seen: Seen, calls: int = CALLS) -> Any:
     from google.adk.models import BaseLlm
     from google.adk.models.llm_request import LlmRequest
     from google.adk.models.llm_response import LlmResponse
     from google.genai import types
-
-    from restate.agents import adk
 
     class Scripted(BaseLlm):
         model: str = "scripted"
@@ -222,10 +229,18 @@ def adk_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **opt
                 ]
             yield LlmResponse(content=types.Content(role="model", parts=parts))
 
-    return adk.agent("followed", model=Scripted(), tools=[lookup_of(seen, steer)], **options)
+    return Scripted()
+
+
+def adk_agent(seen: Seen, steer: str | None = None, *, calls: int = CALLS, **options: Any) -> AgentObject:
+    from restate.agents import adk
+
+    return adk.agent("followed", model=adk_model(seen, calls), tools=[lookup_of(seen, steer)], **options)
 
 
 AGENTS = {"pydantic_ai": pydantic_agent, "openai": openai_agent, "adk": adk_agent}
+MODELS = {"pydantic_ai": pydantic_model, "openai": openai_model, "adk": adk_model}
+"""Each framework's scripted model, for its ``prompt``."""
 
 
 def make(framework: str, seen: Seen, steer: str | None = None, **options: Any) -> AgentObject:
@@ -281,6 +296,53 @@ async def test_a_background_agent_publishes_only_its_end(framework: str):
     await chat("hello")
     # Its start publishes nothing, nor do its commits: only its close does.
     assert seen.companion_calls() == ["start", "close"]
+
+
+def no_companion(*_: Any) -> Any:
+    raise AssertionError("a session object that is no agent has no companion to call, nor anything to publish")
+
+
+@pytest.mark.parametrize("framework", list(AGENTS))
+async def test_a_plain_session_objects_prompt_with_tool_calls_stores_its_turn_and_publishes_nothing(
+    framework: str, monkeypatch: pytest.MonkeyPatch
+):
+    """A handler of one's own, on a session object that is no agent, prompts with a framework: a turn of tool calls.
+
+    The conversation stores the turn; nothing publishes, nor looks for a companion, and the handler makes no Restate
+    call at all."""
+    import importlib
+
+    from sessions_database import Backend
+    from sessions_object import Host, request
+
+    from restate.agents import _signals, _turn
+    from restate.sessions.internal import invoke
+
+    monkeypatch.setattr(_turn, "publish", no_companion)
+    monkeypatch.setattr(_signals, "companion_at", no_companion)
+    seen = Seen()
+    framework_module = importlib.import_module(f"restate.agents.{framework}")
+    desk = sessions.SessionObject("desk")
+
+    @desk.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await framework_module.prompt(ctx, text, model=MODELS[framework](seen), tools=[lookup_of(seen)])
+
+    @desk.handler
+    async def stored(ctx: sessions.SessionContext) -> list[Any]:
+        turns = await ctx.db.values("SELECT prompt, answer FROM restate_agent_turns")
+        steps = await ctx.db.values("SELECT count(*) FROM restate_agent_items")
+        return [[list(turn) for turn in turns], steps[0][0]]
+
+    backend = Backend()
+    host = Host(backend, service="desk")
+    assert await invoke(desk, "ask", host, request(), "hello") == "answered after hello"
+    assert host.calls == []
+    assert [event for event, _ in seen.events] == ["model", "model"]
+    [turns, steps] = await invoke(desk, "stored", Host(backend, service="desk"), request())
+    assert [answer for _, answer in turns] == ["answered after hello"]
+    # The reply with the calls, their results, and the final reply.
+    assert steps >= 3
 
 
 class _State:

@@ -624,6 +624,30 @@ def companion_in(ctx: SessionContext | ViewContext) -> Companion:
     return companion
 
 
+def needs_agent(ctx: SessionContext, what: str) -> TerminalError:
+    """Return the error for ``what`` (a step that only an agent takes, as it needs the companion), from a handler
+    of a session object that is no agent: terminal, as a retry would meet it again."""
+    definition = definition_of(ctx)
+    name = typing.cast(str, getattr(definition, "name", "?"))
+    return TerminalError(
+        f"{what} needs an agent, whose companion holds its waits: {name!r} is a plain session object. "
+        "Use `<framework>.agent(...)` (such as `restate.agents.pydantic_ai.agent`) or `AgentObject` instead of "
+        "`SessionObject`"
+    )
+
+
+def waits_in(ctx: SessionContext, what: str) -> Companion:
+    """Return the companion of the agent whose handler ``ctx`` runs, to wait for a signal (``what``) on it.
+
+    Raises:
+        TerminalError: If ``ctx`` is a handler's of a session object that is no agent (``needs_agent``).
+    """
+    companion = companion_at(ctx)
+    if companion is None:
+        raise needs_agent(ctx, what)
+    return companion
+
+
 def has_companion(agent: object) -> bool:
     """Return whether ``agent`` is a ``restate.agents`` agent, with a companion."""
     return _COMPANION.of(agent) is not None

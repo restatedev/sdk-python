@@ -296,8 +296,8 @@ def _current(conversation: Conversation, root: Agent[Any], everyone: dict[str, A
 
 
 class _Hooks(RunHooks[Any]):
-    """Store each step of a run as it comes (each write that commits publishes), and settle the earlier calls as
-    each tool call starts."""
+    """Store each step of a run as it comes (in an agent's ``chat`` turn, each write that commits publishes), and
+    settle the earlier calls as each tool call starts."""
 
     def __init__(self, ctx: SessionContext, conversation: Conversation, config: RunConfig) -> None:
         self.ctx = ctx

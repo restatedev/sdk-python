@@ -350,8 +350,8 @@ class _Restate(AbstractCapability[Any]):
     """Make a Pydantic AI run durable in a Restate handler.
 
     It stores the requests before each model request and each response as it
-    arrives (each write that commits publishes, for clients that follow the
-    conversation), and settles the earlier calls as each tool call starts. A
+    arrives (in an agent's ``chat`` turn, each write that commits publishes,
+    for clients that follow the conversation), and settles the earlier calls as each tool call starts. A
     tool's ``restate.TerminalError`` becomes its
     answer to the model; any other error fails the attempt. It records the
     errors of model requests, the only ones that can be a refusal.
