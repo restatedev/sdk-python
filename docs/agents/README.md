@@ -35,9 +35,14 @@ building it, and how to port it.
 - **A turn whose invocation dies is closed, never finished:** `settle`, or
   the next message, gives each open call a result and ends the turn as
   `ended`.
-- **The companion** (the `signals` object) is the control plane: the turn
-  being answered, the tools' waits, and a revision clients follow. Nothing in
-  it is needed to complete a turn.
+- **The companion** is the control plane: the turn being answered, the
+  tools' waits, and a revision clients follow. Each agent has its own, the
+  virtual object `<agent>.agentprebuild.restate`, keyed as the agent (key
+  `alice` of `assistant` has key `alice` of `assistant.agentprebuild.restate`).
+  It is ingress-private: clients reach it through the agent's views. Nothing
+  in it is needed to complete a turn. Upgrading from the shared `signals`
+  object of earlier versions leaves its state behind: see
+  [The companion is the agent's own](turns.md#the-companion-is-the-agents-own).
 
 ```mermaid
 flowchart LR
@@ -50,10 +55,11 @@ flowchart LR
     T[("Key's database: turns, items, snapshots, call records")]
     V["views: messages, sync"] -- read --> T
     X["private: settle, compact, steered"] --> T
+    W["views: status, stop, signal, steer, watch"]
   end
-  H -- "start, close, publish" --> S[("Companion signals, key assistant:alice: turn, waits, steered messages, revision")]
+  H -- "start, close, publish" --> S[("Companion assistant.agentprebuild.restate, key alice: turn, waits, steered messages, revision")]
   F -- "wait, for a tool or an approval" --> S
-  C -- "signal resolves a wait" --> S
+  W -- "ask, signal resolves a wait, steer" --> S
   S -- "settle a dead turn, and steered for each steered message" --> X
 ```
 
@@ -81,7 +87,7 @@ then the same.
 | [`_turn.py`](../../python/restate/agents/_turn.py) | the turn's wrapper: start and close in the companion, cancellation, attempts |
 | [`_conversation.py`](../../python/restate/agents/_conversation.py) | the conversation: its tables, `Conversation`, `Turn`, `answer_once`, `compact`, `settle` |
 | [`_messages.py`](../../python/restate/agents/_messages.py) | the conversation as clients read it (`messages`, `sync`) |
-| [`_signals.py`](../../python/restate/agents/_signals.py) | the companion |
+| [`_signals.py`](../../python/restate/agents/_signals.py) | the companion: `make_companion`, one per agent |
 | [`_steering.py`](../../python/restate/agents/_steering.py) | the messages steered to a turn: `take_steers`, at its steps |
 | [`_object.py`](../../python/restate/agents/_object.py) | the agent object: `chat`, the views, the private handlers |
 | [`_calls.py`](../../python/restate/agents/_calls.py) | the call records: a tool's Restate calls, made once |

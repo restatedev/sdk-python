@@ -717,7 +717,7 @@ MUTANTS = [
         "steer-taken-never-sent",
         "the companion keeps a message the turn took, and status shows it waiting",
         f"{AGENTS}/_steering.py",
-        '        tx.send(_signals.taken, ids, key=companion, idempotency_key=f"taken:{ids[0]}")\n',
+        '        tx.send(companion.taken, ids, key=ctx.key, idempotency_key=f"taken:{ids[0]}")\n',
         "        pass\n",
         STEERING,
     ),

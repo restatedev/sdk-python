@@ -57,7 +57,6 @@ from restate.retry_policy import InvocationRetryPolicy
 from restate.sessions import Migration, SessionContext, SessionObject, ViewContext
 from restate.sessions.internal import reset
 
-T = typing.TypeVar("T")
 A = typing.TypeVar("A", bound=Callable[[SessionContext, str], Awaitable[Any]])
 """The function that answers a chat message: it takes the message and returns the answer."""
 
@@ -277,7 +276,7 @@ class AgentObject(SessionObject):
             raise ValueError(f"budget must be a number of tokens (0 or more), not {budget!r}")
         self._settings = AgentInfo(background=background, window=check_window(window), budget=budget)
         AGENT.on(self, self._settings)
-        _signals.with_companion(self)
+        self._companion = _signals.with_companion(self)
         self._building = True
         try:
             self._built_in()
@@ -285,9 +284,9 @@ class AgentObject(SessionObject):
             self._building = False
 
     def __restate_services__(self) -> tuple[VirtualObject, ...]:
-        """What ``restate.app`` serves for an agent (see ``restate.Servable``): itself, and ``signals``,
-        the object its tools wait on, shared by every agent."""
-        return (self, _signals.signals)
+        """What ``restate.app`` serves for an agent (see ``restate.Servable``): itself, and its own companion,
+        ``<agent>.agentprebuild.restate``, which its tools wait on."""
+        return (self, self._companion.service)
 
     def _reserved(self, name: str) -> str | None:
         if name not in BUILT_IN or getattr(self, "_building", False):
@@ -316,27 +315,28 @@ class AgentObject(SessionObject):
         return answering
 
     def _built_in(self) -> None:
-        """Register the views every agent has; each one asks the agent's companion ``signals`` object."""
+        """Register the views every agent has; each one asks the agent's companion."""
+        companion = self._companion
 
         async def signal(ctx: ViewContext, signal: Signal) -> Resolved:
             """Resolve a wait of the agent's tools with ``value``: the wait with ``id``, or the oldest one for ``name``."""
-            return await _companion(ctx, _signals.resolve, "signal")(signal)
+            return await ctx.call(companion.resolve, signal, key=ctx.key, idempotency_key=f"{ctx.request.id}:signal")
 
         async def pending(ctx: ViewContext, _: Nothing = None) -> list[Waiting]:
             """List the signals the agent's tools are waiting for, oldest first."""
-            return await _companion(ctx, _signals.pending)()
+            return await ctx.call(companion.pending, key=ctx.key)
 
         async def status(ctx: ViewContext, _: Nothing = None) -> Status:
             """Return what the agent is doing: the message it is answering, if any, and what its tools wait for."""
-            return await _companion(ctx, _signals.status)()
+            return await ctx.call(companion.status, key=ctx.key)
 
         async def stop(ctx: ViewContext, _: Nothing = None) -> Stopped:
             """Cancel the invocation that is answering the current message, if there is one."""
-            return await _stopped(ctx, "stop")
+            return await _stopped(ctx, companion, "stop")
 
         async def notifications(ctx: ViewContext, _: Nothing = None) -> Notifications:
             """Return the conversation's revision, which increases whenever ``messages`` or ``status`` change."""
-            return await _companion(ctx, _signals.notifications)()
+            return await ctx.call(companion.notifications, key=ctx.key)
 
         async def watch(ctx: ViewContext, request: Watch) -> Notifications:
             """Wait for a revision newer than ``revision``, then return the current one.
@@ -344,7 +344,7 @@ class AgentObject(SessionObject):
             It returns anyway after ``timeoutSeconds`` (50 by default, at most
             60). The wait happens in Restate and holds no process.
             """
-            return await _companion(ctx, _signals.watch, "watch")(request)
+            return await ctx.call(companion.watch, request, key=ctx.key, idempotency_key=f"{ctx.request.id}:watch")
 
         for fn in (signal, pending, status, stop, notifications):
             self.view(fn)
@@ -500,31 +500,17 @@ class AgentObject(SessionObject):
         return answer
 
 
-def _companion(
-    ctx: ViewContext, handler: Callable[..., Awaitable[T]], step: str | None = None
-) -> Callable[..., Awaitable[T]]:
-    """Return a function that calls ``handler`` on the companion of the agent of ``ctx``.
-
-    With ``step``, the call gets an idempotency key made of the request id and
-    ``step``, so a restarted view joins the same call. Reads have no key.
-    """
-    key = None if step is None else f"{ctx.request.id}:{step}"
-    companion = _signals.signals_of(ctx)
-    untyped = typing.cast(Any, ctx)
-
-    def call(*args: Any) -> Awaitable[T]:
-        return typing.cast(Awaitable[T], untyped.call(handler, *args, key=companion, idempotency_key=key))
-
-    return call
-
-
-async def _stopped(ctx: ViewContext, step: str) -> Stopped:
+async def _stopped(ctx: ViewContext, companion: _signals.Companion, step: str) -> Stopped:
     """Cancel the invocation answering the current message, if any, and return its id.
 
-    The status is read with an idempotency key, so a restarted view cancels the
-    same invocation again (a no-op) rather than the next message's.
+    The status is read with an idempotency key, made of the request id and
+    ``step``, so a restarted view cancels the same invocation again (a no-op)
+    rather than the next message's. The companion's other calls from a view
+    that change something (``signal``, ``steer``) or wait (``watch``) have
+    such a key too, so a restarted view joins the same call; reads have none.
     """
-    turn = (await _companion(ctx, _signals.status, step)())["answering"]
+    status = await ctx.call(companion.status, key=ctx.key, idempotency_key=f"{ctx.request.id}:{step}")
+    turn = status["answering"]
     if turn is not None:
         ctx.cancel(turn["invocationId"])
     return {"stopped": turn["invocationId"] if turn is not None else None}
@@ -533,6 +519,7 @@ async def _stopped(ctx: ViewContext, step: str) -> Stopped:
 def _followed(agent: AgentObject, items: Items) -> None:
     """Register the views that ``chat()`` adds (``messages``, ``steer``, ``clear``, ``sync``), and the private
     handlers."""
+    companion = _signals.companion_of(agent)
 
     async def messages(ctx: ViewContext, request: MessagesRequest | None = None) -> Messages:
         """Read the conversation: a page of it, or what changed since a cursor.
@@ -555,7 +542,8 @@ def _followed(agent: AgentObject, items: Items) -> None:
         Either way it is answered once: send it with an idempotency key, so
         that a retried request is the same message.
         """
-        return await _companion(ctx, _signals.steer, "steer")({"id": ctx.request.id, "text": text})
+        message: Steer = {"id": ctx.request.id, "text": text}
+        return await ctx.call(companion.steer, message, key=ctx.key, idempotency_key=f"{ctx.request.id}:steer")
 
     async def erase(ctx: SessionContext) -> None:
         """Empty the key's database and its signals, once the handlers queued before it are done."""
@@ -566,7 +554,7 @@ def _followed(agent: AgentObject, items: Items) -> None:
             await reset(tx)
             await restart(tx, start)
         await cleared(ctx)
-        await ctx.call(_signals.reset, key=_signals.signals_of(ctx), idempotency_key=f"{ctx.request.id}:reset")
+        await ctx.call(companion.reset, key=ctx.key, idempotency_key=f"{ctx.request.id}:reset")
 
     async def settle(ctx: SessionContext, invocation_id: str) -> bool:
         """Close the latest turn, unanswered, if invocation ``invocation_id`` ran it and is gone.
@@ -594,7 +582,7 @@ def _followed(agent: AgentObject, items: Items) -> None:
         that follows the conversation keeps reading, and drops the messages
         before ``first``.
         """
-        stopped = await _stopped(ctx, "clear")
+        stopped = await _stopped(ctx, companion, "clear")
         await ctx.call(erase, key=ctx.key, idempotency_key=f"{ctx.request.id}:erase")
         return stopped
 
@@ -610,12 +598,12 @@ def _followed(agent: AgentObject, items: Items) -> None:
         revision = request.get("revision")
         if revision is not None:
             watch: Watch = {"revision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)}
-            await _companion(ctx, _signals.watch, "watch")(watch)
+            await ctx.call(companion.watch, watch, key=ctx.key, idempotency_key=f"{ctx.request.id}:watch")
         # Read the revision first, then the page in an invocation of its own, which starts after it: a view
         # reads the database as committed when it started, and this one started before the revision (by
         # the whole wait, when it waited). So the page has every change the revision counts.
-        now = await _companion(ctx, _signals.notifications)()
-        status = await _companion(ctx, _signals.status)()
+        now = await ctx.call(companion.notifications, key=ctx.key)
+        status = await ctx.call(companion.status, key=ctx.key)
         wanted: MessagesRequest = {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)}
         if "view" in request:
             wanted["view"] = request["view"]

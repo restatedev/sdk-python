@@ -47,6 +47,7 @@ from restate.agents._conversation import (
 )
 from restate.agents._tools import ToolCall, _once
 from restate.agents._turn import AGENT, AgentInfo
+from restate.agents._signals import with_companion
 from restate.agents.internal import wait_for
 from restate.exceptions import TerminalError
 from restate.sessions.internal import invoke, reset
@@ -58,6 +59,14 @@ def anyio_backend():
 
 
 pytestmark = [pytest.mark.anyio]
+
+
+def waiter() -> sessions.SessionObject:
+    """A session object whose handlers wait for signals: at the companion it has, as an agent's."""
+    obj = sessions.SessionObject("waiter")
+    with_companion(obj)
+    return obj
+
 
 SUMMARY = {"role": "user", "text": "<summary>q0 and q1 were asked and answered</summary>"}
 """What the made-up framework's compaction leaves in place of the history it compacted."""
@@ -398,7 +407,7 @@ async def test_each_turns_row_has_the_time_it_was_asked():
 
 
 async def test_a_framework_waits_for_a_signal_for_its_own_tool_call_once():
-    obj = sessions.SessionObject("waiter")
+    obj = waiter()
 
     @obj.handler
     async def deferred(ctx: sessions.SessionContext, call_id: str) -> Any:
@@ -412,7 +421,12 @@ async def test_a_framework_waits_for_a_signal_for_its_own_tool_call_once():
     first = host()
     assert await invoke(obj, "deferred", first, invocation, "call-1") == "approved"
     [(service, handler, arg, key, idempotency_key)] = first.calls
-    assert (service, handler, key, idempotency_key) == ("signals", "wait", "waiter:alice", f"{invocation.id}:call-1")
+    assert (service, handler, key, idempotency_key) == (
+        "waiter.agentprebuild.restate",
+        "wait",
+        "alice",
+        f"{invocation.id}:call-1",
+    )
     assert json.loads(arg) == {"id": f"{invocation.id}:call-1", "name": "approval", "input": {"refund": 5}}
     # The tool call runs again (after a crash, say): it joins the same wait.
     again = host()
@@ -428,7 +442,7 @@ async def test_a_framework_waits_for_a_signal_for_its_own_tool_call_once():
 async def test_waits_opened_at_once_each_keep_their_record():
     from restate.agents._calls import _load  # pylint: disable=import-outside-toplevel
 
-    obj = sessions.SessionObject("waiter")
+    obj = waiter()
 
     @obj.handler
     async def deferred(ctx: sessions.SessionContext, call_ids: list[str]) -> Any:
@@ -451,7 +465,7 @@ async def _lookup(ctx: sessions.SessionContext, _: Any = None) -> str:
 
 async def _closed_result(wait: Callable[[sessions.SessionContext], Awaitable[None]]) -> str:
     """Return what a turn stopped right after ``wait`` stores as the result of its tool call ``c1``."""
-    obj = sessions.SessionObject("waiter")
+    obj = waiter()
     AGENT.on(obj, AgentInfo())
     contexts: list[sessions.SessionContext] = []
 
@@ -511,7 +525,7 @@ async def test_an_approval_and_the_restate_call_of_its_tool_call_keep_records_of
 
 
 async def test_a_wait_with_nothing_to_show_shows_no_input():
-    obj = sessions.SessionObject("waiter")
+    obj = waiter()
 
     @obj.handler
     async def deferred(ctx: sessions.SessionContext, call_id: str) -> Any:

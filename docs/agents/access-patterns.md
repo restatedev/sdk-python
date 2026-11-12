@@ -61,7 +61,7 @@ at a time, so each get is charged to the right one).
 - **Probes:** single statements, each alone in a new process.
 - The agent's defaults: `window=1`, `budget=32_000`, no summaries.
 
-Not covered: the companion (`signals`), the call records' writes (no tool
+Not covered: the companion (`<agent>.agentprebuild.restate`), the call records' writes (no tool
 here makes Restate calls), snapshots and `compact`, and a real server (see
 [Open questions](#open-questions)).
 

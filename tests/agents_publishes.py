@@ -60,11 +60,10 @@ class Companion:
     """The agent's companion in this process: each publish (and a ``start`` that publishes) reads the ``messages``
     view, as a follower told of it would, and returns a new revision with the messages steered to the turn."""
 
-    def __init__(self, obj: AgentObject, backend: Any, seen: Seen, *, start_publishes: bool = True) -> None:
+    def __init__(self, obj: AgentObject, backend: Any, seen: Seen) -> None:
         self.obj = obj
         self.backend = backend
         self.seen = seen
-        self.start_publishes = start_publishes
         self.revision = 0
 
     async def results(self) -> int:
@@ -78,7 +77,7 @@ class Companion:
         return sum("output" in part for message in page["messages"] for part in message["parts"])
 
     async def answer(self, handler: str, arg: Any) -> bytes:
-        if handler == "start" and not (self.start_publishes and json.loads(arg).get("publishes")):
+        if handler == "start" and not json.loads(arg).get("publishes"):
             self.seen.events.append(("start", await self.results()))
             return b"null"
         if handler in ("start", "publish"):
@@ -90,7 +89,7 @@ class Companion:
         return b"null"
 
 
-def follow(obj: AgentObject, seen: Seen, *, start_publishes: bool = True) -> Callable[[str], Any]:
+def follow(obj: AgentObject, seen: Seen) -> Callable[[str], Any]:
     """Return a ``chat`` of ``obj`` in this process, each call a turn, whose follower records what it sees in ``seen``."""
     from sessions_database import Backend
     from sessions_object import Answer, Host, request
@@ -98,7 +97,7 @@ def follow(obj: AgentObject, seen: Seen, *, start_publishes: bool = True) -> Cal
     from restate.sessions.internal import invoke
 
     backend = Backend()
-    companion = Companion(obj, backend, seen, start_publishes=start_publishes)
+    companion = Companion(obj, backend, seen)
 
     class Deferred(Answer):
         def __init__(self, handler: str, arg: Any) -> None:
@@ -273,15 +272,6 @@ async def test_a_message_steered_while_the_tools_run_is_taken_at_the_next_step(f
     # The tool steered it: the publish after the results returned it, and the next request had it.
     assert await chat("hello") == "answered after hello, use Celsius"
     assert seen.companion_calls() == ["start", "publish", "publish", "close"]
-
-
-@pytest.mark.parametrize("framework", list(AGENTS))
-async def test_a_companion_whose_start_returns_nothing_still_gets_the_turns_first_publish(framework: str):
-    seen = Seen()
-    chat = follow(make(framework, seen, calls=0), seen, start_publishes=False)
-    await chat("hello")
-    # An older companion: the turn publishes its start itself.
-    assert seen.companion_calls() == ["start", "publish", "close"]
 
 
 @pytest.mark.parametrize("framework", list(AGENTS))

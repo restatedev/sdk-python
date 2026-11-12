@@ -95,10 +95,14 @@ async def forget(ctx: sessions.SessionContext) -> None:
 assistant = AgentObject("assistant")
 assistant.chat(answer, items=ITEMS, clear=forget)
 
+other = AgentObject("other")
+"""A second agent in the same app, with a companion of its own."""
+other.chat(answer, items=ITEMS)
+
 
 @pytest.fixture(scope="session")
 async def harness():
-    async with restate.create_test_harness(restate.app([assistant]), restate_image=RESTATE_IMAGE) as harness:
+    async with restate.create_test_harness(restate.app([assistant, other]), restate_image=RESTATE_IMAGE) as harness:
         yield harness
 
 
@@ -210,6 +214,32 @@ async def test_status_says_which_message_is_answered_and_stop_cancels_it(harness
     # The next message is answered.
     gate.open()
     assert (await call(harness, "chat", key, "next")).json() == "echo: next"
+
+
+async def test_each_agent_has_its_own_companion_which_a_turn_of_the_other_does_not_touch(harness: HarnessEnvironment):
+    key = str(uuid.uuid4())
+    async with httpx2.AsyncClient(timeout=60) as admin:
+        served = {
+            service["name"] for service in (await admin.get(f"{harness.admin_api_url}/services")).json()["services"]
+        }
+    assert {"assistant.agentprebuild.restate", "other.agentprebuild.restate"} <= served and "signals" not in served
+    # A turn of the assistant, which waits for an approval at the same key.
+    invocation = await send(harness, key, "refund o7")
+
+    async def waits() -> bool:
+        return len((await call(harness, "pending", key)).json()) == 1
+
+    await until(waits)
+    assert (await call(harness, "notifications", key)).json()["revision"] > 0
+    async with httpx2.AsyncClient(timeout=60) as ingress:
+        other_status = (await ingress.post(f"{harness.ingress_url}/other/{key}/status")).json()
+        other_revision = (await ingress.post(f"{harness.ingress_url}/other/{key}/notifications")).json()
+        unresolved = (await ingress.post(f"{harness.ingress_url}/other/{key}/signal", json={"name": "approval"})).json()
+    # The other agent's companion, at the same key, knows nothing of it, and has no wait to resolve.
+    assert other_status == {"answering": None, "waiting": []} and other_revision == {"revision": 0}
+    assert unresolved == {"resolved": None}
+    await call(harness, "signal", key, {"name": "approval", "value": "approved"})
+    assert (await attach(harness, invocation)).json() == "refund: approved"
 
 
 async def test_clear_forgets_the_conversation_and_its_ids_go_on(harness: HarnessEnvironment):

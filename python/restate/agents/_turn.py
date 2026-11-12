@@ -181,11 +181,9 @@ class Inbox:
     revision: int = -1
     messages: list[Steer] = field(default_factory=list[Steer])
 
-    def saw(self, published: Published | None) -> None:
+    def saw(self, published: Published) -> None:
         """Keep what ``publish`` returned, if it is newer than what is kept."""
-        if not isinstance(published, dict):
-            return
-        revision = published.get("revision", -1)
+        revision = published["revision"]
         if revision > self.revision:
             self.revision = revision
             self.messages = list(published.get("steering", []))
@@ -226,16 +224,22 @@ async def publish(ctx: SessionContext) -> None:
 
     While a framework is answering (inside ``answering``), the calls whose
     results are stored are first forgotten. The rows the conversation holds
-    back are written first: the clients read them once told to.
+    back are written first: the clients read them once told to. A session
+    object that is no agent (that answers with ``answer_once`` all the same)
+    has no companion to publish to: nothing follows it.
     """
     await flush_held(ctx)
     stored = _ANSWERING.get(ctx)
     if stored is not None:
         await _settled(ctx, stored)
-    published = await ctx.call(_signals.publish, key=_signals.signals_of(ctx))
+    companion = _signals.companion_at(ctx)
+    if companion is None:
+        # A session object that is no agent has no companion, and no views that follow it.
+        return
+    published = await ctx.call(companion.publish, key=ctx.key)
     inbox = _INBOX.get(ctx)
     if inbox is not None:
-        inbox.saw(typing.cast(Published | None, published))
+        inbox.saw(published)
 
 
 async def stepped(ctx: SessionContext) -> None:
@@ -327,26 +331,22 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     AI's usage limits, retries that ran out and setup errors.
     """
     invocation_id = ctx.request.id
-    companion = _signals.signals_of(ctx)
+    companion = _signals.companion_in(ctx)
     turn: Answering = {"invocationId": invocation_id, "since": _now()}
     settings = settings_of(ctx)
     steers = settings.steers and not settings.background
     if steers:
         # Before the first publish, which may return messages steered to the turn already.
         _INBOX.set(ctx, Inbox())
-    # From here until the turn closes, the companion knows about it: `status` and `stop` ask it.
-    # The agent has ``settle`` (``chat()`` adds it), so the companion may send it this turn once it is gone.
+    # From here until the turn closes, the companion knows about it: `status` and `stop` ask it. Once the
+    # turn's invocation is gone, the companion sends it to the agent's `settle` (which `chat()` adds).
     followed = not _unfollowed(ctx)
-    started: _signals.Started = {**turn, "settles": True, "steers": steers, "publishes": followed}
-    published = await ctx.call(_signals.start, started, key=companion)
-    if isinstance(published, dict):
-        # The companion published the turn's start as it started it.
-        inbox = _INBOX.get(ctx)
-        if inbox is not None:
-            inbox.saw(published)
-    else:
-        # A companion that does not publish as it starts a turn (of an earlier deployment): publish here.
-        await stepped(ctx)
+    started: _signals.Started = {**turn, "steers": steers, "publishes": followed}
+    # A followed turn's start is its first publish; a background agent's publishes nothing (and takes no steers).
+    published = await ctx.call(companion.start, started, key=ctx.key)
+    inbox = _INBOX.get(ctx)
+    if inbox is not None and published is not None:
+        inbox.saw(published)
 
     async def end() -> None:
         # Have the companion close the turn, which publishes its last change
@@ -355,7 +355,7 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
         stored = _ANSWERING.get(ctx)
         if stored is not None:
             await _settled(ctx, stored)
-        await ctx.call(_signals.close, invocation_id, key=companion)
+        await ctx.call(companion.close, invocation_id, key=ctx.key)
 
     stop = Stop()
     _STOP.set(ctx, stop)

@@ -40,6 +40,7 @@ from restate.agents._conversation import (
     last_of,
 )
 from restate.agents._common import Check
+from restate.agents._signals import with_companion
 from restate.agents.internal import CANCELLED, from_tool, refusal_of
 from restate.sessions.internal import invoke
 
@@ -51,8 +52,11 @@ def anyio_backend():
 
 pytestmark = [pytest.mark.anyio]
 
-PUBLISHED = {"publish": b"null"}
-"""What the signals object answers when the turn publishes its progress."""
+REVISION = b'{"revision": 1}'
+"""What the agent's companion answers a turn's ``start`` and each ``publish`` with: the revision."""
+
+PUBLISHED = {"publish": REVISION}
+"""What the agent's companion answers when the turn publishes its progress."""
 
 
 class Items:
@@ -980,8 +984,11 @@ class Syncing(Host):
 
 
 def _turn_rows() -> sessions.SessionObject:
-    """An object whose ``ask`` answers with the run that ``runs`` holds, and whose ``rows`` reads each turn back."""
+    """An object whose ``ask`` answers with the run that ``runs`` holds, and whose ``rows`` reads each turn back.
+
+    It has a companion, as an agent has, which its turns publish to."""
     obj = sessions.SessionObject("asker")
+    with_companion(obj)
 
     @obj.handler
     async def rows(ctx: sessions.SessionContext) -> list[dict[str, Any]]:

@@ -232,7 +232,7 @@ sequenceDiagram
   autonumber
   participant M as Model
   participant G as _Restate
-  participant S as Companion (signals)
+  participant S as Companion
   participant C as Client
   M->>G: call delete_account(id=7), which requires approval
   G->>S: wait for the call's id

@@ -29,6 +29,7 @@ from restate import sessions
 from restate.agents import _messages
 from restate.agents._api import Steer
 from restate.agents._common import Check
+from restate.agents._signals import with_companion
 from restate.agents._conversation import SCHEMA, STEERED, Conversation, answer_once, steer_stored
 from restate.agents._steering import take_steers
 from restate.agents._turn import _INBOX, _STOP, Inbox, Stop
@@ -50,14 +51,15 @@ class Asker:
 
     def __init__(self, run: Run, *, window: int | None = None, check: Check | None = None):
         self.obj = sessions.SessionObject("asker")
+        with_companion(self.obj)  # the companion it calls, as an agent's
         self.backend = Backend()
         self.inbox: list[Steer] = []
         self.hosts: list[Host] = []
 
         @self.obj.handler
         async def ask(ctx: sessions.SessionContext, text: str) -> str:
-            # As ``chat_turn`` sets it, from what the companion's ``publish`` returned.
-            _INBOX.set(ctx, Inbox(revision=0, messages=list(self.inbox)))
+            # As ``chat_turn`` sets it, from what the companion's ``start`` returned (each publish answers the same).
+            _INBOX.set(ctx, Inbox(revision=1, messages=list(self.inbox)))
 
             async def ran(conversation: Conversation) -> str:
                 return await run(ctx, conversation)
@@ -120,9 +122,9 @@ async def test_a_steered_message_is_stored_once_as_a_step_of_the_turn_and_taken_
     # The transaction that stored it sent the companion its id, once.
     [sent] = asker.taken()
     assert (sent.service, json.loads(sent.arg), sent.key, sent.idempotency_key) == (
-        "signals",
+        "asker.agentprebuild.restate",
         ["s1"],
-        "asker:alice",
+        "alice",
         "taken:s1",
     )
 

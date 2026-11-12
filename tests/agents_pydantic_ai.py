@@ -57,6 +57,9 @@ def anyio_backend():
 
 pytestmark = [pytest.mark.anyio]
 
+REVISION = b'{"revision": 1}'
+"""What the agent's companion answers a turn's ``start`` and each ``publish`` with: the revision."""
+
 
 class AuthenticationError(Exception):
     """As a model SDK names the error of a missing or wrong API key."""
@@ -1275,7 +1278,7 @@ async def test_a_chat_without_snapshots_that_answers_with_prompt_takes_steered_m
     def lookup(about: str) -> str:
         """Look something up; meanwhile, a client steers the turn twice."""
         steering = [{"id": "s1", "text": "use Celsius"}, {"id": "s2", "text": "and be brief"}]
-        answers["publish"] = json.dumps({"revision": 1, "steering": steering}).encode()
+        answers["publish"] = json.dumps({"revision": 2, "steering": steering}).encode()
         return f"found {about}"
 
     mine: Any = Agent(FunctionModel(model), tools=[lookup])
@@ -1327,7 +1330,7 @@ async def test_a_tool_call_whose_id_an_earlier_turns_call_had_still_gets_its_res
     obj = pydantic_ai.agent("pai_reused_ids", model=FunctionModel(model), tools=[lookup])
     backend = Backend()
     for word in ("one", "two", "three"):
-        host = Host(backend, service=obj.name, answers={"publish": b"null", "start": b"null", "close": b"null"})
+        host = Host(backend, service=obj.name, answers={"publish": REVISION, "start": REVISION, "close": b"null"})
         assert await invoke(obj, "chat", host, request(), word) == "answered"
     # The last request has each turn's result, its own, and none taken for interrupted.
     returned = [

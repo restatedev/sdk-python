@@ -111,7 +111,7 @@ def main() -> None:
 
     manifest = asyncio.run(discover(restate.app([notes, restate.agents.AgentObject("assistant")])))
     served = sorted(s["name"] for s in manifest["services"])
-    check("sessions and agents serve", served == ["assistant", "notes", "signals"], served)
+    check("sessions and agents serve", served == ["assistant", "assistant.agentprebuild.restate", "notes"], served)
 
     refused("restate.agents.tool", lambda: restate.agents.tool(lambda city: city), "pydantic")
     refused("restate.agents.langgraph", lambda: __import__("restate.agents.langgraph"), "restate-sdk[langgraph]")

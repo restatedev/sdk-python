@@ -8,26 +8,33 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""The ``signals`` virtual object: each agent key's companion.
+"""Each agent's companion: a virtual object of its own, ``<agent>.agentprebuild.restate``.
 
-The companion of an agent's key is keyed ``<agent>:<key>`` (such as
-``assistant:alice``). It holds the signals the agent's tools wait for (``wait``
-returns once ``resolve`` gives the wait its value), the message the agent is
+Whatever makes an agent (a framework's ``agent()``, ``AgentObject``) makes its
+companion too (``with_companion``), and the agent serves it alongside itself.
+The companion of agent ``assistant`` is ``assistant.agentprebuild.restate``,
+keyed as the agent: key ``alice`` of the agent has key ``alice`` of its
+companion. It holds the signals the agent's tools wait for (``wait`` returns
+once ``resolve`` gives the wait its value), the message the agent is
 answering, the messages steered to it that it has not taken yet (``steer``),
-and the conversation's revision, which ``watch`` waits on. Its handler names,
-including the camelCase ``awaitTurn``, are wire names shared with Restate's
-other SDKs.
+and the conversation's revision, which ``watch`` waits on.
+
+The companion is ingress-private: only its agent's handlers and views call it,
+and clients reach it through the agent's views (``status``, ``pending``,
+``signal``, ``steer``, ``watch``, ...). Its handlers' names, the camelCase
+``awaitTurn`` among them, and payloads are those of the TypeScript SDK's
+companion.
 
 An agent's own handler cannot wait on an awakeable, since it has no journal to
 replay one from. Instead it calls ``wait``, a regular journaled handler of
-this object, which waits without holding a process.
+its companion, which waits without holding a process.
 """
 
 from __future__ import annotations
 
 import json
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypedDict
@@ -52,14 +59,18 @@ from restate.sessions._link import Link
 from restate.sessions.internal import definition_of
 
 T = typing.TypeVar("T")
-D = typing.TypeVar("D")
 
-signals = restate.VirtualObject("signals")
-"""The companion object of every agent, keyed ``<agent>:<key>`` (see ``signals_of``).
+COMPANION_SUFFIX = ".agentprebuild.restate"
+"""What an agent's name is followed by to name its companion: ``<agent>.agentprebuild.restate``.
 
-``restate.app`` serves it alongside the agents: each agent lists it (``AgentObject.__restate_services__``). Its ingress-private handlers
-are called only by the agents' own handlers.
-"""
+Restate refuses service names that start with ``restate``, so the companion's
+name ends with it instead."""
+
+
+def companion_name(agent: str) -> str:
+    """Return the name of the companion of agent ``agent``: ``<agent>.agentprebuild.restate``."""
+    return f"{agent}{COMPANION_SUFFIX}"
+
 
 WATCH = timedelta(hours=1)
 """How long one ``awaitTurn`` invocation waits for its turn to end before handing over to a new one."""
@@ -108,19 +119,15 @@ Context = ObjectContext | ObjectSharedContext
 
 
 class Started(Answering, total=False):
-    """A turn as its agent starts it: and whether the agent closes it itself once its invocation is gone."""
+    """A turn as its agent starts it: and whether it takes steered messages, and whether ``start`` publishes it."""
 
-    settles: bool
-    """Whether the agent has the private ``settle`` handler, which the companion sends a turn whose invocation is
-    gone. An agent of another SDK, whose turns this companion may hold too (its handler names are shared), does
-    not say so, and is sent nothing: its next message closes such a turn."""
     steers: bool
-    """Whether the turn takes steered messages at its steps (``steer``). A turn that does not say so (of another
-    SDK, or of an agent whose framework cannot take them) gets none: each is answered as a turn of its own."""
+    """Whether the turn takes steered messages at its steps (``steer``). A turn that does not (of an agent whose
+    framework cannot take them, or that runs in the background) gets none: each is answered as a turn of its own."""
     publishes: bool
-    """Whether ``start`` publishes the turn's start, and returns what ``publish`` returns: a followed turn of this
-    SDK's agents, which then makes no publish of its own. A turn that does not say so (of another SDK, or of an
-    agent that runs in the background) is not published by ``start``, which returns nothing."""
+    """Whether ``start`` publishes the turn's start, and returns what ``publish`` returns: a followed turn, which
+    then makes no publish of its own. A turn that does not (of an agent that runs in the background) is not
+    published by ``start``, which returns nothing."""
 
 
 class _Held(TypedDict):
@@ -190,7 +197,7 @@ async def _publish(ctx: ObjectContext) -> Notifications:
     return notified
 
 
-async def _closed(ctx: ObjectContext, turn: str, gone: bool = False) -> None:
+async def _closed(ctx: ObjectContext, agent: str, turn: str, gone: bool = False) -> None:
     """Close ``turn`` (an invocation id): forget it and its tools' waits, and publish the change.
 
     The waits are rejected, which ends their ``wait`` calls. A turn that ends
@@ -198,8 +205,8 @@ async def _closed(ctx: ObjectContext, turn: str, gone: bool = False) -> None:
     Closing a turn twice changes nothing and publishes nothing.
 
     If the turn's invocation is ``gone`` and the turn did not close itself, the
-    agent is sent ``settle``, which closes the turn in its conversation too: if
-    it said it has that handler as it started the turn.
+    agent (``agent``, whose companion this is) is sent ``settle``, which closes
+    the turn in its conversation too.
 
     The messages steered to the turn are forgotten here: each that it did not
     take was queued as a turn of its own as it was sent (``steer``), and is
@@ -209,9 +216,8 @@ async def _closed(ctx: ObjectContext, turn: str, gone: bool = False) -> None:
     is_answered = answering is not None and answering["invocationId"] == turn
     if is_answered:
         ctx.clear("turn")
-        if gone and typing.cast(Started, answering).get("settles", False):
-            agent, key = ctx.key().split(":", 1)
-            ctx.generic_send(agent, "settle", json.dumps(turn).encode(), key=key)
+        if gone:
+            ctx.generic_send(agent, "settle", json.dumps(turn).encode(), key=ctx.key())
     inbox = await _inbox(ctx)
     dropped = any(one["turn"] == turn for one in inbox)
     if dropped:
@@ -234,252 +240,6 @@ def _set_inbox(ctx: ObjectContext, inbox: list[_Inboxed]) -> None:
         ctx.clear("inbox")
 
 
-@signals.handler(ingress_private=True)
-async def steer(ctx: ObjectContext, message: Steer) -> Steered:
-    """Take a message steered to the agent (its ``steer`` view): for the turn being answered, or as a turn of its own.
-
-    The message is always sent to the agent's private ``steered`` handler at
-    once, which keeps its place in the key's queue, in order with the
-    messages sent after it: once the turn being answered ends, ``steered``
-    answers the message as a turn of its own, unless that turn took it. A
-    turn that takes steered messages (``Started.steers``) also finds it here,
-    at its next step, through ``publish``, until it takes it (``taken``) or
-    ends.
-    """
-    message_id, text = message["id"], message["text"]
-    agent, key = ctx.key().split(":", 1)
-    placeholder = json.dumps({"id": message_id, "text": text}).encode()
-    ctx.generic_send(agent, "steered", placeholder, key=key, idempotency_key=f"steer:{message_id}")
-    answering = await _get(ctx, "turn", typing.cast(Started | None, None))
-    if answering is None or not answering.get("steers", False):
-        return {"id": message_id, "turn": None}
-    turn, inbox = answering["invocationId"], await _inbox(ctx)
-    if any(one["id"] == message_id for one in inbox):
-        return {"id": message_id, "turn": turn}
-    # Taken or not: the turn has room for so many in all.
-    if sum(one["turn"] == turn for one in inbox) >= STEERS:
-        return {"id": message_id, "turn": None}
-    since = iso(await ctx.time())
-    _set_inbox(ctx, [*inbox, {"id": message_id, "text": text, "since": since, "turn": turn}])
-    await _publish(ctx)
-    return {"id": message_id, "turn": turn}
-
-
-@signals.handler(ingress_private=True)
-async def taken(ctx: ObjectContext, ids: list[str]) -> None:
-    """Mark the steered messages ``ids`` taken, which their turn has stored, and publish the change, if any.
-
-    The turn sends it with the transaction that stores them, so it comes once
-    they are stored, and once only. Each is kept without its text until the
-    turn ends, as one of its ``STEERS``; one already forgotten (its turn
-    closed first) is left so.
-    """
-    inbox = await _inbox(ctx)
-    marked: list[_Inboxed] = [
-        {"id": one["id"], "since": one["since"], "turn": one["turn"]} if one["id"] in ids else one for one in inbox
-    ]
-    if marked != inbox:
-        _set_inbox(ctx, marked)
-        await _publish(ctx)
-
-
-@signals.handler(kind="shared", inactivity_timeout=PARKED)
-async def wait(ctx: ObjectSharedContext, request: WaitRequest) -> Any:
-    """Wait for the signal ``name`` as wait ``id``, and return its value."""
-    awakeable, value = ctx.awakeable(type_hint=object)
-    since = iso(await ctx.time())
-    waiting: _WaitingOn = {"id": request["id"], "name": request["name"], "since": since, "awakeable": awakeable}
-    if "input" in request:
-        waiting["input"] = request["input"]
-    ctx.object_send(listen, ctx.key(), waiting)
-    try:
-        return await value
-    except TerminalError as error:
-        # The agent's invocation was cancelled, so nothing waits any more.
-        if error.status_code == 409:
-            ctx.object_send(forget, ctx.key(), request["id"])
-        raise
-
-
-@signals.handler()
-async def resolve(ctx: ObjectContext, signal: Signal) -> Resolved:
-    """Resolve the wait ``id``, or else the oldest wait for signal ``name``, with ``value``."""
-    wait_id, name = signal.get("id"), signal.get("name")
-    if wait_id is None and name is None:
-        raise TerminalError("a signal needs an id or a name")
-    value = signal.get("value")
-    waiting = await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))
-    found = next(
-        (at for at, wait in enumerate(waiting) if (wait["name"] == name if wait_id is None else wait["id"] == wait_id)),
-        None,
-    )
-    if found is None:
-        if signal.get("keep", False) and name is not None and wait_id is None:
-            kept = await _get(ctx, "kept", typing.cast(dict[str, list[Any]], {}))
-            ctx.set("kept", {**kept, name: [*kept.get(name, []), value]})
-        return {"resolved": None}
-    resolved = waiting.pop(found)
-    ctx.resolve_awakeable(resolved["awakeable"], value)
-    ctx.set("waiting", waiting)
-    await _publish(ctx)
-    return {"resolved": resolved["id"]}
-
-
-@signals.handler(kind="shared")
-async def pending(ctx: ObjectSharedContext) -> list[Waiting]:
-    """List the waits, oldest first."""
-    return [_public(wait) for wait in await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))]
-
-
-@signals.handler(ingress_private=True)
-async def listen(ctx: ObjectContext, waiting: _WaitingOn) -> None:
-    """Register a wait, resolving it right away if a signal was kept for it."""
-    kept = await _get(ctx, "kept", typing.cast(dict[str, list[Any]], {}))
-    values = kept.get(waiting["name"], [])
-    if values:
-        ctx.resolve_awakeable(waiting["awakeable"], values[0])
-        ctx.set("kept", {**kept, waiting["name"]: values[1:]})
-        return
-    ctx.set("waiting", [*await _get(ctx, "waiting", typing.cast(list[_WaitingOn], [])), waiting])
-    await _publish(ctx)
-
-
-@signals.handler(ingress_private=True)
-async def start(ctx: ObjectContext, turn: Started) -> Published | None:
-    """Record that the agent's ``chat`` started answering ``turn``, and publish it if the turn ``publishes``.
-
-    A retry of the same invocation keeps the original start time. A previous
-    turn that never closed itself (because its invocation was killed) is
-    closed now. ``awaitTurn`` then watches the new turn, so that it is closed
-    even if no other turn follows it.
-
-    A turn that ``publishes`` gets what ``publish`` returns (the turn's first
-    publish, made here rather than by a call of its own); any other gets
-    ``None``, and publishes itself if it is followed.
-    """
-    before = await _get(ctx, "turn", typing.cast(Started | None, None))
-    if before is None or before["invocationId"] != turn["invocationId"]:
-        if before is not None:
-            await _closed(ctx, before["invocationId"], gone=True)
-        ctx.set("turn", turn)
-        ctx.object_send(await_turn, ctx.key(), turn["invocationId"])
-    if not turn.get("publishes", False):
-        return None
-    return await _published(ctx)
-
-
-@signals.handler(
-    name="awaitTurn",
-    kind="shared",
-    ingress_private=True,
-    inactivity_timeout=PARKED,
-    # Keep nothing once it is done: there is one at a time per turn.
-    journal_retention=timedelta(0),
-    idempotency_retention=timedelta(0),
-)
-async def await_turn(ctx: ObjectSharedContext, turn: str) -> None:
-    """Wait for ``turn`` to end, without holding a process, and close it if it failed.
-
-    Closing ends the turn's waits, and ``status`` stops reporting it. A turn
-    that ended normally or was cancelled has closed itself already; one that
-    did not (killed, out of retries, lost) is closed here.
-
-    It waits at most ``WATCH``: if the turn is still running then, a new
-    watch takes over, which runs on the current deployment. Cancelling the
-    watch itself (an operator might) closes nothing.
-    """
-    attached = ctx.attach_invocation(turn, type_hint=object)
-    # Cancelling this watch raises here, and closes nothing; the turn failing does not raise here.
-    completed, _ = await restate.wait_completed(attached, ctx.sleep(WATCH))
-    if attached in completed:
-        try:
-            await attached
-        except TerminalError:
-            ctx.object_send(ended, ctx.key(), turn)
-        return
-    answering = await _get(ctx, "turn", typing.cast(Answering | None, None))
-    if answering is not None and answering["invocationId"] == turn:
-        ctx.object_send(await_turn, ctx.key(), turn)
-
-
-@signals.handler(kind="shared")
-async def status(ctx: ObjectSharedContext) -> Status:
-    """Return what the agent is doing: the message it is answering, if any, its tools' waits, and the messages
-    steered to it that it has not taken yet."""
-    answering = await _get(ctx, "turn", typing.cast(Started | None, None))
-    shown: Status = {
-        "answering": _shown(answering),
-        "waiting": [_public(wait) for wait in await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))],
-    }
-    waiting = _waiting(await _inbox(ctx), answering)
-    steering: list[Steering] = [{"id": one["id"], "since": one["since"]} for one in waiting]
-    if steering:
-        shown["steering"] = steering
-    return shown
-
-
-# Its journal is not kept once it is done: a client follows with one watch after another.
-@signals.handler(kind="shared", inactivity_timeout=PARKED, journal_retention=timedelta(0))
-async def watch(ctx: ObjectSharedContext, request: Watch) -> Notifications:
-    """Wait for a revision newer than ``revision``, or the timeout, and return the current revision.
-
-    The timeout is ``timeoutSeconds`` (50 by default, at most 60). The wait
-    happens in Restate and holds no process; a caller that retries with the
-    same idempotency key joins the same wait.
-    """
-    awakeable, changed = ctx.awakeable(type_hint=object)
-    watching: _Watching = {"revision": request["revision"], "awakeable": awakeable}
-    ctx.object_send(subscribe, ctx.key(), watching)
-    seconds = min(max(float(request.get("timeoutSeconds", 50)), 0.0), 60.0)
-    which, value = await restate.select(changed=changed, timeout=ctx.sleep(timedelta(seconds=seconds)))
-    if which == "changed":
-        return typing.cast(Notifications, value)
-    ctx.object_send(unsubscribe, ctx.key(), awakeable)
-    return {"revision": await _get(ctx, "revision", 0)}
-
-
-@signals.handler(ingress_private=True)
-async def close(ctx: ObjectContext, turn: str) -> None:
-    """Close ``turn`` (an invocation id), which has been answered or ended otherwise."""
-    await _closed(ctx, turn)
-
-
-@signals.handler(ingress_private=True)
-async def ended(ctx: ObjectContext, turn: str) -> None:
-    """Close ``turn`` (an invocation id), which failed: if it did not close itself, the agent closes it too."""
-    await _closed(ctx, turn, gone=True)
-
-
-@signals.handler(ingress_private=True)
-async def reset(ctx: ObjectContext) -> None:
-    """Forget all waits, kept signals and steered messages after the agent's ``clear``, and publish the change.
-    Each steered message was queued as a turn of its own as it was sent, before the ``clear``."""
-    ctx.clear("waiting")
-    ctx.clear("kept")
-    ctx.clear("inbox")
-    await _publish(ctx)
-
-
-@signals.handler(ingress_private=True)
-async def forget(ctx: ObjectContext, wait_id: str) -> None:
-    """Forget wait ``wait_id``, which the agent no longer waits for."""
-    waiting = await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))
-    ctx.set("waiting", [wait for wait in waiting if wait["id"] != wait_id])
-    await _publish(ctx)
-
-
-@signals.handler(ingress_private=True)
-async def publish(ctx: ObjectContext) -> Published:
-    """Increase the conversation's revision after a change, and wake up every waiting ``watch``.
-
-    It returns the new revision, and the messages steered to the turn being
-    answered that it has not taken yet, if any: a turn publishes as it starts
-    and after each step it stores that a tool waits for (a reply with tool
-    calls, the tools' results), so it learns of them at no cost of its own.
-    """
-    return await _published(ctx)
-
-
 async def _published(ctx: ObjectContext) -> Published:
     """Publish (``_publish``), and return the new revision and the messages the turn being answered has not taken."""
     published: Published = {**await _publish(ctx)}
@@ -493,74 +253,348 @@ async def _published(ctx: ObjectContext) -> Published:
     return published
 
 
-@signals.handler(kind="shared")
-async def notifications(ctx: ObjectSharedContext) -> Notifications:
-    """Return the conversation's revision."""
-    return {"revision": await _get(ctx, "revision", 0)}
+@dataclass(frozen=True)
+class Companion:
+    """An agent's companion object (``service``), and its handlers, to call with the agent's key.
+
+    From a handler or view of the agent::
+
+        status = await ctx.call(companion_of(assistant).status, key=ctx.key)
+    """
+
+    agent: str
+    """The name of the agent whose companion this is."""
+    service: restate.VirtualObject
+    """The companion's virtual object, ``<agent>.agentprebuild.restate``, which the agent serves alongside itself."""
+    steer: Callable[[ObjectContext, Steer], Awaitable[Steered]]
+    taken: Callable[[ObjectContext, list[str]], Awaitable[None]]
+    wait: Callable[[ObjectSharedContext, WaitRequest], Awaitable[Any]]
+    resolve: Callable[[ObjectContext, Signal], Awaitable[Resolved]]
+    pending: Callable[[ObjectSharedContext], Awaitable[list[Waiting]]]
+    listen: Callable[[ObjectContext, _WaitingOn], Awaitable[None]]
+    start: Callable[[ObjectContext, Started], Awaitable[Published | None]]
+    await_turn: Callable[[ObjectSharedContext, str], Awaitable[None]]
+    status: Callable[[ObjectSharedContext], Awaitable[Status]]
+    watch: Callable[[ObjectSharedContext, Watch], Awaitable[Notifications]]
+    close: Callable[[ObjectContext, str], Awaitable[None]]
+    ended: Callable[[ObjectContext, str], Awaitable[None]]
+    reset: Callable[[ObjectContext], Awaitable[None]]
+    forget: Callable[[ObjectContext, str], Awaitable[None]]
+    publish: Callable[[ObjectContext], Awaitable[Published]]
+    notifications: Callable[[ObjectSharedContext], Awaitable[Notifications]]
+    subscribe: Callable[[ObjectContext, _Watching], Awaitable[None]]
+    unsubscribe: Callable[[ObjectContext, str], Awaitable[None]]
 
 
-@signals.handler(ingress_private=True)
-async def subscribe(ctx: ObjectContext, watching: _Watching) -> None:
-    """Resolve the watch's awakeable once there is a revision newer than its ``revision``, right away if there is one."""
-    revision = await _get(ctx, "revision", 0)
-    if revision > watching["revision"]:
-        ctx.resolve_awakeable(watching["awakeable"], {"revision": revision})
-        return
-    ctx.set("watching", [*await _get(ctx, "watching", typing.cast(list[_Watching], [])), watching])
+def make_companion(agent: str) -> Companion:
+    """Make the companion of agent ``agent``: the virtual object ``<agent>.agentprebuild.restate``, keyed as the agent.
 
+    It knows its agent: it sends it ``settle`` and ``steered``. It is
+    ingress-private: only the agent's handlers and views call it.
+    """
+    service = restate.VirtualObject(
+        companion_name(agent),
+        description=f"The companion of agent {agent}: its turn, its tools' waits, steered messages and revision",
+        ingress_private=True,
+    )
 
-@signals.handler(ingress_private=True)
-async def unsubscribe(ctx: ObjectContext, awakeable: str) -> None:
-    """Forget the ``watch`` with ``awakeable``, which no longer waits."""
-    watching = await _get(ctx, "watching", typing.cast(list[_Watching], []))
-    ctx.set("watching", [one for one in watching if one["awakeable"] != awakeable])
+    @service.handler()
+    async def steer(ctx: ObjectContext, message: Steer) -> Steered:
+        """Take a message steered to the agent (its ``steer`` view): for the turn being answered, or as a turn of its own.
+
+        The message is always sent to the agent's private ``steered`` handler at
+        once, which keeps its place in the key's queue, in order with the
+        messages sent after it: once the turn being answered ends, ``steered``
+        answers the message as a turn of its own, unless that turn took it. A
+        turn that takes steered messages (``Started.steers``) also finds it here,
+        at its next step, through ``publish``, until it takes it (``taken``) or
+        ends.
+        """
+        message_id, text = message["id"], message["text"]
+        placeholder = json.dumps({"id": message_id, "text": text}).encode()
+        ctx.generic_send(agent, "steered", placeholder, key=ctx.key(), idempotency_key=f"steer:{message_id}")
+        answering = await _get(ctx, "turn", typing.cast(Started | None, None))
+        if answering is None or not answering.get("steers", False):
+            return {"id": message_id, "turn": None}
+        turn, inbox = answering["invocationId"], await _inbox(ctx)
+        if any(one["id"] == message_id for one in inbox):
+            return {"id": message_id, "turn": turn}
+        # Taken or not: the turn has room for so many in all.
+        if sum(one["turn"] == turn for one in inbox) >= STEERS:
+            return {"id": message_id, "turn": None}
+        since = iso(await ctx.time())
+        _set_inbox(ctx, [*inbox, {"id": message_id, "text": text, "since": since, "turn": turn}])
+        await _publish(ctx)
+        return {"id": message_id, "turn": turn}
+
+    @service.handler()
+    async def taken(ctx: ObjectContext, ids: list[str]) -> None:
+        """Mark the steered messages ``ids`` taken, which their turn has stored, and publish the change, if any.
+
+        The turn sends it with the transaction that stores them, so it comes once
+        they are stored, and once only. Each is kept without its text until the
+        turn ends, as one of its ``STEERS``; one already forgotten (its turn
+        closed first) is left so.
+        """
+        inbox = await _inbox(ctx)
+        marked: list[_Inboxed] = [
+            {"id": one["id"], "since": one["since"], "turn": one["turn"]} if one["id"] in ids else one for one in inbox
+        ]
+        if marked != inbox:
+            _set_inbox(ctx, marked)
+            await _publish(ctx)
+
+    @service.handler(kind="shared", inactivity_timeout=PARKED)
+    async def wait(ctx: ObjectSharedContext, request: WaitRequest) -> Any:
+        """Wait for the signal ``name`` as wait ``id``, and return its value."""
+        awakeable, value = ctx.awakeable(type_hint=object)
+        since = iso(await ctx.time())
+        waiting: _WaitingOn = {"id": request["id"], "name": request["name"], "since": since, "awakeable": awakeable}
+        if "input" in request:
+            waiting["input"] = request["input"]
+        ctx.object_send(listen, ctx.key(), waiting)
+        try:
+            return await value
+        except TerminalError as error:
+            # The agent's invocation was cancelled, so nothing waits any more.
+            if error.status_code == 409:
+                ctx.object_send(forget, ctx.key(), request["id"])
+            raise
+
+    @service.handler()
+    async def resolve(ctx: ObjectContext, signal: Signal) -> Resolved:
+        """Resolve the wait ``id``, or else the oldest wait for signal ``name``, with ``value``."""
+        wait_id, name = signal.get("id"), signal.get("name")
+        if wait_id is None and name is None:
+            raise TerminalError("a signal needs an id or a name")
+        value = signal.get("value")
+        waiting = await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))
+        found = next(
+            (
+                at
+                for at, wait in enumerate(waiting)
+                if (wait["name"] == name if wait_id is None else wait["id"] == wait_id)
+            ),
+            None,
+        )
+        if found is None:
+            if signal.get("keep", False) and name is not None and wait_id is None:
+                kept = await _get(ctx, "kept", typing.cast(dict[str, list[Any]], {}))
+                ctx.set("kept", {**kept, name: [*kept.get(name, []), value]})
+            return {"resolved": None}
+        resolved = waiting.pop(found)
+        ctx.resolve_awakeable(resolved["awakeable"], value)
+        ctx.set("waiting", waiting)
+        await _publish(ctx)
+        return {"resolved": resolved["id"]}
+
+    @service.handler(kind="shared")
+    async def pending(ctx: ObjectSharedContext) -> list[Waiting]:
+        """List the waits, oldest first."""
+        return [_public(wait) for wait in await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))]
+
+    @service.handler()
+    async def listen(ctx: ObjectContext, waiting: _WaitingOn) -> None:
+        """Register a wait, resolving it right away if a signal was kept for it."""
+        kept = await _get(ctx, "kept", typing.cast(dict[str, list[Any]], {}))
+        values = kept.get(waiting["name"], [])
+        if values:
+            ctx.resolve_awakeable(waiting["awakeable"], values[0])
+            ctx.set("kept", {**kept, waiting["name"]: values[1:]})
+            return
+        ctx.set("waiting", [*await _get(ctx, "waiting", typing.cast(list[_WaitingOn], [])), waiting])
+        await _publish(ctx)
+
+    @service.handler()
+    async def start(ctx: ObjectContext, turn: Started) -> Published | None:
+        """Record that the agent's ``chat`` started answering ``turn``, and publish it if the turn ``publishes``.
+
+        A retry of the same invocation keeps the original start time. A previous
+        turn that never closed itself (because its invocation was killed) is
+        closed now. ``awaitTurn`` then watches the new turn, so that it is closed
+        even if no other turn follows it.
+
+        A turn that ``publishes`` gets what ``publish`` returns (the turn's first
+        publish, made here rather than by a call of its own); any other gets
+        ``None``, and publishes itself if it is followed.
+        """
+        before = await _get(ctx, "turn", typing.cast(Started | None, None))
+        if before is None or before["invocationId"] != turn["invocationId"]:
+            if before is not None:
+                await _closed(ctx, agent, before["invocationId"], gone=True)
+            ctx.set("turn", turn)
+            ctx.object_send(await_turn, ctx.key(), turn["invocationId"])
+        if not turn.get("publishes", False):
+            return None
+        return await _published(ctx)
+
+    @service.handler(
+        name="awaitTurn",
+        kind="shared",
+        inactivity_timeout=PARKED,
+        # Keep nothing once it is done: there is one at a time per turn.
+        journal_retention=timedelta(0),
+        idempotency_retention=timedelta(0),
+    )
+    async def await_turn(ctx: ObjectSharedContext, turn: str) -> None:
+        """Wait for ``turn`` to end, without holding a process, and close it if it failed.
+
+        Closing ends the turn's waits, and ``status`` stops reporting it. A turn
+        that ended normally or was cancelled has closed itself already; one that
+        did not (killed, out of retries, lost) is closed here.
+
+        It waits at most ``WATCH``: if the turn is still running then, a new
+        watch takes over, which runs on the current deployment. Cancelling the
+        watch itself (an operator might) closes nothing.
+        """
+        attached = ctx.attach_invocation(turn, type_hint=object)
+        # Cancelling this watch raises here, and closes nothing; the turn failing does not raise here.
+        completed, _ = await restate.wait_completed(attached, ctx.sleep(WATCH))
+        if attached in completed:
+            try:
+                await attached
+            except TerminalError:
+                ctx.object_send(ended, ctx.key(), turn)
+            return
+        answering = await _get(ctx, "turn", typing.cast(Answering | None, None))
+        if answering is not None and answering["invocationId"] == turn:
+            ctx.object_send(await_turn, ctx.key(), turn)
+
+    @service.handler(kind="shared")
+    async def status(ctx: ObjectSharedContext) -> Status:
+        """Return what the agent is doing: the message it is answering, if any, its tools' waits, and the messages
+        steered to it that it has not taken yet."""
+        answering = await _get(ctx, "turn", typing.cast(Started | None, None))
+        shown: Status = {
+            "answering": _shown(answering),
+            "waiting": [_public(wait) for wait in await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))],
+        }
+        waiting = _waiting(await _inbox(ctx), answering)
+        steering: list[Steering] = [{"id": one["id"], "since": one["since"]} for one in waiting]
+        if steering:
+            shown["steering"] = steering
+        return shown
+
+    # Its journal is not kept once it is done: a client follows with one watch after another.
+    @service.handler(kind="shared", inactivity_timeout=PARKED, journal_retention=timedelta(0))
+    async def watch(ctx: ObjectSharedContext, request: Watch) -> Notifications:
+        """Wait for a revision newer than ``revision``, or the timeout, and return the current revision.
+
+        The timeout is ``timeoutSeconds`` (50 by default, at most 60). The wait
+        happens in Restate and holds no process; a caller that retries with the
+        same idempotency key joins the same wait.
+        """
+        awakeable, changed = ctx.awakeable(type_hint=object)
+        watching: _Watching = {"revision": request["revision"], "awakeable": awakeable}
+        ctx.object_send(subscribe, ctx.key(), watching)
+        seconds = min(max(float(request.get("timeoutSeconds", 50)), 0.0), 60.0)
+        which, value = await restate.select(changed=changed, timeout=ctx.sleep(timedelta(seconds=seconds)))
+        if which == "changed":
+            return typing.cast(Notifications, value)
+        ctx.object_send(unsubscribe, ctx.key(), awakeable)
+        return {"revision": await _get(ctx, "revision", 0)}
+
+    @service.handler()
+    async def close(ctx: ObjectContext, turn: str) -> None:
+        """Close ``turn`` (an invocation id), which has been answered or ended otherwise."""
+        await _closed(ctx, agent, turn)
+
+    @service.handler()
+    async def ended(ctx: ObjectContext, turn: str) -> None:
+        """Close ``turn`` (an invocation id), which failed: if it did not close itself, the agent closes it too."""
+        await _closed(ctx, agent, turn, gone=True)
+
+    @service.handler()
+    async def reset(ctx: ObjectContext) -> None:
+        """Forget all waits, kept signals and steered messages after the agent's ``clear``, and publish the change.
+        Each steered message was queued as a turn of its own as it was sent, before the ``clear``."""
+        ctx.clear("waiting")
+        ctx.clear("kept")
+        ctx.clear("inbox")
+        await _publish(ctx)
+
+    @service.handler()
+    async def forget(ctx: ObjectContext, wait_id: str) -> None:
+        """Forget wait ``wait_id``, which the agent no longer waits for."""
+        waiting = await _get(ctx, "waiting", typing.cast(list[_WaitingOn], []))
+        ctx.set("waiting", [wait for wait in waiting if wait["id"] != wait_id])
+        await _publish(ctx)
+
+    @service.handler()
+    async def publish(ctx: ObjectContext) -> Published:
+        """Increase the conversation's revision after a change, and wake up every waiting ``watch``.
+
+        It returns the new revision, and the messages steered to the turn being
+        answered that it has not taken yet, if any: a turn publishes as it starts
+        and after each step it stores that a tool waits for (a reply with tool
+        calls, the tools' results), so it learns of them at no cost of its own.
+        """
+        return await _published(ctx)
+
+    @service.handler(kind="shared")
+    async def notifications(ctx: ObjectSharedContext) -> Notifications:
+        """Return the conversation's revision."""
+        return {"revision": await _get(ctx, "revision", 0)}
+
+    @service.handler()
+    async def subscribe(ctx: ObjectContext, watching: _Watching) -> None:
+        """Resolve the watch's awakeable once there is a revision newer than its ``revision``, right away if there is one."""
+        revision = await _get(ctx, "revision", 0)
+        if revision > watching["revision"]:
+            ctx.resolve_awakeable(watching["awakeable"], {"revision": revision})
+            return
+        ctx.set("watching", [*await _get(ctx, "watching", typing.cast(list[_Watching], [])), watching])
+
+    @service.handler()
+    async def unsubscribe(ctx: ObjectContext, awakeable: str) -> None:
+        """Forget the ``watch`` with ``awakeable``, which no longer waits."""
+        watching = await _get(ctx, "watching", typing.cast(list[_Watching], []))
+        ctx.set("watching", [one for one in watching if one["awakeable"] != awakeable])
+
+    return Companion(
+        agent=agent,
+        service=service,
+        steer=steer,
+        taken=taken,
+        wait=wait,
+        resolve=resolve,
+        pending=pending,
+        listen=listen,
+        start=start,
+        await_turn=await_turn,
+        status=status,
+        watch=watch,
+        close=close,
+        ended=ended,
+        reset=reset,
+        forget=forget,
+        publish=publish,
+        notifications=notifications,
+        subscribe=subscribe,
+        unsubscribe=unsubscribe,
+    )
 
 
 # --- An agent's companion -------------------------------------------------------------------------
 
 
-def key_of(service: str, key: str) -> str:
-    """Return the companion's key for key ``key`` of agent ``service``: ``<agent>:<key>``."""
-    return f"{service}:{key}"
+_COMPANION: Link[Companion] = Link("restate-agents.companion")
+"""The companion of each agent."""
 
 
-def signals_of(ctx: SessionContext | ViewContext) -> str:
-    """Return the companion's key for the agent key that ``ctx`` runs on."""
-    definition = definition_of(ctx)
-    if definition is None:
-        raise TypeError("signals_of takes the context of an agent's handler or view")
-    return key_of(definition.name, ctx.key)
+def with_companion(definition: object) -> Companion:
+    """Make the companion of ``definition`` (an agent), attach it, and return it.
 
-
-@dataclass(frozen=True)
-class Companion:
-    """The address of an agent key's companion in the ``signals`` object.
-
-    The companion knows what the agent is doing: the message it is answering
-    and what its tools wait for.
+    The agent serves it alongside itself (``AgentObject.__restate_services__``).
     """
-
-    key: str
-    """The companion's key in ``signals``: ``<agent>:<key>``."""
-    agent: str
-    """The agent's name."""
-    agent_key: str
-    """The agent's key."""
-
-
-_COMPANION: Link[Callable[[str], Companion]] = Link("restate-agents.companion")
-"""How an agent finds the companion of each of its keys."""
-
-
-def with_companion(definition: D) -> D:
-    """Attach the companion to ``definition`` (an agent): how it finds what each of its keys waits for."""
     name = typing.cast(str, getattr(definition, "name"))  # noqa: B009 (a definition of the SDK's)
-    _COMPANION.on(definition, lambda key: Companion(key=key_of(name, key), agent=name, agent_key=key))
-    return definition
+    companion = make_companion(name)
+    _COMPANION.on(definition, companion)
+    return companion
 
 
-def companion_of(agent: object, key: str) -> Companion:
-    """Return the companion of ``agent``'s key ``key``, to find out what that agent is doing.
+def companion_of(agent: object) -> Companion:
+    """Return the companion of ``agent``, whose handlers take the agent's keys, to find out what that agent is doing.
 
     Raises:
         TypeError: If ``agent`` is not a ``restate.agents`` agent.
@@ -568,7 +602,26 @@ def companion_of(agent: object, key: str) -> Companion:
     companion = _COMPANION.of(agent)
     if companion is None:
         raise TypeError(f"{agent!r} is not an agent of restate.agents")
-    return companion(key)
+    return companion
+
+
+def companion_at(ctx: SessionContext | ViewContext) -> Companion | None:
+    """Return the companion of the agent whose handler or view ``ctx`` runs, or ``None`` for another session
+    object's: call it with ``key=ctx.key``."""
+    definition = definition_of(ctx)
+    return _COMPANION.of(definition) if definition is not None else None
+
+
+def companion_in(ctx: SessionContext | ViewContext) -> Companion:
+    """Return the companion of the agent whose handler or view ``ctx`` runs: call it with ``key=ctx.key``.
+
+    Raises:
+        TypeError: If ``ctx`` is not the context of an agent's handler or view.
+    """
+    companion = companion_at(ctx)
+    if companion is None:
+        raise TypeError("companion_in takes the context of an agent's handler or view")
+    return companion
 
 
 def has_companion(agent: object) -> bool:
@@ -591,13 +644,21 @@ def deliver(
     Raises:
         TypeError: If ``agent`` is not a ``restate.agents`` agent.
     """
-    companion = companion_of(agent, key)  # an agent of restate.agents, with a `chat` handler
+    agent_name = companion_of(agent).agent  # an agent of restate.agents, with a `chat` handler
     if isinstance(ctx, restate.Context):
         # A Restate handler's context sends bytes: the message as a JSON string, which `chat` takes.
         message = json.dumps(text).encode()
-        ctx.generic_send(companion.agent, "chat", message, key=key, idempotency_key=idempotency_key)
+        ctx.generic_send(agent_name, "chat", message, key=key, idempotency_key=idempotency_key)
     else:
-        ctx.generic_send(companion.agent, "chat", text, key=key, idempotency_key=idempotency_key)
+        ctx.generic_send(agent_name, "chat", text, key=key, idempotency_key=idempotency_key)
 
 
-__all__: Sequence[str] = ["Companion", "companion_of", "deliver", "signals"]
+__all__: Sequence[str] = [
+    "COMPANION_SUFFIX",
+    "Companion",
+    "companion_in",
+    "companion_name",
+    "companion_of",
+    "deliver",
+    "make_companion",
+]

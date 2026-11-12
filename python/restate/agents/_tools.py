@@ -693,7 +693,8 @@ async def _wait(
         request: _signals.WaitRequest = {"id": wait_id, "name": signal}
         if shown:
             request["input"] = input
-        return await c.ctx.call(_signals.wait, request, key=_signals.signals_of(c.ctx), idempotency_key=wait_id)
+        wait = _signals.companion_in(c.ctx).wait
+        return await c.ctx.call(wait, request, key=c.ctx.key, idempotency_key=wait_id)
 
     return await _once(f"signal/{signal}", input, call, made, rejoin=rejoin, approval=approval)
 

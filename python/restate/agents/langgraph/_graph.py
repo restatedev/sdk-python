@@ -324,6 +324,7 @@ async def _resumed(ctx: SessionContext, snapshot: StateSnapshot) -> dict[str, An
         return None
     # What the turn holds back is written before it waits: the waits outlive the attempt.
     await flush_held(ctx)
+    companion = _signals.companion_in(ctx)
     waits: dict[str, Any] = {}
     for interrupted in pending:
         wait_id = f"{ctx.request.id}:interrupt:{interrupted.id}"
@@ -332,7 +333,7 @@ async def _resumed(ctx: SessionContext, snapshot: StateSnapshot) -> dict[str, An
             "name": INTERRUPT,
             "input": to_jsonable_python(interrupted.value),
         }
-        waits[interrupted.id] = ctx.call(_signals.wait, request, key=_signals.signals_of(ctx), idempotency_key=wait_id)
+        waits[interrupted.id] = ctx.call(companion.wait, request, key=ctx.key, idempotency_key=wait_id)
     values = await asyncio.gather(*waits.values())
     return dict(zip(waits, values, strict=True))
 
