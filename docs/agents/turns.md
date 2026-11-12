@@ -42,14 +42,30 @@ the turn. A handler of your own that prompts on a plain `SessionObject`
 it has no companion, and nothing follows it.
 
 A handler you add to an agent (`@assistant.handler`) that prompts publishes
-each step its turns store, as `chat` does: every handler of an
-`AgentObject` calls `publish_steps`, so the agent's followers see its steps.
-It is not a turn in the companion, though: no `start` nor `close`, so
-`status` does not report it and `stop` does not cancel it. There is no
-public way to make it one: `chat_turn` is private (`_turn.py`), and needs
-the handler declared with `explicit_cancellation=True` and the agent's
-`settle` handler, which only `chat()` adds. For a followed turn, send the
-message to the agent's `chat` (`deliver`, or `ctx.generic_send`).
+each step its turns store, as `chat` does, and publishes once more when a
+turn's answer is stored: every handler of an `AgentObject` calls
+`publish_steps` and `publish_end` (what follows the answer's commit,
+`after_answer`, which `answer_once` runs as the other opaque callback). So a
+follower of such a turn sees its steps arrive and then sees it end, instead
+of hearing nothing more. The end publish comes after the commit that stored
+the answer, never before it: a follower told earlier would read a
+conversation that has no answer yet. A turn closed for good (failed,
+refused, stopped) publishes its end too — its close stores the turn's
+answer; a turn whose attempt failed publishes none, as it has not ended and
+the next attempt carries it on. A background agent's turn publishes neither
+its steps nor its end.
+
+A `chat` turn publishes no end of its own: `chat_turn` sets `after_answer`
+to nothing, because the turn ends with the companion's `close`, which
+publishes the turn's last change with it. So the publishes of a `chat` turn
+are what they always were: `start`, one per commit of its steps, `close`.
+
+A turn of another handler is not a turn in the companion, though: no `start`
+nor `close`, so `status` does not report it and `stop` does not cancel it.
+There is no public way to make it one: `chat_turn` is private (`_turn.py`),
+and needs the handler declared with `explicit_cancellation=True` and the
+agent's `settle` handler, which only `chat()` adds. For a followed turn,
+send the message to the agent's `chat` (`deliver`, or `ctx.generic_send`).
 
 Waiting for a signal (a `wait_for_signal` tool, `wait_for`, an approval,
 LangGraph's `interrupt()` and `nodes.wait_for_signal`) and steering need the

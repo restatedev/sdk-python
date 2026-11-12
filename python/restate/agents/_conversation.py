@@ -106,6 +106,7 @@ from restate.agents._common import (
     UNANSWERED,
     Check,
     Window,
+    after_answer_of,
     after_steps_of,
     check_window,
     cut_off_result,
@@ -1678,11 +1679,19 @@ async def answer_once(
     # then runs what the caller set (`after_steps`): an agent's `chat` turn publishes there; a handler of one's own
     # sets nothing, and its turn is only stored.
     after = after_steps_of(ctx)
+    # What follows the commit that stored the turn's answer (`after_answer`): an agent's handlers publish there,
+    # a `chat` turn sets nothing (its `close` publishes its end), and so does a handler of one's own.
+    at_end = after_answer_of(ctx)
 
     async def committed() -> None:
         await settled(ctx)
         if after is not None:
             await after()
+
+    async def ended() -> None:
+        # The turn's calls are forgotten already: `answering` does it as its work ends, failed for good or not.
+        if at_end is not None:
+            await at_end()
 
     conversation.hold(committed)
     holding(ctx, conversation.flush)
@@ -1704,7 +1713,15 @@ async def answer_once(
         running = conversation.running()
         return running is not None and running.id == prompt_id and running.stored(call_id, failed)
 
-    answered = await answering(ctx, stored, work)
+    try:
+        answered = await answering(ctx, stored, work)
+    except TerminalError:
+        # The turn ended for good, closed with the error (`_answer`): its answer is stored, so what follows the
+        # answer runs, and a follower hears the turn end. An attempt that failed otherwise ends no turn, and runs
+        # nothing: the next attempt carries it on.
+        await ended()
+        raise
+    await ended()
     definition = definition_of(ctx)
     if settings.snapshots:
         due = settings.compact_history is not None and conversation.compaction_asked

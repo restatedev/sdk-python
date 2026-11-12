@@ -15,6 +15,10 @@ handlers (its `chat` turn, and handlers you add) publish after each write of
 steps that commits, by setting what follows a commit (`after_steps`, through
 `publish_steps`), which `answer_once` hands to
 `Conversation.hold` as it is ([Who does what](turns.md#who-does-what)). A
+handler you add publishes once more after the commit that stored the turn's
+answer, by setting what follows it (`after_answer`, through `publish_end`),
+which `answer_once` runs itself; a `chat` turn sets nothing there, and ends
+with the companion's `close`. A
 handler of your own on a plain `SessionObject` that prompts stores its turn
 the same way, and publishes nothing. Writing the held rows before a call
 record or a Restate call (`holding`, `flush_held`) is the conversation's own

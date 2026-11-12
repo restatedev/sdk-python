@@ -17,8 +17,11 @@ publish only tells the clients to read again.
 
 The layers: the conversation (``answer_once``) stores a turn, and knows
 nothing of the companion; the agent's ``chat`` turn (``chat_turn``) starts,
-publishes and closes it. A handler of one's own that prompts, on a session
-object that is no agent, stores its turn and publishes nothing.
+publishes and closes it. A turn of another handler of the agent publishes
+each of its steps and its end (``publish_steps``, ``publish_end``), but is no
+turn in the companion: no ``start``, no ``close``. A handler of one's own
+that prompts, on a session object that is no agent, stores its turn and
+publishes nothing.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from restate.agents._common import (
     CompactHistory,
     Summarize,
     Window,
+    after_answer,
     after_steps,
     flush_held,
     refusal_of,
@@ -242,7 +246,8 @@ async def publish(ctx: SessionContext) -> None:
     (``settled``), and the ``settle`` handler publishes outside a turn.
 
     Only an agent publishes, to its companion: after each step its handlers'
-    turns store (``publish_steps``), and its ``settle``. A session object that
+    turns store (``publish_steps``), after the answer of a turn that no
+    ``close`` ends (``publish_end``), and its ``settle``. A session object that
     is no agent has no companion, and nothing follows it: its turns are only
     stored.
 
@@ -268,6 +273,26 @@ def publish_steps(ctx: SessionContext) -> None:
     """
     if not _unfollowed(ctx):
         after_steps(ctx, lambda: publish(ctx))
+
+
+def publish_end(ctx: SessionContext) -> None:
+    """Have the commit that stores the answer of a turn that ``ctx``'s handler answers publish: unless the agent
+    runs in the background, which publishes only as a ``chat`` turn ends.
+
+    Every handler of an agent (``AgentObject``) calls it, as it calls
+    ``publish_steps``: a follower of such a turn sees its steps as they are
+    stored, and then the turn end, instead of hearing nothing more. A turn
+    closed for good (failed, refused, stopped) publishes its end too: its
+    close stores the turn's answer. One whose attempt failed publishes none:
+    the turn has not ended, and the next attempt carries it on.
+
+    ``chat_turn`` undoes it (``after_answer(ctx, None)``): a ``chat`` turn
+    ends with the companion's ``close``, which publishes the turn's last
+    change with it, as one revision. ``answer_once`` runs what is set
+    (``after_answer``), and knows nothing of it.
+    """
+    if not _unfollowed(ctx):
+        after_answer(ctx, lambda: publish(ctx))
 
 
 async def settled(ctx: SessionContext) -> None:
@@ -348,9 +373,11 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     it starts (the companion's ``start`` does), after each write of its steps
     that commits (a reply with tool calls, the tools' results: ``answer_once``
     runs what ``after_steps`` sets, see ``Conversation.hold``), unless the
-    agent runs in the background, and when it ends (its ``close``). The
-    conversation itself only stores: a handler of one's own that prompts
-    stores its turn and publishes nothing.
+    agent runs in the background, and when it ends (its ``close``, which
+    publishes the turn's last change with it: so the commit of its answer
+    publishes nothing of its own, unlike the turns of the agent's other
+    handlers, see ``publish_end``). The conversation itself only stores: a
+    handler of one's own that prompts stores its turn and publishes nothing.
 
     An error ends the turn for good if it is a ``TerminalError``, or a model
     provider's refusal (``refusal_of``), as a 424. Any other error fails the
@@ -380,6 +407,10 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
         inbox.saw(published)
     # Each step the turn stores that a tool waits for (a reply with tool calls, the tools' results).
     publish_steps(ctx)
+    # Nothing follows the commit of the answer: this turn ends with the companion's `close`, which publishes
+    # its last change with it. So it keeps the end the handler's wrapper gave it (`publish_end`) from making a
+    # second publish, and a `chat` turn's calls are as they were.
+    after_answer(ctx, None)
 
     async def end() -> None:
         # Have the companion close the turn, which publishes its last change

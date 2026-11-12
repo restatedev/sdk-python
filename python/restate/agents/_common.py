@@ -105,6 +105,28 @@ def after_steps_of(ctx: SessionContext) -> Callable[[], Awaitable[None]] | None:
     return _AFTER_STEPS.get(ctx)
 
 
+_AFTER_ANSWER: ScopeKey[Callable[[], Awaitable[None]]] = ScopeKey("what follows the commit of the turn's answer")
+
+
+def after_answer(ctx: SessionContext, then: Callable[[], Awaitable[None]] | None) -> None:
+    """Have ``then`` run after the commit that stores the attempt's turn's answer, or ``None`` for nothing.
+
+    The caller of ``answer_once`` sets it, before the turn runs: a handler of
+    an agent publishes there, so that a follower of the turn hears it end, as
+    it heard each of its steps. A ``chat`` turn sets ``None``: its end is the
+    companion's ``close``, which publishes the turn's last change with it.
+    """
+    if then is None:
+        _AFTER_ANSWER.delete(ctx)
+    else:
+        _AFTER_ANSWER.set(ctx, then)
+
+
+def after_answer_of(ctx: SessionContext) -> Callable[[], Awaitable[None]] | None:
+    """Return what follows the commit of the attempt's turn's answer (``after_answer``), or ``None``."""
+    return _AFTER_ANSWER.get(ctx)
+
+
 MODEL_ENV = "RESTATE_AGENT_MODEL"
 """The environment variable that names the model agents use when none is given."""
 

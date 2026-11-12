@@ -84,7 +84,7 @@ then the same.
 
 | Module | What it is |
 | --- | --- |
-| [`_turn.py`](../../python/restate/agents/_turn.py) | the agent's turn: start, a publish after each commit of its steps, and close in the companion; cancellation, attempts |
+| [`_turn.py`](../../python/restate/agents/_turn.py) | the agent's turn: start, a publish after each commit of its steps (and after its answer, for a turn no `close` ends), and close in the companion; cancellation, attempts |
 | [`_conversation.py`](../../python/restate/agents/_conversation.py) | the conversation, which only stores (no companion, no publish): its tables, `Conversation`, `Turn`, `answer_once`, `compact`, `settle` |
 | [`_messages.py`](../../python/restate/agents/_messages.py) | the conversation as clients read it (`messages`, `sync`) |
 | [`_signals.py`](../../python/restate/agents/_signals.py) | the companion: `make_companion`, one per agent |
