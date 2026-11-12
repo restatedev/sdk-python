@@ -232,7 +232,7 @@ async def publish(ctx: SessionContext) -> None:
     stored = _ANSWERING.get(ctx)
     if stored is not None:
         await _settled(ctx, stored)
-    published = await ctx.call(_signals.publish, key=_signals.signals_of(ctx))
+    published = await ctx.call(_signals.publish, key=_signals.signals_of(ctx), name=_signals.ENTRY_NAME)
     inbox = _INBOX.get(ctx)
     if inbox is not None:
         inbox.saw(typing.cast(Published | None, published))
@@ -338,7 +338,7 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     # The agent has ``settle`` (``chat()`` adds it), so the companion may send it this turn once it is gone.
     followed = not _unfollowed(ctx)
     started: _signals.Started = {**turn, "settles": True, "steers": steers, "publishes": followed}
-    published = await ctx.call(_signals.start, started, key=companion)
+    published = await ctx.call(_signals.start, started, key=companion, name=_signals.ENTRY_NAME)
     if isinstance(published, dict):
         # The companion published the turn's start as it started it.
         inbox = _INBOX.get(ctx)
@@ -355,7 +355,7 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
         stored = _ANSWERING.get(ctx)
         if stored is not None:
             await _settled(ctx, stored)
-        await ctx.call(_signals.close, invocation_id, key=companion)
+        await ctx.call(_signals.close, invocation_id, key=companion, name=_signals.ENTRY_NAME)
 
     stop = Stop()
     _STOP.set(ctx, stop)

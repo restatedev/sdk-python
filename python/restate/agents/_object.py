@@ -55,7 +55,7 @@ from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared, publish
 from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.sessions import Migration, SessionContext, SessionObject, ViewContext
-from restate.sessions.internal import reset
+from restate.sessions.internal import hide_entries, reset
 
 T = typing.TypeVar("T")
 A = typing.TypeVar("A", bound=Callable[[SessionContext, str], Awaitable[Any]])
@@ -262,7 +262,8 @@ class AgentObject(SessionObject):
             name,
             migrations=migrations,
             description=description,
-            metadata=metadata,
+            # Hide the calls to the companion, the agent's bookkeeping, from Restate's UI.
+            metadata={**hide_entries(_signals.ENTRY_NAME), **(metadata or {})},
             inactivity_timeout=inactivity_timeout,
             abort_timeout=abort_timeout,
             journal_retention=journal_retention,
@@ -513,7 +514,8 @@ def _companion(
     untyped = typing.cast(Any, ctx)
 
     def call(*args: Any) -> Awaitable[T]:
-        return typing.cast(Awaitable[T], untyped.call(handler, *args, key=companion, idempotency_key=key))
+        made = untyped.call(handler, *args, key=companion, idempotency_key=key, name=_signals.ENTRY_NAME)
+        return typing.cast(Awaitable[T], made)
 
     return call
 
@@ -566,7 +568,12 @@ def _followed(agent: AgentObject, items: Items) -> None:
             await reset(tx)
             await restart(tx, start)
         await cleared(ctx)
-        await ctx.call(_signals.reset, key=_signals.signals_of(ctx), idempotency_key=f"{ctx.request.id}:reset")
+        await ctx.call(
+            _signals.reset,
+            key=_signals.signals_of(ctx),
+            idempotency_key=f"{ctx.request.id}:reset",
+            name=_signals.ENTRY_NAME,
+        )
 
     async def settle(ctx: SessionContext, invocation_id: str) -> bool:
         """Close the latest turn, unanswered, if invocation ``invocation_id`` ran it and is gone.

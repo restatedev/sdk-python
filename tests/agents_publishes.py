@@ -51,6 +51,8 @@ class Seen:
     """Each companion call that answers with a revision, or a model request, and the results the view showed then."""
     steering: list[dict[str, str]] = field(default_factory=list[dict[str, str]])
     """The messages steered to the turn, which each publish returns."""
+    names: list[tuple[str, str | None]] = field(default_factory=list[tuple[str, str | None]])
+    """Each call the agent made, by handler, with the name of its journal entry."""
 
     def companion_calls(self) -> list[str]:
         return [event for event, _ in self.events if event != "model"]
@@ -109,8 +111,10 @@ def follow(obj: AgentObject, seen: Seen, *, start_publishes: bool = True) -> Cal
             return companion.answer(self.handler, self.arg).__await__()
 
     class Followed(Host):
-        def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None):
+        def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None, name=None):
             self.calls.append((service, handler, arg, key, idempotency_key))
+            self.call_names.append(name)
+            seen.names.append((f"{service}/{handler}", name))
             return Deferred(handler, arg)
 
     async def chat(text: str) -> Any:
@@ -242,6 +246,26 @@ async def test_a_follower_sees_the_tools_results_before_the_model_is_asked_again
     second = [i for i, (event, _) in enumerate(seen.events) if event == "model"][1]
     before = [(event, results) for event, results in seen.events[:second] if event != "model"]
     assert before[-1] == ("publish", CALLS)
+
+
+@pytest.mark.parametrize("framework", list(AGENTS))
+async def test_the_calls_to_the_companion_are_named_for_the_agents_metadata_to_hide_them(framework: str):
+    seen = Seen()
+    agent = make(framework, seen)
+    chat = follow(agent, seen)
+    await chat("hello")
+    assert [handler for handler, _ in seen.names] == [
+        "signals/start",
+        "signals/publish",
+        "signals/publish",
+        "signals/close",
+    ]
+    assert {name for _, name in seen.names} == {"signals"}
+    # Restate's UI hides them, with the database's entries; an agent's own metadata still wins.
+    hidden = "dev.restate.tooling.journal.hidden.names"
+    assert (agent.service_tag.metadata or {})[hidden] == "sync,signals"
+    shown = make(framework, Seen(), metadata={hidden: "sync"})
+    assert (shown.service_tag.metadata or {})[hidden] == "sync"
 
 
 @pytest.mark.parametrize("framework", list(AGENTS))

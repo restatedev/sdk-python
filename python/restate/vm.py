@@ -413,10 +413,11 @@ class VMWrapper:
         headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None,
         scope: typing.Optional[str] = None,
         limit_key: typing.Optional[str] = None,
+        name: typing.Optional[str] = None,
     ):
-        """Call a service"""
+        """Call a service; ``name`` names the call's journal entry"""
         py_headers = [PyHeader(key=h[0], value=h[1]) for h in headers] if headers else None
-        return self.vm.sys_call(service, handler, parameter, key, idempotency_key, py_headers, scope, limit_key)
+        return self.vm.sys_call(service, handler, parameter, key, idempotency_key, py_headers, scope, limit_key, name)
 
     # pylint: disable=too-many-arguments
     def sys_send(
@@ -430,13 +431,17 @@ class VMWrapper:
         headers: typing.Optional[typing.List[typing.Tuple[str, str]]] = None,
         scope: typing.Optional[str] = None,
         limit_key: typing.Optional[str] = None,
+        name: typing.Optional[str] = None,
     ) -> int:
         """
         send an invocation to a service, and return the handle
-        to the promise that will resolve with the invocation id
+        to the promise that will resolve with the invocation id;
+        ``name`` names the send's journal entry
         """
         py_headers = [PyHeader(key=h[0], value=h[1]) for h in headers] if headers else None
-        return self.vm.sys_send(service, handler, parameter, key, delay, idempotency_key, py_headers, scope, limit_key)
+        return self.vm.sys_send(
+            service, handler, parameter, key, delay, idempotency_key, py_headers, scope, limit_key, name
+        )
 
     def sys_run(self, name: str) -> Run:
         """

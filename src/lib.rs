@@ -392,7 +392,11 @@ impl PyVM {
                 NonDeterministicChecksOption::Enabled
             },
             journal_replay: if explicit_recovery {
-                JournalReplay::Disabled
+                // The runs an earlier attempt left open (an agent's timing of a model request a
+                // crash interrupted) are failed, rather than left pending for ever.
+                JournalReplay::Disabled {
+                    fail_interrupted_runs: true,
+                }
             } else {
                 JournalReplay::Enabled
             },
@@ -612,7 +616,7 @@ impl PyVM {
             .map_err(Into::into)
     }
 
-    #[pyo3(signature = (service, handler, buffer, key=None, idempotency_key=None, headers=None, scope=None, limit_key=None))]
+    #[pyo3(signature = (service, handler, buffer, key=None, idempotency_key=None, headers=None, scope=None, limit_key=None, name=None))]
     #[allow(clippy::too_many_arguments)]
     fn sys_call(
         mut self_: PyRefMut<'_, Self>,
@@ -624,6 +628,7 @@ impl PyVM {
         headers: Option<Vec<PyHeader>>,
         scope: Option<String>,
         limit_key: Option<String>,
+        name: Option<String>,
     ) -> Result<PyCallHandle, PyVMError> {
         self_
             .vm
@@ -642,14 +647,14 @@ impl PyVM {
                         .collect(),
                 },
                 buffer.as_bytes().to_vec().into(),
-                Default::default(),
+                name,
                 Default::default(),
             )
             .map(Into::into)
             .map_err(Into::into)
     }
 
-    #[pyo3(signature = (service, handler, buffer, key=None, delay=None, idempotency_key=None, headers=None, scope=None, limit_key=None))]
+    #[pyo3(signature = (service, handler, buffer, key=None, delay=None, idempotency_key=None, headers=None, scope=None, limit_key=None, name=None))]
     #[allow(clippy::too_many_arguments)]
     fn sys_send(
         mut self_: PyRefMut<'_, Self>,
@@ -662,6 +667,7 @@ impl PyVM {
         headers: Option<Vec<PyHeader>>,
         scope: Option<String>,
         limit_key: Option<String>,
+        name: Option<String>,
     ) -> Result<PyNotificationHandle, PyVMError> {
         self_
             .vm
@@ -686,7 +692,7 @@ impl PyVM {
                         .expect("Duration since unix epoch cannot fail")
                         + Duration::from_millis(millis)
                 }),
-                Default::default(),
+                name,
                 Default::default(),
             )
             .map(|s| s.invocation_id_notification_handle.into())

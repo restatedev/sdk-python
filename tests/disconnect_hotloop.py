@@ -145,6 +145,7 @@ async def test_empty_body_frames_do_not_cause_hotloop():
     ctx.receive = receive_channel
     ctx.run_coros_to_execute = {}
     ctx.tasks = MagicMock()
+    ctx._output_lock = asyncio.Lock()  # pylint: disable=protected-access
 
     try:
         with pytest.raises(DisconnectedException):
