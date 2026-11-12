@@ -14,7 +14,7 @@ A service, a virtual object and a workflow are servable: each serves itself.
 So is anything else that says what to serve for it, such as an agent, which
 serves itself and its own companion, the object its tools wait on::
 
-    app = restate.app([greeter, assistant])  # greeter, assistant, and assistant.agentprebuilt.restate
+    app = restate.app([greeter, assistant])  # greeter, assistant, and assistant.prebuilt.restate
 """
 
 from __future__ import annotations

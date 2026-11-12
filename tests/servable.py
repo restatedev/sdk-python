@@ -71,7 +71,7 @@ def test_a_group_serves_its_members():
 
 def test_an_agent_brings_its_own_companion_along():
     first, second = AgentObject("first_agent"), AgentObject("second_agent")
-    served = ["first_agent", "first_agent.agentprebuilt.restate", "second_agent", "second_agent.agentprebuilt.restate"]
+    served = ["first_agent", "first_agent.prebuilt.restate", "second_agent", "second_agent.prebuilt.restate"]
     assert names([first, second]) == served
     endpoint = Endpoint().bind(first).bind(second)  # bound one at a time, each with its companion
     assert list(endpoint.services) == served

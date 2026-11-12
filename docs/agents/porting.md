@@ -18,7 +18,7 @@ conversation:
 
 | | sdk-sessions (TypeScript) today | This SDK (Python) |
 | --- | --- | --- |
-| The companion | `signals`, shared by every agent, keyed `<agent>:<key>` | the agent's own, `<agent>.agentprebuilt.restate`, keyed as the agent, ingress-private ([The companion is the agent's own](turns.md#the-companion-is-the-agents-own)) |
+| The companion | `signals`, shared by every agent, keyed `<agent>:<key>` | the agent's own, `<agent>.prebuilt.restate`, keyed as the agent, ingress-private ([The companion is the agent's own](turns.md#the-companion-is-the-agents-own)) |
 | The conversation | each framework's own tables: Claude's `restate_claude_messages` and `restate_claude_answers`, DeepSeek's sessions and events, opencode's and pi's stores, a LangGraph checkpointer | one store for every framework: turn rows and items ([The conversation](conversation.md)) |
 | A turn in storage | an answer per prompt id, in the framework's tables | a row per turn, with a status, an answer, and what it carries |
 | What clients read | `restate_agent_log` (`log.ts`), kept in step with the framework's transcript at each publish (`transcribing`) | the turn rows and items themselves: the full and summary views |
@@ -67,7 +67,7 @@ Each step stands on its own, with its tests, and the earlier ones are small.
      published. `publish` (and `start`) clear `watching` only when a watch
      waits.
 2. **The agent's own companion, and its `settle`.** Each agent makes its
-   own companion, `<agent>.agentprebuilt.restate` (Restate refuses names
+   own companion, `<agent>.prebuilt.restate` (Restate refuses names
    that start with `restate`), keyed as the agent, ingress-private, which
    knows its agent rather than parsing it from its key. Since the two are
    always the same code, the companion sends every turn whose invocation is

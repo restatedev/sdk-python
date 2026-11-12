@@ -40,7 +40,7 @@ def anyio_backend():
 pytestmark = [pytest.mark.anyio]
 
 companion = make_companion("assistant")
-"""The companion of the agent ``assistant`` (below), ``assistant.agentprebuilt.restate``."""
+"""The companion of the agent ``assistant`` (below), ``assistant.prebuilt.restate``."""
 
 # The agent's side: its handlers call the companion's handlers, which the ingress refuses.
 driver = restate.Service("driver")
@@ -159,14 +159,14 @@ def signal(**fields: Any) -> Signal:
 
 
 async def test_the_companion_is_named_for_its_agent_and_refuses_the_ingress(harness: HarnessEnvironment):
-    assert companion.service.name == "assistant.agentprebuilt.restate"
+    assert companion.service.name == "assistant.prebuilt.restate"
     async with httpx2.AsyncClient(timeout=60) as admin:
         listed = (await admin.get(f"{harness.admin_api_url}/services")).json()["services"]
     served = {service["name"]: service for service in listed}
-    assert served["assistant.agentprebuilt.restate"]["public"] is False
+    assert served["assistant.prebuilt.restate"]["public"] is False
     assert "signals" not in served
     async with httpx2.AsyncClient(timeout=60) as ingress:
-        refused = await ingress.post(f"{harness.ingress_url}/assistant.agentprebuilt.restate/{key()}/status")
+        refused = await ingress.post(f"{harness.ingress_url}/assistant.prebuilt.restate/{key()}/status")
     assert refused.is_client_error
 
 

@@ -33,7 +33,7 @@ An integration needs, beyond the public API:
   tool's error.
 - ``companion_of`` and ``deliver``, to see what an agent is doing and to send
   it a message from another session object's handler. Each agent has its own
-  companion, the ingress-private virtual object ``<agent>.agentprebuilt.restate``
+  companion, the ingress-private virtual object ``<agent>.prebuilt.restate``
   (``COMPANION_SUFFIX``) keyed as the agent: ``companion_of(agent)`` returns it,
   with its handlers, to call with the agent's key.
 - ``take_steers``, at each step of a turn: the items of the messages steered

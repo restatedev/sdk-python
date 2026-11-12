@@ -13,7 +13,7 @@ This note is the design for both SDKs. It was written against sdk-python
 | | The object | Its key | Where |
 | --- | --- | --- | --- |
 | Shipped (both `main`s) | `signals`, one for the whole endpoint | `<agent>:<key>` (`assistant:alice`) | sdk-python `_signals.py` at `4730b10`; sdk-sessions `packages/agents/src/signals.ts` |
-| The branches now | `<agent>.agentprebuilt.restate`, one per agent | the agent's own key (`alice`) | sdk-python `_signals.py`; sdk-sessions `packages/agents/src/companion.ts` |
+| The branches, before this | `<agent>.agentprebuilt.restate`, one per agent | the agent's own key (`alice`) | sdk-python `_signals.py`; sdk-sessions `packages/agents/src/companion.ts` |
 | **Decided here** | **`<agent>.prebuilt.restate`, one per agent** | the agent's own key | the same files, renamed |
 
 The move from one shared object to one per agent is already made on both
@@ -51,7 +51,7 @@ code with it.
 refuses service names that *start* with `restate`, so the marker is a
 suffix and ends with it.
 
-- **Not `.agentprebuilt.restate`** (what the branches carry): `agent` says
+- **Not `.agentprebuilt.restate`** (what the branches carried): `agent` says
   nothing the agent's own name does not already say, and one marker is
   enough. Shorter reads better in a service list, in a state query and in an
   error message.
@@ -132,7 +132,7 @@ alone.
 | File | Change |
 | --- | --- |
 | `python/restate/agents/_signals.py` | `COMPANION_SUFFIX = ".prebuilt.restate"`, and the module docstring; **rename the file to `_companion.py`** (it matches `companion.ts`, and it is the last place called `signals`) |
-| `python/restate/agents/internal.py` | the import, and the paragraph naming `<agent>.agentprebuilt.restate` |
+| `python/restate/agents/internal.py` | the import, and the paragraph naming the companion |
 | `python/restate/agents/_object.py`, `servable.py`, `endpoint.py` | the name in the docstrings |
 | `docs/agents/README.md`, `turns.md`, `conversation.md`, `porting.md`, `access-patterns.md`, `README.md` (root) | the name, and `porting.md`'s table row, which still describes `signals` as the TypeScript state |
 | `tests/agents_companion.py` (11), `tests/agents_signals.py` (4), `agents_object.py`, `agents_steering.py`, `agents_snapshots.py`, `agents_tools.py`, `servable.py` | the expected names; **rename `tests/agents_signals.py` to `tests/agents_companion_server.py`**, the against-a-server twin of `agents_companion.py` |

@@ -222,7 +222,7 @@ async def test_each_agent_has_its_own_companion_which_a_turn_of_the_other_does_n
         served = {
             service["name"] for service in (await admin.get(f"{harness.admin_api_url}/services")).json()["services"]
         }
-    assert {"assistant.agentprebuilt.restate", "other.agentprebuilt.restate"} <= served and "signals" not in served
+    assert {"assistant.prebuilt.restate", "other.prebuilt.restate"} <= served and "signals" not in served
     # A turn of the assistant, which waits for an approval at the same key.
     invocation = await send(harness, key, "refund o7")
 
