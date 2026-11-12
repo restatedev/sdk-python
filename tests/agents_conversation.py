@@ -972,11 +972,11 @@ class Syncing(Host):
         await super().sync()
         self.syncs += 1
 
-    def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None):
+    def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None, name=None):
         if handler == "publish" and self.crash_at_publish:
             # The process crashes once the clients were told to read: every later sync fails.
             self.crash_after(0)
-        return super().generic_call(service, handler, arg, key, idempotency_key, headers)
+        return super().generic_call(service, handler, arg, key, idempotency_key, headers, name)
 
 
 def _turn_rows() -> sessions.SessionObject:

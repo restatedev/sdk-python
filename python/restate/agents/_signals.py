@@ -61,6 +61,13 @@ signals = restate.VirtualObject("signals")
 are called only by the agents' own handlers.
 """
 
+ENTRY_NAME = "signals"
+"""The journal entry name of every call and send of an agent to its companion.
+
+The agent's metadata hides the entries of this name (see ``hide_entries``),
+so that Restate's UI shows an agent's own work, not its bookkeeping.
+"""
+
 WATCH = timedelta(hours=1)
 """How long one ``awaitTurn`` invocation waits for its turn to end before handing over to a new one."""
 

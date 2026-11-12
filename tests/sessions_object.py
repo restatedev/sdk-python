@@ -63,6 +63,7 @@ class Send:
     key: str | None
     delay: Any
     idempotency_key: str | None
+    name: str | None = None
 
 
 class Answer(restate.RestateDurableCallFuture[bytes]):
@@ -105,6 +106,8 @@ class Host:
     shared: bool = False
     sends: list[Send] = field(default_factory=list)
     calls: list[tuple[str, str, bytes, str | None, str | None]] = field(default_factory=list)
+    # The name of each call's journal entry, in the order of ``calls``.
+    call_names: list[str | None] = field(default_factory=list)
     answers: dict[str, bytes] = field(default_factory=dict)
     # The invocations attached to, by id; their results are the answers of their ids.
     attached: list[str] = field(default_factory=list)
@@ -138,16 +141,19 @@ class Host:
             self._syncs_left -= 1
         self.backend.confirm()
 
-    def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None):
+    def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None, name=None):
         self.calls.append((service, handler, arg, key, idempotency_key))
+        self.call_names.append(name)
         return Answer(self.answers[handler])
 
     def attach_invocation(self, invocation_id: str):
         self.attached.append(invocation_id)
         return Answer(self.answers[invocation_id])
 
-    def generic_send(self, service, handler, arg, key=None, send_delay=None, idempotency_key=None, headers=None):
-        self.sends.append(Send(service, handler, arg, key, send_delay, idempotency_key))
+    def generic_send(
+        self, service, handler, arg, key=None, send_delay=None, idempotency_key=None, headers=None, name=None
+    ):
+        self.sends.append(Send(service, handler, arg, key, send_delay, idempotency_key, name))
         return Sent(f"inv_{service}/{key}")
 
     def cancel_invocation(self, invocation_id: str) -> None:
@@ -417,6 +423,34 @@ async def test_ctx_send_is_made_at_once_and_cancel_takes_an_invocation_id():
         await run(sender, "go", host)
     assert [(s.handler, s.key, s.idempotency_key) for s in host.sends] == [("record", "k", None)]
     assert host.cancelled == ["inv_1"]
+
+
+async def test_calls_and_sends_carry_the_name_of_their_journal_entry_through_the_outbox_too():
+    named = sessions.SessionObject(
+        "named_calls", migrations=["CREATE TABLE t (a TEXT)"], metadata=internal.hide_entries("mine")
+    )
+
+    @named.handler()
+    async def go(ctx: sessions.SessionContext) -> None:
+        await ctx.call(quote, "pear", name="mine")
+        await ctx.generic_call("pricing", "quote", "fig")
+        ctx.send(record, "now", key="k", name="mine")
+        async with ctx.db.transaction() as tx:
+            await tx.execute("INSERT INTO t VALUES ('x')")
+            tx.send(record, "committed", key="k", name="mine")
+            tx.generic_send("audit", "record", "plain", key="k")
+
+    host = Host(Backend(), service="named_calls", answers={"quote": b"1"})
+    await run(named, "go", host)
+    assert host.call_names == ["mine", None]
+    assert [(s.arg, s.name) for s in host.sends] == [
+        (b'"now"', "mine"),
+        (b'"committed"', "mine"),
+        (b'"plain"', None),
+    ]
+    assert named.service_tag.metadata is not None
+    assert named.service_tag.metadata["dev.restate.tooling.journal.hidden.names"] == "sync,mine"
+    assert named.service_tag.metadata["dev.restate.tooling.journal.hidden.name.prefix"] == "v22/"
 
 
 async def test_another_database_of_the_key_is_apart_from_the_objects_own():

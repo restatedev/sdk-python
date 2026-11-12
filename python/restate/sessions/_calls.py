@@ -48,6 +48,8 @@ class GenericSend:
     delay: timedelta | None = None
     idempotency_key: str | None = None
     headers: dict[str, str] | None = None
+    name: str | None = None
+    """The name of the send's journal entry."""
 
 
 class CallHost(Protocol):
@@ -61,6 +63,7 @@ class CallHost(Protocol):
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> RestateDurableCallFuture[bytes]: ...
 
     def generic_send(
@@ -72,6 +75,7 @@ class CallHost(Protocol):
         send_delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> Any: ...
 
     def attach_invocation(self, invocation_id: str) -> Awaitable[bytes]: ...
@@ -137,6 +141,7 @@ class Calls:
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> CallFuture[O]: ...
 
     @typing.overload
@@ -149,6 +154,7 @@ class Calls:
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> CallFuture[O]: ...
 
     def call(
@@ -160,9 +166,11 @@ class Calls:
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> CallFuture[Any]:
-        service, name, input_serde, output_serde = _target(handler, key)
-        future = self._call_host.generic_call(service, name, input_serde.serialize(arg), key, idempotency_key, headers)
+        service, target, input_serde, output_serde = _target(handler, key)
+        parameter = input_serde.serialize(arg)
+        future = self._call_host.generic_call(service, target, parameter, key, idempotency_key, headers, name=name)
         return CallFuture(future, output_serde)
 
     def generic_call(
@@ -176,9 +184,10 @@ class Calls:
         headers: dict[str, str] | None = None,
         input_serde: Serde[Any] = JsonSerde(),
         output_serde: Serde[Any] = JsonSerde(),
+        name: str | None = None,
     ) -> CallFuture[Any]:
         parameter = input_serde.serialize(arg)
-        future = self._call_host.generic_call(service, handler, parameter, key, idempotency_key, headers)
+        future = self._call_host.generic_call(service, handler, parameter, key, idempotency_key, headers, name=name)
         return CallFuture(future, output_serde)
 
 
@@ -201,6 +210,7 @@ class Sends:
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> None: ...
 
     @typing.overload
@@ -214,6 +224,7 @@ class Sends:
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> None: ...
 
     def send(
@@ -226,10 +237,11 @@ class Sends:
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> None:
-        service, name, input_serde, _ = _target(handler, key)
+        service, target, input_serde, _ = _target(handler, key)
         parameter = input_serde.serialize(arg)
-        self._send_sink(GenericSend(service, name, parameter, key, delay, idempotency_key, headers))
+        self._send_sink(GenericSend(service, target, parameter, key, delay, idempotency_key, headers, name))
 
     def generic_send(
         self,
@@ -242,9 +254,10 @@ class Sends:
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
         input_serde: Serde[Any] = JsonSerde(),
+        name: str | None = None,
     ) -> None:
         parameter = input_serde.serialize(arg)
-        self._send_sink(GenericSend(service, handler, parameter, key, delay, idempotency_key, headers))
+        self._send_sink(GenericSend(service, handler, parameter, key, delay, idempotency_key, headers, name))
 
 
 def send_to(host: CallHost, handler: Callable[..., Awaitable[Any]], arg: Any, key: str | None) -> Any:
@@ -258,7 +271,14 @@ def send_now(host: CallHost) -> Callable[[GenericSend], None]:
 
     def sink(send: GenericSend) -> None:
         host.generic_send(
-            send.service, send.handler, send.parameter, send.key, send.delay, send.idempotency_key, send.headers
+            send.service,
+            send.handler,
+            send.parameter,
+            send.key,
+            send.delay,
+            send.idempotency_key,
+            send.headers,
+            name=send.name,
         )
 
     return sink

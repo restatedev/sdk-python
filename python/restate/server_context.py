@@ -538,6 +538,9 @@ class ServerInvocationContext(ObjectContext):
         # cancellation's future (the cancel notification can be taken only once).
         self._calls_in_flight: List[ServerCallDurableFuture[Any]] = []
         self._cancellation: Optional[ServerDurableFuture[None]] = None
+        # Taking the VM's output and sending it is one step, so that output sent from two tasks (an
+        # annotation's flush, beside the awaits') keeps its order.
+        self._output_lock = asyncio.Lock()
 
     def _encode(self, buffer: bytes) -> bytes:
         """Apply the journal value codec encode step, if a codec is configured."""
@@ -607,17 +610,18 @@ class ServerInvocationContext(ObjectContext):
 
     async def leave(self):
         """Leave the context."""
-        while True:
-            chunk = self.vm.take_output()
-            if not chunk:
-                break
-            await self.send(
-                {
-                    "type": "http.response.body",
-                    "body": chunk,
-                    "more_body": True,
-                }
-            )
+        async with self._output_lock:
+            while True:
+                chunk = self.vm.take_output()
+                if not chunk:
+                    break
+                await self.send(
+                    {
+                        "type": "http.response.body",
+                        "body": chunk,
+                        "more_body": True,
+                    }
+                )
         # ========================================
         # End the connection
         # ========================================
@@ -654,15 +658,16 @@ class ServerInvocationContext(ObjectContext):
 
     async def take_and_send_output(self):
         """Take output from state machine and send it"""
-        output = self.vm.take_output()
-        if output:
-            await self.send(
-                {
-                    "type": "http.response.body",
-                    "body": bytes(output),
-                    "more_body": True,
-                }
-            )
+        async with self._output_lock:
+            output = self.vm.take_output()
+            if output:
+                await self.send(
+                    {
+                        "type": "http.response.body",
+                        "body": bytes(output),
+                        "more_body": True,
+                    }
+                )
 
     async def must_take_notification(self, handle):
         """Take notification, which must be present"""
@@ -954,6 +959,47 @@ class ServerInvocationContext(ObjectContext):
                 handle, failure=failure, attempt_duration_ms=attempt_duration, config=config
             )
 
+    def open_annotation(self, name: str) -> Optional[int]:
+        """Journal a run named ``name`` that nothing executes or awaits, to time some work in the journal.
+
+        The run starts now, and ends with ``close_annotation``. It is meant for
+        handlers with explicit recovery, which never replay it. Returns its
+        handle, or ``None`` if the attempt has ended.
+        """
+        try:
+            handle = self.vm.sys_run(name).handle
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+        # Send the run's command now, rather than at the handler's next await: Restate stores it as it
+        # gets it, and the time it does is when the run started.
+        self._flush_soon()
+        return handle
+
+    def close_annotation(self, handle: int, value: bytes = b"", failure: Optional[str] = None) -> None:
+        """End the run of ``open_annotation``, with ``value``, or with a terminal ``failure``.
+
+        Nothing waits for Restate to store it. Once the attempt has ended, it does nothing.
+        """
+        try:
+            if failure is None:
+                self.vm.propose_run_completion_success(handle, self._encode(value))
+            else:
+                self.vm.propose_run_completion_failure(handle, Failure(code=500, message=failure))
+        except Exception:  # pylint: disable=broad-exception-caught
+            return
+        self._flush_soon()
+
+    def _flush_soon(self) -> None:
+        """Send the VM's output from a task of its own, as soon as the handler yields."""
+
+        async def flush() -> None:
+            try:
+                await self.take_and_send_output()
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass  # the attempt ended: there is nothing to send to
+
+        self.tasks.add(asyncio.ensure_future(flush()))
+
     # pylint: disable=W0236
     # pylint: disable=R0914
     def run(
@@ -1080,8 +1126,9 @@ class ServerInvocationContext(ObjectContext):
         headers: typing.Dict[str, str] | None = None,
         scope: str | None = None,
         limit_key: str | None = None,
+        entry_name: str | None = None,
     ) -> RestateDurableCallFuture[O] | SendHandle:
-        """Make an RPC call to the given handler"""
+        """Make an RPC call to the given handler, its journal entry named ``entry_name``"""
         parameter = self._encode(input_serde.serialize(input_param))
         if headers is not None:
             headers_kvs = list(headers.items())
@@ -1099,6 +1146,7 @@ class ServerInvocationContext(ObjectContext):
                 headers=headers_kvs,
                 scope=scope,
                 limit_key=limit_key,
+                name=entry_name,
             )
             update_restate_context_is_replaying(self.vm)
             return ServerSendHandle(self, send_handle)
@@ -1112,6 +1160,7 @@ class ServerInvocationContext(ObjectContext):
                 headers=headers_kvs,
                 scope=scope,
                 limit_key=limit_key,
+                name=entry_name,
             )
             update_restate_context_is_replaying(self.vm)
             return ServerSendHandle(self, send_handle)
@@ -1125,6 +1174,7 @@ class ServerInvocationContext(ObjectContext):
             headers=headers_kvs,
             scope=scope,
             limit_key=limit_key,
+            name=entry_name,
         )
         update_restate_context_is_replaying(self.vm)
 
@@ -1223,6 +1273,7 @@ class ServerInvocationContext(ObjectContext):
         headers: typing.Dict[str, str] | None = None,
         scope: str | None = None,
         limit_key: str | None = None,
+        entry_name: str | None = None,
     ) -> RestateDurableCallFuture[bytes]:
         serde = BytesSerde()
         call_handle = self.do_raw_call(
@@ -1236,6 +1287,7 @@ class ServerInvocationContext(ObjectContext):
             headers=headers,
             scope=scope,
             limit_key=limit_key,
+            entry_name=entry_name,
         )
         assert not isinstance(call_handle, SendHandle)
         return call_handle
@@ -1251,6 +1303,7 @@ class ServerInvocationContext(ObjectContext):
         headers: typing.Dict[str, str] | None = None,
         scope: str | None = None,
         limit_key: str | None = None,
+        entry_name: str | None = None,
     ) -> SendHandle:
         serde = BytesSerde()
         send_handle = self.do_raw_call(
@@ -1266,6 +1319,7 @@ class ServerInvocationContext(ObjectContext):
             headers=headers,
             scope=scope,
             limit_key=limit_key,
+            entry_name=entry_name,
         )
         assert isinstance(send_handle, SendHandle)
         return send_handle

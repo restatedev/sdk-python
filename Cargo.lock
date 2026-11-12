@@ -2490,9 +2490,9 @@ dependencies = [
 
 [[package]]
 name = "restate-sdk-shared-core"
-version = "8.5.0"
+version = "8.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a955c21a0cd1d0cebbad2878355c9c954282f43f46a9bf37caf10afd36b1a17"
+checksum = "3acfd8eb5d8145db1a2e5480f49a47c0582a34115bdd1e47fcb3af468f5f2654"
 dependencies = [
  "base64 0.22.1",
  "bs58",

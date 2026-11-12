@@ -21,7 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # checkpoints may outgrow Restate into (RESTATE_SQL_OBJECT_STORE: S3, GCS, Azure, or a
 # directory); `tunnel` is Restate Cloud's. `aws_lc_rs` is the crypto of all of them (the
 # tunnel's TLS, request identity's signatures), as the object stores' must be aws-lc.
-restate-sdk-shared-core = { version = "8.5.0", features = [
+restate-sdk-shared-core = { version = "8.6.0", features = [
     "request_identity",
     "sha2_random_seed",
     "aws_lc_rs",
