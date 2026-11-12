@@ -53,8 +53,8 @@ having a companion of its own, are this SDK's (see
   a suspension ends an attempt; Restate starts another, which runs the
   handler again from its first line and resumes from what the database has.
 - **Companion.** The agent's own virtual object, named
-  `<agent>.agentprebuild.restate` and keyed as the agent: key `alice` of
-  `assistant` has the companion `assistant.agentprebuild.restate`, key
+  `<agent>.agentprebuilt.restate` and keyed as the agent: key `alice` of
+  `assistant` has the companion `assistant.agentprebuilt.restate`, key
   `alice`. Whatever makes the agent makes it, and the agent serves it
   alongside itself. It is ingress-private: clients reach it through the
   agent's views. It is a journaled virtual object, so it can wait
@@ -690,7 +690,7 @@ answer, shows with the turn's end.
 ## The companion is the agent's own
 
 Each agent has a companion of its own: the virtual object
-`<agent>.agentprebuild.restate`, with the agent's name as it is (Restate
+`<agent>.agentprebuilt.restate`, with the agent's name as it is (Restate
 refuses names that start with `restate`, so the suffix ends the name
 instead). It is keyed as the agent, and it knows its agent: it sends
 `settle` and `steered` to the agent it was made for, at its own key. An

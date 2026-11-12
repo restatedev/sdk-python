@@ -44,7 +44,7 @@ app = restate.app(services=[greeter])
 
 `restate.app` takes services, virtual objects and workflows, and anything else that is a
 `restate.Servable`: session objects, and agents, each of which brings along its own companion
-(`<agent>.agentprebuild.restate`), the object its tools wait on. Each is served once, however many
+(`<agent>.agentprebuilt.restate`), the object its tools wait on. Each is served once, however many
 things bring it along.
 
 Serve it with `restate.serve`, which needs the `serve` extra (`pip install "restate-sdk[serve]"`).

@@ -55,14 +55,14 @@ def agent(name: str) -> AgentObject:
 
 
 def test_each_agent_has_a_companion_of_its_own_named_for_it():
-    assert COMPANION_SUFFIX == ".agentprebuild.restate"
+    assert COMPANION_SUFFIX == ".agentprebuilt.restate"
     first, second = agent("first"), agent("second")
-    assert companion_of(first).service.name == companion_name("first") == "first.agentprebuild.restate"
-    assert companion_of(second).service.name == "second.agentprebuild.restate"
+    assert companion_of(first).service.name == companion_name("first") == "first.agentprebuilt.restate"
+    assert companion_of(second).service.name == "second.agentprebuilt.restate"
     assert companion_of(first).service is not companion_of(second).service
     assert (companion_of(first).agent, companion_of(second).agent) == ("first", "second")
     # The agent's name is taken as it is.
-    assert companion_of(AgentObject("Odd-Name_1")).service.name == "Odd-Name_1.agentprebuild.restate"
+    assert companion_of(AgentObject("Odd-Name_1")).service.name == "Odd-Name_1.agentprebuilt.restate"
 
 
 def test_an_app_serves_each_agent_with_its_companion_and_no_shared_signals():
@@ -70,13 +70,13 @@ def test_an_app_serves_each_agent_with_its_companion_and_no_shared_signals():
     endpoint = Endpoint().bind(first, second)
     assert list(endpoint.services) == [
         "first",
-        "first.agentprebuild.restate",
+        "first.agentprebuilt.restate",
         "second",
-        "second.agentprebuild.restate",
+        "second.agentprebuilt.restate",
     ]
     assert "signals" not in endpoint.services
     # The companion is ingress-private, all of it: clients reach it through its agent's views.
-    for name in ("first.agentprebuild.restate", "second.agentprebuild.restate"):
+    for name in ("first.agentprebuilt.restate", "second.agentprebuilt.restate"):
         companion = endpoint.services[name]
         assert companion.ingress_private is True
         assert all(not handler.ingress_private for handler in companion.handlers.values())
@@ -90,8 +90,8 @@ async def test_a_turn_calls_its_own_agents_companion_with_the_agents_key_and_not
     assert await invoke(first, "chat", host, request(), "hi") == "echo: hi"
     called = [(service, handler, key) for service, handler, _, key, _ in host.calls]
     assert called == [
-        ("first.agentprebuild.restate", "start", "alice"),
-        ("first.agentprebuild.restate", "close", "alice"),
+        ("first.agentprebuilt.restate", "start", "alice"),
+        ("first.agentprebuilt.restate", "close", "alice"),
     ]
     # Nothing reaches the other agent's companion.
     other = companion_of(second).service.name
@@ -105,6 +105,6 @@ async def test_the_views_ask_the_agents_own_companion_at_the_agents_key():
     assert await invoke(first, "status", view, request(), None) == {"answering": None, "waiting": []}
     assert await invoke(first, "watch", view, request(), {"revision": 0}) == {"revision": 1}
     assert [(service, handler, key) for service, handler, _, key, _ in view.calls] == [
-        ("first.agentprebuild.restate", "status", "bob"),
-        ("first.agentprebuild.restate", "watch", "bob"),
+        ("first.agentprebuilt.restate", "status", "bob"),
+        ("first.agentprebuilt.restate", "watch", "bob"),
     ]

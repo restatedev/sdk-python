@@ -153,7 +153,7 @@ async def test_signal_waits_at_the_companion_of_the_agent_with_the_tool_calls_ke
     req = request()
     assert await run_tool(host, "approval", {"order": "o1", "amount": 5}, "w1", req) == "approved"
     [(service, handler, arg, key, idempotency_key)] = host.calls
-    assert (service, handler, key, idempotency_key) == ("runner.agentprebuild.restate", "wait", "alice", f"{req.id}:w1")
+    assert (service, handler, key, idempotency_key) == ("runner.agentprebuilt.restate", "wait", "alice", f"{req.id}:w1")
     wait = typing.cast(dict[str, Any], json.loads(arg))
     assert wait == {"id": f"{req.id}:w1", "name": "approval", "input": {"order": "o1", "amount": 5}}
 

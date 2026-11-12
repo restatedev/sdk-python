@@ -285,7 +285,7 @@ class AgentObject(SessionObject):
 
     def __restate_services__(self) -> tuple[VirtualObject, ...]:
         """What ``restate.app`` serves for an agent (see ``restate.Servable``): itself, and its own companion,
-        ``<agent>.agentprebuild.restate``, which its tools wait on."""
+        ``<agent>.agentprebuilt.restate``, which its tools wait on."""
         return (self, self._companion.service)
 
     def _reserved(self, name: str) -> str | None:

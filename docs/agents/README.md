@@ -37,8 +37,8 @@ building it, and how to port it.
   `ended`.
 - **The companion** is the control plane: the turn being answered, the
   tools' waits, and a revision clients follow. Each agent has its own, the
-  virtual object `<agent>.agentprebuild.restate`, keyed as the agent (key
-  `alice` of `assistant` has key `alice` of `assistant.agentprebuild.restate`).
+  virtual object `<agent>.agentprebuilt.restate`, keyed as the agent (key
+  `alice` of `assistant` has key `alice` of `assistant.agentprebuilt.restate`).
   It is ingress-private: clients reach it through the agent's views. Nothing
   in it is needed to complete a turn. Upgrading from the shared `signals`
   object of earlier versions leaves its state behind: see
@@ -57,7 +57,7 @@ flowchart LR
     X["private: settle, compact, steered"] --> T
     W["views: status, stop, signal, steer, watch"]
   end
-  H -- "start, close, publish" --> S[("Companion assistant.agentprebuild.restate, key alice: turn, waits, steered messages, revision")]
+  H -- "start, close, publish" --> S[("Companion assistant.agentprebuilt.restate, key alice: turn, waits, steered messages, revision")]
   F -- "wait, for a tool or an approval" --> S
   W -- "ask, signal resolves a wait, steer" --> S
   S -- "settle a dead turn, and steered for each steered message" --> X

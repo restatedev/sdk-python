@@ -122,7 +122,7 @@ async def test_a_steered_message_is_stored_once_as_a_step_of_the_turn_and_taken_
     # The transaction that stored it sent the companion its id, once.
     [sent] = asker.taken()
     assert (sent.service, json.loads(sent.arg), sent.key, sent.idempotency_key) == (
-        "asker.agentprebuild.restate",
+        "asker.agentprebuilt.restate",
         ["s1"],
         "alice",
         "taken:s1",

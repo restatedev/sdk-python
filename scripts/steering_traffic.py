@@ -43,9 +43,9 @@ from typing import Any
 
 
 def _companion(service: str) -> bool:
-    """Whether ``service`` is an agent's companion: its own (``<agent>.agentprebuild.restate``), or the ``signals``
+    """Whether ``service`` is an agent's companion: its own (``<agent>.agentprebuilt.restate``), or the ``signals``
     object that every agent shared before, in a tree of then."""
-    return service.endswith(".agentprebuild.restate") or service == "signals"
+    return service.endswith(".agentprebuilt.restate") or service == "signals"
 
 
 async def query(client: Any, admin: str, sql: str) -> list[dict[str, Any]]:

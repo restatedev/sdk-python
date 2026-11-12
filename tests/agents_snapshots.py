@@ -422,7 +422,7 @@ async def test_a_framework_waits_for_a_signal_for_its_own_tool_call_once():
     assert await invoke(obj, "deferred", first, invocation, "call-1") == "approved"
     [(service, handler, arg, key, idempotency_key)] = first.calls
     assert (service, handler, key, idempotency_key) == (
-        "waiter.agentprebuild.restate",
+        "waiter.agentprebuilt.restate",
         "wait",
         "alice",
         f"{invocation.id}:call-1",

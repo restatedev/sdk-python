@@ -8,11 +8,11 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""Each agent's companion: a virtual object of its own, ``<agent>.agentprebuild.restate``.
+"""Each agent's companion: a virtual object of its own, ``<agent>.agentprebuilt.restate``.
 
 Whatever makes an agent (a framework's ``agent()``, ``AgentObject``) makes its
 companion too (``with_companion``), and the agent serves it alongside itself.
-The companion of agent ``assistant`` is ``assistant.agentprebuild.restate``,
+The companion of agent ``assistant`` is ``assistant.agentprebuilt.restate``,
 keyed as the agent: key ``alice`` of the agent has key ``alice`` of its
 companion. It holds the signals the agent's tools wait for (``wait`` returns
 once ``resolve`` gives the wait its value), the message the agent is
@@ -60,15 +60,15 @@ from restate.sessions.internal import definition_of
 
 T = typing.TypeVar("T")
 
-COMPANION_SUFFIX = ".agentprebuild.restate"
-"""What an agent's name is followed by to name its companion: ``<agent>.agentprebuild.restate``.
+COMPANION_SUFFIX = ".agentprebuilt.restate"
+"""What an agent's name is followed by to name its companion: ``<agent>.agentprebuilt.restate``.
 
 Restate refuses service names that start with ``restate``, so the companion's
 name ends with it instead."""
 
 
 def companion_name(agent: str) -> str:
-    """Return the name of the companion of agent ``agent``: ``<agent>.agentprebuild.restate``."""
+    """Return the name of the companion of agent ``agent``: ``<agent>.agentprebuilt.restate``."""
     return f"{agent}{COMPANION_SUFFIX}"
 
 
@@ -265,7 +265,7 @@ class Companion:
     agent: str
     """The name of the agent whose companion this is."""
     service: restate.VirtualObject
-    """The companion's virtual object, ``<agent>.agentprebuild.restate``, which the agent serves alongside itself."""
+    """The companion's virtual object, ``<agent>.agentprebuilt.restate``, which the agent serves alongside itself."""
     steer: Callable[[ObjectContext, Steer], Awaitable[Steered]]
     taken: Callable[[ObjectContext, list[str]], Awaitable[None]]
     wait: Callable[[ObjectSharedContext, WaitRequest], Awaitable[Any]]
@@ -287,7 +287,7 @@ class Companion:
 
 
 def make_companion(agent: str) -> Companion:
-    """Make the companion of agent ``agent``: the virtual object ``<agent>.agentprebuild.restate``, keyed as the agent.
+    """Make the companion of agent ``agent``: the virtual object ``<agent>.agentprebuilt.restate``, keyed as the agent.
 
     It knows its agent: it sends it ``settle`` and ``steered``. It is
     ingress-private: only the agent's handlers and views call it.
