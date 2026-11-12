@@ -108,50 +108,17 @@ views (`status`, `pending`, `signal`, `steer`, `watch`, `sync`). The handler
 names, `awaitTurn` among them, stay as they are — they are the wire the two
 SDKs share.
 
-## Migration
+## No migration
 
-### From the shipped `signals`
+Nothing carries the companion's state over, and nothing needs to. The
+shared `signals` and `<agent>.agentprebuilt.restate` are both preview, and
+neither per-agent companion has been released: the new object starts empty
+for every key, and whatever a running `signals` holds — waits, the turn
+being answered, the steering inbox, the revision — is dropped with it.
 
-The companion's state does not move, and nothing migrates it. What that
-costs, per item:
-
-- **Waits in flight.** A tool waiting on an awakeable held by `signals` is
-  resolved by `signals` and by nothing else. Its turn hangs until the wait is
-  rejected or the invocation is killed.
-- **The turn being answered.** The new object does not know it. `status`
-  reads idle while an invocation is still running, and the turn is closed by
-  the next message rather than by `settle`.
-- **The steering inbox.** Messages already steered to a live turn are lost to
-  that turn; each was sent to the agent's `steered` handler as it arrived, so
-  it is still answered as a turn of its own.
-- **The revision**, which restarts at 0 for each key — see below.
-- **The conversation itself is untouched.** It lives in the key's SQL
-  database: messages, turns, statuses and cursors all survive.
-
-So: **drain before upgrading.** No turn being answered, no tool waiting for a
-signal, then deploy. Restate keeps running invocations on the deployment
-version they started on, which still serves `signals`, so an in-flight turn
-finishes correctly as long as that deployment is not removed under it.
-Remove the old deployment once it is drained, and `signals` goes with it.
-
-**The revision restart is client-visible.** A client that holds revision 7
-calls `watch`/`sync` against an object back at 0; `subscribe` only answers a
-revision *greater* than the one asked for, so it hears nothing until the new
-revision passes 7. It is self-healing: the 50 s timeout returns the current
-revision, and the client follows from there. Two ways to handle it:
-
-- **Document it** (one paragraph in the upgrade note): a conversation may be
-  deaf for up to one `watch` timeout after the upgrade.
-- **Tolerate it in `subscribe`** (recommended): answer at once when the
-  stored revision is *lower* than the one asked for, since that can only mean
-  a reset. A few lines in each SDK, and it makes any future reset of the
-  companion's state harmless to a following client.
-
-### From `.agentprebuilt.restate`
-
-Only the branches run it, and neither is released: this is a straight rename
-of a constant, with its docs, tests and e2e assertions. No migration note is
-owed to anyone.
+The conversation itself is untouched. It lives in the key's SQL database:
+messages, turns, statuses and cursors all survive the rename, since the
+companion holds none of them.
 
 ## The change, file by file
 
@@ -203,16 +170,10 @@ alone.
 
 ## Open questions
 
-1. **An alias for one release** — serve `signals` beside the new object so an
-   un-drained deployment keeps working? Recommendation: no. It is preview
-   software, and an alias means two objects with split state for the same
-   conversation, which is worse than a drain.
-2. **The revision tolerance in `subscribe`** (above): take it, or only
-   document the restart?
-3. **The Python file names** (`_companion.py`, `agents_companion_server.py`):
+1. **The Python file names** (`_companion.py`, `agents_companion_server.py`):
    confirm, or keep `_signals.py` as the file name and change only the
    strings.
-4. **Which repo lands first.** The name must be identical in both before
+2. **Which repo lands first.** The name must be identical in both before
    either is released; sdk-python's branch is the one the TypeScript port
    follows (`docs/agents/porting.md`), so it goes first, and sdk-sessions
    follows in the same week.
