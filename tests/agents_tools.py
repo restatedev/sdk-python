@@ -22,7 +22,7 @@ import pytest
 import restate
 from restate import sessions
 from restate.sessions import internal
-from restate.agents._common import ToolError
+from restate.agents._common import NeedsAgent, ToolError
 from restate.agents._object import AgentObject
 from restate.agents._tools import Tool, ToolCall, call, subagent, tool, wait_for_signal, workflow
 from restate.context import Request
@@ -273,8 +273,8 @@ NEEDS_AGENT = "needs an agent, whose companion holds its waits: 'desk' is a plai
 
 
 async def test_a_wait_for_a_signal_from_a_session_object_that_is_no_agent_fails_for_good_with_what_to_do():
-    """A ``wait_for_signal`` tool's call fails with a terminal error, which is its result: a retry would fail again.
-    It makes no call, nor records one."""
+    """A ``wait_for_signal`` tool's call, and ``wait_for``, fail with a terminal error that is not the tool's result
+    (``NeedsAgent``): a retry would fail again, and the model cannot fix it. They make no call, nor record one."""
     from restate.agents._tools import wait_for  # pylint: disable=import-outside-toplevel
     from restate.exceptions import TerminalError  # pylint: disable=import-outside-toplevel
 
@@ -284,7 +284,11 @@ async def test_a_wait_for_a_signal_from_a_session_object_that_is_no_agent_fails_
 
     @desk.handler
     async def tool_call(ctx: sessions.SessionContext) -> str:
-        return await approval.run({}, ToolCall(ctx, "c1"))
+        try:
+            return await approval.run({}, ToolCall(ctx, "c1"))
+        except NeedsAgent as error:
+            waited.append(error.message)
+            raise
 
     @desk.handler
     async def deferred(ctx: sessions.SessionContext) -> None:
@@ -296,12 +300,14 @@ async def test_a_wait_for_a_signal_from_a_session_object_that_is_no_agent_fails_
 
     backend = Backend()
     host = Host(backend, service="desk")
-    result = await internal.invoke(desk, "tool_call", host, request())
-    assert result.startswith(f"Error: waiting for signal 'approval' {NEEDS_AGENT}"), result
-    assert "`<framework>.agent(...)`" in result and "`AgentObject`" in result
+    with pytest.raises(TerminalError):
+        await internal.invoke(desk, "tool_call", host, request())
     with pytest.raises(TerminalError):
         await internal.invoke(desk, "deferred", host, request())
-    assert waited and waited[0].startswith(f"waiting for signal 'refund' {NEEDS_AGENT}")
+    assert len(waited) == 2, waited
+    assert waited[0].startswith(f"waiting for signal 'approval' {NEEDS_AGENT}"), waited
+    assert "`<framework>.agent(...)`" in waited[0] and "`AgentObject`" in waited[0]
+    assert waited[1].startswith(f"waiting for signal 'refund' {NEEDS_AGENT}")
     assert host.calls == []
 
 

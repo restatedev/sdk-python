@@ -402,3 +402,41 @@ async def test_a_publish_clears_the_watches_only_if_there_are_any():
     watched = _State(revision=4, watching=[{"revision": 4, "awakeable": "a1"}])
     await _signals._publish(typing.cast(Any, watched))  # pyright: ignore[reportPrivateUsage]
     assert watched.resolved == ["a1"] and watched.writes == [("set", "revision"), ("clear", "watching")]
+
+
+@pytest.mark.parametrize("framework", list(AGENTS))
+async def test_a_signal_tool_of_a_plain_session_object_fails_its_turn_for_good_and_the_model_never_sees_it(
+    framework: str,
+):
+    """Waiting needs an agent: the turn fails once, terminally, and is closed ``failed``; the model is not asked
+    again with the error as the tool's result, as it could not fix how the object is set up."""
+    import importlib
+
+    from sessions_database import Backend
+    from sessions_object import Host, request
+
+    from restate.agents import wait_for_signal
+    from restate.exceptions import TerminalError
+    from restate.sessions.internal import invoke
+
+    seen = Seen()
+    waits = wait_for_signal("approval", description="Wait for an approval.", name="lookup")
+    framework_module = importlib.import_module(f"restate.agents.{framework}")
+    desk = sessions.SessionObject("desk")
+
+    @desk.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await framework_module.prompt(ctx, text, model=MODELS[framework](seen), tools=[waits])
+
+    @desk.handler
+    async def stored(ctx: sessions.SessionContext) -> list[Any]:
+        return [list(row) for row in await ctx.db.values("SELECT status, answer FROM restate_agent_turns")]
+
+    backend = Backend()
+    host = Host(backend, service="desk")
+    with pytest.raises(TerminalError) as raised:
+        await invoke(desk, "ask", host, request(), "refund o1")
+    assert raised.value.message.startswith("waiting for signal 'approval' needs an agent"), raised.value.message
+    assert [event for event, _ in seen.events] == ["model"] and host.calls == []
+    [[status, answer]] = await invoke(desk, "stored", Host(backend, service="desk"), request())
+    assert status == "failed" and "needs an agent" in answer

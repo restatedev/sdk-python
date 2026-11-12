@@ -158,6 +158,7 @@ from restate.agents._common import (
     CompactHistory,
     ErrorSet,
     ModelError,
+    NeedsAgent,
     PerSession,
     check_built_in,
     check_own,
@@ -455,7 +456,7 @@ class _Restate(AbstractCapability[Any]):
         stop = stop_signal_of(self.ctx)
         if stop is not None and stop.reason is not None:
             raise stop.reason from error
-        if isinstance(error, TerminalError) and not is_cancellation(error):
+        if isinstance(error, TerminalError) and not is_cancellation(error) and not isinstance(error, NeedsAgent):
             return f"Error: {error.message}"
         # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
         from_tool(self.ctx, error)

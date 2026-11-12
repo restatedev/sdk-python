@@ -313,6 +313,16 @@ class ToolError(Exception):
         self.__cause__ = cause
 
 
+class NeedsAgent(TerminalError):
+    """A step that only an agent takes (waiting for a signal: it needs the agent's companion), from a handler of a
+    session object that is no agent.
+
+    It fails the turn for good, and closes it ``failed``. Unlike another
+    ``TerminalError`` that a tool raises, it is never the tool's result for
+    the model: the model cannot fix how the object is set up.
+    """
+
+
 class ErrorSet:
     """A set of errors, by identity, that holds them for as long as it lives (an attempt, or a run).
 

@@ -54,6 +54,7 @@ from restate.agents._api import (
     Waiting,
     Watch,
 )
+from restate.agents._common import NeedsAgent
 from restate.sessions import SessionContext, ViewContext
 from restate.sessions._link import Link
 from restate.sessions.internal import definition_of
@@ -624,12 +625,12 @@ def companion_in(ctx: SessionContext | ViewContext) -> Companion:
     return companion
 
 
-def needs_agent(ctx: SessionContext, what: str) -> TerminalError:
+def needs_agent(ctx: SessionContext, what: str) -> NeedsAgent:
     """Return the error for ``what`` (a step that only an agent takes, as it needs the companion), from a handler
-    of a session object that is no agent: terminal, as a retry would meet it again."""
+    of a session object that is no agent: it fails the turn for good, as a retry would meet it again."""
     definition = definition_of(ctx)
     name = typing.cast(str, getattr(definition, "name", "?"))
-    return TerminalError(
+    return NeedsAgent(
         f"{what} needs an agent, whose companion holds its waits: {name!r} is a plain session object. "
         "Use `<framework>.agent(...)` (such as `restate.agents.pydantic_ai.agent`) or `AgentObject` instead of "
         "`SessionObject`"
@@ -640,7 +641,7 @@ def waits_in(ctx: SessionContext, what: str) -> Companion:
     """Return the companion of the agent whose handler ``ctx`` runs, to wait for a signal (``what``) on it.
 
     Raises:
-        TerminalError: If ``ctx`` is a handler's of a session object that is no agent (``needs_agent``).
+        NeedsAgent: If ``ctx`` is a handler's of a session object that is no agent (``needs_agent``).
     """
     companion = companion_at(ctx)
     if companion is None:

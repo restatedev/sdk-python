@@ -40,7 +40,7 @@ from typing import Any
 
 from restate.agents import _signals
 from restate.agents._calls import call_of
-from restate.agents._common import PerSession, ToolError, configured
+from restate.agents._common import NeedsAgent, PerSession, ToolError, configured
 from restate.agents._turn import stop_signal_of, tool_call_started
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable
@@ -172,6 +172,9 @@ class Tool:
                     # nothing else. The turn still stops with its reason, from the stop signal.
                     raise
                 raise stop.reason from error
+            if isinstance(error, NeedsAgent):
+                # Not the model's to fix (a wait from a session object that is no agent): the turn fails with it.
+                raise
             if isinstance(error, TerminalError):
                 # A terminal error is the tool's result, which the model can act on.
                 return f"Error: {error.message}"
@@ -688,7 +691,7 @@ async def _wait(
     """Wait for signal ``signal`` as tool call ``call``, once however often it runs; ``pending`` shows ``input`` if
     ``shown``. ``rejoin`` and ``approval`` are ``call_of``'s."""
 
-    # Before the call is recorded: from a session object that is no agent, the wait fails for good, as a retry would.
+    # Before the call is recorded: from a session object that is no agent, the turn fails for good (``NeedsAgent``).
     waiting = "waiting for an approval" if approval else f"waiting for signal {signal!r}"
     wait = _signals.waits_in(call.ctx, waiting).wait
 

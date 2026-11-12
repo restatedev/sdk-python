@@ -103,7 +103,8 @@ async def test_an_app_of_only_a_session_object_that_prompts_answers_a_turn_of_to
 
 
 async def test_a_wait_for_a_signal_from_a_session_object_that_is_no_agent_fails_once_with_what_to_do():
-    """The tool's call fails with a terminal error, its result for the model, in the one attempt: not retried."""
+    """The turn fails with a terminal error, in the one attempt (not retried), and is closed ``failed``; the model is
+    not asked again with it."""
     from restate.agents import pydantic_ai  # pylint: disable=import-outside-toplevel
     from restate.agents._tools import wait_for_signal  # pylint: disable=import-outside-toplevel
 
@@ -117,8 +118,14 @@ async def test_a_wait_for_a_signal_from_a_session_object_that_is_no_agent_fails_
         attempts.append(ctx.request.id)
         return await pydantic_ai.prompt(ctx, text, model=_scripted(approval.name, replies), tools=[approval])
 
+    @desk.handler
+    async def turns(ctx: sessions.SessionContext) -> list[list[str]]:
+        return [[str(v) for v in row] for row in await ctx.db.values("SELECT status, answer FROM restate_agent_turns")]
+
     async with restate.create_test_harness(restate.app([desk]), restate_image=RESTATE_IMAGE) as harness:
-        answer = await harness.client.object_call(ask, key="alice", arg="refund o1")
-    assert len(attempts) == 1
-    assert len(replies) == 1 and replies[0].startswith("Error: waiting for signal 'approval' needs an agent")
-    assert "`<framework>.agent(...)`" in replies[0] and answer == f"the tool said: {replies[0]}"
+        with pytest.raises(Exception, match="HTTP 500"):  # a terminal error, whose message the turn stored
+            await harness.client.object_call(ask, key="alice", arg="refund o1")
+        [[status, answer]] = await harness.client.object_call(turns, key="alice", arg=None)
+    assert len(attempts) == 1 and replies == []
+    assert status == "failed" and answer.startswith("Error: waiting for signal 'approval' needs an agent"), answer
+    assert "`<framework>.agent(...)`" in answer

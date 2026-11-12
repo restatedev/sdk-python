@@ -53,11 +53,14 @@ message to the agent's `chat` (`deliver`, or `ctx.generic_send`).
 
 Waiting for a signal (a `wait_for_signal` tool, `wait_for`, an approval,
 LangGraph's `interrupt()` and `nodes.wait_for_signal`) and steering need the
-companion, so an agent. From a plain session object a wait fails for good,
-with a terminal error that says to use `<framework>.agent(...)` or
-`AgentObject`: a tool's wait as its call's result, which the model gets, and
-the others as the turn's error. A `publish` from it is a programming error,
-which raises.
+companion, so an agent. From a plain session object every wait fails the
+turn once, for good (`NeedsAgent`, a `TerminalError`), with a message that
+says to use `<framework>.agent(...)` or `AgentObject`, and the turn is
+closed `failed`. A signal tool's wait included: unlike another
+`TerminalError` a tool raises, it is never handed to the model as the
+tool's result, since the model cannot fix how the object is set up (as in
+the TypeScript SDK). A `publish` from a plain session object is a
+programming error, which raises.
 
 ## Words
 
