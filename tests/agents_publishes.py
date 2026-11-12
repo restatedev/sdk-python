@@ -90,8 +90,9 @@ class Companion:
         return b"null"
 
 
-def follow(obj: AgentObject, seen: Seen) -> Callable[[str], Any]:
-    """Return a ``chat`` of ``obj`` in this process, each call a turn, whose follower records what it sees in ``seen``."""
+def follow(obj: AgentObject, seen: Seen, handler: str = "chat") -> Callable[[str], Any]:
+    """Return a ``chat`` of ``obj`` in this process, each call a turn, whose follower records what it sees in ``seen``;
+    or a call of another of its handlers, ``handler``."""
     from sessions_database import Backend
     from sessions_object import Answer, Host, request
 
@@ -114,7 +115,7 @@ def follow(obj: AgentObject, seen: Seen) -> Callable[[str], Any]:
             return Deferred(handler, arg)
 
     async def chat(text: str) -> Any:
-        return await invoke(obj, "chat", Followed(backend, service=obj.name), request(), text)
+        return await invoke(obj, handler, Followed(backend, service=obj.name), request(), text)
 
     return chat
 
@@ -296,6 +297,28 @@ async def test_a_background_agent_publishes_only_its_end(framework: str):
     await chat("hello")
     # Its start publishes nothing, nor do its commits: only its close does.
     assert seen.companion_calls() == ["start", "close"]
+
+
+@pytest.mark.parametrize("framework", list(AGENTS))
+@pytest.mark.parametrize("background", [False, True])
+async def test_a_handler_of_your_own_on_an_agent_publishes_each_committed_step_as_chat_does(
+    framework: str, background: bool
+):
+    """No turn in the companion (no ``start`` nor ``close``, which only ``chat`` makes), but its steps publish as
+    ``chat``'s do, so that the agent's followers see them; a background agent's publish nothing."""
+    import importlib
+
+    seen = Seen()
+    agent = make(framework, seen, background=background)
+    framework_module = importlib.import_module(f"restate.agents.{framework}")
+
+    @agent.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await framework_module.prompt(ctx, text, model=MODELS[framework](seen), tools=[lookup_of(seen)])
+
+    assert await follow(agent, seen, "ask")("hello") == "answered after hello"
+    # The reply with the calls (no results yet); the results.
+    assert [e for e in seen.events if e[0] != "model"] == ([] if background else [("publish", 0), ("publish", CALLS)])
 
 
 def no_companion(*_: Any) -> Any:

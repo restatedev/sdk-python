@@ -236,12 +236,13 @@ def _settled(ctx: SessionContext, stored: Stored) -> Awaitable[None]:
 async def publish(ctx: SessionContext) -> None:
     """Publish a change to the conversation of ``ctx``: the revision increases, and the clients read it again.
 
-    While a framework is answering (inside ``answering``), the calls whose
-    results are stored are first forgotten. The rows the conversation holds
-    back are written first: the clients read them once told to.
+    The rows the conversation holds back are written first: the clients
+    read them once told to. It forgets no calls: ``answer_once`` does that
+    after each write of steps that commits, before it publishes there
+    (``settled``), and the ``settle`` handler publishes outside a turn.
 
-    Only an agent publishes, to its companion: a ``chat`` turn after each
-    step it stores (``chat_turn``), and its ``settle``. A session object that
+    Only an agent publishes, to its companion: after each step its handlers'
+    turns store (``publish_steps``), and its ``settle``. A session object that
     is no agent has no companion, and nothing follows it: its turns are only
     stored.
 
@@ -250,11 +251,23 @@ async def publish(ctx: SessionContext) -> None:
     """
     companion = _signals.companion_in(ctx)
     await flush_held(ctx)
-    await settled(ctx)
     published = await ctx.call(companion.publish, key=ctx.key)
     inbox = _INBOX.get(ctx)
     if inbox is not None:
         inbox.saw(published)
+
+
+def publish_steps(ctx: SessionContext) -> None:
+    """Have each write of steps that commits, in the turns that ``ctx``'s handler answers, publish: unless the
+    agent runs in the background, which publishes only as a ``chat`` turn ends.
+
+    ``chat_turn`` calls it, and so does every handler of an agent
+    (``AgentObject``), a handler of your own that prompts included: its
+    followers see its steps as they are stored. ``answer_once`` runs it
+    (``after_steps``), and knows nothing of it.
+    """
+    if not _unfollowed(ctx):
+        after_steps(ctx, lambda: publish(ctx))
 
 
 async def settled(ctx: SessionContext) -> None:
@@ -365,9 +378,8 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     inbox = _INBOX.get(ctx)
     if inbox is not None and published is not None:
         inbox.saw(published)
-    if followed:
-        # Each step the turn stores that a tool waits for (a reply with tool calls, the tools' results).
-        after_steps(ctx, lambda: publish(ctx))
+    # Each step the turn stores that a tool waits for (a reply with tool calls, the tools' results).
+    publish_steps(ctx)
 
     async def end() -> None:
         # Have the companion close the turn, which publishes its last change

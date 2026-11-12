@@ -659,8 +659,8 @@ MUTANTS = [
         "pydantic-denial-approves",
         "a deferred call's approval signal with any text runs the tool, a denial's reason included",
         f"{AGENTS}/pydantic_ai/_agent.py",
-        "        return ToolApproved() if value.strip().lower() in _APPROVED else ToolDenied(value)",
-        "        return ToolApproved()",
+        "        if said in _APPROVED:\n            return ToolApproved()",
+        "        if True:\n            return ToolApproved()",
         PYDANTIC_AI,
     ),
     Mutant(

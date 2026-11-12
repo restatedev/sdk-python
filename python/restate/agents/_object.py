@@ -51,7 +51,7 @@ from restate.agents._common import (
 from restate.agents._conversation import SCHEMA, Items, next_start, restart, steer_stored
 from restate.agents._conversation import compact as compact_turns
 from restate.agents._conversation import settle as settle_turn
-from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared, publish
+from restate.agents._turn import AGENT, AgentInfo, chat_turn, cleared, publish, publish_steps
 from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
 from restate.sessions import Migration, SessionContext, SessionObject, ViewContext
@@ -297,13 +297,15 @@ class AgentObject(SessionObject):
         )
 
     def _attempt_fn(self, fn: Callable[..., Awaitable[Any]], view: bool) -> Callable[..., Awaitable[Any]]:
-        """Wrap a handler so that a model provider's refusal fails its invocation for good, as in ``chat``."""
+        """Wrap a handler so that a model provider's refusal fails its invocation for good, as in ``chat``, and the
+        steps its turns store publish (``publish_steps``), as in ``chat``: for a handler of your own that prompts."""
         if view:
             return fn
 
         # Keep fn's signature: the SDK reads from it whether the handler takes an input.
         @functools.wraps(fn)
         async def answering(ctx: SessionContext, *args: Any) -> Any:
+            publish_steps(ctx)
             try:
                 return await fn(ctx, *args)
             except Exception as error:

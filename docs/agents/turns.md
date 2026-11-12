@@ -35,11 +35,21 @@ having a companion of its own, are this SDK's (see
 The conversation stores: `answer_once` runs a prompt's turn and writes its
 steps in the key's database, and nothing else. The agent's turn publishes:
 `chat_turn` starts the turn with the companion, has each write of the turn's
-steps that commits publish (it sets what follows a commit, `after_steps`,
-which `answer_once` runs as an opaque callback), and closes the turn. So a
-handler of your own that prompts (`pydantic_ai.prompt(ctx, …)` on a plain
-`SessionObject`, say) stores its turn and publishes nothing: it has no
-companion, and nothing follows it.
+steps that commits publish (`publish_steps` sets what follows a commit,
+`after_steps`, which `answer_once` runs as an opaque callback), and closes
+the turn. A handler of your own that prompts on a plain `SessionObject`
+(`pydantic_ai.prompt(ctx, …)`, say) stores its turn and publishes nothing:
+it has no companion, and nothing follows it.
+
+A handler you add to an agent (`@assistant.handler`) that prompts publishes
+each step its turns store, as `chat` does: every handler of an
+`AgentObject` calls `publish_steps`, so the agent's followers see its steps.
+It is not a turn in the companion, though: no `start` nor `close`, so
+`status` does not report it and `stop` does not cancel it. There is no
+public way to make it one: `chat_turn` is private (`_turn.py`), and needs
+the handler declared with `explicit_cancellation=True` and the agent's
+`settle` handler, which only `chat()` adds. For a followed turn, send the
+message to the agent's `chat` (`deliver`, or `ctx.generic_send`).
 
 Waiting for a signal (a `wait_for_signal` tool, `wait_for`, an approval,
 LangGraph's `interrupt()` and `nodes.wait_for_signal`) and steering need the
@@ -679,9 +689,10 @@ A handler of your own may prompt more than once (`openai.prompt(ctx, …)`
 twice, say): each prompt is a turn of the conversation, `<id>`, then
 `<id>:2`. A retried attempt makes them in the same order, so each finds its
 own answer. In an agent's `chat` turn, the companion's turn is the
-invocation, all of them. A handler of your own outside `chat` (on a plain
-`SessionObject`, or a handler you add to an agent) stores its turns, and
-publishes none of them: only `chat` starts, publishes and closes a turn.
+invocation, all of them. A handler you add to an agent publishes each
+step its turns store, as `chat` does, but only `chat` starts and closes a
+turn in the companion. A handler of a plain `SessionObject` stores its turns
+and publishes none of them.
 
 ## What a client sees
 

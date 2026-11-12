@@ -303,3 +303,45 @@ async def test_a_wait_for_a_signal_from_a_session_object_that_is_no_agent_fails_
         await internal.invoke(desk, "deferred", host, request())
     assert waited and waited[0].startswith(f"waiting for signal 'refund' {NEEDS_AGENT}")
     assert host.calls == []
+
+
+def _langgraph_desk(node: Any) -> sessions.SessionObject:
+    """A session object that is no agent, whose ``ask`` prompts a graph that runs ``node``."""
+    from langgraph.graph import END, START, MessagesState, StateGraph  # pylint: disable=import-outside-toplevel
+
+    from restate.agents import langgraph  # pylint: disable=import-outside-toplevel
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("wait", node)
+    builder.add_edge(START, "wait")
+    builder.add_edge("wait", END)
+    desk = sessions.SessionObject("desk")
+
+    @desk.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await langgraph.prompt(ctx, text, graph=builder)
+
+    return desk
+
+
+def _interrupting(state: Any) -> dict[str, Any]:
+    from langgraph.types import interrupt  # pylint: disable=import-outside-toplevel
+
+    return {"messages": [("ai", f"approved: {interrupt('approve?')}")]}
+
+
+@pytest.mark.parametrize("waits", ["node", "interrupt"])
+async def test_a_langgraph_wait_from_a_session_object_that_is_no_agent_fails_the_turn_for_good(waits: str):
+    """``nodes.wait_for_signal`` and ``interrupt()``: the turn fails once, terminally, with what to do."""
+    pytest.importorskip("langgraph")
+    from restate.agents.langgraph import nodes  # pylint: disable=import-outside-toplevel
+    from restate.exceptions import TerminalError  # pylint: disable=import-outside-toplevel
+
+    node = nodes.wait_for_signal("approval") if waits == "node" else _interrupting
+    what = "waiting for signal 'approval'" if waits == "node" else "resuming an interrupt"
+    desk = _langgraph_desk(node)
+    host = Host(Backend(), service="desk")
+    with pytest.raises(TerminalError) as raised:
+        await internal.invoke(desk, "ask", host, request(), "refund o1")
+    assert raised.value.message.startswith(f"{what} {NEEDS_AGENT}"), raised.value.message
+    assert host.calls == []
