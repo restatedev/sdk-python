@@ -30,6 +30,25 @@ having a companion of its own, are this SDK's (see
 [The companion is the agent's own](#the-companion-is-the-agents-own), and
 [Porting to sdk-sessions](porting.md)).
 
+## Who does what
+
+The conversation stores: `answer_once` runs a prompt's turn and writes its
+steps in the key's database, and nothing else. The agent's turn publishes:
+`chat_turn` starts the turn with the companion, has each write of the turn's
+steps that commits publish (it sets what follows a commit, `after_steps`,
+which `answer_once` runs as an opaque callback), and closes the turn. So a
+handler of your own that prompts (`pydantic_ai.prompt(ctx, …)` on a plain
+`SessionObject`, say) stores its turn and publishes nothing: it has no
+companion, and nothing follows it.
+
+Waiting for a signal (a `wait_for_signal` tool, `wait_for`, an approval,
+LangGraph's `interrupt()` and `nodes.wait_for_signal`) and steering need the
+companion, so an agent. From a plain session object a wait fails for good,
+with a terminal error that says to use `<framework>.agent(...)` or
+`AgentObject`: a tool's wait as its call's result, which the model gets, and
+the others as the turn's error. A `publish` from it is a programming error,
+which raises.
+
 ## Words
 
 - **Agent, key.** A session object of `restate.agents`, such as `assistant`,
@@ -165,7 +184,8 @@ sequenceDiagram
    is stored as it comes: a reply with tool calls in one transaction, before
    its tools run; the tools' results before the model is asked again. A
    final reply, which no tool waits for, is held and commits with the
-   answer. After each write that commits, the turn publishes once, and
+   answer. After each write that commits, the turn (`chat_turn`, not
+   `answer_once`, see [Who does what](#who-does-what)) publishes once, and
    waits for it: so a follower sees the calls as their tools start, and
    their results before the model's next request returns. The companion
    answers each `publish` with the messages steered to the turn that wait:
@@ -658,7 +678,10 @@ shared with Restate's other SDKs).
 A handler of your own may prompt more than once (`openai.prompt(ctx, …)`
 twice, say): each prompt is a turn of the conversation, `<id>`, then
 `<id>:2`. A retried attempt makes them in the same order, so each finds its
-own answer, and the companion's turn is the invocation, all of them.
+own answer. In an agent's `chat` turn, the companion's turn is the
+invocation, all of them. A handler of your own outside `chat` (on a plain
+`SessionObject`, or a handler you add to an agent) stores its turns, and
+publishes none of them: only `chat` starts, publishes and closes a turn.
 
 ## What a client sees
 

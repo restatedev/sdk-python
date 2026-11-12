@@ -10,6 +10,15 @@ The code is [`_conversation.py`](../../python/restate/agents/_conversation.py)
 view) and [`_calls.py`](../../python/restate/agents/_calls.py) (the call
 records).
 
+The conversation only stores. It knows nothing of the companion: an agent's
+`chat` turn publishes after each write of steps that commits, by setting what
+follows a commit (`after_steps`), which `answer_once` hands to
+`Conversation.hold` as it is ([Who does what](turns.md#who-does-what)). A
+handler of your own on a plain `SessionObject` that prompts stores its turn
+the same way, and publishes nothing. Writing the held rows before a call
+record or a Restate call (`holding`, `flush_held`) is the conversation's own
+durability, and applies to both.
+
 ## Conversation and turns
 
 - **A conversation is a key's database.** Each key of an agent (`alice` of
@@ -524,8 +533,9 @@ invocation (the next invocation's first call replaces it):
   again under the same id; a new call with the same input (the model asking
   again after the first's answer) waits anew, and never gets an earlier
   call's approval or denial.
-- **Forgetting.** At each publish (after each write of steps that commits)
-  and before each tool call, a record whose Restate call returned is
+- **Forgetting.** After each write of steps that commits (before the
+  publish an agent's turn makes there, and in a plain session object's turn
+  too, which publishes nothing) and before each tool call, a record whose Restate call returned is
   forgotten once the transcript has its result under the latest id it was
   made with: a success, or the very error the call
   returned. Another error in the transcript (one the framework made up for a
