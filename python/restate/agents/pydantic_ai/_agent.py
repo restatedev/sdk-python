@@ -740,13 +740,14 @@ def _due(messages: list[ModelMessage], model: Model, context_window: int | None)
 def history_source() -> TurnsHistorySource:
     """Return the conversation's turns as a source for the harness's ``ConversationSearch``::
 
-        desk = Agent(model, capabilities=[ConversationSearch(pydantic_ai.history_source())])
+        search = ConversationSearch(pydantic_ai.history_source(), scope="conversation")
+        desk = Agent(model, capabilities=[search])
 
     Each turn is a run: its id is the turn's prompt id, its start the time
     the turn was asked, and its messages the turn's as stored, the originals
     of what a compaction summarized for the model. The runs are those of the
-    conversation (its id is ``<agent>/<key>``), so the default scope finds
-    them.
+    conversation (its id is ``<agent>/<key>``), so the conversation's scope
+    finds them.
     """
     return TurnsHistorySource(ITEMS)
 

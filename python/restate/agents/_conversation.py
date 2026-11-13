@@ -91,7 +91,7 @@ import json
 import logging
 import time
 import typing
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
@@ -530,7 +530,7 @@ class _Ledger:
         return self.holds and not any(e.calls or e.results for e in entries)
 
     @contextlib.asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Transaction]:
+    async def transaction(self) -> AsyncGenerator[Transaction, None]:
         """Open a transaction that writes the held rows first; hold the lock.
 
         They are no longer held once it commits; if it rolls back, they still are.

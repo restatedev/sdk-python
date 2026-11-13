@@ -22,7 +22,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import typing
-from collections.abc import Iterator
+from collections.abc import Generator
 
 from restate.sessions import SessionContext
 
@@ -30,7 +30,7 @@ _RUN: contextvars.ContextVar[SessionContext | None] = contextvars.ContextVar("re
 
 
 @contextlib.contextmanager
-def running(ctx: SessionContext) -> Iterator[None]:
+def running(ctx: SessionContext) -> Generator[None, None, None]:
     """Run a graph for the handler of ``ctx``: its nodes and tools find it with ``handler_context``."""
     token = _RUN.set(ctx)
     try:
