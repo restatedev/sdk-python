@@ -282,7 +282,8 @@ async def test_search_finds_a_tool_result_that_a_compaction_summarized_and_lists
         """Look something up."""
         return f"found {about}: {'fact ' * 50}"
 
-    mine: Any = Agent(FunctionModel(model), tools=[lookup], capabilities=[ConversationSearch(source), Runs()])
+    search = ConversationSearch(source, scope="conversation")
+    mine: Any = Agent(FunctionModel(model), tools=[lookup], capabilities=[search, Runs()])
     chat = Chat(pydantic_ai.agent("pai_search", agent=mine, context_window=8000))
     turns = await until_snapshot(chat)
     stored = "".join((await chat.read())["items"])
