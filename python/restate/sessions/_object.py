@@ -298,7 +298,11 @@ def _sdk_handler(entry: _Entry) -> Callable[..., Awaitable[Any]]:
     @functools.wraps(entry.fn)
     async def handler(ctx: ServerInvocationContext, *args: Any) -> Any:
         host = _ContextHost(ctx, shared=entry.view)
-        return await _attempt(entry, host, ctx.request(), args)
+        try:
+            return await _attempt(entry, host, ctx.request(), args)
+        finally:
+            # Before the SDK writes the output: the working run ends first, in the journal.
+            host.selector.close()
 
     return handler
 
@@ -326,6 +330,16 @@ async def cancelled(ctx: SessionContext) -> None:
 
 
         asyncio.ensure_future(stop_when_cancelled())
+
+    It watches for the cancellation, and holds nothing: awaited alone, it
+    neither suspends the invocation nor tells Restate that the handler waits
+    (the attempt's journal has a run named ``work`` instead, for the
+    handler's own work; see ``_selector.py``). A cancellation reaches the
+    handler at once while Restate keeps the invocation's input open. Once
+    Restate closed it (the handler sent and received nothing for the
+    inactivity timeout), a cancellation reaches the handler at its next
+    await of Restate's, which suspends the invocation and resumes it at once
+    (in the next attempt), or not at all if it awaits nothing more.
 
     Args:
         ctx: The context of a handler with ``explicit_cancellation=True``.

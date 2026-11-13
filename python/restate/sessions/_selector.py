@@ -17,11 +17,16 @@ one await point per invocation: a suspension, the awaiting-on hint and a
 cancellation each take a single unresolved future. So every wait registers
 with the selector, which asks the VM for progress on whichever of them
 completes first, and which is the only reader of the invocation's input.
+
+To ask is to say that the handler waits, but a handler that watches for its
+cancellation does not wait for it: see ``FutureSelector`` for the working
+run that the selector asks for with it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
@@ -29,6 +34,7 @@ from typing import Any, Protocol
 from restate.exceptions import SdkInternalException, SuspendedException, TerminalError
 from restate.server_context import DisconnectedException, ServerInvocationContext
 from restate.vm import (
+    CANCEL_HANDLE,
     DoProgressAnyCompleted,
     DoProgressCancelSignalReceived,
     DoProgressExecuteRun,
@@ -69,6 +75,19 @@ class SelectorDriver(Protocol):
         """Start the run of ``handle``, which signals its completion through ``receive``."""
         ...
 
+    def work(self) -> int:
+        """Return the handle of the attempt's working run, made at the first call.
+
+        It is a run that the VM hands out like any other (``DoProgressExecuteRun``),
+        and that does not end while the attempt lasts: it stands for the
+        handler's work outside Restate.
+        """
+        ...
+
+    def end_work(self) -> None:
+        """End the working run, if there is one, as the attempt ends."""
+        ...
+
     def notify_input(self, chunk: Mapping[str, Any]) -> None:
         """Pass a chunk of the request body to the VM."""
         ...
@@ -80,6 +99,17 @@ class SelectorDriver(Protocol):
     def on_end(self) -> None:
         """Handle the end of the attempt, after the selector has failed every wait."""
         ...
+
+
+CANCELLATION: int = CANCEL_HANDLE
+"""The handle of the invocation's cancel signal: the VM's, and what ``ctx.cancellation()`` awaits."""
+
+
+def cancellation_alone(future: UnresolvedFuture) -> bool:
+    """Return whether ``future`` waits for the invocation's cancellation, and nothing else."""
+    if isinstance(future, SingleUnresolvedFuture):
+        return future.handle == CANCELLATION
+    return all(cancellation_alone(child) for child in future.children)
 
 
 def is_ready(future: UnresolvedFuture, completed: Callable[[int], bool]) -> bool:
@@ -101,6 +131,25 @@ class FutureSelector:
     reaches all of them. Registering a wait while the loop reads input wakes
     the loop, so the new wait is included in the next check. The loop runs as
     long as something is pending.
+
+    To ask is to say that the handler waits: the VM tells Restate what for,
+    and suspends the invocation on it once the input closed (Restate's
+    inactivity timeout). That holds for every wait but one. A handler with
+    explicit cancellation waits for its cancellation (``cancelled(ctx)``) to
+    stop work it does outside Restate, a model's request, say: it watches for
+    it, and does not wait for it. Reported as awaited, the cancel signal
+    would be all Restate believes the handler waits for; and suspended on it,
+    the invocation would end its attempt in the middle of that work, with a
+    cancellation as the only thing to resume it.
+
+    So with only the cancellation pending, the loop asks for it together with
+    the attempt's working run (``SelectorDriver.work``), which says what is
+    true: the handler is at work on something of its own, as inside
+    ``ctx.run``. While a run executes, the VM reports no await, and does not
+    suspend on a future the run is part of, whether the input is open or
+    closed; and it still finds the cancel signal when it comes. With anything
+    else pending, the working run is left out, and the invocation suspends on
+    what it waits for, the cancellation among it, as before.
     """
 
     def __init__(self, driver: SelectorDriver, disconnected: Callable[[], BaseException]) -> None:
@@ -139,6 +188,17 @@ class FutureSelector:
             await waiter
         finally:
             self._waits.pop(waiter, None)
+
+    def close(self) -> None:
+        """End the attempt as the handler returns: fail what still waits, and end the working run."""
+        if self._end is None:
+            self._end = SuspendedException
+        self._fail_all(self._end)
+        if self._waiting:
+            # Its next pass finds nothing pending, and ends the loop.
+            self._waiting = False
+            self._driver.wake()
+        self._driver.end_work()
 
     def _start(self) -> None:
         if self._task is None:
@@ -181,6 +241,9 @@ class FutureSelector:
                 pending = [future for waiter, future in self._waits.items() if not waiter.done()]
                 if not pending:
                     return
+                if all(cancellation_alone(future) for future in pending):
+                    # The handler watches, and waits for nothing: it works (see the class).
+                    pending.append(SingleUnresolvedFuture(driver.work()))
                 await driver.flush_output()
                 response = driver.do_progress(
                     pending[0] if len(pending) == 1 else FirstCompletedUnresolvedFuture(pending)
@@ -252,6 +315,8 @@ class _ContextDriver:
     def __init__(self, context: ServerInvocationContext, on_end: Callable[[], None]) -> None:
         self.context: ServerInvocationContext = context
         self.on_end: Callable[[], None] = on_end
+        # The working run's handle, once made.
+        self._work: int | None = None
 
     def do_progress(self, future: UnresolvedFuture) -> Any:
         return self.context.vm.do_progress(future)
@@ -271,6 +336,9 @@ class _ContextDriver:
         self.track(asyncio.ensure_future(event))
 
     def execute_run(self, handle: int) -> None:
+        if handle == self._work:
+            # The working run has no action: it executes until the attempt ends.
+            return
         context = self.context
         fn = context.run_coros_to_execute.pop(handle)
 
@@ -289,6 +357,21 @@ class _ContextDriver:
             self.context.vm.notify_input(body)
         if not chunk.get("more_body", False):
             self.context.vm.notify_input_closed()
+
+    def work(self) -> int:
+        if self._work is None:
+            # Journaled as a run named ``work``, whose action is the handler's own work.
+            self._work = self.context.vm.sys_run("work").handle
+        return self._work
+
+    def end_work(self) -> None:
+        handle, self._work = self._work, None
+        if handle is None:
+            return
+        # The work is over: so is its run, in the journal of an invocation that goes on to answer. A VM that a
+        # suspension or an error closed refuses: the next attempt, or nothing, ends the run.
+        with contextlib.suppress(Exception):
+            self.context.vm.propose_run_completion_success(handle, b"")
 
     def track(self, task: asyncio.Future[Any]) -> None:
         self.context.tasks.add(task)
