@@ -371,7 +371,12 @@ async def chat_turn(ctx: AgentContext, text: str, answer: Callable[[AgentContext
     While it answers, the object's ``status`` reports the turn. Cancelling the
     invocation stops the turn (through ``stop_signal_of``) whenever it comes,
     and cancels the calls its tools made; the handler then fails with the
-    cancellation. If the attempt ends first, the turn stops with
+    cancellation. The cancellation reaches the turn's work at once while
+    Restate keeps the turn's input open; once Restate closed it (nothing
+    sent or received for its inactivity timeout: a long model request, say),
+    at the turn's next step, when it next commits or calls (see
+    ``cancelled`` of ``restate.sessions.internal``). Watching for it holds
+    nothing: the turn works on. If the attempt ends first, the turn stops with
     ``AttemptEnded`` and the next attempt carries on. The turn publishes when
     it starts (the companion's ``start`` does), after each write of its steps
     that commits (a reply with tool calls, the tools' results: ``answer_once``
