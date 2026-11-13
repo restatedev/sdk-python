@@ -70,6 +70,6 @@ async def take_steers(ctx: SessionContext, conversation: Conversation) -> list[I
 
     def taken(tx: Transaction, ids: list[str]) -> None:
         # With the transaction that stores them: so they are marked taken once stored, and once.
-        tx.send(companion.taken, ids, key=ctx.key, idempotency_key=f"taken:{ids[0]}")
+        tx.send(companion.taken, ids, key=ctx.key, idempotency_key=f"taken:{ids[0]}", name=_signals.ENTRY_NAME)
 
     return await turn.steer(inbox.messages, taken, going)

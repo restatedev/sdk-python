@@ -256,7 +256,7 @@ async def publish(ctx: AgentContext) -> None:
     """
     companion = _signals.companion_in(ctx)
     await flush_held(ctx)
-    published = await ctx.call(companion.publish, key=ctx.key)
+    published = await ctx.call(companion.publish, key=ctx.key, name=_signals.ENTRY_NAME)
     inbox = _INBOX.get(ctx)
     if inbox is not None:
         inbox.saw(published)
@@ -404,7 +404,7 @@ async def chat_turn(ctx: AgentContext, text: str, answer: Callable[[AgentContext
     followed = not _unfollowed(ctx)
     started: _signals.Started = {**turn, "steers": steers, "publishes": followed}
     # A followed turn's start is its first publish; a background agent's publishes nothing (and takes no steers).
-    published = await ctx.call(companion.start, started, key=ctx.key)
+    published = await ctx.call(companion.start, started, key=ctx.key, name=_signals.ENTRY_NAME)
     inbox = _INBOX.get(ctx)
     if inbox is not None and published is not None:
         inbox.saw(published)
@@ -422,7 +422,7 @@ async def chat_turn(ctx: AgentContext, text: str, answer: Callable[[AgentContext
         stored = _ANSWERING.get(ctx)
         if stored is not None:
             await _settled(ctx, stored)
-        await ctx.call(companion.close, invocation_id, key=ctx.key)
+        await ctx.call(companion.close, invocation_id, key=ctx.key, name=_signals.ENTRY_NAME)
 
     stop = Stop()
     _STOP.set(ctx, stop)

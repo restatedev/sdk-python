@@ -319,6 +319,8 @@ class _Sends:
             stored["idempotencyKey"] = send.idempotency_key
         if send.headers:
             stored["headers"] = send.headers
+        if send.name is not None:
+            stored["name"] = send.name
         self._sends.append(stored)
 
     def close(self) -> Outgoing | None:
@@ -815,6 +817,7 @@ class Attempt:
                 None if delay is None else timedelta(milliseconds=delay),
                 send.get("idempotencyKey") or f"transaction/{outgoing['id']}/{index}",
                 send.get("headers"),
+                name=send.get("name"),
             )
         self._made.add(outgoing["id"])
 

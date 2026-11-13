@@ -108,6 +108,7 @@ start, and the run resumes from the last step stored:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
 import json
@@ -134,6 +135,7 @@ from agents import (
     UserError,
 )
 from agents import Tool as SdkTool
+from agents.models.default_models import get_default_model
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.run import CallModelData, ModelInputData
 from agents.tool import invoke_function_tool
@@ -161,6 +163,7 @@ from restate.agents._tools import Tool, current_call, tools_in
 from restate.agents._turn import tool_call_started
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
+from restate.sessions.internal import Annotation, annotate
 
 M = typing.TypeVar("M", bound=BaseModel)
 
@@ -311,6 +314,31 @@ class _Hooks(RunHooks[Any]):
         """The messages steered to the turn that the run took: each later request gets them again."""
         self.running = 0
         """How many of the run's tool calls are running: a request meanwhile is a nested run's."""
+        self.model = config.model
+        """The run's model, which overrides its agents' own."""
+        self.request: Annotation | None = None
+        """The model request in progress, timed in the journal."""
+        self.calls: dict[str, Annotation] = {}
+        """The tool calls in progress, timed in the journal, by call id."""
+
+    def ended(self, error: BaseException | None) -> None:
+        """End the timing of the model request and tool calls still in progress, as the run ends with ``error``."""
+        timed = [*self.calls.values(), *([self.request] if self.request is not None else [])]
+        self.request = None
+        self.calls.clear()
+        for annotation in timed:
+            if error is None:
+                annotation.end()
+            else:
+                annotation.fail(_failure(error))
+
+    async def on_llm_start(
+        self, context: RunContextWrapper[Any], agent: Agent[Any], system_prompt: str | None, input_items: list[Any]
+    ) -> None:
+        if self.request is not None:
+            # Never so: a run makes one request at a time.
+            self.request.fail("another request started")
+        self.request = annotate(self.ctx, f"model: {_model_name(self.model or agent.model)}")
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
         """The run's ``call_model_input_filter``: store the tools' outputs before the next request, and take the
@@ -352,6 +380,10 @@ class _Hooks(RunHooks[Any]):
         return await given if inspect.isawaitable(given) else given
 
     async def on_llm_end(self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse) -> None:
+        # The request ends here, before the reply is stored.
+        if self.request is not None:
+            self.request.end(_usage(agent, response))
+            self.request = None
         self.requesting = False
         reply = typing.cast(list[Item], response.to_input_items())
         await self.conversation.turn.append_reply(*reply, agent=agent.name)
@@ -359,13 +391,57 @@ class _Hooks(RunHooks[Any]):
     async def on_tool_start(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool) -> None:
         self.running += 1
         await tool_call_started(self.ctx)
+        # Timed from here: the settling of the earlier calls is not the tool's.
+        self.calls[_call_key(context, tool)] = annotate(self.ctx, f"tool: {tool.name}")
 
     async def on_handoff(self, context: RunContextWrapper[Any], from_agent: Agent[Any], to_agent: Agent[Any]) -> None:
         # The turn carries the agent it handed off to, even if it ends before that agent replies.
         self.conversation.turn.carry(agent=to_agent.name)
 
     async def on_tool_end(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool, result: Any) -> None:
+        if (call := self.calls.pop(_call_key(context, tool), None)) is not None:
+            call.end()
         self.running -= 1
+
+
+def _call_key(context: RunContextWrapper[Any], tool: SdkTool) -> str:
+    """Return what tells a tool call apart from the others in progress: its id, which a function tool's context has."""
+    call_id = getattr(context, "tool_call_id", None)
+    return call_id if isinstance(call_id, str) else f"{id(context)}:{tool.name}"
+
+
+def _model_name(model: str | Model | None) -> str:
+    """Return the name of a request's model, for its timing in the journal."""
+    if model is None:
+        return get_default_model()
+    if isinstance(model, str):
+        return model
+    return str(getattr(model, "model", None) or type(model).__name__)
+
+
+def _usage(agent: Agent[Any], response: ModelResponse) -> dict[str, Any]:
+    """Return what a model request used, as the value of its timing in the journal."""
+    usage = response.usage
+    summary: dict[str, Any] = {
+        "agent": agent.name,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+    }
+    if cached := getattr(usage.input_tokens_details, "cached_tokens", 0):
+        summary["cached_tokens"] = cached
+    if reasoning := getattr(usage.output_tokens_details, "reasoning_tokens", 0):
+        summary["reasoning_tokens"] = reasoning
+    if response.response_id:
+        summary["response_id"] = response.response_id
+    return summary
+
+
+def _failure(error: BaseException) -> str:
+    """Return why timed work failed with ``error``, as its run's failure in the journal."""
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled"
+    text = str(error)
+    return f"{type(error).__name__}: {text}" if text else type(error).__name__
 
 
 class _Steers:
@@ -495,12 +571,16 @@ async def _resume(
             arguments = call.input if isinstance(call.input, str) else json.dumps(call.input)
             given = ToolContext(context, tool_name=tool.name, tool_call_id=call.id, tool_arguments=arguments)
             await tool_call_started(ctx)
+            timed = annotate(ctx, f"tool: {tool.name}")
             try:
                 output = _output(await _invoke(tool, given, arguments))
-            except Exception as error:
-                # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
-                from_tool(ctx, error)
+            except BaseException as error:
+                timed.fail(_failure(error))
+                if isinstance(error, Exception):
+                    # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
+                    from_tool(ctx, error)
                 raise
+            timed.end()
         outputs.extend(ITEMS.results([(call, output)]))
     await turn.append(*outputs)
     return agent
@@ -657,25 +737,31 @@ async def _go(
     # The SDK's default, unless given: the SDK takes None for no limit at all.
     limit: dict[str, Any] = {"max_turns": options.max_turns} if options.max_turns is not None else {}
     try:
-        agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
-        # A step: the messages steered to the turn by now (that an earlier attempt learned of, say) are the run's
-        # input, after what the turn stored.
-        await take_steers(ctx, conversation)
-        items = typing.cast(Any, _since_compaction(conversation.history()))
-        run = Runner.run(agent, items, context=options.context, hooks=hooks, run_config=filtered, **limit)
-        result = await _unwrapped(ctx, run)
-    except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:
-        # The reply the guardrail blocked is not kept.
-        if (blocked := turn.last_reply()) is not None:
-            await turn.drop(blocked)
-        raise TerminalError(str(error)) from error
-    except TerminalError:
+        try:
+            agent = await _unwrapped(ctx, _resume(ctx, conversation, current, everyone, options.context))
+            # A step: the messages steered to the turn by now (that an earlier attempt learned of, say) are the run's
+            # input, after what the turn stored.
+            await take_steers(ctx, conversation)
+            items = typing.cast(Any, _since_compaction(conversation.history()))
+            run = Runner.run(agent, items, context=options.context, hooks=hooks, run_config=filtered, **limit)
+            result = await _unwrapped(ctx, run)
+        except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as error:
+            # The reply the guardrail blocked is not kept.
+            if (blocked := turn.last_reply()) is not None:
+                await turn.drop(blocked)
+            raise TerminalError(str(error)) from error
+        except TerminalError:
+            raise
+        except Exception as error:
+            if not hooks.requesting:
+                # Not a model request's: no refusal, whatever its name (an instructions function's, say).
+                from_tool(ctx, error)
+            raise
+    except BaseException as error:
+        # The model request or tool calls in progress failed with the run.
+        hooks.ended(error)
         raise
-    except Exception as error:
-        if not hooks.requesting:
-            # Not a model request's: no refusal, whatever its name (an instructions function's, say).
-            from_tool(ctx, error)
-        raise
+    hooks.ended(None)
     # The outputs that no model request stored: those of a tool that ends the turn, say.
     if outputs := conversation.new_results(result.to_input_list()):
         await turn.append(*outputs)

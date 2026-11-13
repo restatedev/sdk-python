@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import json
 import typing
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
@@ -61,8 +62,11 @@ F = typing.TypeVar("F", bound=Callable[..., Awaitable[Any]])
 HEAD_KEY = "v22/head"
 """The state key of the database's head, the first thing read when it opens."""
 
+HIDDEN_NAMES = "dev.restate.tooling.journal.hidden.names"
+"""The metadata key of the names of the journal entries that Restate's UI hides: a comma-separated list."""
+
 SQL_METADATA = {
-    "dev.restate.tooling.journal.hidden.names": "sync",
+    HIDDEN_NAMES: "sync",
     "dev.restate.tooling.journal.hidden.name.prefix": "v22/",
 }
 """Metadata added to every session object.
@@ -71,6 +75,15 @@ It tells Restate's UI to hide the database from the journal view: its head,
 tail, manifests and packs (state keys under ``v22/``), and the ``sync`` run
 after its writes.
 """
+
+
+def hide_entries(*names: str) -> dict[str, str]:
+    """Return the metadata that has Restate's UI hide the journal entries named ``names``, besides the database's.
+
+    Pass it as a session object's metadata, and name the calls, sends or runs
+    to hide with one of ``names``. Restate's UI still shows them on request.
+    """
+    return {HIDDEN_NAMES: ",".join([SQL_METADATA[HIDDEN_NAMES], *names])}
 
 
 @dataclass(frozen=True, eq=False)
@@ -156,6 +169,12 @@ class _ContextHost:
     def sync(self) -> Awaitable[Any]:
         return self.context.run_typed("sync", _nothing)
 
+    def open_annotation(self, name: str) -> int | None:
+        return self.context.open_annotation(name)
+
+    def close_annotation(self, handle: int, value: bytes, failure: str | None) -> None:
+        self.context.close_annotation(handle, value, failure)
+
     def generic_call(
         self,
         service: str,
@@ -164,8 +183,9 @@ class _ContextHost:
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> Any:
-        return self.context.generic_call(service, handler, arg, key, idempotency_key, headers)
+        return self.context.generic_call(service, handler, arg, key, idempotency_key, headers, entry_name=name)
 
     def attach_invocation(self, invocation_id: str) -> Awaitable[bytes]:
         return self.context.attach_invocation(invocation_id, serde=BytesSerde())
@@ -179,8 +199,11 @@ class _ContextHost:
         send_delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> Any:
-        return self.context.generic_send(service, handler, arg, key, send_delay, idempotency_key, headers)
+        return self.context.generic_send(
+            service, handler, arg, key, send_delay, idempotency_key, headers, entry_name=name
+        )
 
     def attempt_end(self) -> BaseException | None:
         ended = self.selector.ended
@@ -359,6 +382,48 @@ async def start(
     """
     sent = send_to(_host_of(ctx), handler, arg, key)
     return typing.cast(str, await sent.invocation_id())
+
+
+class Annotation:
+    """Some work of a handler, timed in the journal as a run that nothing executes or awaits.
+
+    Restate's UI shows it as any run: its name, when it started and ended,
+    and the value or failure it ended with. A handler of a session object is
+    never replayed, so the run need not be made again on a later attempt. Its
+    end is not waited for: the attempt goes on as Restate stores it.
+
+    A run its attempt left without an end (a crash, say) is failed by the
+    next attempt.
+    """
+
+    def __init__(self, host: _ContextHost | None = None, handle: int | None = None) -> None:
+        self._host: _ContextHost | None = host
+        self._handle: int | None = handle
+
+    def end(self, summary: Any = None) -> None:
+        """End the work, with ``summary`` (as JSON) as the run's value. It does nothing if it has ended."""
+        self._close(json.dumps(summary, default=str).encode() if summary is not None else b"", None)
+
+    def fail(self, message: str) -> None:
+        """End the work as failed: the run fails with ``message``. It does nothing if it has ended."""
+        self._close(b"", message)
+
+    def _close(self, value: bytes, failure: str | None) -> None:
+        handle, self._handle = self._handle, None
+        if handle is not None and self._host is not None:
+            self._host.close_annotation(handle, value, failure)
+
+
+def annotate(ctx: SessionContext, name: str) -> Annotation:
+    """Start timing some work of the handler of ``ctx`` (a model request, say), as a run named ``name``.
+
+    End it with ``end`` or ``fail``. Outside a session object's handler on
+    Restate (with a test's host, say), nothing is timed.
+    """
+    host = ctx._call_host if isinstance(ctx, AttemptContext) else None  # pyright: ignore[reportPrivateUsage]
+    if not isinstance(host, _ContextHost):
+        return Annotation()
+    return Annotation(host, host.open_annotation(name))
 
 
 def attach_invocation(ctx: SessionContext, invocation_id: str) -> Awaitable[bytes]:

@@ -90,6 +90,7 @@ class Caller(Protocol):
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> CallFuture[O]: ...
 
     @typing.overload
@@ -102,6 +103,7 @@ class Caller(Protocol):
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> CallFuture[O]: ...
 
     def call(
@@ -113,6 +115,7 @@ class Caller(Protocol):
         key: str | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> CallFuture[Any]:
         """Call ``handler`` with ``arg``, and return a future of its result.
 
@@ -129,6 +132,9 @@ class Caller(Protocol):
             idempotency_key: The same on every attempt, so that a retried
                 attempt gets the first call's result instead of calling again.
             headers: Headers to send with the call.
+            name: The name of the call's journal entry, which Restate's UI
+                shows, and which the object's metadata can hide (see
+                ``dev.restate.tooling.journal.hidden.names``).
 
         Raises:
             TerminalError: If ``handler`` is not a handler, or ``key`` is
@@ -147,6 +153,7 @@ class Caller(Protocol):
         headers: dict[str, str] | None = None,
         input_serde: Serde[Any] = JsonSerde(),
         output_serde: Serde[Any] = JsonSerde(),
+        name: str | None = None,
     ) -> CallFuture[Any]:
         """Call a handler known only at run time, by its service's and its own name.
 
@@ -168,6 +175,7 @@ class Sender(Protocol):
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> None: ...
 
     @typing.overload
@@ -181,6 +189,7 @@ class Sender(Protocol):
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> None: ...
 
     def send(
@@ -193,6 +202,7 @@ class Sender(Protocol):
         delay: timedelta | None = None,
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
+        name: str | None = None,
     ) -> None:
         """Send ``arg`` to ``handler``, without waiting for it to run::
 
@@ -207,6 +217,7 @@ class Sender(Protocol):
             idempotency_key: The same on every attempt, so that a retried
                 attempt does not send again.
             headers: Headers to send with the request.
+            name: The name of the send's journal entry, as for ``call``.
 
         Raises:
             TerminalError: If ``handler`` is not a handler, or ``key`` is
@@ -225,6 +236,7 @@ class Sender(Protocol):
         idempotency_key: str | None = None,
         headers: dict[str, str] | None = None,
         input_serde: Serde[Any] = JsonSerde(),
+        name: str | None = None,
     ) -> None:
         """Send to a handler known only at run time, by its service's and its own name (JSON unless a serde is given)."""
         ...
