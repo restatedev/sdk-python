@@ -10,7 +10,9 @@
 #
 """Building blocks for writing a framework integration of ``restate.agents``.
 
-An integration needs, beyond the public API:
+An integration needs, beyond the public API (``AgentContext`` and
+``AgentViewContext``, the contexts of an agent's handlers and views, which
+an integration's ``answer`` and any handler of its own take):
 
 - ``Conversation``, ``Turn`` and ``answer_once``: the conversation every
   integration stores the same way, as turns, and the run of a prompt on it
@@ -42,6 +44,7 @@ An integration needs, beyond the public API:
   message's item, with ``steered``).
 """
 
+from restate.agents._api import AgentContext, AgentViewContext
 from restate.agents._common import (
     CANCELLED,
     CHECK_MODEL,
@@ -98,6 +101,8 @@ __all__ = [
     "MODEL_ENV",
     "REFUSED",
     "UNANSWERED",
+    "AgentContext",
+    "AgentViewContext",
     "AttemptEnded",
     "Call",
     "Companion",

@@ -1081,7 +1081,8 @@ async def test_a_reply_held_back_is_stored_before_a_publish_that_follows_it():
         async def run(conversation: Conversation) -> str:
             await conversation.turn.append_reply({"role": "assistant", "text": "on it"})
             # The clients are told to read the reply: it is stored by then, even if the process crashes after.
-            await publish(ctx)
+            # ``publish`` takes an agent's context; this object stands in for one, so the test says so.
+            await publish(typing.cast(Any, ctx))
             await conversation.turn.append_reply({"role": "assistant", "text": "done"})
             return "done"
 
@@ -1280,7 +1281,9 @@ async def test_a_publish_from_a_session_object_that_is_no_agent_raises():
 
     @obj.handler
     async def tell(ctx: sessions.SessionContext) -> None:
-        await publish(ctx)
+        # The cast is the test: ``publish`` takes an agent's context, and a plain one passed off as one still
+        # raises when it runs. The names are a signpost; the companion is the fence.
+        await publish(typing.cast(Any, ctx))
 
     host = Host(Backend(), service="desk")
     with pytest.raises(TypeError, match="companion_in takes the context of an agent's handler"):

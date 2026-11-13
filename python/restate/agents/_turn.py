@@ -34,7 +34,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from restate.agents import _signals
-from restate.agents._api import Answering, Published, Steer
+from restate.agents._api import AgentContext, Answering, Published, Steer
 from restate.agents._calls import settle
 from restate.agents._common import (
     BUDGET,
@@ -172,7 +172,7 @@ def settings_of(ctx: SessionContext) -> AgentInfo:
     return _agent_of(ctx) or AgentInfo()
 
 
-async def cleared(ctx: SessionContext) -> None:
+async def cleared(ctx: AgentContext) -> None:
     """Clear whatever the agent of ``ctx`` keeps outside its database."""
     agent = _agent_of(ctx)
     if agent is not None and agent.clear is not None:
@@ -237,7 +237,7 @@ def _settled(ctx: SessionContext, stored: Stored) -> Awaitable[None]:
     return done
 
 
-async def publish(ctx: SessionContext) -> None:
+async def publish(ctx: AgentContext) -> None:
     """Publish a change to the conversation of ``ctx``: the revision increases, and the clients read it again.
 
     The rows the conversation holds back are written first: the clients
@@ -262,7 +262,7 @@ async def publish(ctx: SessionContext) -> None:
         inbox.saw(published)
 
 
-def publish_steps(ctx: SessionContext) -> None:
+def publish_steps(ctx: AgentContext) -> None:
     """Have each write of steps that commits, in the turns that ``ctx``'s handler answers, publish: unless the
     agent runs in the background, which publishes only as a ``chat`` turn ends.
 
@@ -275,7 +275,7 @@ def publish_steps(ctx: SessionContext) -> None:
         after_steps(ctx, lambda: publish(ctx))
 
 
-def publish_end(ctx: SessionContext) -> None:
+def publish_end(ctx: AgentContext) -> None:
     """Have the commit that stores the answer of a turn that ``ctx``'s handler answers publish: unless the agent
     runs in the background, which publishes only as a ``chat`` turn ends.
 
@@ -362,7 +362,7 @@ def _now() -> str:
     return _signals.iso(time.time())
 
 
-async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionContext, str], Awaitable[T]]) -> T:
+async def chat_turn(ctx: AgentContext, text: str, answer: Callable[[AgentContext, str], Awaitable[T]]) -> T:
     """Run ``answer`` as the turn of a ``chat`` handler.
 
     While it answers, the object's ``status`` reports the turn. Cancelling the

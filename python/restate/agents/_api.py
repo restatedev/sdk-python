@@ -8,18 +8,63 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""The JSON types that an agent's clients send and receive.
+"""The shapes an agent's handlers and clients are written to.
 
-These cover the conversation's messages and pages of them, the agent's
-status, and signals. Some keys are camelCase (``invocationId``,
-``timeoutSeconds``): they are wire-format names, shared with Restate's other
-SDKs so that the same client can follow an agent written in any of them.
+The contexts come first: ``AgentContext`` and ``AgentViewContext``, which
+name the layer a handler or a view belongs to. The rest are the JSON types
+an agent's clients send and receive, which cover the conversation's messages
+and pages of them, the agent's status, and signals. Some keys are camelCase
+(``invocationId``, ``timeoutSeconds``): they are wire-format names, shared
+with Restate's other SDKs so that the same client can follow an agent
+written in any of them.
 """
 
 from __future__ import annotations
 
 import typing
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, Protocol, TypedDict
+
+from restate.sessions import SessionContext, ViewContext
+
+
+class AgentContext(SessionContext, Protocol):
+    """The context of an agent's handler: a session context, from an object that has a companion.
+
+    The agent's own surface takes it: the ``answer`` of ``chat()``, the
+    agent's handlers, and what only an agent does with a context
+    (``chat_turn``, ``publish``). The layer a handler belongs to is then in
+    its signature, where the person writing it reads it, rather than found
+    out in the middle of a turn, after a model round-trip, looking like a
+    tool failure. It is a signpost, not a fence: nothing of it exists at
+    runtime, the handler is passed the context a session object always
+    passes, and ``NeedsAgent`` stays the guard that stops a wait from a
+    session object.
+
+    The tier below keeps ``SessionContext``: the tools, which are values a
+    framework may run from either, and the conversation a handler of one's
+    own prompts with (``answer_once``, and a framework's ``prompt``), which
+    a plain session object drives too.
+    """
+
+    @property
+    def _agent(self) -> None:
+        """A marker, never present at runtime and never read: it is what makes a plain session context
+        fail to be an ``AgentContext`` for a type checker."""
+
+
+class AgentViewContext(ViewContext, Protocol):
+    """The context of an agent's view: a view context, from an object that has a companion.
+
+    What ``AgentContext`` is to a handler, for the views that read what the
+    agent is doing, or tell its companion to (``status``, ``pending``,
+    ``signal``, ``steer``, ``watch``). Its marker is the same fiction.
+    """
+
+    @property
+    def _agent(self) -> None:
+        """A marker, never present at runtime and never read: it is what makes a plain view context
+        fail to be an ``AgentViewContext`` for a type checker."""
+
 
 Role = Literal["user", "assistant"]
 """Who wrote a message."""
