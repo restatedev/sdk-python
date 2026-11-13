@@ -10,6 +10,20 @@ The code is [`_conversation.py`](../../python/restate/agents/_conversation.py)
 view) and [`_calls.py`](../../python/restate/agents/_calls.py) (the call
 records).
 
+The conversation only stores. It knows nothing of the companion: an agent's
+handlers (its `chat` turn, and handlers you add) publish after each write of
+steps that commits, by setting what follows a commit (`after_steps`, through
+`publish_steps`), which `answer_once` hands to
+`Conversation.hold` as it is ([Who does what](turns.md#who-does-what)). A
+handler you add publishes once more after the commit that stored the turn's
+answer, by setting what follows it (`after_answer`, through `publish_end`),
+which `answer_once` runs itself; a `chat` turn sets nothing there, and ends
+with the companion's `close`. A
+handler of your own on a plain `SessionObject` that prompts stores its turn
+the same way, and publishes nothing. Writing the held rows before a call
+record or a Restate call (`holding`, `flush_held`) is the conversation's own
+durability, and applies to both.
+
 ## Conversation and turns
 
 - **A conversation is a key's database.** Each key of an agent (`alice` of
@@ -175,7 +189,7 @@ CREATE TABLE restate_agent_steers (          -- the messages steered to a turn t
 | Where | What | Written by |
 | --- | --- | --- |
 | `restate_agent_calls` (schema `restate-agents.calls`), in the key's database | one row: the invocation's Restate calls made by tools, as JSON ([Tool calls, once](#tool-calls-once-the-call-records)) | the tools built on Restate (`call`, `send`, `workflow`, `subagent`, `wait_for_signal`) and `wait_for` |
-| the companion's state: the `signals` object, keyed `<agent>:<key>` | `turn`: the turn being answered (`Started`: its invocation, since when, whether the agent `settles`); `waiting`: the tools' waits, each with its awakeable; `kept`: signals that came before their wait; `revision`; `watching`: the `watch` calls waiting for a newer revision | the companion's handlers (`start`, `close`, `wait`, `signal`, `publish`, `watch`) |
+| the companion's state: the agent's own object `<agent>.prebuilt.restate`, keyed as the agent | `turn`: the turn being answered (`Started`: its invocation, since when, whether it takes steered messages and whether `start` publishes it); `waiting`: the tools' waits, each with its awakeable; `kept`: signals that came before their wait; `revision`; `watching`: the `watch` calls waiting for a newer revision | the companion's handlers (`start`, `close`, `wait`, `signal`, `publish`, `watch`) |
 | `restate_langgraph_checkpoints`, `restate_langgraph_channel_values`, `restate_langgraph_writes` (schema `restate_agents.langgraph`) | a LangGraph graph's checkpoints, channel values by version, and pending writes, per thread and namespace | `SqlCheckpointSaver`, for `langgraph.agent(graph=...)`; pruned to what the latest checkpoint of each namespace needs after each run |
 | `restate_pydantic_ai_plan`, `restate_pydantic_ai_spills`, `restate_pydantic_ai_journal` (schema `restate_agents.pydantic_ai`) | the harness's plan (`plan_store()`), spilled tool results (`overflow_store()`), and each tool call's journal of plan reads and writes, for the current invocation | the Pydantic AI stores |
 | `restate_pydantic_ai_memory`, `..._receipts`, `..._generation` (schema `restate_agents.pydantic_ai.memory`), in a memory object's key | the harness's memory files, the receipts of the changes, and the version counter: one key per namespace (a user), shared by that user's conversations | `memory()`'s session object |
@@ -524,8 +538,10 @@ invocation (the next invocation's first call replaces it):
   again under the same id; a new call with the same input (the model asking
   again after the first's answer) waits anew, and never gets an earlier
   call's approval or denial.
-- **Forgetting.** At each publish (after each write of steps that commits)
-  and before each tool call, a record whose Restate call returned is
+- **Forgetting.** After each write of steps that commits (once, before the
+  publish an agent's turn makes there, and in a plain session object's turn
+  too, which publishes nothing) and before each tool call, a record whose
+  Restate call returned is
   forgotten once the transcript has its result under the latest id it was
   made with: a success, or the very error the call
   returned. Another error in the transcript (one the framework made up for a

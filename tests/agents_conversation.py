@@ -40,6 +40,7 @@ from restate.agents._conversation import (
     last_of,
 )
 from restate.agents._common import Check
+from restate.agents._signals import with_companion
 from restate.agents.internal import CANCELLED, from_tool, refusal_of
 from restate.sessions.internal import invoke
 
@@ -51,8 +52,11 @@ def anyio_backend():
 
 pytestmark = [pytest.mark.anyio]
 
-PUBLISHED = {"publish": b"null"}
-"""What the signals object answers when the turn publishes its progress."""
+REVISION = b'{"revision": 1}'
+"""What the agent's companion answers a turn's ``start`` and each ``publish`` with: the revision."""
+
+PUBLISHED = {"publish": REVISION}
+"""What the agent's companion answers when the turn publishes its progress."""
 
 
 class Items:
@@ -980,8 +984,12 @@ class Syncing(Host):
 
 
 def _turn_rows() -> sessions.SessionObject:
-    """An object whose ``ask`` answers with the run that ``runs`` holds, and whose ``rows`` reads each turn back."""
+    """An object whose ``ask`` answers with the run that ``runs`` holds, and whose ``rows`` reads each turn back.
+
+    It has a companion, as an agent has, which ``publish`` publishes to: its turns, outside an agent's ``chat``,
+    publish nothing themselves."""
     obj = sessions.SessionObject("asker")
+    with_companion(obj)
 
     @obj.handler
     async def rows(ctx: sessions.SessionContext) -> list[dict[str, Any]]:
@@ -1064,7 +1072,7 @@ async def test_a_crash_at_the_final_commit_stores_neither_the_reply_nor_the_answ
 
 
 async def test_a_reply_held_back_is_stored_before_a_publish_that_follows_it():
-    from restate.agents._turn import stepped  # pylint: disable=import-outside-toplevel
+    from restate.agents._turn import publish  # pylint: disable=import-outside-toplevel
 
     obj = _turn_rows()
 
@@ -1073,7 +1081,8 @@ async def test_a_reply_held_back_is_stored_before_a_publish_that_follows_it():
         async def run(conversation: Conversation) -> str:
             await conversation.turn.append_reply({"role": "assistant", "text": "on it"})
             # The clients are told to read the reply: it is stored by then, even if the process crashes after.
-            await stepped(ctx)
+            # ``publish`` takes an agent's context; this object stands in for one, so the test says so.
+            await publish(typing.cast(Any, ctx))
             await conversation.turn.append_reply({"role": "assistant", "text": "done"})
             return "done"
 
@@ -1223,3 +1232,60 @@ async def test_a_keys_first_turn_applies_its_schemas_in_one_commit():
         assert await invoke(obj, "ask", host, request(), text) == "hello"
         syncs.append(host.syncs)
     assert syncs[0] - syncs[1] == 1
+
+
+# --- Layers: the conversation stores, an agent's turn publishes -------------------------------------------------
+
+
+def _no_companion(*_: Any) -> Any:
+    raise AssertionError("a session object that is no agent has no companion to call, nor anything to publish")
+
+
+async def test_answer_once_in_a_plain_session_object_stores_a_turn_of_tool_calls_and_publishes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The conversation only stores: its commits publish nothing unless an agent's ``chat`` turn asks for it."""
+    from restate.agents import _signals, _turn  # pylint: disable=import-outside-toplevel
+
+    monkeypatch.setattr(_turn, "publish", _no_companion)
+    monkeypatch.setattr(_signals, "companion_at", _no_companion)
+    obj = sessions.SessionObject("desk")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        async def run(conversation: Conversation) -> str:
+            calls = [{"id": "t1", "name": "lookup", "input": {}}]
+            await conversation.turn.append_reply({"role": "assistant", "text": "", "calls": calls})
+            await conversation.turn.append({"result": "t1", "output": "found"})
+            await conversation.turn.append_reply({"role": "assistant", "text": "done"})
+            return "done"
+
+        return await answer_once(ctx, text, ITEMS, run)
+
+    @obj.handler
+    async def rows(ctx: sessions.SessionContext) -> list[Any]:
+        conversation = await Conversation.load(ctx.db, ITEMS, "all")
+        return [[turn.answer, len(turn.items)] for turn in conversation.turns]
+
+    backend = Backend()
+    host = Host(backend, service="desk")
+    assert await invoke(obj, "ask", host, request(), "hi") == "done"
+    assert host.calls == []
+    assert await invoke(obj, "rows", Host(backend, service="desk"), request()) == [["done", 3]]
+
+
+async def test_a_publish_from_a_session_object_that_is_no_agent_raises():
+    from restate.agents.internal import publish  # pylint: disable=import-outside-toplevel
+
+    obj = sessions.SessionObject("desk")
+
+    @obj.handler
+    async def tell(ctx: sessions.SessionContext) -> None:
+        # The cast is the test: ``publish`` takes an agent's context, and a plain one passed off as one still
+        # raises when it runs. The names are a signpost; the companion is the fence.
+        await publish(typing.cast(Any, ctx))
+
+    host = Host(Backend(), service="desk")
+    with pytest.raises(TypeError, match="companion_in takes the context of an agent's handler"):
+        await invoke(obj, "tell", host, request())
+    assert host.calls == []

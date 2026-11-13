@@ -53,3 +53,79 @@ async def test_the_workflow_tool_answers_with_its_run_run_again_after_a_crash_to
 
     async with restate.create_test_harness(restate.app([greeter, runner]), restate_image=RESTATE_IMAGE) as harness:
         assert await harness.client.object_call(greet, key="alice", arg="c1") == "hi"
+
+
+# --- A session object that is no agent: the conversation stores, nothing publishes, waits fail for good ------------
+
+
+def _scripted(tool_name: str, replies: list[str]):
+    """A model that calls ``tool_name`` once, then answers with what the tool returned (kept in ``replies``)."""
+    from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        returned = [p for m in messages for p in getattr(m, "parts", []) if isinstance(p, ToolReturnPart)]
+        if not returned:
+            return ModelResponse(parts=[ToolCallPart(tool_name, {}, tool_call_id="c1")])
+        replies.append(str(returned[0].content))
+        return ModelResponse(parts=[TextPart(f"the tool said: {returned[0].content}")])
+
+    return FunctionModel(model)
+
+
+async def test_an_app_of_only_a_session_object_that_prompts_answers_a_turn_of_tool_calls_and_stores_it():
+    """No agent, so no companion service at all: the turn is answered and stored, and publishes nothing."""
+    from restate.agents import pydantic_ai, tool  # pylint: disable=import-outside-toplevel
+
+    @tool
+    async def lookup() -> str:
+        """Look it up."""
+        return "found"
+
+    replies: list[str] = []
+    desk = sessions.SessionObject("plain_desk")
+
+    @desk.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await pydantic_ai.prompt(ctx, text, model=_scripted("lookup", replies), tools=[lookup])
+
+    @desk.handler
+    async def turns(ctx: sessions.SessionContext) -> list[list[str]]:
+        rows = await ctx.db.values("SELECT answer FROM restate_agent_turns")
+        steps = await ctx.db.values("SELECT count(*) FROM restate_agent_items")
+        return [[str(row[0]) for row in rows], [str(steps[0][0])]]
+
+    async with restate.create_test_harness(restate.app([desk]), restate_image=RESTATE_IMAGE) as harness:
+        assert await harness.client.object_call(ask, key="alice", arg="hi") == "the tool said: found"
+        [answers, [steps]] = await harness.client.object_call(turns, key="alice", arg=None)
+        assert answers == ["the tool said: found"] and int(steps) >= 3
+    assert replies == ["found"]
+
+
+async def test_a_wait_for_a_signal_from_a_session_object_that_is_no_agent_fails_once_with_what_to_do():
+    """The turn fails with a terminal error, in the one attempt (not retried), and is closed ``failed``; the model is
+    not asked again with it."""
+    from restate.agents import pydantic_ai  # pylint: disable=import-outside-toplevel
+    from restate.agents._tools import wait_for_signal  # pylint: disable=import-outside-toplevel
+
+    approval = wait_for_signal("approval", description="Wait for an approval.")
+    replies: list[str] = []
+    attempts: list[str] = []
+    desk = sessions.SessionObject("plain_waiter")
+
+    @desk.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        attempts.append(ctx.request.id)
+        return await pydantic_ai.prompt(ctx, text, model=_scripted(approval.name, replies), tools=[approval])
+
+    @desk.handler
+    async def turns(ctx: sessions.SessionContext) -> list[list[str]]:
+        return [[str(v) for v in row] for row in await ctx.db.values("SELECT status, answer FROM restate_agent_turns")]
+
+    async with restate.create_test_harness(restate.app([desk]), restate_image=RESTATE_IMAGE) as harness:
+        with pytest.raises(Exception, match="HTTP 500"):  # a terminal error, whose message the turn stored
+            await harness.client.object_call(ask, key="alice", arg="refund o1")
+        [[status, answer]] = await harness.client.object_call(turns, key="alice", arg=None)
+    assert len(attempts) == 1 and replies == []
+    assert status == "failed" and answer.startswith("Error: waiting for signal 'approval' needs an agent"), answer
+    assert "`<framework>.agent(...)`" in answer

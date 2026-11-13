@@ -42,6 +42,11 @@ from pathlib import Path
 from typing import Any
 
 
+def _companion(service: str) -> bool:
+    """Whether ``service`` is an agent's companion, ``<agent>.prebuilt.restate``."""
+    return service.endswith(".prebuilt.restate")
+
+
 async def query(client: Any, admin: str, sql: str) -> list[dict[str, Any]]:
     response = await client.post(f"{admin}/query", json={"query": sql}, headers={"accept": "application/json"})
     response.raise_for_status()
@@ -58,7 +63,7 @@ async def cost(client: Any, admin: str, invocation: str) -> dict[str, Any]:
         f"SELECT target_service_name, target_handler_name FROM sys_invocation WHERE invoked_by_id = '{invocation}'",
     )
     companion = collections.Counter(
-        row["target_handler_name"] for row in called if row["target_service_name"] == "signals"
+        row["target_handler_name"] for row in called if _companion(row["target_service_name"])
     )
     return {
         "journal": len(journal),

@@ -9,14 +9,16 @@ against sdk-sessions at `6d5e9a2` (after v0.3.0).
 ## Where the two SDKs stand
 
 Both SDKs share the turn's outer life: a key answers one message at a time
-(`chat` is exclusive), a turn starts and closes in the companion (`signals`,
-keyed `<agent>:<key>`, with the same handler names), `stop` cancels the
+(`chat` is exclusive), a turn starts and closes in the companion (with the
+same handler names), `stop` cancels the
 invocation, `status`, `pending`, `messages`, `sync` and `watch` mean the same,
 and a tool's Restate calls are made once (`calls.ts` and `_calls.py` are the
-same design). They differ in who owns the conversation:
+same design). They differ in whose companion it is, and in who owns the
+conversation:
 
 | | sdk-sessions (TypeScript) today | This SDK (Python) |
 | --- | --- | --- |
+| The companion | `signals`, shared by every agent, keyed `<agent>:<key>` | the agent's own, `<agent>.prebuilt.restate`, keyed as the agent, ingress-private ([The companion is the agent's own](turns.md#the-companion-is-the-agents-own)) |
 | The conversation | each framework's own tables: Claude's `restate_claude_messages` and `restate_claude_answers`, DeepSeek's sessions and events, opencode's and pi's stores, a LangGraph checkpointer | one store for every framework: turn rows and items ([The conversation](conversation.md)) |
 | A turn in storage | an answer per prompt id, in the framework's tables | a row per turn, with a status, an answer, and what it carries |
 | What clients read | `restate_agent_log` (`log.ts`), kept in step with the framework's transcript at each publish (`transcribing`) | the turn rows and items themselves: the full and summary views |
@@ -30,7 +32,7 @@ The map of the code:
 | Concern | Python | TypeScript today |
 | --- | --- | --- |
 | The turn's wrapper: start, close, cancellation, attempt end | `_turn.py` (`chat_turn`, `answering`) | `common.ts` (`chatHandler`) |
-| The companion | `_signals.py` | `signals.ts` |
+| The companion | `_signals.py` (`make_companion`, one per agent) | `signals.ts` (one, shared) |
 | The views and private handlers | `_object.py` (`settle`, `compact`, `erase`) | `object.ts` |
 | The conversation | `_conversation.py` | — (each framework's store) |
 | What clients read | `_messages.py` (from the turns) | `log.ts`, `Transcript` in `common.ts` |
@@ -61,20 +63,20 @@ Each step stands on its own, with its tests, and the earlier ones are small.
      (`Started.publishes`, a followed turn) is published as `start` starts
      it, and `start` returns what `publish` returns (`{revision,
      steering?}`): the turn makes no publish of its own to start. A turn that
-     doesn't say so gets nothing back, and is not published: so a TypeScript
-     turn that this SDK's companion holds publishes its start as before, and
-     this SDK's turn publishes its own start when the TypeScript companion
-     returns nothing. `publish` (and `start`) clear `watching` only when a
-     watch waits.
-2. **The companion's `settle`.** A turn's start says whether its agent
-   settles (`Started.settles`); when `awaitTurn` finds the invocation gone,
-   the companion closes the turn and sends such an agent `settle(turn)`, a
-   private handler that closes the turn in the conversation
-   ([Dead turns](turns.md#dead-turns)). The handler names stay shared, and an
-   agent that doesn't say it settles is sent nothing, so the two SDKs' agents
-   can share a deployment's companion while one has it and the other
-   doesn't. Port it with the conversation (step 3), since `settle` closes the
-   turn there.
+     doesn't say so (a background agent's) gets nothing back, and is not
+     published. `publish` (and `start`) clear `watching` only when a watch
+     waits.
+2. **The agent's own companion, and its `settle`.** Each agent makes its
+   own companion, `<agent>.prebuilt.restate` (Restate refuses names
+   that start with `restate`), keyed as the agent, ingress-private, which
+   knows its agent rather than parsing it from its key. Since the two are
+   always the same code, the companion sends every turn whose invocation is
+   gone to its agent's `settle(turn)`, a private handler that closes the turn
+   in the conversation ([Dead turns](turns.md#dead-turns)); this SDK has no
+   `Started.settles` flag any more. Port the companion with the
+   conversation (step 3), since `settle` closes the turn there. Until then,
+   the two SDKs' companions are different objects: they share handler names
+   and payloads, not state.
 3. **The conversation store.** The tables, `Conversation`, `Turn` and
    `answerOnce`, as [The conversation](conversation.md) and
    [The turn model](turns.md#the-turn-model) describe them, with an `Items`
@@ -172,7 +174,7 @@ tests. Test names are this SDK's.
 | The turn model: scope, ownership, the window rule by status, asking again, a turn's end, bounded loading, summaries, dead turns and `settle`, the summary view | `tests/agents_conversation.py`, `tests/agents_messages.py`, `tests/agents_object.py` |
 | Snapshots, `asked_at`, `wait_for` (a wait per tool call, approvals not outcomes, an approval and its tool's call apart) | `tests/agents_snapshots.py` |
 | Call records: made once, rejoined under a new id, kept until stored, forgotten after | `tests/agents_tools.py` (`test_a_returned_call_is_kept_until_its_result_is_stored_and_forgotten_once_it_is`) |
-| The companion: start, close, `awaitTurn`, the `settle` gate, waits and signals | `tests/agents_signals.py`, `tests/agents_object.py` |
+| The companion: start, close, `awaitTurn`, `settle`, waits and signals; one per agent, keyed as it, ingress-private | `tests/agents_signals.py`, `tests/agents_companion.py`, `tests/agents_object.py` |
 | Per framework: answer and the full view after it, a crash in a tool, a stored answer not asked again, refused, stopped, `output=`, several prompts | each framework's `tests/agents_<framework>*.py` |
 | The LangGraph checkpointer: resume, history, prune, `DeltaChannel`, many channels | `tests/agents_langgraph_checkpointer.py` |
 

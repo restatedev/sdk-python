@@ -48,6 +48,9 @@ def anyio_backend():
 
 pytestmark = [pytest.mark.anyio]
 
+REVISION = b'{"revision": 1}'
+"""What the agent's companion answers a turn's ``start`` and each ``publish`` with: the revision."""
+
 
 class AuthenticationError(Exception):
     """As a model SDK names the error of a missing or wrong API key."""
@@ -551,7 +554,9 @@ def asking(**options: Any) -> Callable[..., Awaitable[Any]]:
     backend = Backend()
 
     async def asked(text: str) -> Any:
-        return await invoke(asker, "ask", Host(backend, service="asker", answers={"publish": b"null"}), request(), text)
+        return await invoke(
+            asker, "ask", Host(backend, service="asker", answers={"publish": REVISION}), request(), text
+        )
 
     return asked
 

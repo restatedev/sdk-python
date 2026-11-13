@@ -69,11 +69,13 @@ def test_a_group_serves_its_members():
     assert names([Team(Needing("a", shared), Team(Needing("b", shared))), shared]) == ["a", "shared", "b"]
 
 
-def test_an_agent_brings_signals_along_once():
+def test_an_agent_brings_its_own_companion_along():
     first, second = AgentObject("first_agent"), AgentObject("second_agent")
-    assert names([first, second]) == ["first_agent", "signals", "second_agent"]
-    endpoint = Endpoint().bind(first).bind(second)  # bound one at a time, signals still once
-    assert list(endpoint.services) == ["first_agent", "signals", "second_agent"]
+    served = ["first_agent", "first_agent.prebuilt.restate", "second_agent", "second_agent.prebuilt.restate"]
+    assert names([first, second]) == served
+    endpoint = Endpoint().bind(first).bind(second)  # bound one at a time, each with its companion
+    assert list(endpoint.services) == served
+    assert names([first, first]) == served[:2]
 
 
 def test_what_cannot_be_served():

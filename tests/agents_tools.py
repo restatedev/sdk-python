@@ -22,7 +22,7 @@ import pytest
 import restate
 from restate import sessions
 from restate.sessions import internal
-from restate.agents._common import ToolError
+from restate.agents._common import NeedsAgent, ToolError
 from restate.agents._object import AgentObject
 from restate.agents._tools import Tool, ToolCall, call, subagent, tool, wait_for_signal, workflow
 from restate.context import Request
@@ -153,7 +153,7 @@ async def test_signal_waits_at_the_companion_of_the_agent_with_the_tool_calls_ke
     req = request()
     assert await run_tool(host, "approval", {"order": "o1", "amount": 5}, "w1", req) == "approved"
     [(service, handler, arg, key, idempotency_key)] = host.calls
-    assert (service, handler, key, idempotency_key) == ("signals", "wait", "runner:alice", f"{req.id}:w1")
+    assert (service, handler, key, idempotency_key) == ("runner.prebuilt.restate", "wait", "alice", f"{req.id}:w1")
     wait = typing.cast(dict[str, Any], json.loads(arg))
     assert wait == {"id": f"{req.id}:w1", "name": "approval", "input": {"order": "o1", "amount": 5}}
 
@@ -265,3 +265,89 @@ async def test_a_returned_call_is_kept_until_its_result_is_stored_and_forgotten_
     assert [c[4] for c in made] == [f"{req.id}:t1", f"{req.id}:t1"]
     # Its result is stored, and so its record is forgotten.
     assert await internal.invoke(obj, "records", Host(backend, service="crashed_caller"), req) == []
+
+
+# --- Waits need an agent ------------------------------------------------------------------------------------------
+
+NEEDS_AGENT = "needs an agent, whose companion holds its waits: 'desk' is a plain session object"
+
+
+async def test_a_wait_for_a_signal_from_a_session_object_that_is_no_agent_fails_for_good_with_what_to_do():
+    """A ``wait_for_signal`` tool's call, and ``wait_for``, fail with a terminal error that is not the tool's result
+    (``NeedsAgent``): a retry would fail again, and the model cannot fix it. They make no call, nor record one."""
+    from restate.agents._tools import wait_for  # pylint: disable=import-outside-toplevel
+    from restate.exceptions import TerminalError  # pylint: disable=import-outside-toplevel
+
+    approval = wait_for_signal("approval", description="Wait for an approval.")
+    desk = sessions.SessionObject("desk")
+    waited: list[str] = []
+
+    @desk.handler
+    async def tool_call(ctx: sessions.SessionContext) -> str:
+        try:
+            return await approval.run({}, ToolCall(ctx, "c1"))
+        except NeedsAgent as error:
+            waited.append(error.message)
+            raise
+
+    @desk.handler
+    async def deferred(ctx: sessions.SessionContext) -> None:
+        try:
+            await wait_for(ctx, "c2", "refund", {"order": "o1"})
+        except TerminalError as error:
+            waited.append(error.message)
+            raise
+
+    backend = Backend()
+    host = Host(backend, service="desk")
+    with pytest.raises(TerminalError):
+        await internal.invoke(desk, "tool_call", host, request())
+    with pytest.raises(TerminalError):
+        await internal.invoke(desk, "deferred", host, request())
+    assert len(waited) == 2, waited
+    assert waited[0].startswith(f"waiting for signal 'approval' {NEEDS_AGENT}"), waited
+    assert "`<framework>.agent(...)`" in waited[0] and "`AgentObject`" in waited[0]
+    assert waited[1].startswith(f"waiting for signal 'refund' {NEEDS_AGENT}")
+    assert host.calls == []
+
+
+def _langgraph_desk(node: Any) -> sessions.SessionObject:
+    """A session object that is no agent, whose ``ask`` prompts a graph that runs ``node``."""
+    from langgraph.graph import END, START, MessagesState, StateGraph  # pylint: disable=import-outside-toplevel
+
+    from restate.agents import langgraph  # pylint: disable=import-outside-toplevel
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("wait", node)
+    builder.add_edge(START, "wait")
+    builder.add_edge("wait", END)
+    desk = sessions.SessionObject("desk")
+
+    @desk.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await langgraph.prompt(ctx, text, graph=builder)
+
+    return desk
+
+
+def _interrupting(state: Any) -> dict[str, Any]:
+    from langgraph.types import interrupt  # pylint: disable=import-outside-toplevel
+
+    return {"messages": [("ai", f"approved: {interrupt('approve?')}")]}
+
+
+@pytest.mark.parametrize("waits", ["node", "interrupt"])
+async def test_a_langgraph_wait_from_a_session_object_that_is_no_agent_fails_the_turn_for_good(waits: str):
+    """``nodes.wait_for_signal`` and ``interrupt()``: the turn fails once, terminally, with what to do."""
+    pytest.importorskip("langgraph")
+    from restate.agents.langgraph import nodes  # pylint: disable=import-outside-toplevel
+    from restate.exceptions import TerminalError  # pylint: disable=import-outside-toplevel
+
+    node = nodes.wait_for_signal("approval") if waits == "node" else _interrupting
+    what = "waiting for signal 'approval'" if waits == "node" else "resuming an interrupt"
+    desk = _langgraph_desk(node)
+    host = Host(Backend(), service="desk")
+    with pytest.raises(TerminalError) as raised:
+        await internal.invoke(desk, "ask", host, request(), "refund o1")
+    assert raised.value.message.startswith(f"{what} {NEEDS_AGENT}"), raised.value.message
+    assert host.calls == []

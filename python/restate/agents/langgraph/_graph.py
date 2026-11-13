@@ -217,7 +217,7 @@ async def _copied(
     messages whose ids are not ``known``. ``known`` is the ids the
     conversation has, which this adds to; the messages the conversation gave
     the graph are not copied back. Tool messages that follow one another (a step's results) are copied in one
-    write. Each write that commits publishes (``Conversation.hold``).
+    write. Each write that commits publishes, in an agent's ``chat`` turn (``Conversation.hold``).
     """
     at = next((i for i, m in enumerate(messages) if m.id == prompt), None)
     new = [
@@ -322,6 +322,7 @@ async def _resumed(ctx: SessionContext, snapshot: StateSnapshot) -> dict[str, An
     pending = _interrupts(snapshot)
     if not pending:
         return None
+    companion = _signals.waits_in(ctx, "resuming an interrupt")
     # What the turn holds back is written before it waits: the waits outlive the attempt.
     await flush_held(ctx)
     waits: dict[str, Any] = {}
@@ -332,7 +333,7 @@ async def _resumed(ctx: SessionContext, snapshot: StateSnapshot) -> dict[str, An
             "name": INTERRUPT,
             "input": to_jsonable_python(interrupted.value),
         }
-        waits[interrupted.id] = ctx.call(_signals.wait, request, key=_signals.signals_of(ctx), idempotency_key=wait_id)
+        waits[interrupted.id] = ctx.call(companion.wait, request, key=ctx.key, idempotency_key=wait_id)
     values = await asyncio.gather(*waits.values())
     return dict(zip(waits, values, strict=True))
 

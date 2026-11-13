@@ -14,6 +14,14 @@ A turn reports its status, handles its cancellation, and publishes each change
 to the clients that follow the conversation. The conversation itself is
 already in the key's database, where the ``messages`` view reads it; a
 publish only tells the clients to read again.
+
+The layers: the conversation (``answer_once``) stores a turn, and knows
+nothing of the companion; the agent's ``chat`` turn (``chat_turn``) starts,
+publishes and closes it. A turn of another handler of the agent publishes
+each of its steps and its end (``publish_steps``, ``publish_end``), but is no
+turn in the companion: no ``start``, no ``close``. A handler of one's own
+that prompts, on a session object that is no agent, stores its turn and
+publishes nothing.
 """
 
 from __future__ import annotations
@@ -26,9 +34,19 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from restate.agents import _signals
-from restate.agents._api import Answering, Published, Steer
+from restate.agents._api import AgentContext, Answering, Published, Steer
 from restate.agents._calls import settle
-from restate.agents._common import BUDGET, WINDOW, CompactHistory, Summarize, Window, flush_held, refusal_of
+from restate.agents._common import (
+    BUDGET,
+    WINDOW,
+    CompactHistory,
+    Summarize,
+    Window,
+    after_answer,
+    after_steps,
+    flush_held,
+    refusal_of,
+)
 from restate.exceptions import TerminalError
 from restate.sessions import SessionContext
 from restate.sessions._link import Link
@@ -154,7 +172,7 @@ def settings_of(ctx: SessionContext) -> AgentInfo:
     return _agent_of(ctx) or AgentInfo()
 
 
-async def cleared(ctx: SessionContext) -> None:
+async def cleared(ctx: AgentContext) -> None:
     """Clear whatever the agent of ``ctx`` keeps outside its database."""
     agent = _agent_of(ctx)
     if agent is not None and agent.clear is not None:
@@ -181,11 +199,9 @@ class Inbox:
     revision: int = -1
     messages: list[Steer] = field(default_factory=list[Steer])
 
-    def saw(self, published: Published | None) -> None:
+    def saw(self, published: Published) -> None:
         """Keep what ``publish`` returned, if it is newer than what is kept."""
-        if not isinstance(published, dict):
-            return
-        revision = published.get("revision", -1)
+        revision = published["revision"]
         if revision > self.revision:
             self.revision = revision
             self.messages = list(published.get("steering", []))
@@ -221,32 +237,77 @@ def _settled(ctx: SessionContext, stored: Stored) -> Awaitable[None]:
     return done
 
 
-async def publish(ctx: SessionContext) -> None:
+async def publish(ctx: AgentContext) -> None:
     """Publish a change to the conversation of ``ctx``: the revision increases, and the clients read it again.
 
-    While a framework is answering (inside ``answering``), the calls whose
-    results are stored are first forgotten. The rows the conversation holds
-    back are written first: the clients read them once told to.
+    The rows the conversation holds back are written first: the clients
+    read them once told to. It forgets no calls: ``answer_once`` does that
+    after each write of steps that commits, before it publishes there
+    (``settled``), and the ``settle`` handler publishes outside a turn.
+
+    Only an agent publishes, to its companion: after each step its handlers'
+    turns store (``publish_steps``), after the answer of a turn that no
+    ``close`` ends (``publish_end``), and its ``settle``. A session object that
+    is no agent has no companion, and nothing follows it: its turns are only
+    stored.
+
+    Raises:
+        TypeError: If ``ctx`` is not the context of an agent's handler.
     """
+    companion = _signals.companion_in(ctx)
     await flush_held(ctx)
+    published = await ctx.call(companion.publish, key=ctx.key, name=_signals.ENTRY_NAME)
+    inbox = _INBOX.get(ctx)
+    if inbox is not None:
+        inbox.saw(published)
+
+
+def publish_steps(ctx: AgentContext) -> None:
+    """Have each write of steps that commits, in the turns that ``ctx``'s handler answers, publish: unless the
+    agent runs in the background, which publishes only as a ``chat`` turn ends.
+
+    ``chat_turn`` calls it, and so does every handler of an agent
+    (``AgentObject``), a handler of your own that prompts included: its
+    followers see its steps as they are stored. ``answer_once`` runs it
+    (``after_steps``), and knows nothing of it.
+    """
+    if not _unfollowed(ctx):
+        after_steps(ctx, lambda: publish(ctx))
+
+
+def publish_end(ctx: AgentContext) -> None:
+    """Have the commit that stores the answer of a turn that ``ctx``'s handler answers publish: unless the agent
+    runs in the background, which publishes only as a ``chat`` turn ends.
+
+    Every handler of an agent (``AgentObject``) calls it, as it calls
+    ``publish_steps``: a follower of such a turn sees its steps as they are
+    stored, and then the turn end, instead of hearing nothing more. A turn
+    closed for good (failed, refused, stopped) publishes its end too: its
+    close stores the turn's answer. One whose attempt failed publishes none:
+    the turn has not ended, and the next attempt carries it on. An attempt
+    that died between the commit that stored the answer and this publish
+    leaves it to the retry, which finds the turn answered and publishes its
+    end before it answers.
+
+    ``chat_turn`` undoes it (``after_answer(ctx, None)``): a ``chat`` turn
+    ends with the companion's ``close``, which publishes the turn's last
+    change with it, as one revision. ``answer_once`` runs what is set
+    (``after_answer``), and knows nothing of it.
+    """
+    if not _unfollowed(ctx):
+        after_answer(ctx, lambda: publish(ctx))
+
+
+async def settled(ctx: SessionContext) -> None:
+    """Forget the calls whose results the turn being answered (inside ``answering``) has stored (see ``_calls.py``).
+
+    ``answer_once`` has it done after each write of the turn's steps that
+    commits, before what its caller set (``after_steps``), and each tool
+    call's start does it. Outside ``answering``, it does nothing.
+    """
     stored = _ANSWERING.get(ctx)
     if stored is not None:
         await _settled(ctx, stored)
-    published = await ctx.call(_signals.publish, key=_signals.signals_of(ctx), name=_signals.ENTRY_NAME)
-    inbox = _INBOX.get(ctx)
-    if inbox is not None:
-        inbox.saw(typing.cast(Published | None, published))
-
-
-async def stepped(ctx: SessionContext) -> None:
-    """Publish a step of the turn, unless the agent runs in the background.
-
-    ``answer_once`` has it made after each write of the turn's steps that
-    commits (see ``Conversation.hold``): a reply with tool calls, the tools'
-    results.
-    """
-    if not _unfollowed(ctx):
-        await publish(ctx)
 
 
 async def tool_call_started(ctx: SessionContext) -> None:
@@ -255,9 +316,7 @@ async def tool_call_started(ctx: SessionContext) -> None:
     It publishes nothing: the turn publishes once the tool call is stored
     (with its reply), and once its result is.
     """
-    stored = _ANSWERING.get(ctx)
-    if stored is not None:
-        await _settled(ctx, stored)
+    await settled(ctx)
 
 
 async def tool_call_ended(ctx: SessionContext) -> None:
@@ -306,7 +365,7 @@ def _now() -> str:
     return _signals.iso(time.time())
 
 
-async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionContext, str], Awaitable[T]]) -> T:
+async def chat_turn(ctx: AgentContext, text: str, answer: Callable[[AgentContext, str], Awaitable[T]]) -> T:
     """Run ``answer`` as the turn of a ``chat`` handler.
 
     While it answers, the object's ``status`` reports the turn. Cancelling the
@@ -314,8 +373,14 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     and cancels the calls its tools made; the handler then fails with the
     cancellation. If the attempt ends first, the turn stops with
     ``AttemptEnded`` and the next attempt carries on. The turn publishes when
-    it starts (the companion's ``start`` does) and when it ends (its
-    ``close``).
+    it starts (the companion's ``start`` does), after each write of its steps
+    that commits (a reply with tool calls, the tools' results: ``answer_once``
+    runs what ``after_steps`` sets, see ``Conversation.hold``), unless the
+    agent runs in the background, and when it ends (its ``close``, which
+    publishes the turn's last change with it: so the commit of its answer
+    publishes nothing of its own, unlike the turns of the agent's other
+    handlers, see ``publish_end``). The conversation itself only stores: a
+    handler of one's own that prompts stores its turn and publishes nothing.
 
     An error ends the turn for good if it is a ``TerminalError``, or a model
     provider's refusal (``refusal_of``), as a 424. Any other error fails the
@@ -327,26 +392,28 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
     AI's usage limits, retries that ran out and setup errors.
     """
     invocation_id = ctx.request.id
-    companion = _signals.signals_of(ctx)
+    companion = _signals.companion_in(ctx)
     turn: Answering = {"invocationId": invocation_id, "since": _now()}
     settings = settings_of(ctx)
     steers = settings.steers and not settings.background
     if steers:
         # Before the first publish, which may return messages steered to the turn already.
         _INBOX.set(ctx, Inbox())
-    # From here until the turn closes, the companion knows about it: `status` and `stop` ask it.
-    # The agent has ``settle`` (``chat()`` adds it), so the companion may send it this turn once it is gone.
+    # From here until the turn closes, the companion knows about it: `status` and `stop` ask it. Once the
+    # turn's invocation is gone, the companion sends it to the agent's `settle` (which `chat()` adds).
     followed = not _unfollowed(ctx)
-    started: _signals.Started = {**turn, "settles": True, "steers": steers, "publishes": followed}
-    published = await ctx.call(_signals.start, started, key=companion, name=_signals.ENTRY_NAME)
-    if isinstance(published, dict):
-        # The companion published the turn's start as it started it.
-        inbox = _INBOX.get(ctx)
-        if inbox is not None:
-            inbox.saw(published)
-    else:
-        # A companion that does not publish as it starts a turn (of an earlier deployment): publish here.
-        await stepped(ctx)
+    started: _signals.Started = {**turn, "steers": steers, "publishes": followed}
+    # A followed turn's start is its first publish; a background agent's publishes nothing (and takes no steers).
+    published = await ctx.call(companion.start, started, key=ctx.key, name=_signals.ENTRY_NAME)
+    inbox = _INBOX.get(ctx)
+    if inbox is not None and published is not None:
+        inbox.saw(published)
+    # Each step the turn stores that a tool waits for (a reply with tool calls, the tools' results).
+    publish_steps(ctx)
+    # Nothing follows the commit of the answer: this turn ends with the companion's `close`, which publishes
+    # its last change with it. So it keeps the end the handler's wrapper gave it (`publish_end`) from making a
+    # second publish, and a `chat` turn's calls are as they were.
+    after_answer(ctx, None)
 
     async def end() -> None:
         # Have the companion close the turn, which publishes its last change
@@ -355,7 +422,7 @@ async def chat_turn(ctx: SessionContext, text: str, answer: Callable[[SessionCon
         stored = _ANSWERING.get(ctx)
         if stored is not None:
             await _settled(ctx, stored)
-        await ctx.call(_signals.close, invocation_id, key=companion, name=_signals.ENTRY_NAME)
+        await ctx.call(companion.close, invocation_id, key=ctx.key, name=_signals.ENTRY_NAME)
 
     stop = Stop()
     _STOP.set(ctx, stop)

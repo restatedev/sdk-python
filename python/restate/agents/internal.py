@@ -10,7 +10,9 @@
 #
 """Building blocks for writing a framework integration of ``restate.agents``.
 
-An integration needs, beyond the public API:
+An integration needs, beyond the public API (``AgentContext`` and
+``AgentViewContext``, the contexts of an agent's handlers and views, which
+an integration's ``answer`` and any handler of its own take):
 
 - ``Conversation``, ``Turn`` and ``answer_once``: the conversation every
   integration stores the same way, as turns, and the run of a prompt on it
@@ -32,13 +34,17 @@ An integration needs, beyond the public API:
 - ``refusal_of`` and ``from_tool``, to tell a model provider's refusal from a
   tool's error.
 - ``companion_of`` and ``deliver``, to see what an agent is doing and to send
-  it a message from another session object's handler.
+  it a message from another session object's handler. Each agent has its own
+  companion, the ingress-private virtual object ``<agent>.prebuilt.restate``
+  (``COMPANION_SUFFIX``) keyed as the agent: ``companion_of(agent)`` returns it,
+  with its handlers, to call with the agent's key.
 - ``take_steers``, at each step of a turn: the items of the messages steered
   to it, which the next model request gets (an integration says it calls it
   with ``chat(..., steers=True)``, and its ``Items`` may make a steered
   message's item, with ``steered``).
 """
 
+from restate.agents._api import AgentContext, AgentViewContext
 from restate.agents._common import (
     CANCELLED,
     CHECK_MODEL,
@@ -73,7 +79,7 @@ from restate.agents._conversation import (
     answer_once,
 )
 from restate.agents._output import answer_with, asking
-from restate.agents._signals import Companion, companion_of, deliver, signals
+from restate.agents._signals import COMPANION_SUFFIX, Companion, companion_of, deliver
 from restate.agents._steering import take_steers
 from restate.agents._tools import run_tool, wait_for
 from restate.agents._turn import (
@@ -89,11 +95,14 @@ from restate.agents._turn import (
 __all__ = [
     "CANCELLED",
     "CHECK_MODEL",
+    "COMPANION_SUFFIX",
     "DEFAULT_MODEL",
     "ENDED",
     "MODEL_ENV",
     "REFUSED",
     "UNANSWERED",
+    "AgentContext",
+    "AgentViewContext",
     "AttemptEnded",
     "Call",
     "Companion",
@@ -125,7 +134,6 @@ __all__ = [
     "refusal",
     "refusal_of",
     "run_tool",
-    "signals",
     "stop_signal_of",
     "stored_answer",
     "take_steers",

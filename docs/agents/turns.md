@@ -11,7 +11,8 @@ The code lives in:
 - [`_turn.py`](../../python/restate/agents/_turn.py): `chat_turn`, the turn;
 - [`_conversation.py`](../../python/restate/agents/_conversation.py): the
   conversation, and `answer_once`, which answers a prompt;
-- [`_signals.py`](../../python/restate/agents/_signals.py): the companion;
+- [`_signals.py`](../../python/restate/agents/_signals.py): the companion, one per
+  agent (`make_companion`);
 - [`_steering.py`](../../python/restate/agents/_steering.py): the messages
   steered to a turn, which it takes at its steps;
 - [`_object.py`](../../python/restate/agents/_object.py): the views (`status`,
@@ -24,9 +25,58 @@ The code lives in:
 
 The TypeScript SDK's agents follow the same turn and companion
 (`sdk-sessions/packages/agents/TURN-SEMANTICS.md`). How the conversation is
-stored and loaded, and the `settle` and `compact` handlers, are this SDK's
-(see [Agents of the TypeScript SDK](#agents-of-the-typescript-sdk), and
+stored and loaded, the `settle` and `compact` handlers, and each agent
+having a companion of its own, are this SDK's (see
+[The companion is the agent's own](#the-companion-is-the-agents-own), and
 [Porting to sdk-sessions](porting.md)).
+
+## Who does what
+
+The conversation stores: `answer_once` runs a prompt's turn and writes its
+steps in the key's database, and nothing else. The agent's turn publishes:
+`chat_turn` starts the turn with the companion, has each write of the turn's
+steps that commits publish (`publish_steps` sets what follows a commit,
+`after_steps`, which `answer_once` runs as an opaque callback), and closes
+the turn. A handler of your own that prompts on a plain `SessionObject`
+(`pydantic_ai.prompt(ctx, …)`, say) stores its turn and publishes nothing:
+it has no companion, and nothing follows it.
+
+A handler you add to an agent (`@assistant.handler`) that prompts publishes
+each step its turns store, as `chat` does, and publishes once more when a
+turn's answer is stored: every handler of an `AgentObject` calls
+`publish_steps` and `publish_end` (what follows the answer's commit,
+`after_answer`, which `answer_once` runs as the other opaque callback). So a
+follower of such a turn sees its steps arrive and then sees it end, instead
+of hearing nothing more. The end publish comes after the commit that stored
+the answer, never before it: a follower told earlier would read a
+conversation that has no answer yet. A turn closed for good (failed,
+refused, stopped) publishes its end too — its close stores the turn's
+answer; a turn whose attempt failed publishes none, as it has not ended and
+the next attempt carries it on. A background agent's turn publishes neither
+its steps nor its end.
+
+A `chat` turn publishes no end of its own: `chat_turn` sets `after_answer`
+to nothing, because the turn ends with the companion's `close`, which
+publishes the turn's last change with it. So the publishes of a `chat` turn
+are what they always were: `start`, one per commit of its steps, `close`.
+
+A turn of another handler is not a turn in the companion, though: no `start`
+nor `close`, so `status` does not report it and `stop` does not cancel it.
+There is no public way to make it one: `chat_turn` is private (`_turn.py`),
+and needs the handler declared with `explicit_cancellation=True` and the
+agent's `settle` handler, which only `chat()` adds. For a followed turn,
+send the message to the agent's `chat` (`deliver`, or `ctx.generic_send`).
+
+Waiting for a signal (a `wait_for_signal` tool, `wait_for`, an approval,
+LangGraph's `interrupt()` and `nodes.wait_for_signal`) and steering need the
+companion, so an agent. From a plain session object every wait fails the
+turn once, for good (`NeedsAgent`, a `TerminalError`), with a message that
+says to use `<framework>.agent(...)` or `AgentObject`, and the turn is
+closed `failed`. A signal tool's wait included: unlike another
+`TerminalError` a tool raises, it is never handed to the model as the
+tool's result, since the model cannot fix how the object is set up (as in
+the TypeScript SDK). A `publish` from a plain session object is a
+programming error, which raises.
 
 ## Words
 
@@ -50,8 +100,12 @@ stored and loaded, and the `settle` and `compact` handlers, are this SDK's
 - **Attempt.** One run of a turn's invocation. A crash, a lost connection or
   a suspension ends an attempt; Restate starts another, which runs the
   handler again from its first line and resumes from what the database has.
-- **Companion.** The agent's `signals` object, keyed `<agent>:<key>` (such
-  as `assistant:alice`). It is a journaled virtual object, so it can wait
+- **Companion.** The agent's own virtual object, named
+  `<agent>.prebuilt.restate` and keyed as the agent: key `alice` of
+  `assistant` has the companion `assistant.prebuilt.restate`, key
+  `alice`. Whatever makes the agent makes it, and the agent serves it
+  alongside itself. It is ingress-private: clients reach it through the
+  agent's views. It is a journaled virtual object, so it can wait
   (awakeables, timers) and be written while the turn runs. It keeps the
   running turn, the waits of its tools, and the conversation's revision.
   Nothing in it is needed to complete a turn: it is the control plane.
@@ -110,9 +164,9 @@ sequenceDiagram
   participant C as Client
   participant A as Agent (chat)
   participant DB as Key's database
-  participant S as Companion (signals)
+  participant S as Companion
   C->>A: chat("Plan my week")
-  A->>S: start(turn, settles, publishes)
+  A->>S: start(turn, steers, publishes)
   S-)S: awaitTurn(turn)
   Note over S: status.answering = turn, publish
   S-->>A: the revision, and the messages steered to the turn, if any
@@ -140,14 +194,14 @@ sequenceDiagram
 
 1. **Start.** The turn calls the companion's `start(turn)`: from here,
    `status` says the agent answers it (`answering: {invocationId, since}`).
-   It also says the agent has `settle` (see [Dead turns](#dead-turns)). A
-   retried attempt calls `start` again with the same invocation, which
+   It also says whether the turn takes steered messages (`steers`), and
+   whether `start` publishes it (`publishes`: a followed turn, not a
+   background agent's). A retried attempt calls `start` again with the same invocation, which
    changes nothing (it keeps when the turn started). `start` sends
    `awaitTurn(turn)`, the turn's watch. It also publishes, as the turn's
    first revision, and returns what `publish` returns: the turn makes no
-   publish of its own to start. A companion that returns nothing from
-   `start` (an older deployment, or the TypeScript SDK's) gets a `publish`
-   from the turn instead.
+   publish of its own to start. A background agent's turn is not published
+   at its start, and `start` returns nothing.
 2. **The prompt.** `answer_once` reads the prompt's answer by its id, one
    indexed read: a retried attempt of an answered turn returns it, and reads
    nothing more; one of a turn that was closed (cancelled, failed, refused, or
@@ -159,7 +213,8 @@ sequenceDiagram
    is stored as it comes: a reply with tool calls in one transaction, before
    its tools run; the tools' results before the model is asked again. A
    final reply, which no tool waits for, is held and commits with the
-   answer. After each write that commits, the turn publishes once, and
+   answer. After each write that commits, the turn (`chat_turn`, not
+   `answer_once`, see [Who does what](#who-does-what)) publishes once, and
    waits for it: so a follower sees the calls as their tools start, and
    their results before the model's next request returns. The companion
    answers each `publish` with the messages steered to the turn that wait:
@@ -230,9 +285,9 @@ sequenceDiagram
   participant O as Operator
   participant A as Agent (chat)
   participant DB as Key's database
-  participant S as Companion (signals)
+  participant S as Companion
   participant T as Agent (settle)
-  A->>S: start(turn, settles)
+  A->>S: start(turn)
   S-)S: awaitTurn(turn)
   A->>DB: the prompt, a reply with a tool call
   O->>A: kill (admin API)
@@ -275,7 +330,7 @@ sequenceDiagram
   autonumber
   participant N as Next turn (chat)
   participant DB as Key's database
-  participant S as Companion (signals)
+  participant S as Companion
   participant T as Agent (settle)
   N->>S: start(next turn)
   Note over S: a turn before it never closed: close it, send settle
@@ -652,7 +707,11 @@ shared with Restate's other SDKs).
 A handler of your own may prompt more than once (`openai.prompt(ctx, …)`
 twice, say): each prompt is a turn of the conversation, `<id>`, then
 `<id>:2`. A retried attempt makes them in the same order, so each finds its
-own answer, and the companion's turn is the invocation, all of them.
+own answer. In an agent's `chat` turn, the companion's turn is the
+invocation, all of them. A handler you add to an agent publishes each
+step its turns store, as `chat` does, but only `chat` starts and closes a
+turn in the companion. A handler of a plain `SessionObject` stores its turns
+and publishes none of them.
 
 ## What a client sees
 
@@ -681,27 +740,36 @@ calls as their tools start, their results before the model's next request
 returns, its end, and a killed turn end. A final reply, held until the
 answer, shows with the turn's end.
 
-## Agents of the TypeScript SDK
+## The companion is the agent's own
 
-The companion's handler names are shared with the TypeScript SDK, so one
-deployment's `signals` may hold the turns of the other's agents. An agent
-says it has `settle` as it starts a turn (`Started.settles`, which `status`
-does not show), and only such a turn is sent it:
+Each agent has a companion of its own: the virtual object
+`<agent>.prebuilt.restate`, with the agent's name as it is (Restate
+refuses names that start with `restate`, so the suffix ends the name
+instead). It is keyed as the agent, and it knows its agent: it sends
+`settle` and `steered` to the agent it was made for, at its own key. An
+agent and its companion are always the same code in the same deployment, so
+the companion sends `settle` for every dead turn, and `start` always returns
+what it published for a turn that `publishes`.
 
-- a TypeScript agent's turn that this SDK's companion holds is closed in the
-  companion, and its agent is sent nothing;
-- this SDK's agent whose turn the TypeScript companion holds has a dead turn
-  closed by its next message.
+A turn still says whether it takes steered messages (`Started.steers`: a
+framework that cannot take them, or a background agent, does not), and
+whether `start` publishes it (`Started.publishes`: a background agent's turn
+is not published). The handlers' names (`awaitTurn` among them) and payloads
+are those of the TypeScript SDK's companion, but nothing is shared with it
+any more: the TypeScript SDK's agents keep their `signals` object, which this
+SDK's agents no longer serve or call.
 
-A turn says it takes steered messages the same way (`Started.steers`): the
-companion holds messages only for such a turn, and every other gets them as
-turns of their own. And it says whether `start` publishes
-(`Started.publishes`): this SDK's companion then publishes and returns what
-`publish` returns; a TypeScript companion returns nothing from `start`, and
-this SDK's turn then publishes its start itself. A TypeScript agent's turn
-does not say so, and this SDK's companion publishes nothing at its `start`. A TypeScript companion, which has no `steer`, answers
-`publish` with no `steering`, so this SDK's turns take none from it; and the
-`steer` view fails there, as the companion has no such handler.
+**Upgrading** from a version whose agents shared the `signals` object
+(keyed `<agent>:<key>`): the new companions start empty, and nothing in
+`signals` carries over. Turns in flight, pending waits, steered messages
+held for a turn, and the revision are left behind. A turn in flight as you
+deploy runs on with the deployment it started on, and with `signals`: the
+new `status` and `stop` do not see it, and the new `signal` cannot resolve
+its tools' waits (while the old deployment is registered, its `signals`
+still takes `resolve` at `/signals/<agent>:<key>/resolve`). The revision
+starts again, so a follower should start over with a `sync` without one.
+Let the agents' turns end before you deploy, and remove the old deployment
+once nothing runs on it.
 
 ## Guarantees and limits
 

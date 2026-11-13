@@ -69,6 +69,9 @@ def anyio_backend():
 
 pytestmark = [pytest.mark.anyio]
 
+REVISION = b'{"revision": 1}'
+"""What the agent's companion answers a turn's ``start`` and each ``publish`` with: the revision."""
+
 
 class AuthenticationError(Exception):
     """As a model SDK names the error of a missing or wrong API key."""
@@ -440,8 +443,8 @@ async def test_a_handoff_holds_when_the_model_sees_no_earlier_turn_whole(harness
 
 # --- In process -----------------------------------------------------------------------------------
 
-PUBLISHED = {"publish": b"null"}
-"""What the signals object answers when the turn publishes its progress (at each tool call)."""
+PUBLISHED = {"publish": REVISION}
+"""What the agent's companion answers when the turn publishes its progress."""
 
 
 def asker(**options: Any) -> sessions.SessionObject:
@@ -1313,11 +1316,11 @@ async def test_a_message_steered_while_the_model_writes_its_answer_is_the_next_t
 
 
 class Companion(dict[str, bytes]):
-    """An agent's companion, in this process: it answers a turn's start and close, and each publish with the
+    """An agent's companion, in this process: it answers a turn's close, and its start and each publish with the
     messages steered to the turn (``steering``), as the companion does until the turn closes."""
 
     def __init__(self) -> None:
-        super().__init__(start=b"null")
+        super().__init__()
         self.revision = 0
         self.sent = 0
         self.steering: list[dict[str, str]] = []
@@ -1329,7 +1332,7 @@ class Companion(dict[str, bytes]):
             # The messages the turn did not take are each answered as a turn of their own.
             self.steering.clear()
             return b"null"
-        assert handler == "publish", f"the companion has no answer for {handler}"
+        assert handler in ("start", "publish"), f"the companion has no answer for {handler}"
         self.revision += 1
         return json.dumps({"revision": self.revision, "steering": self.steering}).encode()
 

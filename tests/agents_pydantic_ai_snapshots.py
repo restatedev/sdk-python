@@ -59,8 +59,11 @@ def anyio_backend():
 
 pytestmark = [pytest.mark.anyio]
 
-ANSWERS = {"publish": b"null", "start": b"null", "close": b"null"}
-"""What the signals object answers when a turn starts, publishes its progress and closes."""
+REVISION = b'{"revision": 1}'
+"""What the agent's companion answers a turn's ``start`` and each ``publish`` with: the revision."""
+
+ANSWERS = {"publish": REVISION, "start": REVISION, "close": b"null"}
+"""What the agent's companion answers when a turn starts, publishes its progress and closes."""
 
 SUMMARY = "SUMMARY of what was said"
 LONG = "word " * 200
@@ -517,8 +520,8 @@ async def test_every_run_of_a_key_has_the_conversation_id_of_the_agent_and_key()
     assert ids == ["pai_ids/alice"] * 3
 
 
-STEERING = json.dumps({"revision": 1, "steering": [{"id": "s1", "text": "use Celsius"}]}).encode()
-"""What the signals object answers a publish with once a client steered the turn: the message waiting for it."""
+STEERING = json.dumps({"revision": 2, "steering": [{"id": "s1", "text": "use Celsius"}]}).encode()
+"""What the agent's companion answers a publish with once a client steered the turn: the message waiting for it."""
 
 
 def _returned(message: ModelMessage) -> bool:
@@ -633,7 +636,8 @@ async def test_a_feedback_and_the_message_steered_after_it_are_stored_once_throu
     with pytest.raises(RuntimeError, match="crashed"):
         await invoke(chat.obj, "chat", chat.host(), invocation, "plan one")
     # The retried attempt takes a message steered meanwhile, right after the stored feedback.
-    host = Host(chat.backend, service=chat.name, answers={**ANSWERS, "publish": STEERING})
+    # The companion lists it from the retry's start, as from each publish.
+    host = Host(chat.backend, service=chat.name, answers={**ANSWERS, "start": STEERING, "publish": STEERING})
     assert await invoke(chat.obj, "chat", host, invocation, "plan one") == Plan(title="use Celsius")
     assert await chat("plan two") == Plan(title="plan two")
     # The model got each feedback, and the message, once; the conversation stored each once.

@@ -45,7 +45,9 @@ agent, configured as the framework does, for everything else: an ``agent=``
 
 This package holds what all frameworks share:
 
-- ``AgentObject``, a session object set up for agents.
+- ``AgentObject``, a session object set up for agents, and ``AgentContext``
+  and ``AgentViewContext``, which its handlers and views take: the session
+  contexts under a name that says which layer they belong to.
 - Tools that work with any framework: ``tool`` for your own functions, and
   ``call``, ``send``, ``workflow``, ``subagent`` and ``wait_for_signal``,
   which are built on Restate.
@@ -68,6 +70,8 @@ the ``client`` extra (``pip install "restate-sdk[client]"``).
 """
 
 from restate.agents._api import (
+    AgentContext,
+    AgentViewContext,
     Answering,
     ChatMessage,
     Messages,
@@ -90,8 +94,10 @@ from restate.agents._tools import Tool, ToolCall, call, send, subagent, tool, wa
 from restate.agents._webhook import Event, webhook, webhook_message
 
 __all__ = [
+    "AgentContext",
     "AgentObject",
     "AgentOptions",
+    "AgentViewContext",
     "Answering",
     "ChatMessage",
     "Event",

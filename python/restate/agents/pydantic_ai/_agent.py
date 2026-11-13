@@ -158,6 +158,7 @@ from restate.agents._common import (
     CompactHistory,
     ErrorSet,
     ModelError,
+    NeedsAgent,
     PerSession,
     check_built_in,
     check_own,
@@ -350,8 +351,8 @@ class _Restate(AbstractCapability[Any]):
     """Make a Pydantic AI run durable in a Restate handler.
 
     It stores the requests before each model request and each response as it
-    arrives (each write that commits publishes, for clients that follow the
-    conversation), and settles the earlier calls as each tool call starts. A
+    arrives (in an agent's ``chat`` turn, each write that commits publishes,
+    for clients that follow the conversation), and settles the earlier calls as each tool call starts. A
     tool's ``restate.TerminalError`` becomes its
     answer to the model; any other error fails the attempt. It records the
     errors of model requests, the only ones that can be a refusal.
@@ -455,7 +456,7 @@ class _Restate(AbstractCapability[Any]):
         stop = stop_signal_of(self.ctx)
         if stop is not None and stop.reason is not None:
             raise stop.reason from error
-        if isinstance(error, TerminalError) and not is_cancellation(error):
+        if isinstance(error, TerminalError) and not is_cancellation(error) and not isinstance(error, NeedsAgent):
             return f"Error: {error.message}"
         # Mark the error as the tool's, so that it is never mistaken for the model provider refusing.
         from_tool(self.ctx, error)

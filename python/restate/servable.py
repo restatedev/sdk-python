@@ -12,9 +12,9 @@
 
 A service, a virtual object and a workflow are servable: each serves itself.
 So is anything else that says what to serve for it, such as an agent, which
-serves itself and the ``signals`` object its tools wait on::
+serves itself and its own companion, the object its tools wait on::
 
-    app = restate.app([greeter, assistant])  # greeter, assistant, and signals
+    app = restate.app([greeter, assistant])  # greeter, assistant, and assistant.prebuilt.restate
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ class Servable(typing.Protocol):
     ``__restate_services__`` returns the things to serve. A service, a virtual
     object or a workflow lists itself, and is served as it is; anything else it
     lists is served the same way, in turn. So a library's object can bring what
-    it needs along (an agent lists itself and ``signals``), and a group of
+    it needs along (an agent lists itself and its companion), and a group of
     services can be one servable that lists them::
 
         class Team:

@@ -132,7 +132,7 @@ def app(
     A restate ASGI application that hosts the given services.
 
     ``services`` are services, virtual objects and workflows, or anything else ``restate.Servable``:
-    a session object, an agent (which brings the ``signals`` object its tools wait on), or a group of
+    a session object, an agent (which brings its own companion, ``<agent>.prebuilt.restate``), or a group of
     them. Each is served with what it brings along, once::
 
         app = restate.app([greeter, notes, assistant])
