@@ -1669,9 +1669,17 @@ async def answer_once(
     # With the tool calls' (``_calls.py``), which the turn reads as it ends, whether or not a tool ran: a key's
     # first turn applies both in one commit.
     await ensure_schemas(ctx.db, [SCHEMA, CALLS_SCHEMA])
+    # What follows the commit that stored the turn's answer (`after_answer`): an agent's handlers publish there,
+    # a `chat` turn sets nothing (its `close` publishes its end), and so does a handler of one's own. It is read
+    # before the answer below, so that a retry which finds the turn answered publishes its end too: an attempt
+    # that died between the commit and the publish left it unpublished, and its followers waiting.
+    at_end = after_answer_of(ctx)
     if (found := await answer_in(ctx.db, prompt_id)) is not None:
-        # Answered (or closed) already: a retry answers, or fails, as the turn ended.
+        # Answered (or closed) already: a retry answers, or fails, as the turn ended. The end publishes again,
+        # which costs a revision and tells a follower what it may already know.
         answer, status = found
+        if at_end is not None:
+            await at_end()
         return stored_answer(answer, status)
     conversation = await Conversation.load(ctx.db, items, window, budget, snapshots=settings.snapshots)
     # The turn's final reply commits with its answer; the library's publishes and Restate calls write what the run
@@ -1679,9 +1687,6 @@ async def answer_once(
     # then runs what the caller set (`after_steps`): an agent's `chat` turn publishes there; a handler of one's own
     # sets nothing, and its turn is only stored.
     after = after_steps_of(ctx)
-    # What follows the commit that stored the turn's answer (`after_answer`): an agent's handlers publish there,
-    # a `chat` turn sets nothing (its `close` publishes its end), and so does a handler of one's own.
-    at_end = after_answer_of(ctx)
 
     async def committed() -> None:
         await settled(ctx)

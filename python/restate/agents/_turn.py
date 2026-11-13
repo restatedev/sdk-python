@@ -284,7 +284,10 @@ def publish_end(ctx: AgentContext) -> None:
     stored, and then the turn end, instead of hearing nothing more. A turn
     closed for good (failed, refused, stopped) publishes its end too: its
     close stores the turn's answer. One whose attempt failed publishes none:
-    the turn has not ended, and the next attempt carries it on.
+    the turn has not ended, and the next attempt carries it on. An attempt
+    that died between the commit that stored the answer and this publish
+    leaves it to the retry, which finds the turn answered and publishes its
+    end before it answers.
 
     ``chat_turn`` undoes it (``after_answer(ctx, None)``): a ``chat`` turn
     ends with the companion's ``close``, which publishes the turn's last

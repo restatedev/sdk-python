@@ -63,10 +63,12 @@ suffix and ends with it.
   what keeps the two SDKs' names identical for the same agent.
 - **Collisions.** An agent named `a` and an agent named `a.prebuilt` do not
   collide (`a.prebuilt.restate` against `a.prebuilt.prebuilt.restate`). An
-  agent named `support.prebuilt.restate` would own another agent's companion
-  name: refuse that name where the agent is constructed (`ValueError` in
-  Python, a thrown `Error` in TypeScript), the way the built-in handler names
-  are already refused.
+  agent named `support.prebuilt.restate` would own agent `support`'s
+  companion name, and **nothing refuses it**: naming an agent that is a
+  deliberate act, and a guard was weighed and left out. Within one endpoint
+  `Endpoint.bind` still catches it (`Service … already exists`); across
+  endpoints, or across the two SDKs, it would take the companion over, which
+  is the one case this name does not close.
 
 ## Only agents have one
 
@@ -165,7 +167,6 @@ alone.
   tests of both SDKs.
 - The companion's state keys are the agent's keys (`alice`), not
   `<agent>:<key>` — asserted against `state` in the e2e.
-- An agent named `x.prebuilt.restate` is refused where it is constructed.
 - Both repos' e2e assert that no service named `signals` is registered.
 
 ## Open questions
