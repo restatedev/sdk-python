@@ -1,4 +1,5 @@
 mod asgi;
+mod explicit_recovery;
 mod tunnel;
 
 use pyo3::create_exception;
@@ -1067,6 +1068,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStateKeys>()?;
     m.add_class::<PySuspended>()?;
     m.add_class::<PyVM>()?;
+    m.add_class::<explicit_recovery::PyExplicitRecoveryVM>()?;
     m.add_class::<PyIdentityVerifier>()?;
     m.add_class::<PyExponentialRetryConfig>()?;
     m.add_class::<PyDoProgressAnyCompleted>()?;
@@ -1084,6 +1086,11 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("INGRESS_KEY_URL", tunnel::INGRESS_KEY_HELP_URL)?;
 
     m.add("VMException", m.py().get_type::<VMException>())?;
+    m.add(
+        "AttemptShutDownException",
+        m.py()
+            .get_type::<explicit_recovery::AttemptShutDownException>(),
+    )?;
     m.add(
         "IdentityKeyException",
         m.py().get_type::<IdentityKeyException>(),

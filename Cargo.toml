@@ -45,3 +45,8 @@ tokio-util = { version = "0.7", default-features = false }
 
 # Sessions (`src/sessions.rs`): the database's futures, polled on Python's event loop.
 futures = "0.3"
+
+# The explicit recovery VM of session objects, until shared-core releases it
+# (restatedev/sdk-shared-core#118).
+[patch.crates-io]
+restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core", branch = "explicit-recovery-vm" }

@@ -34,7 +34,7 @@ from datetime import timedelta
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from restate._internal import PyVM  # pylint: disable=no-name-in-module
+from restate._internal import PyExplicitRecoveryVM  # pylint: disable=no-name-in-module
 from restate.exceptions import SuspendedException, TerminalError
 from restate.sessions._api import Database, DatabaseReader, Transaction
 from restate.sessions._calls import CallHost, GenericSend, Sends
@@ -94,7 +94,7 @@ class SqlHost(CallHost, Protocol):
         ...
 
     def sync(self) -> Awaitable[Any]:
-        """Make an empty run, which completes once every earlier command is stored."""
+        """Complete once every earlier write is stored."""
         ...
 
     def attempt_end(self) -> BaseException | None:
@@ -106,12 +106,8 @@ class SqlHost(CallHost, Protocol):
         ...
 
     @property
-    def vm(self) -> PyVM | None:
-        """The invocation's VM, which the database reads and writes directly, or ``None`` (as on a test's host)."""
-        ...
-
-    def wait(self, handle: int) -> Awaitable[None]:
-        """Wait until the VM has the result of the read ``handle``."""
+    def vm(self) -> PyExplicitRecoveryVM | None:
+        """The attempt's VM, which the database reads and writes directly, or ``None`` (as on a test's host)."""
         ...
 
     def cancel_invocation(self, invocation_id: str) -> None:
@@ -158,31 +154,22 @@ class _ObjectStore:
     """The object's state as a ``Store``.
 
     ``get`` reads the state; ``set`` and ``clear`` write it, returning at once,
-    and Restate stores the writes in order; ``sync`` is an empty run, which
-    completes once the commands before it are stored. A ``get``, ``wait`` or
-    ``sync`` still pending when the attempt ends raises, so that the session
-    ends instead of holding its lock. With the invocation's VM (``vm``), the
-    extension reads and writes the VM directly, and waits for reads with
-    ``wait``.
+    and Restate stores the writes in order; ``sync`` completes once the writes
+    before it are stored. A ``get`` or ``sync`` still pending when the attempt
+    ends raises, so that the session ends instead of holding its lock. With
+    the attempt's VM (``vm``), the extension uses the VM directly instead.
     """
 
     def __init__(self, host: SqlHost, name: str | None) -> None:
         self._host: SqlHost = host
         self._name: str | None = name
-        self.vm: PyVM | None = host.vm
+        self.vm: PyExplicitRecoveryVM | None = host.vm
         self.database_name: str | None = name
-
-    def wait(self, handle: int) -> Awaitable[None]:
-        """Wait until the VM has the result of the read ``handle``."""
-        return _until_attempt_end(self._host, self._host.wait(handle))
 
     def _key(self, key: str) -> str:
         return key if self._name is None else _beside(self._name, key)
 
     def get(self, key: str) -> Awaitable[bytes | None]:
-        # TODO: use protocol v8's ephemeral get, which stays out of the journal,
-        # once a Restate release ships v8 and the SDK supports it. Restate 1.8
-        # negotiates v7 at most, so this is a journaled get.
         return _until_attempt_end(self._host, self._host.get(self._key(key)))
 
     def set(self, key: str, value: bytes) -> None:
@@ -204,7 +191,7 @@ class _ObjectStore:
         return own()
 
     def sync(self) -> Awaitable[None]:
-        """Wait until every earlier write is stored; the run is issued now, in order with the writes."""
+        """Wait until every earlier write is stored; the request is issued now, in order with the writes."""
         return _until_attempt_end(self._host, self._host.sync())
 
 
@@ -214,12 +201,8 @@ class _ReaderStore:
     def __init__(self, host: SqlHost, name: str | None) -> None:
         self._host: SqlHost = host
         self._name: str | None = name
-        self.vm: PyVM | None = host.vm
+        self.vm: PyExplicitRecoveryVM | None = host.vm
         self.database_name: str | None = name
-
-    def wait(self, handle: int) -> Awaitable[None]:
-        """Wait until the VM has the result of the read ``handle``."""
-        return _until_attempt_end(self._host, self._host.wait(handle))
 
     def get(self, key: str) -> Awaitable[bytes | None]:
         key = key if self._name is None else _beside(self._name, key)

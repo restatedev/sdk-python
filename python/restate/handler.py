@@ -283,6 +283,8 @@ class Handler(Generic[I, O]):
     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None
     explicit_recovery: bool = False
     explicit_cancellation: bool = False
+    attempt_runner: Optional[Callable[..., Awaitable[None]]] = None
+    """What runs an attempt instead of the SDK's context, on a VM of its own (a session object's)."""
 
 
 # disable too many arguments warning

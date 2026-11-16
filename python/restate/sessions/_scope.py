@@ -23,9 +23,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from restate.server_context import ServerInvocationContext
 from restate.sessions._api import SessionContext, ViewContext
 from restate.sessions._link import Link
+
+if typing.TYPE_CHECKING:
+    from restate.sessions._driver import AttemptDriver
 
 T = typing.TypeVar("T")
 
@@ -34,8 +36,8 @@ T = typing.TypeVar("T")
 class Scope:
     """The per-attempt data this package attaches to a context (see ``SCOPE``)."""
 
-    sdk: ServerInvocationContext | None
-    """The SDK's context of the attempt, or ``None`` when running on a test's host."""
+    driver: AttemptDriver | None
+    """The attempt on Restate, or ``None`` when running on a test's host."""
     explicit_cancellation: bool = False
     """Whether its handler has ``explicit_cancellation=True``."""
     definition: object | None = None
