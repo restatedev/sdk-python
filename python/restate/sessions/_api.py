@@ -266,6 +266,31 @@ class Database(DatabaseWriter, Protocol):
 
     Each statement outside ``transaction()`` is a transaction of its own,
     durable once its call returns. Calls run one at a time, in call order.
+
+    A cancellation of the invocation reaches the handler once, at an await,
+    which raises ``TerminalError("cancelled", 409)`` (unless the handler has
+    ``explicit_cancellation``). The awaits of Restate pending when it comes
+    fail, a call or an attached invocation, and the calls under way are
+    cancelled. A call of the database is treated differently, so that its
+    failure means one thing: a call already under way when the cancellation
+    comes runs to its end, and the cancellation goes to what the handler
+    awaits next; a call of the database that raises the cancellation was
+    refused before it began. So the cancellation from ``ctx.db`` says the call
+    did nothing: it wrote nothing, and a ``transaction()`` neither committed
+    nor made its sends. A transaction that returns committed, and its sends
+    are made, once.
+
+    What the handler awaits after the cancellation works, so it can
+    compensate, or make the call again::
+
+        try:
+            async with ctx.db.transaction() as tx:
+                ...
+        except restate.TerminalError as cancelled:
+            if cancelled.status_code != 409:
+                raise
+            await ctx.db.execute("UPDATE orders SET status = 'cancelled' WHERE id = ?", [order])
+            raise
     """
 
     def transaction(self) -> typing.AsyncContextManager[Transaction]:
@@ -292,6 +317,9 @@ class SessionContext(Caller, Sender, Protocol):
     suspension, Restate starts a new attempt, which runs the handler from the
     start and finds what earlier attempts committed. Its operations may be
     awaited together, with ``asyncio.gather`` or ``asyncio.wait``.
+
+    A cancellation reaches the handler once (see ``Database``). An attempt
+    that follows a cancelled one gets it at its first await.
     """
 
     @property

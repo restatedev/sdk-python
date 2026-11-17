@@ -120,8 +120,14 @@ class AttemptDriver:
         self._explicit_cancellation: bool = explicit_cancellation
         self._loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
         self._futures: dict[int, asyncio.Future[Any]] = {}
-        # The invocation ids of the calls and sends, which a cancellation leaves to settle.
-        self._invocation_ids: set[int] = set()
+        # The handles a cancellation leaves to settle, and is never carried to: the invocation
+        # ids of the calls and sends, and the reads and acks of the database's store.
+        self._left_to_settle: set[int] = set()
+        # A cancellation that failed nothing the handler awaits, carried to the next thing it
+        # does: a result of Restate's (``future``), or a call of its database
+        # (``take_carried_cancellation``). A retry of a cancelled invocation knows of it before
+        # the handler starts, and its first await fails all the same. There is one carry, here.
+        self._carried_cancellation: bool = False
         self.calls: list[_CallFuture] = []
         # The cancellation of the calls whose invocation id a cancellation waits for.
         self._cancelling: asyncio.Future[Any] | None = None
@@ -288,7 +294,7 @@ class AttemptDriver:
         try:
             while (notification := self.vm.take_notification()) is not None:
                 handle, value = notification
-                self._invocation_ids.discard(handle)
+                self._left_to_settle.discard(handle)
                 future = self._futures.pop(handle, None)
                 if future is not None:
                     _settle(future, value)
@@ -353,7 +359,40 @@ class AttemptDriver:
             self.schedule()
 
     def future(self, handle: int) -> asyncio.Future[Any]:
-        """The future the notification of ``handle`` settles."""
+        """The future the notification of ``handle`` settles: a result the handler awaits.
+
+        A carried cancellation fails it, once.
+        """
+        if self.ended is None and self._carried_cancellation:
+            self._carried_cancellation = False
+            future = _quiet(self._loop.create_future())
+            future.set_exception(_cancelled_error())
+            return future
+        return self._future(handle)
+
+    def invocation_id_future(self, handle: int) -> asyncio.Future[Any]:
+        """The future of a call's or send's invocation id, which a cancellation leaves to settle.
+
+        Cancelling the call needs it; and a handler rarely awaits it, so a cancellation carried
+        to it would be lost.
+        """
+        self._left_to_settle.add(handle)
+        return self._future(handle)
+
+    def store_future(self, handle: int) -> asyncio.Future[Any]:
+        """The future of a read or an ack of the database's store, which a cancellation leaves to settle.
+
+        Restate answers those promptly, and failing the ack of a commit whose writes are out
+        would report as cancelled a commit that landed. A call of the database gets a
+        cancellation only as the handler makes it, before it issues anything (see
+        ``Attempt.asked``); one under way runs to its end. The store's waits in Rust
+        (``wait_in_rust``) are left alone in the same way: this is the store of an endpoint
+        with a journal codec.
+        """
+        self._left_to_settle.add(handle)
+        return self._future(handle)
+
+    def _future(self, handle: int) -> asyncio.Future[Any]:
         future = _quiet(self._loop.create_future())
         if self.ended is not None:
             future.set_exception(self.ended)
@@ -361,10 +400,14 @@ class AttemptDriver:
             self._futures[handle] = future
         return future
 
-    def invocation_id_future(self, handle: int) -> asyncio.Future[Any]:
-        """The future of a call's or send's invocation id, which a cancellation leaves to settle."""
-        self._invocation_ids.add(handle)
-        return self.future(handle)
+    def take_carried_cancellation(self) -> bool:
+        """Whether a cancellation is owed to the handler's next await, taking it.
+
+        The caller delivers it: the handler's call of its database, before it issues anything,
+        so that a call that fails with the cancellation did nothing.
+        """
+        carried, self._carried_cancellation = self._carried_cancellation, False
+        return carried
 
     def _cancelled(self) -> None:
         """Restate cancelled the invocation."""
@@ -379,12 +422,16 @@ class AttemptDriver:
                 with contextlib.suppress(SdkInternalBaseException):
                     self.act(operator.methodcaller("cancel_invocation", call.known_invocation_id()))
         self._cancelling = _quiet(asyncio.ensure_future(self.cancel_calls()))
-        cancelled = TerminalError("cancelled", 409)
+        cancelled = _cancelled_error()
+        failed_a_result = False
         for handle, future in list(self._futures.items()):
-            if handle not in self._invocation_ids:
+            if handle not in self._left_to_settle:
                 del self._futures[handle]
                 if not future.done():
                     future.set_exception(cancelled)
+                    failed_a_result = True
+        # Carried only if nothing the handler awaits was failed: it is then still owed its one.
+        self._carried_cancellation = not failed_a_result
 
     async def cancel_calls(self) -> list[str]:
         """Cancel the calls of the attempt that have not completed; return their invocation ids."""
@@ -421,6 +468,11 @@ class AttemptDriver:
                 self.act(lambda vm: vm.heartbeat())
             except SdkInternalBaseException:
                 return
+
+
+def _cancelled_error() -> TerminalError:
+    """What an await fails with when Restate cancelled the invocation, as the SDK's own awaits do."""
+    return TerminalError("cancelled", 409)
 
 
 def _failure_of(error: TerminalError) -> Any:
@@ -506,7 +558,7 @@ class VmHost:
 
     def get(self, key: str) -> Awaitable[bytes | None]:
         handle = self.driver.act(lambda vm: vm.get_state(key, key))
-        read = self.driver.future(handle)
+        read = self.driver.store_future(handle)
         codec = self._codec
         if codec is None:
             return read
@@ -528,12 +580,16 @@ class VmHost:
     def state_keys(self) -> Awaitable[list[str]]:
         # Named under the state format's prefix, which tooling hides.
         handle = self.driver.act(lambda vm: vm.get_state_keys("v22/keys"))
-        return self.driver.future(handle)
+        return self.driver.store_future(handle)
 
     def sync(self) -> Awaitable[Any]:
         """Clear ``SYNC_KEY`` with an ack: once acked, every earlier write is stored too."""
         handle = self.driver.act(lambda vm: vm.clear_state(SYNC_KEY, SYNC_KEY, True))
-        return self.driver.future(handle)
+        return self.driver.store_future(handle)
+
+    def take_cancellation(self) -> bool:
+        """Whether a cancellation is owed to the handler's next await, taking it (see ``Attempt.asked``)."""
+        return self.driver.take_carried_cancellation()
 
     def attempt_end(self) -> BaseException | None:
         return self.driver.ended

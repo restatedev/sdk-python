@@ -569,7 +569,9 @@ class SessionObject(VirtualObject):
         Args:
             name: The handler's name. Defaults to the function's name.
             explicit_cancellation: If true, cancelling the invocation neither
-                fails its awaits nor cancels its calls. The handler learns of
+                fails its awaits nor cancels its calls (without it, a
+                cancellation cancels the calls under way and fails one await,
+                once: see ``Database``). The handler learns of
                 the cancellation with ``internal.cancelled(ctx)`` and decides
                 what to stop, for example its calls with
                 ``internal.cancel_calls(ctx)`` (from
