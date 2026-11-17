@@ -2490,8 +2490,9 @@ dependencies = [
 
 [[package]]
 name = "restate-sdk-shared-core"
-version = "8.6.0"
-source = "git+https://github.com/restatedev/sdk-shared-core?branch=explicit-recovery-vm#3bc25595538fc0a73a57f674408dd25283794c46"
+version = "8.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f776d05ba074f66611aafd9f1b91373638bd9ed6e867a4b392463f5eb7281b0a"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -2512,6 +2513,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken",
+ "mixtrics",
  "object_store",
  "parking_lot",
  "pastey",
