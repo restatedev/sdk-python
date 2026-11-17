@@ -73,7 +73,10 @@ Restate's outstanding (it is then working on its own: a model request, a
 tool), and while an annotation is open, which says the same of work that goes
 on beside a call. With an answer of Restate's outstanding and no annotation,
 it does not: Restate shuts the attempt down after the timeout, and starts the
-next when the answer comes, so that a wait of days holds no process.
+next when the answer comes, so that a wait of days holds no process. An
+answer is outstanding from the moment the call is made until Restate gives
+it, whether or not the handler awaits it: work done after a call whose result
+is left aside gets no heartbeat until that call is answered.
 """
 
 SYNC_KEY = "v22/sync"

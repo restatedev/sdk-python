@@ -112,12 +112,18 @@ class Stop:
 
         If it stops first, ``work`` is cancelled and the stop reason is
         raised. Use it for a framework request that stopping the turn must cut
-        short.
+        short. Cancelling the task that awaits it (as the end of an attempt
+        cancels its handler) cancels ``work`` too.
         """
         task = asyncio.ensure_future(work)
         stopping = asyncio.ensure_future(self._event.wait())
         try:
             await asyncio.wait({task, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            # The guard itself is cancelled: so is the work, whose end nobody awaits.
+            task.cancel()
+            task.add_done_callback(_retrieve)
+            raise
         finally:
             stopping.cancel()
         if task.done():
@@ -127,6 +133,12 @@ class Stop:
             await task
         assert self.reason is not None
         raise self.reason
+
+
+def _retrieve(task: asyncio.Future[typing.Any]) -> None:
+    """Retrieve the end of a task nobody awaits, so that asyncio logs no "exception was never retrieved"."""
+    if not task.cancelled():
+        task.exception()
 
 
 _STOP: ScopeKey[Stop] = ScopeKey("stop_signal_of")
