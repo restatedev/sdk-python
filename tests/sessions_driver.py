@@ -19,6 +19,7 @@ only once the attempt has acted on it: no test depends on how long anything take
 # pylint: disable=missing-function-docstring
 
 import asyncio
+from datetime import timedelta
 import random
 import typing
 from collections.abc import Awaitable, Callable, Iterator
@@ -144,6 +145,25 @@ async def commits(ctx: sessions.SessionContext) -> str:
     """Commits, and says what its failure was if it did not."""
     outcome = await said(insert(ctx))
     return "committed" if outcome == "ok" else outcome
+
+
+@notes.handler()
+async def works_alone(ctx: sessions.SessionContext) -> str:
+    """Works outside Restate, with nothing of Restate's outstanding, until the test lets it go on."""
+    await gate_of().wait()
+    return "done"
+
+
+@notes.handler()
+async def works_beside_a_call(ctx: sessions.SessionContext, annotated: bool) -> str:
+    """Waits for a call that is never answered, working meanwhile, inside an annotation or not."""
+    pending = asyncio.ensure_future(ctx.generic_call("Callee", "echo", "A", key="k"))
+    annotation = internal.annotate(ctx, "tool") if annotated else None
+    await gate_of().wait()
+    if annotation is not None:
+        annotation.end()
+    pending.cancel()
+    return "done"
 
 
 @notes.handler()
@@ -564,6 +584,59 @@ async def test_a_schema_the_handler_ensures_takes_a_carried_cancellation_as_its_
     side.start("ke", None)
     await run(notes, "ensures_twice", side)
     assert output_of(side.sent()) == "cancelled,ok", describe(side)
+
+
+def heartbeats(side: RestateSide) -> int:
+    """How many times the attempt told Restate that it makes progress."""
+    return sum(1 for m in side.sent() if m.type == TYPE.awaiting_on)
+
+
+async def beats_while_at(gate_: Gate, handler: str, side: RestateSide) -> int:
+    """Run ``handler`` until it waits at ``gate_``, leave it there for ten heartbeat intervals, then let it end.
+
+    Returns the heartbeats it sent while it waited there.
+    """
+    running = asyncio.ensure_future(run(notes, handler, side))
+    await gate_.reached.wait()
+    before = heartbeats(side)
+    await asyncio.sleep(10 * _driver.HEARTBEAT_INTERVAL.total_seconds())
+    during = heartbeats(side) - before
+    gate_.opened.set()
+    await running
+    return during
+
+
+@pytest.fixture
+def quick_heartbeats(monkeypatch) -> None:
+    monkeypatch.setattr(_driver, "HEARTBEAT_INTERVAL", timedelta(seconds=0.02))
+
+
+async def test_an_attempt_heartbeats_while_its_handler_works_with_nothing_of_restates_outstanding(
+    gate: Gate, quick_heartbeats: None
+):
+    # A model request, say: Restate hears nothing from the attempt meanwhile, and shuts down one it heard nothing
+    # from for its inactivity timeout. The next attempt would make the request again, and never get past it.
+    side = RestateSide()
+    side.start("kh1", None)
+    assert await beats_while_at(gate, "works_alone", side) >= 3, describe(side)
+    assert output_of(side.sent()) == "done", describe(side)
+
+
+async def test_an_attempt_does_not_heartbeat_while_an_answer_of_restates_is_outstanding(
+    gate: Gate, quick_heartbeats: None
+):
+    # A wait of days for an approval holds no process: Restate shuts the attempt down, and starts the next one when
+    # the answer comes.
+    side = RestateSide()
+    side.start("kh2", False)
+    assert await beats_while_at(gate, "works_beside_a_call", side) == 0, describe(side)
+
+
+async def test_an_open_annotation_heartbeats_beside_an_outstanding_answer(gate: Gate, quick_heartbeats: None):
+    # The annotation says the handler is working, on a tool beside the call it waits for.
+    side = RestateSide()
+    side.start("kh3", True)
+    assert await beats_while_at(gate, "works_beside_a_call", side) >= 3, describe(side)
 
 
 async def test_a_read_that_asks_restate_nothing_sees_a_carried_cancellation_too_once(gate: Gate):

@@ -63,11 +63,17 @@ logger = logging.getLogger(__name__)
 T = typing.TypeVar("T")
 
 HEARTBEAT_INTERVAL = timedelta(seconds=20)
-"""How often an attempt with an annotation open tells Restate it makes progress.
+"""How often an attempt that works outside Restate tells it that it makes progress.
 
 Restate shuts down an attempt it heard nothing from for its inactivity timeout
-(a minute, by default): an open annotation (a model request, a tool call)
-keeps it alive.
+(a minute, by default), and the next one runs the handler from the start: a
+model request that takes longer would be made again by every attempt, and
+never answered. So an attempt heartbeats while its handler has nothing of
+Restate's outstanding (it is then working on its own: a model request, a
+tool), and while an annotation is open, which says the same of work that goes
+on beside a call. With an answer of Restate's outstanding and no annotation,
+it does not: Restate shuts the attempt down after the timeout, and starts the
+next when the answer comes, so that a wait of days holds no process.
 """
 
 SYNC_KEY = "v22/sync"
@@ -123,6 +129,9 @@ class AttemptDriver:
         # The handles a cancellation leaves to settle, and is never carried to: the invocation
         # ids of the calls and sends, and the reads and acks of the database's store.
         self._left_to_settle: set[int] = set()
+        # The store's among them: the database waits for those, not the handler, and they come
+        # promptly, so they do not count as an answer of Restate's the handler waits for.
+        self._store_waits: set[int] = set()
         # A cancellation that failed nothing the handler awaits, carried to the next thing it
         # does: a result of Restate's (``future``), or a call of its database
         # (``take_carried_cancellation``). A retry of a cancelled invocation knows of it before
@@ -181,6 +190,7 @@ class AttemptDriver:
         (a model request, say) stops, since nothing it does would count any more.
         """
         self._handler = asyncio.ensure_future(self._cancelled_calls_first(handler))
+        self._heartbeats = asyncio.ensure_future(self._heartbeat())
         try:
             output = await self._handler
             self._last(lambda vm: vm.end_success(output))
@@ -297,6 +307,7 @@ class AttemptDriver:
             while (notification := self.vm.take_notification()) is not None:
                 handle, value = notification
                 self._left_to_settle.discard(handle)
+                self._store_waits.discard(handle)
                 call = self._unanswered.pop(handle, None)
                 if call is not None:
                     call.answered = True
@@ -395,6 +406,7 @@ class AttemptDriver:
         with a journal codec.
         """
         self._left_to_settle.add(handle)
+        self._store_waits.add(handle)
         return self._future(handle)
 
     def _future(self, handle: int) -> asyncio.Future[Any]:
@@ -468,20 +480,22 @@ class AttemptDriver:
         return cancelled
 
     def trace_opened(self) -> None:
-        """An annotation opened: heartbeat while any is."""
+        """An annotation opened: the attempt heartbeats while any is, whatever else is outstanding."""
         self._open_traces += 1
-        if self._heartbeats is None and self.ended is None:
-            self._heartbeats = asyncio.ensure_future(self._heartbeat())
 
     def trace_closed(self) -> None:
         self._open_traces -= 1
-        if self._open_traces == 0 and self._heartbeats is not None:
-            self._heartbeats.cancel()
-            self._heartbeats = None
+
+    def _awaits_restate(self) -> bool:
+        """Whether an answer of Restate's that the handler made for is outstanding: a result or an invocation id."""
+        return any(handle not in self._store_waits for handle in self._futures)
 
     async def _heartbeat(self) -> None:
+        """Tell Restate the attempt makes progress, while it works outside Restate (see ``HEARTBEAT_INTERVAL``)."""
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL.total_seconds())
+            if self._open_traces == 0 and self._awaits_restate():
+                continue
             try:
                 self.act(lambda vm: vm.heartbeat())
             except SdkInternalBaseException:

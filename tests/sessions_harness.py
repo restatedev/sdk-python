@@ -455,10 +455,24 @@ async def test_an_open_annotation_keeps_the_attempt_alive(harness: HarnessEnviro
     assert await harness.client.object_call(thinks, key=key, arg=None) == 1
 
 
-async def test_local_work_without_an_annotation_is_shut_down_and_restarted(harness: HarnessEnvironment):
+async def test_local_work_keeps_its_attempt_alive_with_nothing_of_restates_outstanding(
+    harness: HarnessEnvironment, monkeypatch
+):
+    # The attempt heartbeats while its handler works on its own, annotation or not: here faster than the object's
+    # inactivity timeout of a second, so the work is done in the first attempt.
+    monkeypatch.setattr(_driver, "HEARTBEAT_INTERVAL", timedelta(seconds=0.3))
+    key = str(uuid.uuid4())
+    assert await harness.client.object_call(daydreams, key=key, arg=None) == 1
+    assert daydreamt.get(key, 0) == 1
+
+
+async def test_local_work_is_shut_down_and_restarted_when_the_heartbeat_is_slower_than_the_inactivity_timeout(
+    harness: HarnessEnvironment,
+):
     key = str(uuid.uuid4())
     sent = await harness.client.object_send(daydreams, key=key, arg=None)
-    # Each attempt is shut down after a second with nothing pending, and restarted right away.
+    # The heartbeat comes every 20 seconds, and the object's inactivity timeout is a second: each attempt is shut
+    # down after a second with nothing heard from it, and restarted right away.
     for _ in range(300):
         if attempts.get(key, 0) >= 4:
             break

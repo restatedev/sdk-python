@@ -111,6 +111,7 @@ class TYPE:  # pylint: disable=too-few-public-methods
     error = 0x0002
     end = 0x0003
     command_ack = 0x0004
+    awaiting_on = 0x0006
     get_state_ephemeral = 0x0200
     get_state_ephemeral_notification = 0x0300
     input = 0x0400
