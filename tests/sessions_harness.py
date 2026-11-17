@@ -166,6 +166,55 @@ async def waits_for_a_nap(ctx: sessions.SessionContext) -> str:
     return await napping
 
 
+@sleeper.handler()
+async def doze(ctx: restate.Context) -> str:
+    await asyncio.sleep(0.5)
+    return "dozed"
+
+
+@notes.handler()
+async def cancels_itself(ctx: sessions.SessionContext, text: str) -> int:
+    """Cancels itself inside its transaction, then compensates in its database.
+
+    The cancellation reaches one await of the handler's, once. A call of the
+    database that it fails did nothing, and one already under way when it
+    arrives runs to its end: so the transaction, which issued the cancellation,
+    committed and its send is made; and the compensation is stored exactly
+    once, by the call itself or, where the cancellation reached that call, by
+    making it again. A cancelled call that had landed would show as a second
+    row. The result: how many awaits failed with the cancellation.
+    """
+    cancellations = 0
+
+    async def counting(step: typing.Callable[[], typing.Awaitable[Any]]) -> bool:
+        """Whether ``step`` failed with the cancellation."""
+        nonlocal cancellations
+        try:
+            await step()
+            return False
+        except restate.TerminalError as error:
+            if error.status_code != 409:
+                raise
+            cancellations += 1
+            return True
+
+    async def commit() -> None:
+        async with ctx.db.transaction() as tx:
+            await tx.execute("INSERT INTO notes (text) VALUES (?)", [text])
+            tx.send(deliver, text, key=ctx.key)
+            ctx.cancel(ctx.request.id)
+
+    async def compensate() -> None:
+        await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [f"undone: {text}"])
+
+    await counting(lambda: ctx.db.get("SELECT count(*) AS n FROM notes"))
+    await counting(commit)
+    if await counting(compensate):
+        await compensate()
+    await counting(lambda: ctx.call(doze))  # by now, the cancellation came
+    return cancellations
+
+
 @notes.handler()
 async def nested(ctx: sessions.SessionContext) -> None:
     """Times a model request inside a turn."""
@@ -372,6 +421,24 @@ async def test_a_cancellation_fails_the_awaits_and_cancels_the_calls(harness: Ha
     assert (await attach(harness, sent.invocation_id)).status_code == 409
     [nap_id] = await harness.client.object_call(texts, key=key, arg=None)
     assert (await attach(harness, nap_id)).status_code == 409
+
+
+async def test_a_cancellation_fails_one_await_once_and_a_cancelled_call_of_the_database_did_nothing(
+    harness: HarnessEnvironment,
+):
+    for _ in range(5):
+        key = str(uuid.uuid4())
+        assert await harness.client.object_call(cancels_itself, key=key, arg="x") == 1
+        # The transaction, and the compensation, once each.
+        assert await harness.client.object_call(texts, key=key, arg=None) == ["x", "undone: x"]
+        # The transaction's send went out, though the invocation was cancelled.
+        delivered: list[str] = []
+        for _ in range(50):
+            delivered = await harness.client.object_call(messages, key=key, arg=None)
+            if delivered:
+                break
+            await asyncio.sleep(0.1)
+        assert delivered == ["x"]
 
 
 async def test_a_shut_down_attempt_resumes_when_its_call_completes(harness: HarnessEnvironment):
