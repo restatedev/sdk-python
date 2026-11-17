@@ -34,13 +34,6 @@ def anyio_backend():
 
 pytestmark = [pytest.mark.anyio]
 
-NEEDS_SHARED_CORE = pytest.mark.xfail(
-    strict=True,
-    reason="shared-core 8.7.0 suspends a shut down attempt on its calls alone, so a cancellation does not resume it; "
-    "fixed on shared-core's branch claude/cancel-wakes-a-shut-down-attempt, not released yet",
-)
-"""Remove with the shared-core release that has the fix: these then pass, and a strict xfail that passes fails."""
-
 sleeper = restate.Service("sleeper")
 
 
@@ -129,7 +122,6 @@ async def cancelled_while_suspended(harness: HarnessEnvironment, handler: Any) -
     return code, seen
 
 
-@NEEDS_SHARED_CORE
 async def test_a_cancellation_reaches_an_invocation_that_was_shut_down_while_it_waited_for_a_call(
     harness: HarnessEnvironment,
 ):
@@ -137,7 +129,6 @@ async def test_a_cancellation_reaches_an_invocation_that_was_shut_down_while_it_
     assert code == 409, f"the cancelled invocation did not end in 10 s: {seen}"
 
 
-@NEEDS_SHARED_CORE
 async def test_a_handler_that_watches_for_its_cancellation_learns_of_it_after_it_was_shut_down(
     harness: HarnessEnvironment,
 ):
@@ -145,7 +136,6 @@ async def test_a_handler_that_watches_for_its_cancellation_learns_of_it_after_it
     assert code == 200, f"the cancelled invocation did not end in 10 s: {seen}"
 
 
-@NEEDS_SHARED_CORE
 async def test_a_cancelled_invocation_that_goes_on_waiting_is_not_resumed_over_and_over(harness: HarnessEnvironment):
     # Waiting on a cancellation that Restate has stored resumes the invocation at once. The attempt that follows
     # the cancellation knows of it, and waits for its call alone.
