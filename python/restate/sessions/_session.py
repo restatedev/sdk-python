@@ -34,7 +34,7 @@ from datetime import timedelta
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from restate._internal import PyVM  # pylint: disable=no-name-in-module
+from restate._internal import PyExplicitRecoveryVM  # pylint: disable=no-name-in-module
 from restate.exceptions import SuspendedException, TerminalError
 from restate.sessions._api import Database, DatabaseReader, Transaction
 from restate.sessions._calls import CallHost, GenericSend, Sends
@@ -60,6 +60,10 @@ class SqlHost(CallHost, Protocol):
     """The host that an attempt's database runs on: the handler's context, or a test's fake.
 
     Implement it to run handlers without Restate, with ``internal.invoke``.
+
+    A host may also have ``take_cancellation() -> bool``: whether a cancellation
+    is owed to the handler's next await, taking it (see ``Attempt.asked``). A
+    host without it never has one.
     """
 
     @property
@@ -94,7 +98,7 @@ class SqlHost(CallHost, Protocol):
         ...
 
     def sync(self) -> Awaitable[Any]:
-        """Make an empty run, which completes once every earlier command is stored."""
+        """Complete once every earlier write is stored."""
         ...
 
     def attempt_end(self) -> BaseException | None:
@@ -106,12 +110,8 @@ class SqlHost(CallHost, Protocol):
         ...
 
     @property
-    def vm(self) -> PyVM | None:
-        """The invocation's VM, which the database reads and writes directly, or ``None`` (as on a test's host)."""
-        ...
-
-    def wait(self, handle: int) -> Awaitable[None]:
-        """Wait until the VM has the result of the read ``handle``."""
+    def vm(self) -> PyExplicitRecoveryVM | None:
+        """The attempt's VM, which the database reads and writes directly, or ``None`` (as on a test's host)."""
         ...
 
     def cancel_invocation(self, invocation_id: str) -> None:
@@ -158,31 +158,22 @@ class _ObjectStore:
     """The object's state as a ``Store``.
 
     ``get`` reads the state; ``set`` and ``clear`` write it, returning at once,
-    and Restate stores the writes in order; ``sync`` is an empty run, which
-    completes once the commands before it are stored. A ``get``, ``wait`` or
-    ``sync`` still pending when the attempt ends raises, so that the session
-    ends instead of holding its lock. With the invocation's VM (``vm``), the
-    extension reads and writes the VM directly, and waits for reads with
-    ``wait``.
+    and Restate stores the writes in order; ``sync`` completes once the writes
+    before it are stored. A ``get`` or ``sync`` still pending when the attempt
+    ends raises, so that the session ends instead of holding its lock. With
+    the attempt's VM (``vm``), the extension uses the VM directly instead.
     """
 
     def __init__(self, host: SqlHost, name: str | None) -> None:
         self._host: SqlHost = host
         self._name: str | None = name
-        self.vm: PyVM | None = host.vm
+        self.vm: PyExplicitRecoveryVM | None = host.vm
         self.database_name: str | None = name
-
-    def wait(self, handle: int) -> Awaitable[None]:
-        """Wait until the VM has the result of the read ``handle``."""
-        return _until_attempt_end(self._host, self._host.wait(handle))
 
     def _key(self, key: str) -> str:
         return key if self._name is None else _beside(self._name, key)
 
     def get(self, key: str) -> Awaitable[bytes | None]:
-        # TODO: use protocol v8's ephemeral get, which stays out of the journal,
-        # once a Restate release ships v8 and the SDK supports it. Restate 1.8
-        # negotiates v7 at most, so this is a journaled get.
         return _until_attempt_end(self._host, self._host.get(self._key(key)))
 
     def set(self, key: str, value: bytes) -> None:
@@ -204,7 +195,7 @@ class _ObjectStore:
         return own()
 
     def sync(self) -> Awaitable[None]:
-        """Wait until every earlier write is stored; the run is issued now, in order with the writes."""
+        """Wait until every earlier write is stored; the request is issued now, in order with the writes."""
         return _until_attempt_end(self._host, self._host.sync())
 
 
@@ -214,12 +205,8 @@ class _ReaderStore:
     def __init__(self, host: SqlHost, name: str | None) -> None:
         self._host: SqlHost = host
         self._name: str | None = name
-        self.vm: PyVM | None = host.vm
+        self.vm: PyExplicitRecoveryVM | None = host.vm
         self.database_name: str | None = name
-
-    def wait(self, handle: int) -> Awaitable[None]:
-        """Wait until the VM has the result of the read ``handle``."""
-        return _until_attempt_end(self._host, self._host.wait(handle))
 
     def get(self, key: str) -> Awaitable[bytes | None]:
         key = key if self._name is None else _beside(self._name, key)
@@ -397,6 +384,7 @@ class AttemptDatabase(Writes):
         _ATTEMPT.on(self, attempt)
 
     async def query_columns(self, sql: str, params: Sequence[SqlParam] | None = None) -> tuple[list[str], Rows]:
+        self._attempt.asked()
         return await self._attempt.call(lambda db: db.query_columns(sql, params))
 
     def transaction(self) -> typing.AsyncContextManager[Transaction]:
@@ -576,7 +564,32 @@ class Attempt:
         ensuring(self.db, self._ensure)
 
     async def _ensure(self, schemas: Sequence[Schema]) -> None:
+        self.asked()
         await self.call(lambda db: self._ensure_schemas(db, schemas))
+
+    def asked(self) -> None:
+        """The handler asked for a call of its database: fail it if a cancellation is owed to it.
+
+        This is where the database delivers a cancellation, and the only place.
+        What the handler asks for passes through here: ``ctx.db``'s statements,
+        its ``transaction()``, and a schema it ensures. What the session does for
+        itself does not: the open, the object's schema, the sends a crashed
+        attempt left unmade, emptying the outbox after a commit, and the save at
+        the handler's end. A cancellation that failed one of those would be
+        delivered to nobody, or would report a transaction as cancelled after it
+        committed.
+
+        And it is before the call issues anything. So a call of the database
+        that fails with the cancellation wrote nothing and sent nothing; a call
+        already under way when the cancellation arrives runs to its end, and the
+        cancellation goes to what the handler awaits next.
+
+        Raises:
+            TerminalError: The cancellation (``"cancelled"``, 409), once.
+        """
+        take = getattr(self._host, "take_cancellation", None)
+        if take is not None and take():
+            raise TerminalError("cancelled", 409)
 
     def database(self, name: str) -> Database:
         """Return the key's separate database ``name`` for this attempt (see ``database``)."""
@@ -637,12 +650,14 @@ class Attempt:
         commit, right after its writes and before it waits for anything (see
         ``with_commit``). Since Restate stores an attempt's commands in order,
         the sends are stored only if the commit is, and anything that fails the
-        commit's wait (a cancellation, say) comes after them. A second commit
+        commit's wait (the attempt's end, say) comes after them. A second commit
         empties the outbox before the transaction returns. If the sends stayed
         until the handler's end, an attempt that resumes after a long wait could
         make them again after the idempotency retention has expired, so that
         the duplicates would no longer be dropped.
         """
+        # Before the session opens or the transaction begins: see ``asked``.
+        self.asked()
         outgoing: Outgoing | None = None
         session = self._current()
         try:

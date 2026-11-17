@@ -40,22 +40,21 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from restate import _preview
+from restate._internal import PyExplicitRecoveryVM, PyInput  # pylint: disable=no-name-in-module
 from restate.context import Request
-from restate.exceptions import SdkInternalBaseException, SuspendedException, TerminalError
+from restate.exceptions import TerminalError
 from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL, Handler, handler_from_callable
 from restate.object import VirtualObject
 from restate.retry_policy import InvocationRetryPolicy
-from restate.serde import BytesSerde, DefaultSerde, Serde
-from restate.server_context import DisconnectedException, ServerInvocationContext
+from restate.serde import DefaultSerde, Serde
+from restate.server_types import ReceiveChannel, Send, header_to_binary
 from restate.sessions._api import Database, DatabaseReader, SessionContext, ViewContext
 from restate.sessions._calls import CallHost, Calls, GenericSend, Sends, send_now, send_to
+from restate.sessions._driver import AttemptDriver, AttemptFinished, VmHost
 from restate.sessions._link import Link
 from restate.sessions._schema import Migration, Schema, steps_of
 from restate.sessions._scope import SCOPE, Scope
-from restate.sessions._selector import FutureSelector, hook
 from restate.sessions._session import Attempt, ObjectConfig, SqlHost, reader_of, with_attempt
-from restate.vm import SingleUnresolvedFuture
 
 F = typing.TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
@@ -72,8 +71,8 @@ SQL_METADATA = {
 """Metadata added to every session object.
 
 It tells Restate's UI to hide the database from the journal view: its head,
-tail, manifests and packs (state keys under ``v22/``), and the ``sync`` run
-after its writes.
+tail, manifests and packs, and the writes that only ask for an ack (state keys
+under ``v22/``), and the ``sync`` runs of earlier versions.
 """
 
 
@@ -115,126 +114,6 @@ class AttemptViewContext(Calls):
         self._cancel(invocation_id)
 
 
-class _ContextHost:
-    """A ``SqlHost`` over the SDK's context, for one attempt.
-
-    Its waits go through the selector, and its state commands are named after
-    their keys, so that tooling can hide the database by name.
-    """
-
-    def __init__(self, context: ServerInvocationContext, shared: bool) -> None:
-        self.context: ServerInvocationContext = context
-        self.shared: bool = shared
-        self.service: str = context.handler.service_tag.name
-        self.key: str = context.key()
-        self._listeners: list[Callable[[], None]] = []
-        self.selector: FutureSelector = hook(context, self._notify_attempt_end)
-        attempt_finished = context.on_attempt_finished
-
-        def on_attempt_finished() -> None:
-            self._notify_attempt_end()
-            attempt_finished()
-
-        context.on_attempt_finished = on_attempt_finished  # type: ignore[method-assign]
-
-    @property
-    def vm(self) -> Any:
-        """The invocation's VM, which the database reads and writes directly (see ``_database.Store``).
-
-        It is ``None`` when a journal codec is configured, since only the
-        context's state commands apply the codec.
-        """
-        return None if self.context.journal_codec is not None else self.context.vm.vm
-
-    def wait(self, handle: int) -> Awaitable[None]:
-        """Wait, through the selector, until the VM has the result of the read ``handle``."""
-        return self.selector.wait(SingleUnresolvedFuture(handle))
-
-    def cancel_invocation(self, invocation_id: str) -> None:
-        self.context.cancel_invocation(invocation_id)
-
-    def get(self, key: str) -> Awaitable[bytes | None]:
-        return self.context.get(key, serde=BytesSerde(), entry_name=key)
-
-    def set(self, key: str, value: bytes) -> None:
-        self.context.set(key, value, serde=BytesSerde(), entry_name=key)
-
-    def clear(self, key: str) -> None:
-        self.context.clear(key, entry_name=key)
-
-    def state_keys(self) -> Awaitable[list[str]]:
-        # Named under the state format's prefix, which tooling hides.
-        return self.context.state_keys(entry_name="v22/keys")
-
-    def sync(self) -> Awaitable[Any]:
-        return self.context.run_typed("sync", _nothing)
-
-    def open_annotation(self, name: str) -> int | None:
-        return self.context.open_annotation(name)
-
-    def close_annotation(self, handle: int, value: bytes, failure: str | None) -> None:
-        self.context.close_annotation(handle, value, failure)
-
-    def generic_call(
-        self,
-        service: str,
-        handler: str,
-        arg: bytes,
-        key: str | None = None,
-        idempotency_key: str | None = None,
-        headers: dict[str, str] | None = None,
-        name: str | None = None,
-    ) -> Any:
-        return self.context.generic_call(service, handler, arg, key, idempotency_key, headers, entry_name=name)
-
-    def attach_invocation(self, invocation_id: str) -> Awaitable[bytes]:
-        return self.context.attach_invocation(invocation_id, serde=BytesSerde())
-
-    def generic_send(
-        self,
-        service: str,
-        handler: str,
-        arg: bytes,
-        key: str | None = None,
-        send_delay: timedelta | None = None,
-        idempotency_key: str | None = None,
-        headers: dict[str, str] | None = None,
-        name: str | None = None,
-    ) -> Any:
-        return self.context.generic_send(
-            service, handler, arg, key, send_delay, idempotency_key, headers, entry_name=name
-        )
-
-    def attempt_end(self) -> BaseException | None:
-        ended = self.selector.ended
-        if ended is not None:
-            return ended
-        if self.context.request_finished_event.is_set():
-            return SuspendedException()
-        return None
-
-    def on_attempt_end(self, listener: Callable[[], None]) -> Callable[[], None]:
-        if self.attempt_end() is not None:
-            listener()
-            return lambda: None
-        self._listeners.append(listener)
-
-        def cancel() -> None:
-            if listener in self._listeners:
-                self._listeners.remove(listener)
-
-        return cancel
-
-    def _notify_attempt_end(self) -> None:
-        listeners, self._listeners = self._listeners, []
-        for listener in listeners:
-            listener()
-
-
-async def _nothing() -> None:
-    """Do nothing; the action of an empty run."""
-
-
 def _cancel_of(host: SqlHost) -> Callable[[str], None]:
     """Return the context's ``cancel``, implemented on ``host``."""
 
@@ -266,8 +145,8 @@ ENTRIES: Link[dict[str, _Entry]] = Link("entries")
 def _context_of(entry: _Entry, host: SqlHost, request: Request, attempt: Attempt) -> SessionContext | ViewContext:
     """Create the context for an attempt of ``entry``."""
     cancel = _cancel_of(host)
-    sdk = typing.cast("ServerInvocationContext | None", getattr(host, "context", None))
-    scope = Scope(sdk=sdk, explicit_cancellation=entry.explicit_cancellation, definition=entry.definition())
+    driver = host.driver if isinstance(host, VmHost) else None
+    scope = Scope(driver=driver, explicit_cancellation=entry.explicit_cancellation, definition=entry.definition())
     if entry.view:
         view = AttemptViewContext(
             key=host.key, request=request, db=reader_of(attempt.db), _call_host=host, _cancel=cancel
@@ -293,28 +172,99 @@ async def _attempt(entry: _Entry, host: SqlHost, request: Request, args: Sequenc
 
 
 def _sdk_handler(entry: _Entry) -> Callable[..., Awaitable[Any]]:
-    """Wrap ``entry`` as an SDK handler whose attempts drive their awaits through a selector."""
+    """The SDK's handler for ``entry``: it has ``entry``'s signature, for the SDK, but Restate's attempts run ``_runner``'s."""
 
     @functools.wraps(entry.fn)
-    async def handler(ctx: ServerInvocationContext, *args: Any) -> Any:
-        host = _ContextHost(ctx, shared=entry.view)
-        try:
-            return await _attempt(entry, host, ctx.request(), args)
-        finally:
-            # Before the SDK writes the output: the working run ends first, in the journal.
-            host.selector.close()
+    async def handler(*_: Any) -> Any:
+        raise RuntimeError("a session object's attempts run on their own VM (see _runner)")
 
     return handler
 
 
-def _explicit_of(ctx: SessionContext, operation: str) -> ServerInvocationContext:
-    """Return the SDK's context behind ``ctx``, which must be a handler's with ``explicit_cancellation=True``."""
+async def _invoke(
+    entry: _Entry,
+    handler: Handler[Any, Any],
+    driver: AttemptDriver,
+    request: PyInput,
+    attempt_headers: dict[str, str],
+    codec: Any,
+) -> bytes:
+    """Run the attempt's handler on its input; its output, serialized."""
+    body = bytes(request.input)
+    data = body
+    if codec is not None:
+        try:
+            data = await codec.decode(data)
+        except Exception as e:
+            raise TerminalError(message="Failed to decode input using journal value codec", status_code=400) from e
+    args: tuple[Any, ...] = ()
+    if handler.arity == 2:
+        try:
+            args = (handler.handler_io.input_serde.deserialize(data),)
+        except Exception as e:
+            raise TerminalError(message=f"Unable to parse an input argument. {e}") from e
+    host = VmHost(driver, service=handler.service_tag.name, key=request.key, shared=entry.view, codec=codec)
+    context_request = Request(
+        id=request.invocation_id,
+        headers={header.key: header.value for header in request.headers},
+        attempt_headers=attempt_headers,
+        body=body,
+        attempt_finished_event=AttemptFinished(driver.finished),
+        scope=request.scope,
+        limit_key=request.limit_key,
+        idempotency_key=request.idempotency_key,
+    )
+    output = handler.handler_io.output_serde.serialize(await _attempt(entry, host, context_request, args))
+    if codec is not None:
+        output = codec.encode(bytes(output))
+    return bytes(output)
+
+
+def _runner(entry: _Entry) -> Callable[..., Awaitable[None]]:
+    """Return what runs an attempt of ``entry`` on Restate, on its own VM (see ``_driver``)."""
+
+    async def run(
+        handler: Handler[Any, Any],
+        *,
+        request_headers: list[tuple[str, str]],
+        attempt_headers: dict[str, str],
+        receive: ReceiveChannel,
+        send: Send,
+        bidirectional: bool,
+        server_headers: list[tuple[bytes, bytes]],
+        journal_codec: Any = None,
+    ) -> None:
+        vm = PyExplicitRecoveryVM(request_headers, bidirectional)
+        head = vm.get_response_head()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": head.status_code,
+                "headers": [*header_to_binary(head.headers), *server_headers],
+                "trailers": False,
+            }
+        )
+        driver = AttemptDriver(vm, send, receive, entry.explicit_cancellation)
+        try:
+            request = await driver.start()
+            if request is not None:
+                await driver.run(lambda: _invoke(entry, handler, driver, request, attempt_headers, journal_codec))
+        except asyncio.CancelledError:
+            driver.abandon()
+            raise
+        await driver.leave()
+
+    return run
+
+
+def _explicit_of(ctx: SessionContext, operation: str) -> AttemptDriver:
+    """Return the attempt behind ``ctx``, which must be a handler's with ``explicit_cancellation=True``."""
     scope = SCOPE.of(ctx)
-    if scope is None or scope.sdk is None:
+    if scope is None or scope.driver is None:
         raise TerminalError(f"{operation} takes a session object's ctx")
     if not scope.explicit_cancellation:
         raise TerminalError(f"{operation} takes the ctx of a handler with explicit_cancellation=True")
-    return scope.sdk
+    return scope.driver
 
 
 async def cancelled(ctx: SessionContext) -> None:
@@ -331,15 +281,10 @@ async def cancelled(ctx: SessionContext) -> None:
 
         asyncio.ensure_future(stop_when_cancelled())
 
-    It watches for the cancellation, and holds nothing: awaited alone, it
-    neither suspends the invocation nor tells Restate that the handler waits
-    (the attempt's journal has a run named ``work`` instead, for the
-    handler's own work; see ``_selector.py``). A cancellation reaches the
-    handler at once while Restate keeps the invocation's input open. Once
-    Restate closed it (the handler sent and received nothing for the
-    inactivity timeout), a cancellation reaches the handler at its next
-    await of Restate's, which suspends the invocation and resumes it at once
-    (in the next attempt), or not at all if it awaits nothing more.
+    It watches for the cancellation, and holds nothing: awaiting it neither
+    suspends the invocation nor tells Restate that the handler waits. A
+    cancellation reaches the handler as soon as Restate sends it, or at the
+    start of the next attempt if an earlier one received it.
 
     Args:
         ctx: The context of a handler with ``explicit_cancellation=True``.
@@ -351,10 +296,8 @@ async def cancelled(ctx: SessionContext) -> None:
         TerminalError: If ``ctx`` is not the context of a handler with
             ``explicit_cancellation=True``.
     """
-    try:
-        await _preview.cancellation(_explicit_of(ctx, "cancelled"))
-    except (SdkInternalBaseException, DisconnectedException) as ended:
-        raise asyncio.CancelledError() from ended
+    # The attempt's end cancels the cancellation's future.
+    await asyncio.shield(_explicit_of(ctx, "cancelled").cancellation)
 
 
 async def cancel_calls(ctx: SessionContext) -> list[str]:
@@ -373,7 +316,7 @@ async def cancel_calls(ctx: SessionContext) -> list[str]:
         TerminalError: If ``ctx`` is not the context of a handler with
             ``explicit_cancellation=True``.
     """
-    return await _preview.cancel_previous_calls(_explicit_of(ctx, "cancel_calls"))
+    return await _explicit_of(ctx, "cancel_calls").cancel_calls()
 
 
 def _host_of(ctx: SessionContext) -> CallHost:
@@ -410,9 +353,11 @@ class Annotation:
     next attempt.
     """
 
-    def __init__(self, host: _ContextHost | None = None, handle: int | None = None) -> None:
-        self._host: _ContextHost | None = host
+    def __init__(self, host: VmHost | None = None, handle: int | None = None) -> None:
+        self._host: VmHost | None = host
         self._handle: int | None = handle
+        # The trace, which stays a parent after it ends.
+        self._trace: int | None = handle
 
     def end(self, summary: Any = None) -> None:
         """End the work, with ``summary`` (as JSON) as the run's value. It does nothing if it has ended."""
@@ -428,16 +373,18 @@ class Annotation:
             self._host.close_annotation(handle, value, failure)
 
 
-def annotate(ctx: SessionContext, name: str) -> Annotation:
+def annotate(ctx: SessionContext, name: str, *, parent: Annotation | None = None) -> Annotation:
     """Start timing some work of the handler of ``ctx`` (a model request, say), as a run named ``name``.
 
-    End it with ``end`` or ``fail``. Outside a session object's handler on
-    Restate (with a test's host, say), nothing is timed.
+    The work is part of ``parent``'s, if given, or else of the attempt's. End
+    it with ``end`` or ``fail``. Outside a session object's handler on Restate
+    (with a test's host, say), nothing is timed.
     """
     host = ctx._call_host if isinstance(ctx, AttemptContext) else None  # pyright: ignore[reportPrivateUsage]
-    if not isinstance(host, _ContextHost):
+    if not isinstance(host, VmHost):
         return Annotation()
-    return Annotation(host, host.open_annotation(name))
+    parent_trace = parent._trace if parent is not None else None  # pyright: ignore[reportPrivateUsage]
+    return Annotation(host, host.open_annotation(name, parent_trace))
 
 
 def attach_invocation(ctx: SessionContext, invocation_id: str) -> Awaitable[bytes]:
@@ -622,9 +569,11 @@ class SessionObject(VirtualObject):
         Args:
             name: The handler's name. Defaults to the function's name.
             explicit_cancellation: If true, cancelling the invocation neither
-                fails its awaits nor cancels its calls. The handler learns of
-                the cancellation with ``internal.cancelled(ctx)`` and decides
-                what to stop, for example its calls with
+                fails its awaits nor cancels its calls (without it, a
+                cancellation cancels the calls under way and fails the awaits
+                pending, or else the next one: see ``Database``). The handler
+                learns of the cancellation with ``internal.cancelled(ctx)``
+                and decides what to stop, for example its calls with
                 ``internal.cancel_calls(ctx)`` (from
                 ``restate.sessions.internal``).
 
@@ -774,13 +723,14 @@ class SessionObject(VirtualObject):
                 definition=weakref.ref(self),
                 explicit_cancellation=bool(options.get("explicit_cancellation")),
             )
-            # Attempts are not replayed (explicit_recovery): each runs from the
-            # start, against the current state, so it may read differently from
-            # earlier attempts.
+            # Attempts are not replayed: each runs from the start, on a VM of its
+            # own (see _driver), against the current state, so it may read
+            # differently from earlier attempts.
             registered = VirtualObject.handler(
                 self, name, kind="shared" if view else "exclusive", explicit_recovery=True, **options
             )(_sdk_handler(entry))
             sdk: Handler[Any, Any] = handler_from_callable(registered)
+            sdk.attempt_runner = _runner(entry)
             entries = ENTRIES.of(self)
             assert entries is not None
             entries[sdk.name] = entry

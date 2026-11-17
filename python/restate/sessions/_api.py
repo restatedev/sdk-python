@@ -266,6 +266,37 @@ class Database(DatabaseWriter, Protocol):
 
     Each statement outside ``transaction()`` is a transaction of its own,
     durable once its call returns. Calls run one at a time, in call order.
+
+    A cancellation of the invocation reaches the handler once, as
+    ``TerminalError("cancelled", 409)`` (unless the handler has
+    ``explicit_cancellation``). When it comes, the calls Restate has not
+    answered are cancelled, and every await of Restate then pending fails with
+    it: a call, an attached invocation. If none was pending, it is carried to
+    the handler's next such await, or to its next call of the database; a
+    handler that awaits nothing more does not see it. A call made while it is
+    carried is made all the same: its result fails, and the callee runs on.
+
+    A call of the database is treated differently from an await of Restate, so
+    that its failure means one thing. A call already under way when the
+    cancellation comes runs to its end. A call of the database that the
+    carried cancellation fails was refused before it began, and did nothing:
+    it wrote nothing, and a ``transaction()`` neither committed nor made its
+    sends. A transaction that returns committed, and its sends are made, once.
+    (A transaction also raises the cancellation when its body awaits a call
+    that the cancellation fails, unless the body catches it: it rolls back, as
+    for any error of its body.)
+
+    What the handler awaits after the cancellation works, so it can
+    compensate, or make the call again::
+
+        try:
+            async with ctx.db.transaction() as tx:
+                ...
+        except restate.TerminalError as error:
+            if error.status_code != 409 or error.message != "cancelled":
+                raise
+            await ctx.db.execute("UPDATE orders SET status = 'cancelled' WHERE id = ?", [order])
+            raise
     """
 
     def transaction(self) -> typing.AsyncContextManager[Transaction]:
@@ -292,6 +323,9 @@ class SessionContext(Caller, Sender, Protocol):
     suspension, Restate starts a new attempt, which runs the handler from the
     start and finds what earlier attempts committed. Its operations may be
     awaited together, with ``asyncio.gather`` or ``asyncio.wait``.
+
+    A cancellation reaches the handler once (see ``Database``). An attempt
+    that follows a cancelled one gets it at its first await.
     """
 
     @property

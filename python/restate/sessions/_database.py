@@ -35,11 +35,11 @@ from typing import Any, Protocol
 
 from restate._internal import (  # pylint: disable=import-error,no-name-in-module
     SQL_CLEAR,
+    SQL_COMMIT,
     SQL_GET,
     SQL_KEYS,
     SQL_SET,
     SQL_SYNC,
-    SQL_WAIT,
     PySqlDatabase,
     SqlRefusedException,
     SqlReply,
@@ -96,11 +96,9 @@ class Store(Protocol):
     - ``keys()`` returns every key, as ``ctx.state_keys()`` does, or an
       awaitable of them. With it, a commit that writes a checkpoint deletes
       the packs no checkpoint needs any more; without it, they are kept.
-    - ``vm`` is the invocation's VM (``restate._internal.PyVM``), for a store
-      over a Restate context. The extension then reads and writes the VM
-      directly instead of calling ``get``, ``set`` and ``clear``, and calls
-      ``wait(handle)`` (an awaitable that completes once the VM has the read
-      for ``handle``) only when it must wait for a read.
+    - ``vm`` is the attempt's VM (``restate._internal.PyExplicitRecoveryVM``),
+      for a store over Restate. The extension then reads, writes, lists and
+      syncs with the VM directly, instead of calling the store's methods.
     - ``database_name`` names a database of the key other than the object's
       own (see ``_session.database``).
     """
@@ -159,7 +157,6 @@ class _Boundary:
         self.loop: asyncio.AbstractEventLoop = loop
         # The store's optional methods (see `Store`).
         self._keys: Callable[[], Sequence[str] | Awaitable[Sequence[str]]] | None = getattr(store, "keys", None)
-        self._wait: Callable[[int], Awaitable[None]] | None = getattr(store, "wait", None)
         self.lists_keys: bool = callable(self._keys)
         # The store's first error.
         self.failed: BaseException | None = None
@@ -173,7 +170,7 @@ class _Boundary:
             self.failed = error
 
     def dispatch(self, op: int, key: Any, value: bytes | None, reply: SqlReply | None) -> None:
-        """Handle one request of the extension; ``key`` is a store key, or a VM handle for ``SQL_WAIT``."""
+        """Handle one request of the extension; ``key`` is a store key, or empty for a sync or a commit."""
         if op in (SQL_SET, SQL_CLEAR):
             try:
                 if op == SQL_SET:
@@ -193,9 +190,13 @@ class _Boundary:
             elif op == SQL_KEYS:
                 assert self._keys is not None
                 result = self._keys()
-            elif op == SQL_WAIT:
-                assert self._wait is not None
-                result = self._wait(key)
+            elif op == SQL_COMMIT:
+                # A store over the VM syncs with an acked write of the head: what the transaction
+                # makes at its commit runs between that write and the wait for its ack.
+                run, self.with_sync = self.with_sync, None
+                if run is not None:
+                    run()
+                result = None
             elif self._write_failed is not None:
                 reply(None, str(self._write_failed))
                 return
@@ -230,7 +231,7 @@ class _Boundary:
 
 def _reply_value(op: int, result: object) -> object:
     """Convert a request's result to what the extension expects: a value, a list of keys, or ``None``."""
-    if op in (SQL_SYNC, SQL_WAIT):
+    if op in (SQL_SYNC, SQL_COMMIT):
         return None
     if op == SQL_KEYS:
         return list(typing.cast("Sequence[str]", result))

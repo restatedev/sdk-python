@@ -112,12 +112,18 @@ class Stop:
 
         If it stops first, ``work`` is cancelled and the stop reason is
         raised. Use it for a framework request that stopping the turn must cut
-        short.
+        short. Cancelling the task that awaits it (as the end of an attempt
+        cancels its handler) cancels ``work`` too.
         """
         task = asyncio.ensure_future(work)
         stopping = asyncio.ensure_future(self._event.wait())
         try:
             await asyncio.wait({task, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            # The guard itself is cancelled: so is the work, whose end nobody awaits.
+            task.cancel()
+            task.add_done_callback(_retrieve)
+            raise
         finally:
             stopping.cancel()
         if task.done():
@@ -127,6 +133,12 @@ class Stop:
             await task
         assert self.reason is not None
         raise self.reason
+
+
+def _retrieve(task: asyncio.Future[typing.Any]) -> None:
+    """Retrieve the end of a task nobody awaits, so that asyncio logs no "exception was never retrieved"."""
+    if not task.cancelled():
+        task.exception()
 
 
 _STOP: ScopeKey[Stop] = ScopeKey("stop_signal_of")
@@ -371,12 +383,11 @@ async def chat_turn(ctx: AgentContext, text: str, answer: Callable[[AgentContext
     While it answers, the object's ``status`` reports the turn. Cancelling the
     invocation stops the turn (through ``stop_signal_of``) whenever it comes,
     and cancels the calls its tools made; the handler then fails with the
-    cancellation. The cancellation reaches the turn's work at once while
-    Restate keeps the turn's input open; once Restate closed it (nothing
-    sent or received for its inactivity timeout: a long model request, say),
-    at the turn's next step, when it next commits or calls (see
-    ``cancelled`` of ``restate.sessions.internal``). Watching for it holds
-    nothing: the turn works on. If the attempt ends first, the turn stops with
+    cancellation. The cancellation reaches the turn's work at once (see
+    ``cancelled`` of ``restate.sessions.internal``): watching for it holds
+    nothing, and while the turn works on its own (a model request, a tool)
+    its attempt tells Restate that it makes progress, so Restate keeps it
+    past its inactivity timeout. If the attempt ends first, the turn stops with
     ``AttemptEnded`` and the next attempt carries on. The turn publishes when
     it starts (the companion's ``start`` does), after each write of its steps
     that commits (a reply with tool calls, the tools' results: ``answer_once``

@@ -570,15 +570,15 @@ async def test_cancelled_takes_the_ctx_of_a_handler_with_explicit_cancellation()
         await run(obj, "explicit", Host(Backend(), service="cancelling"))
 
 
-async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first(monkeypatch):
-    from restate import _preview  # pylint: disable=import-outside-toplevel
-    from restate.exceptions import SuspendedException  # pylint: disable=import-outside-toplevel
+async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first():
     from restate.sessions import _object, _scope  # pylint: disable=import-outside-toplevel
 
-    async def attempt_ended(_sdk: Any) -> None:
-        raise SuspendedException()
+    class Attempt:
+        """The part of the attempt's driver ``cancelled`` reads: the cancellation, which the attempt's end cancels."""
 
-    monkeypatch.setattr(_preview, "cancellation", attempt_ended)
+        def __init__(self) -> None:
+            self.cancellation: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
     host = Host(Backend())
     ctx = _object.AttemptContext(
         key="k",
@@ -588,8 +588,11 @@ async def test_cancelled_ends_its_waiter_cancelled_when_the_attempt_ends_first(m
         _send_sink=lambda send: None,
         _cancel=lambda invocation_id: None,
     )
-    _scope.SCOPE.on(ctx, _scope.Scope(sdk=typing.cast(Any, object()), explicit_cancellation=True))
+    attempt = Attempt()
+    _scope.SCOPE.on(ctx, _scope.Scope(driver=typing.cast(Any, attempt), explicit_cancellation=True))
     watcher = asyncio.ensure_future(internal.cancelled(ctx))
+    await asyncio.sleep(0)
+    attempt.cancellation.cancel()
     await asyncio.wait({watcher})
     # Cancelled, not failed: asyncio reports no exception nobody retrieved.
     assert watcher.cancelled()
@@ -724,3 +727,56 @@ async def test_an_attempt_is_freed_once_it_ends():
     gc.collect()
     # Nothing of this package's holds an attempt's database (and so the attempt) past it.
     assert kept[0]() is None
+
+
+async def test_a_request_response_transport_is_refused_before_the_handler_runs():
+    from restate.server_types import ReceiveChannel  # pylint: disable=import-outside-toplevel
+
+    obj = sessions.SessionObject("transported")
+    ran = False
+
+    @obj.handler
+    async def handle(ctx: sessions.SessionContext) -> None:
+        nonlocal ran
+        ran = True
+
+    events = iter(
+        [
+            # Restate's whole request, then the end of the body: nothing the VM waits for.
+            {"type": "http.request", "body": b"", "more_body": False},
+            {"type": "http.disconnect"},
+        ]
+    )
+
+    async def receive() -> Any:
+        event = next(events, None)
+        if event is None:
+            await asyncio.Event().wait()
+        return event
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: Any) -> None:
+        sent.append(message)
+
+    handler = obj.handlers["handle"]
+    assert handler.attempt_runner is not None
+    channel = ReceiveChannel(receive)
+    try:
+        await handler.attempt_runner(
+            handler,
+            request_headers=[("content-type", "application/vnd.restate.invocation.v7")],
+            attempt_headers={},
+            receive=channel,
+            send=send,
+            bidirectional=False,
+            server_headers=[],
+        )
+    finally:
+        await channel.close()
+    assert not ran
+    assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 200
+    # The error that pauses the invocation, then the end of the response.
+    bodies = [message for message in sent[1:] if message["type"] == "http.response.body"]
+    assert bodies[0]["body"], sent
+    assert bodies[-1] == {"type": "http.response.body", "body": b"", "more_body": False}

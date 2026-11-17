@@ -410,6 +410,18 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             active_channels.add(receive_channel)
             try:
                 journal_codec = await get_codec()
+                if handler.attempt_runner is not None:
+                    await handler.attempt_runner(
+                        handler,
+                        request_headers=request_headers,
+                        attempt_headers=dict(request_headers),
+                        receive=receive_channel,
+                        send=send,
+                        bidirectional=scope["http_version"] != "1.1" and endpoint.protocol != "request_response",
+                        server_headers=X_RESTATE_SERVER,
+                        journal_codec=journal_codec,
+                    )
+                    return
                 await process_invocation_to_completion(
                     VMWrapper(
                         request_headers,

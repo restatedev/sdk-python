@@ -455,14 +455,17 @@ sequenceDiagram
   does nothing), never the message that started after it.
 - The turn ends cancelled whenever the cancellation comes, and the next
   message starts afresh: the cancelled prompt is over.
-- The cancellation reaches the turn's work at once while Restate keeps the
-  turn's input open. Restate closes it once the turn has sent and received
-  nothing for the inactivity timeout (a minute by default: a long model
-  request, or a slow tool). The turn works on, as watching for the
-  cancellation holds nothing, and a cancellation then reaches it at its next
-  step, when it next commits or calls. For turns whose steps take longer,
-  raise Restate's inactivity timeout (the server's
-  `worker.invoker.inactivity-timeout`).
+- The cancellation reaches the turn's work at once. Restate shuts down an
+  attempt it has heard nothing from for the inactivity timeout (a minute by
+  default), and the next attempt runs the turn from its start. So while the
+  turn works on its own (a model request, a tool), its attempt tells Restate
+  every 20 seconds that it makes progress, and Restate keeps it however long
+  the step takes. While the turn waits for an answer of Restate's instead (a
+  tool waiting for an approval, a call), it tells Restate nothing: Restate
+  shuts the attempt down after the timeout, so that a wait of days holds no
+  process, and the next attempt gets the cancellation as it starts. A
+  deployment that sets an inactivity timeout under 20 seconds is shut down
+  between two of those messages.
 - A cancellation that comes once the turn answered changes nothing: the
   answer stands.
 - A tool cut short by the stop raises the stop's reason, so the model never
