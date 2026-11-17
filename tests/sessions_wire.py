@@ -26,8 +26,10 @@ import asyncio
 import json
 import struct
 import time
+import typing
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal, Union
+from typing import Any, Literal, Optional, Union
 
 from restate.server_types import ASGIReceiveEvent, ASGISendEvent, ReceiveChannel
 from restate.sessions import SessionObject
@@ -169,6 +171,28 @@ def messages(output: bytes) -> list[Message]:
     return out
 
 
+def outcome(sent: list[Message]) -> Optional[Union[tuple[Literal["value"], Any], tuple[Literal["failure"], int, str]]]:
+    """How the invocation ended: ``("value", v)`` with its output deserialized, ``("failure", code, message)``, or
+    ``None`` if the attempt wrote no output (it was shut down)."""
+    output = next((m for m in sent if m.type == TYPE.output), None)
+    if output is None:
+        return None
+    if 14 in output.fields:
+        content = decode(output.bytes_of(14)).get(1, [b""])[0]
+        assert isinstance(content, bytes)
+        return ("value", json.loads(content))
+    failure = decode(output.bytes_of(15))
+    code = failure[1][0]
+    message = failure.get(2, [b""])[0]
+    assert isinstance(code, int) and isinstance(message, bytes)
+    return ("failure", code, message.decode())
+
+
+def commits(sent: list[Message]) -> int:
+    """How many of ``sent``'s commands asked for an ack: a commit each, on either store."""
+    return sum(1 for m in sent if 0x0400 <= m.type < 0x8000 and m.flags & REQUESTED_ACK)
+
+
 def output_of(sent: list[Message]) -> Any:
     """The handler's output, deserialized from the attempt's output message."""
     output = next(m for m in sent if m.type == TYPE.output)
@@ -176,6 +200,40 @@ def output_of(sent: list[Message]) -> Any:
     content = answered[1][0]
     assert isinstance(content, bytes)
     return json.loads(content)
+
+
+@dataclass(frozen=True)
+class Made:
+    """A call or a send the attempt made, as it went on the wire."""
+
+    service: str
+    handler: str
+    key: str
+    idempotency_key: Optional[str]
+    input: str
+    """The input, as the text of its bytes."""
+    invocation_id: Optional[str] = None
+    """The invocation id Restate gave a call; a send's is never answered here."""
+
+    @property
+    def target(self) -> str:
+        """``Service/handler``."""
+        return f"{self.service}/{self.handler}"
+
+
+def _made(message: Message, key_field: int, idempotency_field: int, invocation_id: Optional[str] = None) -> Made:
+    def text(number: int) -> Optional[str]:
+        found = message.fields.get(number)
+        return None if found is None else typing.cast(bytes, found[0]).decode()
+
+    return Made(
+        service=text(1) or "",
+        handler=text(2) or "",
+        key=text(key_field) or "",
+        idempotency_key=text(idempotency_field),
+        input=text(3) or "",
+        invocation_id=invocation_id,
+    )
 
 
 CANCEL_SIGNAL = frame(TYPE.signal, uint(2, 1) + bytes_(4, b""))
@@ -199,10 +257,10 @@ class RestateSide:
         state: The object's state, which the attempt reads and writes. The
             start carries the head of the database alone, as Restate preloads
             it for a session object, and the attempt reads the rest on the wire.
-        cancel_on_commit: The first time a command asks for an ack, Restate
-            sends the cancel signal, and the ack once the attempt has acted
-            on the signal: a cancellation that lands with the database waiting
-            on Restate.
+        cancel_on_commit: The first time a command asks for an ack (``True``),
+            or the ``n``-th time (from 1), Restate sends the cancel signal,
+            and the ack once the attempt has acted on the signal: a
+            cancellation that lands with the database waiting on Restate.
         cancel_on_read: At the ``n``-th read of the state on the wire, Restate
             sends the cancel signal, and the read's value once the attempt has
             acted on the signal.
@@ -216,6 +274,17 @@ class RestateSide:
         cancel_at_start: A retry of a cancelled invocation: the start counts
             two known entries, and the signal follows the input, so the VM
             knows of the cancellation before the handler starts.
+        cancel_before_answer: Just before Restate answers the ``n``-th thing
+            the attempt asks for (from 1; see ``asks``), it sends the cancel
+            signal, and the answer once the attempt has acted on the signal.
+        withhold_answer: The ``n``-th thing the attempt asks for (from 1) is
+            never answered: a test shuts the attempt down meanwhile.
+        hold: Calls to these targets (``Service/handler``) get their
+            invocation id, and their result only once ``release``d.
+        fail: Calls to these targets fail with this terminal failure,
+            ``(code, message)``.
+        id_per_call: Give each call an invocation id of its own (``inv_<n>``)
+            rather than ``inv_started`` for all.
 
     A call to key ``k`` is never answered: what a started call, whose result
     nobody holds, looks like to the handler. Every other call is answered with
@@ -226,14 +295,37 @@ class RestateSide:
         self,
         state: dict[str, bytes] | None = None,
         *,
-        cancel_on_commit: bool = False,
+        cancel_on_commit: bool | int = False,
         cancel_on_read: int | None = None,
         cancel_on_keys: bool = False,
         cancel_on_call: Literal["before_id", "after_id"] | None = None,
         cancel_at_start: bool = False,
+        cancel_before_answer: int | None = None,
+        withhold_answer: int | None = None,
+        hold: list[str] | None = None,
+        fail: dict[str, tuple[int, str]] | None = None,
+        id_per_call: bool = False,
     ) -> None:
         self.state: dict[str, bytes] = {} if state is None else state
-        self._cancel_on_commit = cancel_on_commit
+        # The ack (from 1) that the signal goes in with, or 0 for none.
+        self._cancel_on_commit = int(cancel_on_commit)
+        self._cancel_before_answer = cancel_before_answer
+        self._withhold_answer = withhold_answer
+        self._hold = set(hold or [])
+        self._fail = dict(fail or {})
+        self._id_per_call = id_per_call
+        # The results withheld, by target, oldest first: (the result's completion id, the input echoed).
+        self._held_results: dict[str, list[tuple[int, bytes]]] = {}
+        self._acks = 0
+        self.asks: list[str] = []
+        """What the attempt asked Restate for, in order, which Restate answers: ``read <key>``, ``ack``, or ``call
+        <Service/handler>`` (a call that is neither held nor to key ``k``)."""
+        self.calls: list[Made] = []
+        """The calls the attempt made, in order, with the invocation id each got."""
+        self.sends: list[Made] = []
+        """The sends the attempt made, in order."""
+        self.cancels: list[str] = []
+        """The invocation ids the attempt sent a cancellation to, in order."""
         self._cancel_on_read = cancel_on_read
         self._cancel_on_keys = cancel_on_keys
         self._cancel_on_call = cancel_on_call
@@ -353,6 +445,38 @@ class RestateSide:
         """Restate closes the request body, as its inactivity timeout does: the attempt is shut down."""
         self._close()
 
+    def release(self, target: str) -> None:
+        """Answer the oldest withheld call to ``target`` (``Service/handler``), echoing its input."""
+        withheld = self._held_results.get(target)
+        if not withheld:
+            raise AssertionError(f"no call to {target} is withheld")
+        result, echoed = withheld.pop(0)
+        self._push(frame(TYPE.call_completion, uint(1, result) + field(5, 2, value(echoed))))
+
+    def has_called(self, target: str) -> bool:
+        """Whether the attempt has called ``target`` (``Service/handler``), as far as Restate has taken it in."""
+        return any(c.target == target for c in self.calls)
+
+    async def until(self, condition: Callable[[], bool], what: str, timeout: float = 20.0) -> None:
+        """Return once ``condition`` holds, letting the attempt run; fail after ``timeout``, which only a hang reaches."""
+        deadline = time.monotonic() + timeout
+        while not condition():
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"waited {timeout}s for {what}")
+            await asyncio.sleep(0.001)
+
+    def _asked(self, ask: str) -> bool:
+        """Before Restate answers ``ask``: the signal, if this ask is the one; whether to answer it.
+
+        The answer pushed after the signal is held until the attempt has acted on the signal (``_signal``).
+        """
+        self.asks.append(ask)
+        if self._withhold_answer == len(self.asks):
+            return False
+        if self._cancel_before_answer == len(self.asks) and self.signalled_at is None:
+            self._signal()
+        return True
+
     def _over(self, sent: list[Message]) -> bool:
         return any(m.type in (TYPE.end, TYPE.error) for m in sent)
 
@@ -385,16 +509,21 @@ class RestateSide:
             # Restate acks a command only if it asked to be acked, and the ack of one covers every
             # command before it.
             if message.flags & REQUESTED_ACK:
-                # Restate signals a cancellation once, not on every commit: what follows is acked
-                # as usual.
-                if self._cancel_on_commit and self.signalled_at is None:
-                    self._signal()
-                self._push(frame(TYPE.command_ack, uint(1, self._index)))
+                self._acks += 1
+                # A withheld ack still stores the command, below.
+                if self._asked("ack"):
+                    # Restate signals a cancellation once, not on every commit: what follows is
+                    # acked as usual.
+                    if self._acks == self._cancel_on_commit and self.signalled_at is None:
+                        self._signal()
+                    self._push(frame(TYPE.command_ack, uint(1, self._index)))
         if message.type == TYPE.get_state_ephemeral:
             self.reads += 1
             if self.reads == self._cancel_on_read and self.signalled_at is None:
                 self._signal()
             key = message.bytes_of(2).decode()
+            if not self._asked(f"read {key}"):
+                return
             held = self.state.get(key)
             self._push(
                 frame(
@@ -410,10 +539,15 @@ class RestateSide:
             self.state[key] = content
         elif message.type == TYPE.clear_state:
             self.state.pop(message.bytes_of(1).decode(), None)
+        elif message.type == TYPE.one_way_call:
+            self.sends.append(_made(message, 6, 7))
+        elif message.type == TYPE.cancel_invocation:
+            self.cancels.append(message.bytes_of(1).decode())
         elif message.type == TYPE.call:
-            invocation_id = frame(
-                TYPE.call_invocation_id_completion, uint(1, message.int_of(10)) + bytes_(16, "inv_started")
-            )
+            id_ = f"inv_{len(self.calls) + 1}" if self._id_per_call else "inv_started"
+            made = _made(message, 5, 6, id_)
+            self.calls.append(made)
+            invocation_id = frame(TYPE.call_invocation_id_completion, uint(1, message.int_of(10)) + bytes_(16, id_))
             if self._cancel_on_call is not None and self.signalled_at is None:
                 if self._cancel_on_call == "before_id":
                     self._signal()
@@ -422,9 +556,21 @@ class RestateSide:
                     self._signal()
             else:
                 self._push(invocation_id)
-            if message.fields.get(5) != [b"k"]:
-                echoed = message.bytes_of(3)
-                self._push(frame(TYPE.call_completion, uint(1, message.int_of(11)) + field(5, 2, value(echoed))))
+            result = message.int_of(11)
+            echoed = typing.cast(bytes, message.fields.get(3, [b""])[0])
+            if made.key == "k":
+                return
+            if made.target in self._hold:
+                self._held_results.setdefault(made.target, []).append((result, echoed))
+                return
+            if not self._asked(f"call {made.target}"):
+                return
+            failure = self._fail.get(made.target)
+            if failure is None:
+                self._push(frame(TYPE.call_completion, uint(1, result) + field(5, 2, value(echoed))))
+            else:
+                code, text = failure
+                self._push(frame(TYPE.call_completion, uint(1, result) + field(6, 2, uint(1, code) + bytes_(2, text))))
         elif message.type == TYPE.get_state_keys:
             if self._cancel_on_keys and self.signalled_at is None:
                 self._signal()
