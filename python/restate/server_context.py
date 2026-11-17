@@ -719,6 +719,9 @@ class ServerInvocationContext(ObjectContext):
                 self.tasks.add(task)
                 continue
             if isinstance(do_progress_response, DoProgressWaitExternalProgress):
+                # Send what do_progress wrote before blocking: the AwaitingOn message, which tells Restate
+                # what this attempt awaits while it waits, so that Restate may suspend it.
+                await self.take_and_send_output()
                 chunk = await self.receive()
                 if chunk.get("type") == "restate.run_completed":
                     continue
