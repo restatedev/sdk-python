@@ -129,9 +129,11 @@ class AttemptDriver:
         # the handler starts, and its first await fails all the same. There is one carry, here.
         self._carried_cancellation: bool = False
         self.calls: list[_CallFuture] = []
+        """The attempt's calls, for ``cancel_calls``."""
+        # The calls Restate has yet to answer, by the handle of their result.
+        self._unanswered: dict[int, _CallFuture] = {}
         # The cancellation of the calls whose invocation id a cancellation waits for.
         self._cancelling: asyncio.Future[Any] | None = None
-        """The attempt's calls, for ``cancel_calls``."""
         self._queued: bool = False
         self._output: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._writer: asyncio.Task[None] = asyncio.ensure_future(self._write_output())
@@ -295,6 +297,9 @@ class AttemptDriver:
             while (notification := self.vm.take_notification()) is not None:
                 handle, value = notification
                 self._left_to_settle.discard(handle)
+                call = self._unanswered.pop(handle, None)
+                if call is not None:
+                    call.answered = True
                 future = self._futures.pop(handle, None)
                 if future is not None:
                     _settle(future, value)
@@ -406,8 +411,17 @@ class AttemptDriver:
         The caller delivers it: the handler's call of its database, before it issues anything,
         so that a call that fails with the cancellation did nothing.
         """
+        if self.ended is not None:
+            # The attempt is over: what the handler does now fails with that, as its awaits of
+            # Restate do, and the next attempt gets the cancellation.
+            return False
         carried, self._carried_cancellation = self._carried_cancellation, False
         return carried
+
+    def track(self, call: _CallFuture, result_handle: int) -> None:
+        """A call the attempt made, which a cancellation cancels until Restate answers it."""
+        self.calls.append(call)
+        self._unanswered[result_handle] = call
 
     def _cancelled(self) -> None:
         """Restate cancelled the invocation."""
@@ -415,10 +429,10 @@ class AttemptDriver:
             self.cancellation.set_result(None)
         if self._explicit_cancellation:
             return
-        # The calls in flight are cancelled (right away those whose invocation id is known, so
-        # that it happens before the handler ends), and the awaits fail.
+        # The calls in flight are cancelled (right away those whose invocation id is known, the
+        # others as it comes: the handler's end waits for them), and the awaits fail.
         for call in list(self.calls):
-            if not call.done() and call.knows_invocation_id():
+            if not call.answered and call.knows_invocation_id():
                 with contextlib.suppress(SdkInternalBaseException):
                     self.act(operator.methodcaller("cancel_invocation", call.known_invocation_id()))
         self._cancelling = _quiet(asyncio.ensure_future(self.cancel_calls()))
@@ -434,16 +448,20 @@ class AttemptDriver:
         self._carried_cancellation = not failed_a_result
 
     async def cancel_calls(self) -> list[str]:
-        """Cancel the calls of the attempt that have not completed; return their invocation ids."""
+        """Cancel the calls of the attempt that Restate has not answered; return their invocation ids.
+
+        Not answered, rather than not done: a cancellation fails the result of a call the handler
+        awaits, which leaves the callee running, and that is the call to cancel.
+        """
         cancelled: list[str] = []
         for call in list(self.calls):
-            if call.done() or call.cancelled:
+            if call.answered or call.cancelled:
                 continue
             try:
                 invocation_id = await call.invocation_id()
             except BaseException:  # pylint: disable=broad-exception-caught
                 continue
-            if not call.done() and not call.cancelled:
+            if not call.answered and not call.cancelled:
                 call.cancelled = True
                 self.act(operator.methodcaller("cancel_invocation", invocation_id))
                 cancelled.append(invocation_id)
@@ -496,6 +514,8 @@ class _CallFuture(RestateDurableCallFuture[bytes]):
 
         self.cancelled: bool = False
         """Whether the attempt cancelled the call's invocation."""
+        self.answered: bool = False
+        """Whether Restate answered the call: its result came, the callee's value or its failure."""
 
     def done(self) -> bool:
         return self._result.done()
@@ -618,7 +638,7 @@ class VmHost:
             self.driver.invocation_id_future(handle.invocation_id_handle),
             self.driver.future(handle.result_handle),
         )
-        self.driver.calls.append(call)
+        self.driver.track(call, handle.result_handle)
         return call
 
     def generic_send(
