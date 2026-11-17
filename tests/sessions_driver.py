@@ -12,14 +12,16 @@
 
 No server and no endpoint: the attempt runs through the object's runner, and a
 real database over the object's state. Above all, where a cancellation lands.
+Every cancel signal goes in at a point the test chooses, and what follows it
+only once the attempt has acted on it: no test depends on how long anything takes.
 """
 
 # pylint: disable=missing-function-docstring
 
 import asyncio
-import math
+import random
 import typing
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import pytest
@@ -47,6 +49,54 @@ def store(request, monkeypatch):
     return request.param
 
 
+class Gate:
+    """Where a handler waits for the test: ``wait`` tells the test the handler is there, and returns once it opens."""
+
+    def __init__(self) -> None:
+        self.reached = asyncio.Event()
+        self.opened = asyncio.Event()
+        self.seen: list[str] = []
+        """What a handler reports from where it cannot return it: its cleanup, say."""
+
+    async def wait(self) -> None:
+        self.reached.set()
+        await self.opened.wait()
+
+
+_gates: list[Gate] = []
+
+
+@pytest.fixture
+def gate() -> Iterator[Gate]:
+    """The test's ``Gate``, which its handler reaches with ``gate_of()``."""
+    made = Gate()
+    _gates.append(made)
+    yield made
+    _gates.remove(made)
+
+
+def gate_of() -> Gate:
+    return _gates[-1]
+
+
+async def cancel_at(gate_: Gate, side: RestateSide) -> None:
+    """Once the handler waits at ``gate_``, Restate cancels the invocation; once the attempt has acted on that, the
+    handler goes on. Nothing the handler awaits is pending, so the cancellation is carried."""
+    await gate_.reached.wait()
+    await side.cancel()
+    gate_.opened.set()
+
+
+async def run_cancelling_at(gate_: Gate, handler_name: str, side: RestateSide) -> None:
+    """``run`` the handler, with Restate cancelling the invocation as the handler reaches ``gate_``."""
+    cancelling = asyncio.ensure_future(cancel_at(gate_, side))
+    try:
+        await run(notes, handler_name, side)
+    finally:
+        cancelling.cancel()
+    assert side.signalled_at is not None, "the handler never reached the gate"
+
+
 async def said(step: Callable[[], Awaitable[Any]]) -> str:
     """How ``step`` ended: ``ok``, ``cancelled``, or the name of what else it failed with."""
     try:
@@ -60,12 +110,25 @@ async def said(step: Callable[[], Awaitable[Any]]) -> str:
         return type(error).__name__
 
 
-def call(ctx: sessions.SessionContext) -> Awaitable[Any]:
-    """A call of Restate, which the harness answers with its input: ``"A"``."""
-    return ctx.generic_call("Callee", "echo", "A", key="a")
+async def ended_with(step: Callable[[], Awaitable[Any]]) -> str:
+    """As ``said``, and the attempt's end too, which is not an ``Exception``."""
+    try:
+        return await said(step)
+    except BaseException as error:  # pylint: disable=broad-exception-caught
+        return type(error).__name__
+
+
+def call(ctx: sessions.SessionContext, key: str = "a") -> Awaitable[Any]:
+    """A call of Restate, which the harness answers with its input, ``"A"``; never, to key ``k``."""
+    return ctx.generic_call("Callee", "echo", "A", key=key)
 
 
 notes = sessions.SessionObject("Notes", migrations=["CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"])
+
+
+def insert(ctx: sessions.SessionContext, body: str = "x") -> Callable[[], Awaitable[Any]]:
+    """A call of the database: one statement, which commits."""
+    return lambda: ctx.db.execute("INSERT INTO notes (body) VALUES (?)", [body])
 
 
 @notes.handler()
@@ -79,16 +142,16 @@ async def add(ctx: sessions.SessionContext, body: str) -> int:
 @notes.handler()
 async def commits(ctx: sessions.SessionContext) -> str:
     """Commits, and says what its failure was if it did not."""
-    outcome = await said(lambda: ctx.db.execute("INSERT INTO notes (body) VALUES (?)", ["x"]))
+    outcome = await said(insert(ctx))
     return "committed" if outcome == "ok" else outcome
 
 
 @notes.handler()
 async def commit_then_reads(ctx: sessions.SessionContext) -> str:
-    """A commit, work outside Restate long enough for a cancellation to land with nothing waiting, then two reads:
-    of pages the commit left in the session, so they ask Restate nothing."""
-    commit = await said(lambda: ctx.db.execute("INSERT INTO notes (body) VALUES (?)", ["a"]))
-    await asyncio.sleep(0.3)
+    """A commit, a wait outside Restate where the test cancels the invocation, then two reads: of pages the commit left
+    in the session, so they ask Restate nothing."""
+    commit = await said(insert(ctx, "a"))
+    await gate_of().wait()
 
     def read() -> Awaitable[Any]:
         return ctx.db.get("SELECT count(*) AS n FROM notes")
@@ -99,33 +162,48 @@ async def commit_then_reads(ctx: sessions.SessionContext) -> str:
 @notes.handler()
 async def commit_then_call(ctx: sessions.SessionContext) -> str:
     """A commit, then a call: which of the two a cancellation failed."""
-    commit = await said(lambda: ctx.db.execute("INSERT INTO notes (body) VALUES (?)", ["x"]))
+    commit = await said(insert(ctx))
     return f"{commit},{await said(lambda: call(ctx))}"
 
 
 @notes.handler()
 async def twice(ctx: sessions.SessionContext) -> str:
     """Two commits, each reporting whether it failed and how."""
+    return f"{await said(insert(ctx))},{await said(insert(ctx))}"
 
-    def once() -> Awaitable[str]:
-        return said(lambda: ctx.db.execute("INSERT INTO notes (body) VALUES (?)", ["x"]))
 
-    return f"{await once()},{await once()}"
+@notes.handler()
+async def three_times(ctx: sessions.SessionContext) -> str:
+    """Three commits, each reporting whether it failed and how."""
+    return f"{await said(insert(ctx))},{await said(insert(ctx))},{await said(insert(ctx))}"
 
 
 @notes.handler()
 async def two_commits(ctx: sessions.SessionContext) -> str:
-    """A commit, work outside Restate long enough for a cancellation to land with nothing waiting, then a
-    transaction with a send of its own: sends are made between a commit's head write and the wait for its ack."""
-    first = await said(lambda: ctx.db.execute("INSERT INTO notes (body) VALUES (?)", ["a"]))
-    await asyncio.sleep(0.3)
+    """A commit, a wait outside Restate where the test cancels the invocation, then a transaction with a send of its
+    own: sends are made between a commit's head write and the wait for its ack."""
+    first = await said(insert(ctx, "a"))
+    await gate_of().wait()
 
     async def transaction() -> None:
         async with ctx.db.transaction() as tx:
+            gate_of().seen.append("body")
             await tx.execute("INSERT INTO notes (body) VALUES (?)", ["b"])
             tx.generic_send("Shipping", "ship", "b", key="b")
 
     return f"{first},{await said(transaction)}"
+
+
+@notes.handler()
+async def sending_transaction_then_insert(ctx: sessions.SessionContext) -> str:
+    """A transaction with a send, whose commit empties the outbox after it, then a commit."""
+
+    async def transaction() -> None:
+        async with ctx.db.transaction() as tx:
+            await tx.execute("INSERT INTO notes (body) VALUES (?)", ["t"])
+            tx.generic_send("Shipping", "ship", "t", key="t")
+
+    return f"{await said(transaction)},{await said(insert(ctx))}"
 
 
 AUDIT = internal.Schema("audit", ["CREATE TABLE audit (what TEXT NOT NULL)"])
@@ -134,19 +212,12 @@ AUDIT = internal.Schema("audit", ["CREATE TABLE audit (what TEXT NOT NULL)"])
 @notes.handler()
 async def ensures_twice(ctx: sessions.SessionContext) -> str:
     """A library's schema, ensured twice: applying it is a call of the database the handler asked for."""
-
-    def once() -> Awaitable[str]:
-        return said(lambda: AUDIT.ensure(ctx.db))
-
-    return f"{await once()},{await once()}"
+    return f"{await said(lambda: AUDIT.ensure(ctx.db))},{await said(lambda: AUDIT.ensure(ctx.db))}"
 
 
 @notes.handler()
 async def call_twice(ctx: sessions.SessionContext) -> str:
     """Two calls of Restate: a carried cancellation has to reach the call's result, not its invocation id."""
-    # The signal has to land with nothing in flight, or the first call is failed where it waits and the carry is
-    # never exercised.
-    await asyncio.sleep(0.05)
 
     async def once() -> str:
         try:
@@ -161,7 +232,6 @@ async def call_twice(ctx: sessions.SessionContext) -> str:
 async def send_then_call(ctx: sessions.SessionContext) -> str:
     """A send first, which makes an invocation id and nothing else: it must not swallow the carried cancellation
     that the call after it is owed."""
-    await asyncio.sleep(0.05)
     ctx.generic_send("Callee", "echo", "S", key="a")
     try:
         return str(await call(ctx))
@@ -169,21 +239,90 @@ async def send_then_call(ctx: sessions.SessionContext) -> str:
         return "cancelled" if error.status_code == 409 and error.message == "cancelled" else type(error).__name__
 
 
-class Cancelling:
-    """Restate cancels the invocation after ``delay`` seconds; ``sent_at_cancel`` is how much the attempt had
-    written by then."""
+@notes.handler()
+async def call_then_twice(ctx: sessions.SessionContext) -> str:
+    """A call Restate never answers, then two commits."""
+    return f"{await said(lambda: call(ctx, 'k'))},{await said(insert(ctx))},{await said(insert(ctx))}"
 
-    def __init__(self, side: RestateSide, delay: float) -> None:
-        self.sent_at_cancel: float = math.inf
-        self._side = side
-        self._timer = asyncio.get_running_loop().call_later(delay, self._cancel)
 
-    def _cancel(self) -> None:
-        self.sent_at_cancel = len(self._side.sent())
-        self._side.cancel()
+@notes.handler()
+async def unanswered_call(ctx: sessions.SessionContext) -> str:
+    """A call Restate never answers."""
+    return await said(lambda: call(ctx, "k"))
 
-    def stop(self) -> None:
-        self._timer.cancel()
+
+@notes.handler(explicit_cancellation=True)
+async def explicitly(ctx: sessions.SessionContext) -> str:
+    """A commit, a call and a commit, in a handler that takes cancellations itself."""
+    return f"{await said(insert(ctx))},{await said(lambda: call(ctx))},{await said(insert(ctx))}"
+
+
+@notes.handler()
+async def gathers(ctx: sessions.SessionContext) -> str:
+    """A call and a commit at once, then a commit."""
+    both = await asyncio.gather(said(lambda: call(ctx)), said(insert(ctx)))
+    return f"{','.join(both)},{await said(insert(ctx))}"
+
+
+@notes.view()
+async def counts(ctx: sessions.ViewContext) -> str:
+    """Two reads of a view."""
+
+    def read() -> Awaitable[Any]:
+        return ctx.db.get("SELECT count(*) AS n FROM notes")
+
+    return f"{await said(read)},{await said(read)}"
+
+
+@notes.handler()
+async def other_database(ctx: sessions.SessionContext) -> str:
+    """Two calls of another database of the key, then one of the object's own."""
+    other = internal.database(ctx.db, "other")
+
+    def create() -> Awaitable[Any]:
+        return other.execute("CREATE TABLE IF NOT EXISTS t (x)")
+
+    return f"{await said(create)},{await said(create)},{await said(insert(ctx))}"
+
+
+BULK_ROWS = 40
+
+
+def bulk_rows(seed: int) -> list[str]:
+    """About 160 KiB of rows that do not compress, the same for each ``seed``: enough to make a commit checkpoint."""
+    rows = random.Random(seed)
+    return [rows.randbytes(2000).hex() for _ in range(BULK_ROWS)]
+
+
+@notes.handler()
+async def bulks_then_twice(ctx: sessions.SessionContext) -> str:
+    """Three bulk commits, then two commits.
+
+    The third bulk commit checkpoints and then lists the state's keys, to delete the packs no checkpoint needs any
+    more: where that falls follows from the shared core's checkpoint thresholds, which the test checks.
+    """
+    statement = f"INSERT INTO notes (body) VALUES {', '.join(['(?)'] * BULK_ROWS)}"
+
+    def bulk(seed: int) -> Callable[[], Awaitable[Any]]:
+        return lambda: ctx.db.execute(statement, bulk_rows(seed))
+
+    bulks = [await said(bulk(1)), await said(bulk(2)), await said(bulk(3))]
+    return f"{','.join(bulks)},{await said(insert(ctx))},{await said(insert(ctx))}"
+
+
+@notes.handler()
+async def cleans_up_after_its_end(ctx: sessions.SessionContext) -> str:
+    """A commit, then a wait outside Restate that the attempt's end stops; the cleanup calls the database and Restate,
+    and reports how each ended."""
+    await said(insert(ctx, "a"))
+    seen = gate_of().seen
+    try:
+        await gate_of().wait()
+    except asyncio.CancelledError:
+        seen.append(await ended_with(insert(ctx, "b")))
+        seen.append(await ended_with(lambda: call(ctx)))
+        raise
+    return "not ended"
 
 
 def acked(side: RestateSide) -> int:
@@ -194,6 +333,18 @@ def acked(side: RestateSide) -> int:
 def describe(side: RestateSide) -> str:
     """What the attempt wrote, as message types in order: for a failure's message."""
     return " ".join(f"{m.type:#06x}" for m in side.sent())
+
+
+def acked_after_signal(side: RestateSide) -> int:
+    """How many of the commands the attempt wrote after the cancel signal went in asked for an ack: its commits."""
+    assert side.signalled_at is not None, f"no cancel signal went in: {describe(side)}"
+    return sum(1 for m in side.sent()[side.signalled_at :] if 0x0400 <= m.type < 0x8000 and m.flags & REQUESTED_ACK)
+
+
+def types_after_signal(side: RestateSide) -> list[int]:
+    """The types of what the attempt wrote after the cancel signal went in."""
+    assert side.signalled_at is not None, f"no cancel signal went in: {describe(side)}"
+    return [m.type for m in side.sent()[side.signalled_at :]]
 
 
 async def seeded(key: str) -> dict[str, bytes]:
@@ -219,6 +370,16 @@ async def test_runs_a_handler_commits_its_database_and_answers():
     assert output_of(sent) == 1
     assert sent[-1].type == TYPE.end
     assert HEAD_KEY in side.state
+
+
+async def test_reads_the_state_beyond_the_head_on_the_wire_and_reads_back_what_it_wrote(store: str):
+    # Restate preloads the head alone; the rest of the state is read on the wire. A key this process never opened
+    # has no pages cached, so the read goes to Restate.
+    side = RestateSide(await seeded(f"kl-seed-{store}"))
+    side.start(f"kl-{store}", "second")
+    await run(notes, "add", side)
+    assert output_of(side.sent()) == 2, describe(side)
+    assert side.reads > 0, describe(side)
 
 
 async def test_a_cancellation_that_lands_on_a_commit_in_flight_is_delivered_once_to_the_await_after_it():
@@ -249,6 +410,146 @@ async def test_a_cancellation_does_not_fail_a_commit_already_under_way_its_head_
     assert output_of(after.sent()) == 3, describe(after)
 
 
+async def test_the_outbox_emptied_after_a_commit_does_not_take_the_cancellation_that_landed_on_the_commit():
+    # The signal lands on the transaction's commit, which made its send. The session then empties the outbox, a
+    # call of the database of its own: the cancellation is not its, and the transaction reports what it did.
+    side = RestateSide(await seeded("kb"), cancel_on_commit=True)
+    side.start("kb", None)
+    await run(notes, "sending_transaction_then_insert", side)
+    sent = side.sent()
+    assert output_of(sent) == "ok,cancelled", describe(side)
+    # The premise: the signal went in, and the transaction's send went out.
+    assert side.signalled_at is not None, describe(side)
+    assert TYPE.one_way_call in [m.type for m in sent], describe(side)
+
+
+async def test_a_cancellation_that_fails_a_call_it_finds_waiting_is_not_carried_as_well():
+    # The signal arrives with the call waiting for its result: the call fails, and that was the cancellation. The
+    # calls of the database after it succeed.
+    side = RestateSide(cancel_on_call="after_id")
+    side.start("ka", None)
+    await run(notes, "call_then_twice", side)
+    assert output_of(side.sent()) == "cancelled,ok,ok", describe(side)
+    assert TYPE.cancel_invocation in types_after_signal(side), describe(side)
+
+
+async def test_a_handler_with_explicit_cancellation_gets_no_carried_cancellation():
+    side = RestateSide(cancel_at_start=True)
+    side.start("kx", None)
+    await run(notes, "explicitly", side)
+    assert output_of(side.sent()) == "ok,ok,ok", describe(side)
+
+
+async def test_a_cancellation_does_not_fail_the_read_of_the_state_it_finds_waiting(store: str):
+    # The signal arrives while the session's read of the state waits for Restate (on the VM's store, in Rust):
+    # the read is the open's, which the handler's first call waits for. The read and the call run to their end; the
+    # cancellation goes to the next call.
+    side = RestateSide(await seeded(f"kd-seed-{store}"), cancel_on_read=1)
+    side.start(f"kd-{store}", None)
+    await run(notes, "three_times", side)
+    assert output_of(side.sent()) == "ok,cancelled,ok", describe(side)
+    assert side.signalled_at is not None, f"no read went to Restate: {describe(side)}"
+
+
+async def test_a_cancellation_does_not_fail_the_listing_of_the_state_keys_it_finds_waiting(store: str):
+    # The third bulk commit lists the state's keys after it checkpoints. The signal arrives while the listing waits
+    # for Restate (on the VM's store, in Rust): the call runs to its end, and the next call gets the cancellation.
+    side = RestateSide(cancel_on_keys=True)
+    side.start(f"kk-{store}", None)
+    await run(notes, "bulks_then_twice", side)
+    # The premise: the keys were listed after the third bulk commit, with the open's commit of the schema, four
+    # commits in all, before the listing.
+    assert side.signalled_at is not None, f"the state's keys were never listed: {describe(side)}"
+    assert acked(side) - acked_after_signal(side) == 4, f"the listing came after another commit: {describe(side)}"
+    assert output_of(side.sent()) == "ok,ok,ok,cancelled,ok", describe(side)
+    # The listing ran to its end, and the session went on: after the signal, the one commit is the last call's.
+    assert acked_after_signal(side) == 1, describe(side)
+
+
+async def test_a_call_whose_invocation_id_comes_after_the_cancellation_is_cancelled_once_it_comes():
+    # The signal arrives before the call's invocation id: the call is cancelled as the id comes, before the handler
+    # ends. The cancel command names the id, so it went out after the id came.
+    side = RestateSide(cancel_on_call="before_id")
+    side.start("ki", None)
+    await run(notes, "unanswered_call", side)
+    sent = side.sent()
+    assert output_of(sent) == "cancelled", describe(side)
+    types = [m.type for m in sent]
+    assert TYPE.cancel_invocation in types, describe(side)
+    cancel = types.index(TYPE.cancel_invocation)
+    assert cancel < types.index(TYPE.output), describe(side)
+    assert sent[cancel].bytes_of(1) == b"inv_started", describe(side)
+
+
+async def test_a_call_whose_invocation_id_came_before_the_cancellation_is_cancelled():
+    side = RestateSide(cancel_on_call="after_id")
+    side.start("kj", None)
+    await run(notes, "unanswered_call", side)
+    sent = side.sent()
+    assert output_of(sent) == "cancelled", describe(side)
+    types = [m.type for m in sent]
+    assert TYPE.cancel_invocation in types, describe(side)
+    cancel = types.index(TYPE.cancel_invocation)
+    assert cancel < types.index(TYPE.output), describe(side)
+    assert sent[cancel].bytes_of(1) == b"inv_started", describe(side)
+
+
+async def test_once_the_attempt_has_ended_a_carried_cancellation_is_not_delivered():
+    # The signal arrives during the handler's local work, and Restate shuts the attempt down. The handler's cleanup
+    # calls its database and Restate: each fails with the attempt's end, as it does without the signal, and not with
+    # the cancellation, which the next attempt gets.
+    async def cleanup_saw(cancelled: bool, key: str) -> list[str]:
+        made = Gate()
+        _gates.append(made)
+        try:
+            side = RestateSide()
+            side.start(key, None)
+
+            async def end() -> None:
+                await made.reached.wait()
+                if cancelled:
+                    await side.cancel()
+                side.shut_down()
+
+            ending = asyncio.ensure_future(end())
+            try:
+                await run(notes, "cleans_up_after_its_end", side)
+            finally:
+                ending.cancel()
+            assert not cancelled or side.signalled_at is not None, describe(side)
+            return made.seen
+        finally:
+            _gates.remove(made)
+
+    without = await cleanup_saw(False, "kf1")
+    with_signal = await cleanup_saw(True, "kf2")
+    assert len(without) == 2 and without[1] == "SuspendedException", without
+    assert with_signal == without, f"with the signal: {with_signal}; without: {without}"
+
+
+async def test_a_carried_cancellation_goes_to_the_first_of_a_call_and_a_commit_made_at_once():
+    # ``gather`` starts its steps in order: the call is made first, and takes the carry as it makes its result's
+    # future; the commit after it runs.
+    side = RestateSide(cancel_at_start=True)
+    side.start("kg", None)
+    await run(notes, "gathers", side)
+    assert output_of(side.sent()) == "cancelled,ok,ok", describe(side)
+
+
+async def test_a_view_takes_a_carried_cancellation_at_its_first_read():
+    side = RestateSide(await seeded("kv"), cancel_at_start=True)
+    side.start("kv", None)
+    await run(notes, "counts", side)
+    assert output_of(side.sent()) == "cancelled,ok", describe(side)
+
+
+async def test_another_database_of_the_key_takes_a_carried_cancellation_as_the_objects_own_does():
+    side = RestateSide(cancel_at_start=True)
+    side.start("ko", None)
+    await run(notes, "other_database", side)
+    assert output_of(side.sent()) == "cancelled,ok,ok", describe(side)
+
+
 async def test_a_retry_of_a_cancelled_invocation_fails_its_first_call_and_works_after_it():
     # The cancel signal is among the earlier attempts' entries, so the VM knows before the handler starts and
     # nothing is in flight to fail: the cancellation is carried to the handler's first call.
@@ -265,60 +566,39 @@ async def test_a_schema_the_handler_ensures_takes_a_carried_cancellation_as_its_
     assert output_of(side.sent()) == "cancelled,ok", describe(side)
 
 
-async def test_a_read_that_asks_restate_nothing_sees_a_carried_cancellation_too_once():
+async def test_a_read_that_asks_restate_nothing_sees_a_carried_cancellation_too_once(gate: Gate):
     # A read of pages the session holds is answered without a wait on Restate, so a cancellation delivered at the
     # store's waits had nothing to land on. It is delivered where the handler calls.
     side = RestateSide()
     side.start("kr", None)
-    cancelling = Cancelling(side, 0.15)
-    await run(notes, "commit_then_reads", side)
-    cancelling.stop()
-    sent = side.sent()
-    assert output_of(sent) == "ok,cancelled,ok", describe(side)
+    await run_cancelling_at(gate, "commit_then_reads", side)
+    assert output_of(side.sent()) == "ok,cancelled,ok", describe(side)
     # The premise: the reads after the signal asked Restate for nothing.
-    assert cancelling.sent_at_cancel < len(sent), "the signal went in before the handler ended"
-    after = sent[int(cancelling.sent_at_cancel) :]
-    assert [m.type for m in after] == [TYPE.output, TYPE.end], describe(side)
+    assert types_after_signal(side) == [TYPE.output, TYPE.end], describe(side)
 
 
 async def test_a_carried_cancellation_fails_the_next_call_of_the_database_before_it_writes_or_sends_anything(
-    store: str,
+    gate: Gate,
 ):
     # A call that fails with the cancellation did nothing: the cancellation is delivered where the handler calls,
     # before the call issues a command.
     side = RestateSide()
     side.start("kc", None)
-    cancelling = Cancelling(side, 0.15)
-    await run(notes, "two_commits", side)
-    cancelling.stop()
+    await run_cancelling_at(gate, "two_commits", side)
     sent = side.sent()
     assert output_of(sent) == "ok,cancelled", describe(side)
-    assert cancelling.sent_at_cancel < len(sent), "the signal went in before the handler ended"
+    # The transaction failed before its body ran.
+    assert not gate.seen, gate.seen
     # What came after the signal went in: the handler's output, and before it no command at all.
-    after = [m.type for m in sent[int(cancelling.sent_at_cancel) :] if 0x0400 <= m.type < 0x8000]
+    after = [t for t in types_after_signal(side) if 0x0400 <= t < 0x8000]
     assert after == [TYPE.output], f"the cancelled transaction issued commands: {describe(side)}"
     # Its sends are made between a commit's head write and the wait for that write's ack, so they are the first
     # thing to escape a commit that is failed late.
     assert not any(m.type == TYPE.one_way_call for m in sent), "the cancelled transaction's sends went out"
-    # Every head write is synced: that ack is the commit's sync. The VM's store writes the head *with* its sync,
-    # asking for the ack on the head write itself; the Python store writes it plain and then clears ``v22/sync``
-    # with an ack (``VmHost.sync``).
-    heads = [i for i, m in enumerate(sent) if m.type == TYPE.set_state and m.bytes_of(1).decode() == HEAD_KEY]
-    assert heads, describe(side)
-    if store == "vm":
-        assert all(sent[i].flags & REQUESTED_ACK for i in heads), describe(side)
-    else:
-        synced = [
-            sent[i + 1].type == TYPE.clear_state
-            and sent[i + 1].bytes_of(1).decode() == _driver.SYNC_KEY
-            and bool(sent[i + 1].flags & REQUESTED_ACK)
-            for i in heads
-        ]
-        assert all(synced), describe(side)
 
 
 async def test_a_retrys_carried_cancellation_fails_the_calls_result_not_the_id_it_makes_first():
-    # A call makes the invocation id's future before the result's. Handing the carry to the id let the call run to
+    # A call makes the invocation id's future before the result's. A carry the id took would let the call run to
     # completion and the handler see its result: the cancellation lost.
     side = RestateSide(cancel_at_start=True)
     side.start("k8", None)
