@@ -38,13 +38,6 @@ def anyio_backend():
 
 pytestmark = [pytest.mark.anyio]
 
-NEEDS_SHARED_CORE = pytest.mark.xfail(
-    strict=True,
-    reason="shared-core 8.7.0 suspends a shut down attempt on its calls alone, so a cancellation does not resume it; "
-    "fixed on shared-core's branch claude/cancel-wakes-a-shut-down-attempt, not released yet",
-)
-"""Remove with the shared-core release that has the fix: these then pass, and a strict xfail that passes fails."""
-
 
 class Refund(pydantic.BaseModel):
     order: str
@@ -81,7 +74,6 @@ async def harness():
         yield harness
 
 
-@NEEDS_SHARED_CORE
 async def test_stop_ends_a_turn_that_restate_shut_down_while_it_waited_for_an_approval(harness: HarnessEnvironment):
     key = str(uuid.uuid4())
     seen: list[str] = []
