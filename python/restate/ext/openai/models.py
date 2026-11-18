@@ -48,7 +48,8 @@ class RestateModelResponse(BaseModel):
     """
 
     def to_input_items(self) -> list[TResponseInputItem]:
-        return [it.model_dump(exclude_unset=True) for it in self.output]  # type: ignore
+        # by_alias: the Responses API expects wire names (e.g. `async`, not `async_`).
+        return [it.model_dump(exclude_unset=True, by_alias=True) for it in self.output]  # type: ignore
 
 
 class AgentsTerminalException(AgentsException, TerminalError):
