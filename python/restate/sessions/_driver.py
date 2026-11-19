@@ -491,7 +491,7 @@ class AttemptDriver:
                 thread's own loop): the heartbeat is the attempt's.
         """
         if asyncio.get_running_loop() is not self._loop:
-            raise RuntimeError("ctx.working() is entered on the attempt's own event loop, not another thread's")
+            raise RuntimeError("ctx.working() must be entered on the attempt's own event loop, not another thread's")
         self._scopes += 1
         if self._scopes == 1 and self.ended is None:
             self._heartbeats = asyncio.ensure_future(self._heartbeat())
