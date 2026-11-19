@@ -668,3 +668,157 @@ async def test_turns_that_outgrow_the_budget_are_summarized_once_answered(harnes
     assert len(summaries) == 1 and "User: hi one" in summaries[0] and "hi four" not in summaries[0]
     latest = summarized_prompts[-1]
     assert latest[0].startswith("A summary of our conversation so far:") and latest[1:] == ["hi four", "hi five"]
+
+
+# --- Kept alive -------------------------------------------------------------------------------------
+
+scopes: list[tuple[str, int]] = []
+"""The ``ctx.working`` scopes open (``Host.open_scopes``) when each part of a run saw it, in order."""
+now: list[Any] = []
+"""The host of the run in progress."""
+stuck = asyncio.Event()
+
+
+def mark(where: str) -> None:
+    scopes.append((where, now[0].open_scopes))
+
+
+class Probing(BaseChatModel):
+    """A model that calls the tool a prompt names (its first word), then answers, noting the scopes it sees. A prompt
+    that starts with ``stuck`` waits for ``stuck`` to be set, which never is."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "probing"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:  # pyright: ignore[reportIncompatibleMethodOverride]
+        return self
+
+    def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
+        raise AssertionError("the requests are async")
+
+    async def _agenerate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
+        mark("model")
+        prompt = next(m for m in reversed(messages) if isinstance(m, HumanMessage))
+        word = str(prompt.content).split(" ")[0]
+        if word == "stuck":
+            await stuck.wait()
+        if word == "fail":
+            raise AuthenticationError("invalid x-api-key")
+        if word in ("plain", "kept", "chain", "lg_shipping_status") and not isinstance(messages[-1], ToolMessage):
+            args_ = {"key": "k", "input": "o"} if word == "lg_shipping_status" else {}
+            reply = AIMessage("", tool_calls=[{"id": f"call-{word}", "name": word, "args": args_}])
+        else:
+            reply = AIMessage("done")
+        return ChatResult(generations=[ChatGeneration(message=reply)])
+
+
+@tool
+async def plain() -> str:
+    """A tool of ours."""
+    mark("plain")
+    return "ok"
+
+
+@tool(keepalive=True)
+async def kept() -> str:
+    """A tool of ours that is kept alive."""
+    mark("kept")
+    return "ok"
+
+
+@langchain_tool
+async def chain() -> str:
+    """A LangChain tool of the user's own."""
+    mark("chain")
+    return "ok"
+
+
+shipping = restate.VirtualObject("lg_shipping")
+
+
+@shipping.handler()
+async def status(ctx: restate.ObjectContext, order: str) -> str:
+    return "shipped"
+
+
+def probing(*given: Any, **options: Any) -> Callable[..., Awaitable[Any]]:
+    """Return how to ask an agent with ``given`` tools, in process, which notes the scopes in ``scopes``."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    class Watching(Host):
+        def generic_call(self, *args: Any, **kwargs: Any) -> Any:
+            mark("remote")
+            return super().generic_call(*args, **kwargs)
+
+    asker = sessions.SessionObject("asker")
+    model = Probing()
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await langgraph.prompt(ctx, text, model=model, tools=[*given], **options)
+
+    @asker.handler
+    async def summarize(ctx: sessions.SessionContext, text: str) -> str:
+        from restate.agents.langgraph import _agent  # pylint: disable=import-outside-toplevel
+
+        return await _agent._summarizer(model)(ctx, text)  # pyright: ignore[reportPrivateUsage]
+
+    backend = Backend()
+
+    async def asked(text: str, handler: str = "ask") -> Any:
+        scopes.clear()
+        now[:] = [Watching(backend, service="asker", answers={"publish": REVISION, "status": b'"shipped"'})]
+        return await invoke(asker, handler, now[0], request(), text)
+
+    return asked
+
+
+async def test_the_built_in_agents_model_request_is_kept_alive_and_the_work_around_it_is_not():
+    assert await probing()("hi") == "done"
+    assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_the_summary_of_earlier_turns_is_requested_kept_alive():
+    assert await probing()("hi there", "summarize") == "done"
+    assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_a_tool_of_ours_is_kept_alive_only_with_keepalive_and_a_langchain_tool_is_not():
+    asked = probing(plain, kept, chain)
+    for word, seen in (("plain", 0), ("kept", 1), ("chain", 0)):
+        assert await asked(f"{word} x") == "done"
+        assert scopes == [("model", 1), (word, seen), ("model", 1)]
+        assert now[0].open_scopes == 0
+
+
+async def test_a_call_on_restate_that_a_tool_makes_is_outside_any_scope():
+    from restate.agents import call  # pylint: disable=import-outside-toplevel
+
+    asked = probing(call(status, description="The status of a shipment."))
+    assert await asked("lg_shipping_status x") == "done"
+    assert scopes == [("model", 1), ("remote", 0), ("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_a_stopped_or_failed_request_leaves_no_scope_open():
+    stuck.clear()
+    asked = probing()
+    scopes.clear()
+    task = asyncio.ensure_future(asked("stuck x"))
+    while not scopes:
+        await asyncio.sleep(0.01)
+    assert now[0].open_scopes == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert now[0].open_scopes == 0
+    with pytest.raises(Exception):
+        await asked("fail x")
+    assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0

@@ -107,8 +107,11 @@ import asyncio
 import json
 import typing
 from collections.abc import Sequence
+from contextlib import AsyncExitStack
 from typing import Any
+from uuid import UUID
 
+from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import InvalidUpdateError
@@ -366,6 +369,55 @@ async def _stored(app: Any) -> StateSnapshot:
         return typing.cast(StateSnapshot, await app.aget_state(latest.config))
 
 
+class _KeepAlive(AsyncCallbackHandler):
+    """Keep the attempt alive (``ctx.working``) while a model request of the graph's runs, and only then.
+
+    LangChain awaits a handler's ``on_chat_model_start`` (or ``on_llm_start``) before it sends the request, and
+    ``on_llm_end`` or ``on_llm_error`` (also for a cancelled request) once it is over, so the scope is the request
+    alone. Each is kept by the request's run id: a graph's nodes run models in parallel. It is a handler that its
+    runs inherit, so that the models a node, a tool or a subgraph calls are in it too.
+
+    A scope the callbacks leave open (a request that never ended) is closed as the run's stream ends
+    (``release_all``).
+    """
+
+    run_inline = True
+    """Awaited before the request, in order, rather than gathered with the other handlers."""
+
+    def __init__(self, ctx: SessionContext) -> None:
+        self.ctx = ctx
+        self.requests: dict[UUID, AsyncExitStack] = {}
+
+    async def _open(self, run_id: UUID) -> None:
+        await self._close(run_id)
+        stack = AsyncExitStack()
+        await stack.enter_async_context(self.ctx.working())
+        self.requests[run_id] = stack
+
+    async def _close(self, run_id: UUID) -> None:
+        stack = self.requests.pop(run_id, None)
+        if stack is not None:
+            await stack.aclose()
+
+    async def release_all(self) -> None:
+        stacks = list(self.requests.values())
+        self.requests.clear()
+        for stack in stacks:
+            await stack.aclose()
+
+    async def on_chat_model_start(self, serialized: Any, messages: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        await self._open(run_id)
+
+    async def on_llm_start(self, serialized: Any, prompts: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        await self._open(run_id)
+
+    async def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        await self._close(run_id)
+
+    async def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        await self._close(run_id)
+
+
 def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
     """Return the run of a prompt: the graph's, on the key's thread, from the prompt to its answer.
 
@@ -394,7 +446,13 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
         before = str(metadata.get(_STRUCTURED_BEFORE, "")) if asked else await _structured_version(app)
         # Each checkpoint of the run names its prompt, so that a retried attempt finds the run it cut off, and the
         # version its structured response had before it.
-        config: RunnableConfig = {**THREAD, "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before}}
+        alive = _KeepAlive(ctx)
+        config: RunnableConfig = {
+            **THREAD,
+            "metadata": {_PROMPT: prompt_id, _STRUCTURED_BEFORE: before},
+            # Inherited by the nodes' own runs: the models they call keep the attempt alive while they request.
+            "callbacks": [alive],
+        }
         if asked and not snapshot.next:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
             await _copied(ctx, turn, known, messages, prompt_id)
@@ -425,6 +483,9 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
                 # No refusal, whatever its name: a graph's models, tools and nodes are all its own.
                 from_tool(ctx, error)
                 raise
+            finally:
+                # Before any wait for an interrupt: none is in a scope. Closes what a request left open.
+                await alive.release_all()
             # The run stops at its interrupts: it goes on with the signals that answer them.
             paused = await _stored(app)
             resumes = await _resumed(ctx, paused)

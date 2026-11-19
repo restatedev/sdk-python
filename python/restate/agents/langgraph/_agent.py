@@ -351,7 +351,9 @@ def _graph(
         # request has them after the results, and the state keeps them for the rest of the run, which goes on.
         steered = typing.cast(list[BaseMessage], await take_steers(ctx, conversation))
         messages = _latest([*state["messages"], *steered], window)
-        reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
+        # Kept alive for the request alone: not the steering before it, nor the commit after.
+        async with ctx.working():
+            reply = await bound.ainvoke([SystemMessage(system), *messages] if system else messages)
         await conversation.turn.append_reply(reply)
         return {"messages": [*steered, reply]}
 
@@ -651,7 +653,8 @@ def _summarizer(model: PerSession[ChatModel | None]) -> Summarize:
     async def summarize(ctx: SessionContext, request: str) -> str:
         chosen = await configured(model, ctx)
         chat_model = chosen if isinstance(chosen, BaseChatModel) else _chat_model(model_of(chosen))
-        return _text(await chat_model.ainvoke([HumanMessage(request)]))
+        async with ctx.working():
+            return _text(await chat_model.ainvoke([HumanMessage(request)]))
 
     return summarize
 

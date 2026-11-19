@@ -26,6 +26,7 @@ import pytest
 pytest.importorskip("google.adk")
 
 from google.adk.agents import LlmAgent, RunConfig, SequentialAgent  # noqa: E402
+from google.adk.agents.run_config import StreamingMode  # noqa: E402  # pyright: ignore[reportPrivateImportUsage]
 from google.adk.models import BaseLlm  # noqa: E402
 from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.models.llm_response import LlmResponse  # noqa: E402
@@ -34,7 +35,7 @@ from google.genai import types  # noqa: E402
 import restate  # noqa: E402
 from support import RESTATE_IMAGE, Gate  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
-from restate.agents import adk, tool  # noqa: E402
+from restate.agents import adk, call, tool  # noqa: E402
 from restate.agents._api import Messages  # noqa: E402
 from restate.agents._signals import with_companion  # noqa: E402
 from restate.agents.internal import CANCELLED  # noqa: E402
@@ -1120,3 +1121,249 @@ async def test_a_steered_message_starts_an_invocation_of_its_own_which_a_retry_r
         await attempt()
     # The retry resumed the prompt's invocation, past the message, and answered it.
     assert await attempt() == "echo: in Celsius"
+
+
+# --- Kept alive ------------------------------------------------------------------------------------
+
+scopes: list[tuple[str, int]] = []
+"""The ``ctx.working`` scopes open (``Host.open_scopes``) when each part of a run saw it, in order."""
+now: list[Any] = []
+"""The host of the run in progress."""
+stuck = asyncio.Event()
+
+
+def mark(where: str) -> None:
+    scopes.append((where, now[0].open_scopes))
+
+
+class Probing(BaseLlm):
+    """A model that calls the tool a prompt names (its first word), then answers, noting the scopes it sees. A prompt
+    that starts with ``stream`` also streams its answer; ``stuck`` waits for ``stuck`` to be set, which never is."""
+
+    model: str = "probing"
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        mark("model")
+        prompt = _prompts(list(llm_request.contents))[-1]
+        answered = any(part.function_response for part in llm_request.contents[-1].parts or [])
+        word = prompt.split(" ")[0]
+        if word == "stuck":
+            await stuck.wait()
+        if not answered and word in ("plain", "kept", "local", "function", "shipping_status", "wait"):
+            args = {"key": "k", "input": "o"} if word == "shipping_status" else {}
+            call = types.FunctionCall(id=f"call-{word}", name=word, args=args)
+            yield LlmResponse(content=types.Content(role="model", parts=[types.Part(function_call=call)]))
+            return
+        if stream:
+            yield LlmResponse(content=types.Content(role="model", parts=[types.Part(text="do")]), partial=True)
+            mark("partial")
+        yield LlmResponse(content=types.Content(role="model", parts=[types.Part(text="done")]))
+
+
+@tool
+async def plain() -> str:
+    """A tool of ours."""
+    mark("plain")
+    return "ok"
+
+
+@tool(keepalive=True)
+async def kept() -> str:
+    """A tool of ours that is kept alive."""
+    mark("kept")
+    return "ok"
+
+
+async def function() -> str:
+    """A function of the user's own, which ADK runs as its function tool."""
+    mark("function")
+    return "ok"
+
+
+async def hang() -> str:
+    mark("hang")
+    await stuck.wait()
+    return "never"
+
+
+def local() -> Any:
+    """A built-in local tool of ADK (a shell: its own asks for a confirmation), as a probe."""
+    from google.adk.tools.bash_tool import ExecuteBashTool  # pylint: disable=import-outside-toplevel
+
+    class Local(ExecuteBashTool):
+        def __init__(self, name: str = "local") -> None:
+            super().__init__()
+            self.name = name
+
+        async def run_async(self, *, args: dict[str, Any], tool_context: Any) -> Any:
+            mark(self.name)
+            if self.name == "wait":
+                await stuck.wait()
+            return {"result": "ok"}
+
+    return Local
+
+
+shipping = restate.VirtualObject("shipping")
+
+
+@shipping.handler()
+async def status(ctx: restate.ObjectContext, order: str) -> str:
+    return "shipped"
+
+
+def probing(*given: Any, model: Any = None, **options: Any) -> tuple[Callable[..., Awaitable[Any]], Any]:
+    """Return how to ask an agent with ``given`` tools, in process, and its host (the run's, once it has begun)."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    class Watching(Host):
+        def generic_call(self, *args: Any, **kwargs: Any) -> Any:
+            mark("remote")
+            return super().generic_call(*args, **kwargs)
+
+    asker = sessions.SessionObject("asker")
+    llm = model or Probing()
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        if "agent" in options:
+            return await adk.prompt(ctx, text, **options)
+        return await adk.prompt(ctx, text, model=llm, tools=[*given], **options)
+
+    backend = Backend()
+
+    async def asked(text: str) -> Any:
+        scopes.clear()
+        now[:] = [Watching(backend, service="asker", answers={"publish": REVISION, "status": b'"shipped"'})]
+        return await invoke(asker, "ask", now[0], request(), text)
+
+    return asked, now
+
+
+async def test_a_model_request_is_kept_alive_and_the_work_around_it_is_not():
+    asked, _ = probing()
+    assert await asked("hi") == "done"
+    assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0
+    # Streamed: on for the partial replies too, and released with the whole.
+    mine = LlmAgent(name="mine", model=Probing())
+    asked, _ = probing(agent=mine, run_config=RunConfig(streaming_mode=StreamingMode.SSE))
+    assert await asked("hi") == "done"
+    assert scopes == [("model", 1), ("partial", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_the_summary_of_earlier_turns_is_requested_kept_alive():
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents.adk import _agent  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    summarizer = sessions.SessionObject("summarizer")
+
+    @summarizer.handler
+    async def summarize(ctx: sessions.SessionContext, text: str) -> str:
+        return await _agent._summarizer(Probing())(ctx, text)  # pyright: ignore[reportPrivateUsage]
+
+    scopes.clear()
+    now[:] = [Host(Backend(), service="summarizer")]
+    assert await invoke(summarizer, "summarize", now[0], request(), "hi there") == "done"
+    assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_a_tool_of_ours_is_kept_alive_only_with_keepalive_and_a_users_function_is_not():
+    asked, _ = probing(plain, kept, function)
+    assert await asked("plain x") == "done"
+    assert scopes == [("model", 1), ("plain", 0), ("model", 1)]
+    assert await asked("kept x") == "done"
+    assert scopes == [("model", 1), ("kept", 1), ("model", 1)]
+    assert await asked("function x") == "done"
+    assert scopes == [("model", 1), ("function", 0), ("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_a_built_in_local_tool_is_kept_alive_while_it_runs_and_a_restate_call_is_not():
+    asked, _ = probing(local()("local"))
+    assert await asked("local x") == "done"
+    assert scopes == [("model", 1), ("local", 1), ("model", 1)]
+    assert now[0].open_scopes == 0
+    # A call on Restate, which a tool of ours makes: no scope open.
+    asked, _ = probing(call(status, description="The status of a shipment."))
+    assert await asked("shipping_status x") == "done"
+    assert scopes == [("model", 1), ("remote", 0), ("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_a_stopped_turn_leaves_no_scope_open_whether_it_was_in_the_model_or_a_built_in_tool():
+    for prompt, tools in (("stuck x", []), ("wait x", [local()("wait")])):
+        stuck.clear()
+        asked, _ = probing(*tools)
+        scopes.clear()
+        task = asyncio.ensure_future(asked(prompt))
+        while not scopes or (prompt.startswith("wait") and ("wait", 1) not in scopes):
+            await asyncio.sleep(0.01)
+        assert now[0].open_scopes == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert now[0].open_scopes == 0
+
+
+async def test_a_failed_model_request_leaves_no_scope_open():
+    class Failing(BaseLlm):
+        model: str = "failing"
+
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            mark("model")
+            raise AuthenticationError("invalid x-api-key")
+            yield  # pragma: no cover
+
+    asked, _ = probing(model=Failing())
+    with pytest.raises(Exception):
+        await asked("hi")
+    assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_a_response_a_callback_gives_in_place_of_the_models_leaves_no_scope_open():
+    def answering(callback_context: Any, llm_request: Any) -> LlmResponse | None:
+        # The agent's own callback calls the tool in the model's place, once: no after-model or error callback runs.
+        if any(part.function_response for content in llm_request.contents for part in content.parts or []):
+            return None
+        call_ = types.FunctionCall(id="call-plain", name="plain", args={})
+        return LlmResponse(content=types.Content(role="model", parts=[types.Part(function_call=call_)]))
+
+    mine = LlmAgent(name="mine", model=Probing(), tools=adk.tools([plain]), before_model_callback=answering)
+    asked, _ = probing(agent=mine)
+    assert await asked("hi") == "done"
+    # The tool ran after the request the callback answered, with its scope closed; then the model was asked.
+    assert scopes == [("plain", 0), ("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+def test_the_environments_tools_and_the_shell_are_built_in_local_tools_and_a_function_is_not():
+    # The environment's tools are known by their package: ADK keeps their classes in private modules.
+    from google.adk.tools.function_tool import FunctionTool  # pylint: disable=import-outside-toplevel
+    from google.adk.tools.bash_tool import ExecuteBashTool  # pylint: disable=import-outside-toplevel
+    from google.adk.tools.environment import EnvironmentToolset  # pylint: disable=import-outside-toplevel
+
+    from restate.agents.adk._agent import _local  # pylint: disable=import-outside-toplevel
+
+    class Environment:
+        async def initialize(self) -> None:
+            pass
+
+    toolset = EnvironmentToolset(environment=typing.cast(Any, Environment()))
+    tools = asyncio.run(toolset.get_tools())
+    assert tools and all(_local(t) for t in tools), tools
+    assert _local(ExecuteBashTool())
+    assert not _local(FunctionTool(lambda: None))
