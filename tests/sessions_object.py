@@ -660,6 +660,9 @@ class FakeContext:
     def cancel(self, invocation_id: str) -> None:
         pass
 
+    def working(self) -> contextlib.AbstractAsyncContextManager[None]:
+        return contextlib.nullcontext()
+
 
 async def test_a_handler_runs_over_a_fake_context_of_a_test():
     fake = FakeContext(db=FakeDatabase())
