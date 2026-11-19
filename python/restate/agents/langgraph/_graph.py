@@ -106,7 +106,7 @@ from __future__ import annotations
 import asyncio
 import json
 import typing
-from collections.abc import Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from contextlib import AsyncExitStack
 from typing import Any
 from uuid import UUID
@@ -379,6 +379,11 @@ class _KeepAlive(AsyncCallbackHandler):
 
     A scope the callbacks leave open (a request that never ended) is closed as the run's stream ends
     (``release_all``).
+
+    A sync request (``invoke``, in a sync node) has LangChain run these callbacks on a loop of its own, in a thread,
+    and wait there for every task they started: a scope is the attempt's, with a heartbeat on the attempt's loop, so
+    it is opened and closed there instead, handed over without waiting (the attempt's loop may be the one the sync
+    request blocks). A sync request on the attempt's own loop blocks its heartbeat anyway.
     """
 
     run_inline = True
@@ -387,8 +392,23 @@ class _KeepAlive(AsyncCallbackHandler):
     def __init__(self, ctx: SessionContext) -> None:
         self.ctx = ctx
         self.requests: dict[UUID, AsyncExitStack] = {}
+        self.loop = asyncio.get_running_loop()
+        """The attempt's loop: the one ``ctx.working`` runs on."""
+        self._stream = 0
+        """The stream of the run in progress: ``release_all`` ends one, and the run may stream again (after an
+        interrupt)."""
 
-    async def _open(self, run_id: UUID) -> None:
+    async def _on_loop(self, work: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        """Run ``work`` on the attempt's loop: now if this is it, or else handed over (in order) without waiting."""
+        if asyncio.get_running_loop() is self.loop:
+            await work()
+        else:
+            asyncio.run_coroutine_threadsafe(work(), self.loop)
+
+    async def _open(self, run_id: UUID, stream: int) -> None:
+        if stream != self._stream:
+            # A request whose start reached the attempt's loop after its stream ended: nothing to keep alive.
+            return
         await self._close(run_id)
         stack = AsyncExitStack()
         await stack.enter_async_context(self.ctx.working())
@@ -400,22 +420,25 @@ class _KeepAlive(AsyncCallbackHandler):
             await stack.aclose()
 
     async def release_all(self) -> None:
+        self._stream += 1
         stacks = list(self.requests.values())
         self.requests.clear()
         for stack in stacks:
             await stack.aclose()
 
     async def on_chat_model_start(self, serialized: Any, messages: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        await self._open(run_id)
+        stream = self._stream
+        await self._on_loop(lambda: self._open(run_id, stream))
 
     async def on_llm_start(self, serialized: Any, prompts: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        await self._open(run_id)
+        stream = self._stream
+        await self._on_loop(lambda: self._open(run_id, stream))
 
     async def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        await self._close(run_id)
+        await self._on_loop(lambda: self._close(run_id))
 
     async def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        await self._close(run_id)
+        await self._on_loop(lambda: self._close(run_id))
 
 
 def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:

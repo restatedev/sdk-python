@@ -16,11 +16,12 @@ The graph is scripted: it routes on the first word of the message.
 # pylint: disable=missing-function-docstring,missing-class-docstring
 
 import asyncio
+import contextlib
 import collections
 import threading
 import typing
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, NotRequired, TypedDict
@@ -979,6 +980,8 @@ def test_context_is_for_a_graph_of_your_own():
 
 # --- Kept alive -------------------------------------------------------------------------------------
 
+off_loop: list[bool] = []
+"""Each ``ctx.working`` scope entered off the attempt's event loop."""
 scopes: list[tuple[str, int]] = []
 """The ``ctx.working`` scopes open (``Host.open_scopes``) when each part of a run saw it, in order."""
 now: list[Any] = []
@@ -998,7 +1001,9 @@ class Probing(BaseChatModel):
         return "probing"
 
     def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
-        raise AssertionError("the requests are async")
+        # A sync node's request (`invoke`), in a thread of the graph's.
+        mark("sync model")
+        return ChatResult(generations=[ChatGeneration(message=AIMessage("done"))])
 
     async def _agenerate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
         mark("model")
@@ -1031,6 +1036,10 @@ def _kept_graph() -> Any:
     async def llm(state: MessagesState) -> dict[str, Any]:
         return {"messages": [await model.ainvoke(state["messages"])]}
 
+    def sync_llm(state: MessagesState) -> dict[str, Any]:
+        # The usual shape of LangGraph's examples: LangChain runs the callbacks of a sync request on a loop of its own.
+        return {"messages": [model.invoke(state["messages"])]}
+
     async def ask(state: MessagesState) -> dict[str, Any]:
         mark("before the interrupt")
         return {"messages": [AIMessage(f"approved: {interrupt('approve?')}")]}
@@ -1044,19 +1053,20 @@ def _kept_graph() -> Any:
     inner.add_edge(START, "llm")
 
     def route(state: MessagesState) -> str:
-        return {"ask": "ask", "plain": "calls", "kept": "calls", "nested": "nested"}.get(
+        return {"ask": "ask", "plain": "calls", "kept": "calls", "nested": "nested", "sync": "sync_llm"}.get(
             str(state["messages"][-1].content).split(" ")[0], "llm"
         )
 
     outer = StateGraph(MessagesState)
     outer.add_node("llm", llm)
+    outer.add_node("sync_llm", sync_llm)
     outer.add_node("ask", ask)
     outer.add_node("calls", calls)
     outer.add_node("tools", ToolNode(langgraph.tools([plain, kept])))
     outer.add_node("nested", inner.compile())
-    outer.add_conditional_edges(START, route, ["llm", "ask", "calls", "nested"])
+    outer.add_conditional_edges(START, route, ["llm", "sync_llm", "ask", "calls", "nested"])
     outer.add_edge("calls", "tools")
-    for end in ("llm", "ask", "tools", "nested"):
+    for end in ("llm", "sync_llm", "ask", "tools", "nested"):
         outer.add_edge(end, END)
     return outer
 
@@ -1075,6 +1085,22 @@ def keeping() -> Callable[..., Awaitable[Any]]:
                 mark("wait")
             return super().generic_call(*args, **kwargs)
 
+        @contextlib.asynccontextmanager
+        async def working(self) -> AsyncIterator[None]:
+            # As the driver's: a task that beats while the scope is open, on the loop the scope is entered on. A
+            # scope entered on another loop than the attempt's would hold that loop's caller until it closes.
+            if asyncio.get_running_loop() is not loop:
+                # LangChain swallows a handler's error: noted here instead, for the test to see.
+                off_loop.append(True)
+            async with super().working():
+                beat = asyncio.ensure_future(asyncio.sleep(3600))
+                try:
+                    yield
+                finally:
+                    beat.cancel()
+
+    loop = asyncio.get_running_loop()
+
     graph = _kept_graph()
     asker = AgentObject("kept_asker")
 
@@ -1086,6 +1112,7 @@ def keeping() -> Callable[..., Awaitable[Any]]:
 
     async def asked(text: str) -> Any:
         scopes.clear()
+        off_loop.clear()
         answers = {"publish": b'{"revision": 1}', "wait": b'"yes"'}
         now[:] = [Watching(backend, service="kept_asker", answers=answers)]
         return await invoke(asker, "ask", now[0], request(), text)
@@ -1101,6 +1128,16 @@ async def test_a_graphs_model_request_is_kept_alive_wherever_a_node_makes_it():
     # In a subgraph the graph's nodes run: the handler is inherited.
     assert await asked("nested x") == "done"
     assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_a_sync_nodes_model_request_does_not_hang_and_leaves_no_scope_open():
+    # LangChain runs the callbacks of a sync request (`invoke`) on a loop of its own, in a thread, and waits there for
+    # every task they started: a scope entered there, with its heartbeat's task, would never let the request go out.
+    asked = keeping()
+    assert await asyncio.wait_for(asked("sync now"), timeout=10) == "done"
+    assert [where for where, _ in scopes] == ["sync model"]
+    assert not off_loop, "a scope was entered off the attempt's loop"
     assert now[0].open_scopes == 0
 
 

@@ -481,11 +481,17 @@ class AttemptDriver:
         """Keep the attempt alive while the body runs (see ``HEARTBEAT_INTERVAL``).
 
         One heartbeat every interval, from the first scope opening to the last
-        closing. The first comes at once if the attempt has been silent for an
-        interval already (most of the timeout may be gone), so the silence never
-        reaches twice that; otherwise the scopes the database opens for each of
-        its calls would each send one.
+        closing. The first comes once the attempt has been silent for an
+        interval (at once, if it already has), so the silence never reaches more
+        than that; a scope that closes sooner (the database's, around each of its
+        calls) sends nothing.
+
+        Raises:
+            RuntimeError: Entered on another event loop than the attempt's (a
+                thread's own loop): the heartbeat is the attempt's.
         """
+        if asyncio.get_running_loop() is not self._loop:
+            raise RuntimeError("ctx.working() is entered on the attempt's own event loop, not another thread's")
         self._scopes += 1
         if self._scopes == 1 and self.ended is None:
             self._heartbeats = asyncio.ensure_future(self._heartbeat())
@@ -500,8 +506,8 @@ class AttemptDriver:
     async def _heartbeat(self) -> None:
         """Tell Restate the attempt makes progress, while a ``working`` scope is open."""
         interval = HEARTBEAT_INTERVAL.total_seconds()
-        if self._loop.time() - self._wrote_at < interval:
-            await asyncio.sleep(interval)
+        # The first once the silence reaches an interval: at once, if it already has.
+        await asyncio.sleep(max(0.0, interval - (self._loop.time() - self._wrote_at)))
         while True:
             try:
                 self.act(lambda vm: vm.heartbeat())
