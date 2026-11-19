@@ -13,6 +13,7 @@
 # pylint: disable=missing-function-docstring,missing-class-docstring
 
 import asyncio
+import contextlib
 import itertools
 import json
 import typing
@@ -114,6 +115,17 @@ class Host:
     cancelled: list[str] = field(default_factory=list)
     # How many more syncs go through before the process crashes: every sync after fails, losing its writes.
     _syncs_left: int | None = None
+    # The handler's ``ctx.working`` scopes open now: an attempt on Restate heartbeats while there is one.
+    open_scopes: int = 0
+
+    @contextlib.asynccontextmanager
+    async def working(self):
+        """The handler's ``ctx.working``, counted: a test reads ``open_scopes`` while some work of its own runs."""
+        self.open_scopes += 1
+        try:
+            yield
+        finally:
+            self.open_scopes -= 1
 
     def crash_after(self, syncs: int) -> None:
         """Let ``syncs`` more syncs through, then crash: every later sync fails."""

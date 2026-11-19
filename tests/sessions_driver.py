@@ -148,18 +148,28 @@ async def commits(ctx: sessions.SessionContext) -> str:
 
 
 @notes.handler()
-async def works_alone(ctx: sessions.SessionContext) -> str:
-    """Works outside Restate, with nothing of Restate's outstanding, until the test lets it go on."""
-    await gate_of().wait()
+async def works_alone(ctx: sessions.SessionContext, kept: bool) -> str:
+    """Works outside Restate, with nothing of Restate's outstanding, in ``ctx.working`` or not, until the test lets it go
+    on."""
+    if kept:
+        async with ctx.working():
+            await gate_of().wait()
+    else:
+        await gate_of().wait()
     return "done"
 
 
 @notes.handler()
-async def works_beside_a_call(ctx: sessions.SessionContext, annotated: bool) -> str:
-    """Waits for a call that is never answered, working meanwhile, inside an annotation or not."""
+async def works_beside_a_call(ctx: sessions.SessionContext, how: str) -> str:
+    """Waits for a call that is never answered, working meanwhile: in ``ctx.working`` (``kept``), in an annotation
+    (``annotated``), or neither."""
     pending = asyncio.ensure_future(ctx.generic_call("Callee", "echo", "A", key="k"))
-    annotation = internal.annotate(ctx, "tool") if annotated else None
-    await gate_of().wait()
+    annotation = internal.annotate(ctx, "tool") if how == "annotated" else None
+    if how == "kept":
+        async with ctx.working():
+            await gate_of().wait()
+    else:
+        await gate_of().wait()
     if annotation is not None:
         annotation.end()
     pending.cancel()
@@ -611,32 +621,43 @@ def quick_heartbeats(monkeypatch) -> None:
     monkeypatch.setattr(_driver, "HEARTBEAT_INTERVAL", timedelta(seconds=0.02))
 
 
-async def test_an_attempt_heartbeats_while_its_handler_works_with_nothing_of_restates_outstanding(
-    gate: Gate, quick_heartbeats: None
-):
-    # A model request, say: Restate hears nothing from the attempt meanwhile, and shuts down one it heard nothing
-    # from for its inactivity timeout. The next attempt would make the request again, and never get past it.
+async def test_an_attempt_does_not_heartbeat_outside_working(gate: Gate, quick_heartbeats: None):
+    # Suspension is the default: Restate shuts down an attempt it heard nothing from for its inactivity timeout, and
+    # starts the next when what it waits for answers (or at once, if nothing).
     side = RestateSide()
-    side.start("kh1", None)
+    side.start("kh1", False)
+    assert await beats_while_at(gate, "works_alone", side) == 0, describe(side)
+    assert output_of(side.sent()) == "done", describe(side)
+
+
+async def test_an_attempt_heartbeats_in_working(gate: Gate, quick_heartbeats: None):
+    # A model request, say: the next attempt would make it again, and never get past it.
+    side = RestateSide()
+    side.start("kh2", True)
     assert await beats_while_at(gate, "works_alone", side) >= 3, describe(side)
     assert output_of(side.sent()) == "done", describe(side)
 
 
-async def test_an_attempt_does_not_heartbeat_while_an_answer_of_restates_is_outstanding(
+async def test_an_attempt_heartbeats_in_working_beside_an_outstanding_answer(gate: Gate, quick_heartbeats: None):
+    # Work beside a call it waits for: a model's request beside a tool's call, say.
+    side = RestateSide()
+    side.start("kh3", "kept")
+    assert await beats_while_at(gate, "works_beside_a_call", side) >= 3, describe(side)
+
+
+async def test_an_attempt_does_not_heartbeat_while_it_waits_on_restate_outside_working(
     gate: Gate, quick_heartbeats: None
 ):
-    # A wait of days for an approval holds no process: Restate shuts the attempt down, and starts the next one when
-    # the answer comes.
+    # A wait of days for an approval holds no process.
     side = RestateSide()
-    side.start("kh2", False)
+    side.start("kh4", "neither")
     assert await beats_while_at(gate, "works_beside_a_call", side) == 0, describe(side)
 
 
-async def test_an_open_annotation_heartbeats_beside_an_outstanding_answer(gate: Gate, quick_heartbeats: None):
-    # The annotation says the handler is working, on a tool beside the call it waits for.
+async def test_an_open_annotation_is_a_trace_and_keeps_nothing_alive(gate: Gate, quick_heartbeats: None):
     side = RestateSide()
-    side.start("kh3", True)
-    assert await beats_while_at(gate, "works_beside_a_call", side) >= 3, describe(side)
+    side.start("kh5", "annotated")
+    assert await beats_while_at(gate, "works_beside_a_call", side) == 0, describe(side)
 
 
 async def test_a_read_that_asks_restate_nothing_sees_a_carried_cancellation_too_once(gate: Gate):

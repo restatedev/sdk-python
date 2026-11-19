@@ -351,3 +351,26 @@ async def test_a_langgraph_wait_from_a_session_object_that_is_no_agent_fails_the
         await internal.invoke(desk, "ask", host, request(), "refund o1")
     assert raised.value.message.startswith(f"{what} {NEEDS_AGENT}"), raised.value.message
     assert host.calls == []
+
+
+async def test_a_tool_runs_kept_alive_only_with_keepalive():
+    host = Host(Backend(), service="runner", key="alice")
+    seen: dict[str, int] = {}
+
+    @tool
+    async def quick() -> str:
+        """Quick."""
+        seen["quick"] = host.open_scopes
+        return "done"
+
+    @tool(keepalive=True)
+    async def long() -> str:
+        """Long."""
+        seen["long"] = host.open_scopes
+        return "done"
+
+    tools["quick"], tools["long"] = quick, long
+    await run_tool(host, "quick", {}, "c1")
+    await run_tool(host, "long", {}, "c2")
+    assert seen == {"quick": 0, "long": 1}
+    assert host.open_scopes == 0
