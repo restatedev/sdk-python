@@ -647,3 +647,29 @@ async def test_a_feedback_and_the_message_steered_after_it_are_stored_once_throu
     stored = [p for m in steps if isinstance(m, ModelRequest) for p in m.parts]
     assert [type(p).__name__ for p in stored] == ["RetryFeedbackPart", "UserPromptPart", "RetryFeedbackPart"]
     assert [text for role, text in await chat.messages() if role == "user"] == ["plan one", "use Celsius", "plan two"]
+
+
+async def test_the_summarizers_request_and_the_models_are_kept_alive():
+    hosts: list[Host] = []
+    scopes: dict[str, list[int]] = {"summary": [], "model": []}
+
+    class Watched(Script):
+        def __call__(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            before = self.summaries
+            response = super().__call__(messages, info)
+            scopes["summary" if self.summaries > before else "model"].append(hosts[-1].open_scopes)
+            return response
+
+    script = Watched()
+    chat = agent(script, "pai_alive")
+    make = chat.host
+
+    def watched(view: bool = False) -> Host:
+        hosts.append(make(view))
+        return hosts[-1]
+
+    chat.host = watched  # type: ignore[method-assign]
+    await until_snapshot(chat, compact=False)
+    assert script.summaries == 1
+    assert scopes["summary"] == [1] and scopes["model"] and all(n == 1 for n in scopes["model"])
+    assert all(host.open_scopes == 0 for host in hosts)

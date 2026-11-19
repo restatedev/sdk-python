@@ -114,6 +114,7 @@ import inspect
 import json
 import typing
 from collections.abc import Awaitable, Sequence
+from contextlib import AsyncExitStack
 from typing import Any, Unpack
 
 from agents import (
@@ -320,9 +321,31 @@ class _Hooks(RunHooks[Any]):
         """The model request in progress, timed in the journal."""
         self.calls: dict[str, Annotation] = {}
         """The tool calls in progress, timed in the journal, by call id."""
+        self.alive: AsyncExitStack | None = None
+        """The ``ctx.working`` scope of the model request in progress: just the request, not the work around it."""
+        self.local: dict[str, AsyncExitStack] = {}
+        """The ``ctx.working`` scopes of the built-in local tool calls in progress, by call id."""
 
-    def ended(self, error: BaseException | None) -> None:
-        """End the timing of the model request and tool calls still in progress, as the run ends with ``error``."""
+    async def _keep(self) -> AsyncExitStack:
+        """Return a scope that keeps the attempt alive until closed."""
+        stack = AsyncExitStack()
+        await stack.enter_async_context(self.ctx.working())
+        return stack
+
+    async def _release(self) -> None:
+        """Close the model request's scope, if open."""
+        stack, self.alive = self.alive, None
+        if stack is not None:
+            await stack.aclose()
+
+    async def ended(self, error: BaseException | None) -> None:
+        """End the timing of the model request and tool calls still in progress, and close the scopes still open, as
+        the run ends with ``error``."""
+        stacks = [*self.local.values(), *([self.alive] if self.alive is not None else [])]
+        self.local.clear()
+        self.alive = None
+        for stack in stacks:
+            await stack.aclose()
         timed = [*self.calls.values(), *([self.request] if self.request is not None else [])]
         self.request = None
         self.calls.clear()
@@ -339,6 +362,9 @@ class _Hooks(RunHooks[Any]):
             # Never so: a run makes one request at a time.
             self.request.fail("another request started")
         self.request = annotate(self.ctx, f"model: {_model_name(self.model or agent.model)}")
+        # Kept alive for the request alone, as this hook ends: the steering and commits before it are not it.
+        await self._release()
+        self.alive = await self._keep()
 
     async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
         """The run's ``call_model_input_filter``: store the tools' outputs before the next request, and take the
@@ -381,6 +407,7 @@ class _Hooks(RunHooks[Any]):
 
     async def on_llm_end(self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse) -> None:
         # The request ends here, before the reply is stored.
+        await self._release()
         if self.request is not None:
             self.request.end(_usage(agent, response))
             self.request = None
@@ -392,16 +419,26 @@ class _Hooks(RunHooks[Any]):
         self.running += 1
         await tool_call_started(self.ctx)
         # Timed from here: the settling of the earlier calls is not the tool's.
-        self.calls[_call_key(context, tool)] = annotate(self.ctx, f"tool: {tool.name}")
+        key = _call_key(context, tool)
+        self.calls[key] = annotate(self.ctx, f"tool: {tool.name}")
+        if not isinstance(tool, FunctionTool):
+            # The SDK's own tools (shell, apply_patch, computer...) run local work: kept alive. A function tool is
+            # the user's, and is not.
+            self.local[key] = await self._keep()
 
     async def on_handoff(self, context: RunContextWrapper[Any], from_agent: Agent[Any], to_agent: Agent[Any]) -> None:
         # The turn carries the agent it handed off to, even if it ends before that agent replies.
         self.conversation.turn.carry(agent=to_agent.name)
 
     async def on_tool_end(self, context: RunContextWrapper[Any], agent: Agent[Any], tool: SdkTool, result: Any) -> None:
-        if (call := self.calls.pop(_call_key(context, tool), None)) is not None:
-            call.end()
-        self.running -= 1
+        key = _call_key(context, tool)
+        try:
+            if (stack := self.local.pop(key, None)) is not None:
+                await stack.aclose()
+        finally:
+            if (call := self.calls.pop(key, None)) is not None:
+                call.end()
+            self.running -= 1
 
 
 def _call_key(context: RunContextWrapper[Any], tool: SdkTool) -> str:
@@ -759,9 +796,9 @@ async def _go(
             raise
     except BaseException as error:
         # The model request or tool calls in progress failed with the run.
-        hooks.ended(error)
+        await hooks.ended(error)
         raise
-    hooks.ended(None)
+    await hooks.ended(None)
     # The outputs that no model request stored: those of a tool that ends the turn, say.
     if outputs := conversation.new_results(result.to_input_list()):
         await turn.append(*outputs)
@@ -1102,7 +1139,8 @@ def _summarizer(model: PerSession[AnyModel | None]) -> Summarize:
 
     async def summarize(ctx: SessionContext, request: str) -> str:
         chosen = _model(await configured(model, ctx))
-        result = await Runner.run(Agent(name="summarizer"), request, run_config=RunConfig(model=chosen))
+        async with ctx.working():
+            result = await Runner.run(Agent(name="summarizer"), request, run_config=RunConfig(model=chosen))
         return str(result.final_output)
 
     return summarize

@@ -27,6 +27,7 @@ import pytest
 pytest.importorskip("pydantic_ai")
 
 from pydantic_ai import Agent, ModelRetry, RunContext  # noqa: E402
+from pydantic_ai import Tool as PydanticTool  # noqa: E402
 from pydantic_ai.capabilities import AbstractCapability  # noqa: E402
 from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
@@ -1341,3 +1342,146 @@ async def test_a_tool_call_whose_id_an_earlier_turns_call_had_still_gets_its_res
         if isinstance(part, ToolReturnPart)
     ]
     assert returned == ["found one", "found two", "found three"]
+
+
+# --- In process: the attempt is kept alive for the model's requests and a local tool's runs only ----
+
+
+class Seen:
+    def __init__(self) -> None:
+        self.host: Any = None
+        self.at: dict[str, int] = {}
+
+    def mark(self, what: str) -> None:
+        self.at[what] = self.host.open_scopes
+
+
+async def run_watched(seen: Seen, ask: sessions.SessionObject, text: str, **kwargs: Any) -> Any:
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    seen.host = Host(Backend(), service="asker", **kwargs)
+    try:
+        return await invoke(ask, "ask", seen.host, request(), text)
+    finally:
+        seen.at["after"] = seen.host.open_scopes
+
+
+async def test_a_model_request_is_kept_alive_a_tool_of_your_own_is_not_and_a_local_tool_is():
+    from pydantic_ai_harness.filesystem import READ_FILE_KIND  # pylint: disable=import-outside-toplevel
+
+    seen = Seen()
+
+    @tool
+    async def plain(city: str) -> str:
+        """Plain."""
+        seen.mark("plain")
+        return "plain"
+
+    @tool(keepalive=True)
+    async def long(city: str) -> str:
+        """Long."""
+        seen.mark("long")
+        return "long"
+
+    def local(path: str) -> str:
+        """Stands for a built-in local tool: its kind says so."""
+        seen.mark("local")
+        return "read"
+
+    def own(path: str) -> str:
+        """A plain function tool of the user's."""
+        seen.mark("own")
+        return "own"
+
+    def shell(path: str) -> str:
+        """Stands for the harness's shell: its name says so."""
+        seen.mark("run_command")
+        return "ran"
+
+    def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen.mark("model")
+        if isinstance(messages[-1], ModelRequest) and any(isinstance(p, ToolReturnPart) for p in messages[-1].parts):
+            return ModelResponse(parts=[TextPart("done")])
+        word = next(str(p.content).split(" ")[0] for p in messages[-1].parts if isinstance(p, UserPromptPart))
+        return ModelResponse(
+            parts=[ToolCallPart(word, {"city": "Rome"} if word in ("plain", "long") else {"path": "x"})]
+        )
+
+    mine = Agent(
+        FunctionModel(script),
+        tools=[
+            PydanticTool(local, tool_kind=READ_FILE_KIND, name="local"),
+            PydanticTool(own, name="own"),
+            PydanticTool(shell, name="run_command"),
+        ],
+        toolsets=[pydantic_ai.toolset([plain, long])],
+    )
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await pydantic_ai.prompt(ctx, text, agent=mine)
+
+    for word in ("plain", "long", "local", "own", "run_command"):
+        assert await run_watched(seen, obj, f"{word} now") == "done"
+        assert seen.at["after"] == 0
+    assert seen.at["model"] == 1
+    assert (seen.at["plain"], seen.at["long"], seen.at["local"], seen.at["own"], seen.at["run_command"]) == (
+        0,
+        1,
+        1,
+        0,
+        1,
+    )
+
+
+async def test_a_failed_request_releases_its_scope():
+    seen = Seen()
+
+    def refuse(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen.mark("model")
+        raise AuthenticationError("invalid x-api-key")
+
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await pydantic_ai.prompt(ctx, text, model=FunctionModel(refuse))
+
+    with pytest.raises(Exception):
+        await run_watched(seen, obj, "hi")
+    assert seen.at["model"] == 1 and seen.at["after"] == 0
+
+
+async def test_an_approval_is_waited_for_outside_any_scope(monkeypatch: pytest.MonkeyPatch):
+    from restate.agents.pydantic_ai import _agent  # pylint: disable=import-outside-toplevel
+
+    seen = Seen()
+
+    async def approved(ctx: Any, call_id: str, signal: str, input: Any = None, *, approval: bool = False) -> Any:
+        seen.mark("approval")
+        return {"approved": True}
+
+    monkeypatch.setattr(_agent, "wait_for", approved)
+
+    def needs(city: str) -> str:
+        """Needs an approval."""
+        return "ran"
+
+    def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if any(isinstance(p, ToolReturnPart) for m in messages if isinstance(m, ModelRequest) for p in m.parts):
+            return ModelResponse(parts=[TextPart("done")])
+        return ModelResponse(parts=[ToolCallPart("needs", {"city": "Rome"})])
+
+    mine = Agent(FunctionModel(script), tools=[PydanticTool(needs, requires_approval=True)])
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await pydantic_ai.prompt(ctx, text, agent=mine)
+
+    assert await run_watched(seen, obj, "go") == "done"
+    assert seen.at["approval"] == 0 and seen.at["after"] == 0

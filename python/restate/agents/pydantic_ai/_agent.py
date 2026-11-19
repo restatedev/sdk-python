@@ -101,7 +101,8 @@ import dataclasses
 import json
 import sys
 import typing
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, Unpack
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
@@ -118,7 +119,8 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from pydantic_ai.models import Model, ModelRequestContext, infer_model
+from pydantic_ai.models import Model, ModelRequestContext, StreamedResponse, infer_model
+from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
@@ -139,6 +141,19 @@ from pydantic_ai_harness.compaction import (
     estimate_context_tokens,
     resolve_context_window,
 )
+from pydantic_ai_harness.filesystem import (
+    CREATE_DIRECTORY_KIND,
+    EDIT_FILE_KIND,
+    FILE_INFO_KIND,
+    FIND_FILES_KIND,
+    GREP_KIND,
+    LIST_DIRECTORY_KIND,
+    LIST_FILES_KIND,
+    READ_FILE_KIND,
+    SEARCH_FILES_KIND,
+    WRITE_FILE_KIND,
+)
+from pydantic_ai_harness.shell import SHELL_TOOL_NAMES
 from pydantic_core import to_json, to_jsonable_python
 
 import pydantic_ai
@@ -347,6 +362,50 @@ def _feedback_of(message: ModelMessage) -> list[str]:
     return [to_json(p, bytes_mode="base64").decode() for p in message.parts if isinstance(p, RetryFeedbackPart)]
 
 
+LOCAL_KINDS: frozenset[str] = frozenset(
+    kind.id
+    for kind in (
+        READ_FILE_KIND,
+        WRITE_FILE_KIND,
+        EDIT_FILE_KIND,
+        LIST_DIRECTORY_KIND,
+        SEARCH_FILES_KIND,
+        FIND_FILES_KIND,
+        CREATE_DIRECTORY_KIND,
+        FILE_INFO_KIND,
+        LIST_FILES_KIND,
+        GREP_KIND,
+    )
+)
+"""The ``tool_kind`` of the harness's built-in local tools that this package keeps alive while they run (the file
+system's). The harness's shell tools declare none: they are known by the names the harness gives them
+(``SHELL_TOOL_NAMES``). ``code_mode``'s ``run_code`` runs the user's tools inside it, so it is not kept alive."""
+
+
+def _local(tool_def: ToolDefinition) -> bool:
+    """Whether ``tool_def`` is a built-in local tool of the harness: its file system's, or its shell's."""
+    return tool_def.tool_kind in LOCAL_KINDS or tool_def.name in SHELL_TOOL_NAMES
+
+
+class _Alive(WrapperModel):
+    """A model whose requests keep the attempt alive (``ctx.working``) while they run: exactly the request, so the
+    stores and steering around it are outside, and a wait on Restate never is inside."""
+
+    def __init__(self, wrapped: Model, ctx: SessionContext) -> None:
+        super().__init__(wrapped)
+        self.ctx = ctx
+
+    async def request(self, *args: Any, **kwargs: Any) -> ModelResponse:
+        async with self.ctx.working():
+            return await super().request(*args, **kwargs)
+
+    @asynccontextmanager
+    async def request_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[StreamedResponse]:
+        # In scope until the stream ends, as the caller reads it inside the ``async with``.
+        async with self.ctx.working(), super().request_stream(*args, **kwargs) as stream:
+            yield stream
+
+
 class _Restate(AbstractCapability[Any]):
     """Make a Pydantic AI run durable in a Restate handler.
 
@@ -363,6 +422,8 @@ class _Restate(AbstractCapability[Any]):
         self.conversation = conversation
         self.model_errors = ErrorSet()
         """The errors that the run's model requests failed with."""
+        self.local: dict[str, AsyncExitStack] = {}
+        """The ``ctx.working`` scopes of the built-in local tool calls in progress, by call id."""
         self.feedback = {feedback for m in history for feedback in _feedback_of(m)}
         """Pydantic AI's feedback that the conversation has (each ``RetryFeedbackPart``), as JSON."""
 
@@ -408,18 +469,34 @@ class _Restate(AbstractCapability[Any]):
         await self.conversation.turn.append_reply(response)
         return response
 
+    async def _release(self, call: ToolCallPart) -> None:
+        if (stack := self.local.pop(call.tool_call_id, None)) is not None:
+            await stack.aclose()
+
+    async def release(self) -> None:
+        """Close the scopes still open, as the run ends."""
+        stacks = list(self.local.values())
+        self.local.clear()
+        for stack in stacks:
+            await stack.aclose()
+
     async def before_tool_execute(
         self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any
     ) -> Any:
         # The stores of this package write once per tool call (``_stores.py``).
         calling(call.tool_call_id)
         await tool_call_started(self.ctx)
+        if _local(tool_def):
+            # A built-in local tool (the file system's, the shell's): kept alive while it runs, from here to its end.
+            stack = self.local[call.tool_call_id] = AsyncExitStack()
+            await stack.enter_async_context(self.ctx.working())
         return args
 
     async def after_tool_execute(
         self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any, result: Any
     ) -> Any:
         calling(None)
+        await self._release(call)
         return result
 
     async def handle_deferred_tool_calls(
@@ -453,6 +530,7 @@ class _Restate(AbstractCapability[Any]):
         self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any, error: Exception
     ) -> Any:
         calling(None)
+        await self._release(call)
         stop = stop_signal_of(self.ctx)
         if stop is not None and stop.reason is not None:
             raise stop.reason from error
@@ -794,7 +872,7 @@ def _run(
             with tools_in(ctx):
                 result = await agent.run(
                     message_history=history,
-                    model=model,
+                    model=_Alive(model, ctx),
                     toolsets=toolsets,
                     capabilities=[restate, *chosen, *snapshots, steering],
                     output_type=spec,
@@ -824,6 +902,9 @@ def _run(
                 # Not a model request's: no refusal, whatever its name (an instructions function's, say).
                 from_tool(ctx, error)
             raise
+        finally:
+            # Whatever scope a tool's end hook missed (a cancelled run, say).
+            await restate.release()
         # The messages that no model request stored: an output tool's return, say.
         await restate.store(result.all_messages())
         if isinstance(result.output, DeferredToolRequests):
@@ -1128,7 +1209,7 @@ def _compactor(
         compacted = await compact_now(
             compaction(context_window, target=BETWEEN),
             messages,
-            model=_model(named),
+            model=_Alive(_model(named), ctx),
             conversation_id=conversation_id_of(ctx),
         )
         return None if compacted == messages else _snapshot_of(compacted)
