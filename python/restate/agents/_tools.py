@@ -126,6 +126,7 @@ class Tool:
         description: What the tool does, for the model.
         input_schema: The JSON schema of the tool's input, which the
             framework passes to the model.
+        keepalive: Whether the tool runs in ``ctx.working``: see ``tool``.
     """
 
     name: str
@@ -133,6 +134,7 @@ class Tool:
     input_schema: dict[str, Any]
     _run: Callable[[dict[str, Any], ToolCall], Awaitable[Any]]
     _validate: Callable[[dict[str, Any]], Any]
+    keepalive: bool = False
 
     async def run(self, args: object, call: ToolCall) -> str:
         """Run the tool with the model's raw arguments, and return its result as text for the model.
@@ -157,6 +159,9 @@ class Tool:
         except Exception as error:  # pydantic's ValidationError, for the model to fix
             return f"Error: the arguments do not fit the tool's input: {error}"
         try:
+            if self.keepalive:
+                async with call.ctx.working():
+                    return _text(await self._run(arguments, call))
             return _text(await self._run(arguments, call))
         except BaseException as error:
             # The turn stopped (its invocation was cancelled, or its attempt
@@ -219,15 +224,23 @@ def _text(value: object) -> str:
 
 
 @typing.overload
-def tool(fn: Callable[..., Any], /, *, name: str | None = None, description: str | None = None) -> Tool: ...
+def tool(
+    fn: Callable[..., Any], /, *, name: str | None = None, description: str | None = None, keepalive: bool = False
+) -> Tool: ...
 
 
 @typing.overload
-def tool(*, name: str | None = None, description: str | None = None) -> Callable[[Callable[..., Any]], Tool]: ...
+def tool(
+    *, name: str | None = None, description: str | None = None, keepalive: bool = False
+) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
 def tool(
-    fn: Callable[..., Any] | None = None, *, name: str | None = None, description: str | None = None
+    fn: Callable[..., Any] | None = None,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    keepalive: bool = False,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Create a tool from a function, sync or async.
 
@@ -251,12 +264,19 @@ def tool(
     result, and can act on it. Any other exception fails the attempt, and
     Restate retries it.
 
+    A tool does not keep its attempt alive: one that works for longer than
+    Restate's inactivity timeout (a minute, by default) is cut off, as by a
+    crash. One that must work that long sets ``keepalive``, and runs in
+    ``ctx.working``; it keeps long waits on Restate (a call, a signal) out of
+    it, or holds its process for as long as they take.
+
     Args:
         fn: The function. Omit it to use ``tool(name=..., description=...)``
             as a decorator.
         name: The tool's name. Defaults to the function's name.
         description: What the tool does, for the model. Defaults to the
             function's docstring.
+        keepalive: Keep the attempt alive while the tool runs.
 
     Returns:
         The tool, or a decorator that creates it.
@@ -267,7 +287,7 @@ def tool(
     if fn is None:
 
         def decorate(fn: Callable[..., Any]) -> Tool:
-            return tool(fn, name=name, description=description)
+            return tool(fn, name=name, description=description, keepalive=keepalive)
 
         return decorate
     pydantic = _pydantic()
@@ -295,6 +315,7 @@ def tool(
         input_schema=typing.cast(dict[str, Any], model.model_json_schema()),
         _run=run,
         _validate=validate,
+        keepalive=keepalive,
     )
 
 

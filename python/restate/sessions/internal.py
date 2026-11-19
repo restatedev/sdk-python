@@ -21,7 +21,8 @@ it. It provides:
 - ``cancelled`` and ``cancel_calls``: explicit cancellation, for handlers
   declared with ``explicit_cancellation=True``.
 - ``annotate``: time some work (a model request, say) in the journal, as a
-  run that Restate's UI shows; nothing waits for it.
+  run that Restate's UI shows; nothing waits for it, and it keeps nothing
+  alive (``ctx.working`` does).
 - ``hide_entries``: metadata that has Restate's UI hide the journal entries
   of some names (a library's own calls, say), as it hides the database's.
 - ``start`` and ``attach_invocation``: send, keeping the invocation id,

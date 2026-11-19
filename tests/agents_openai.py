@@ -28,6 +28,7 @@ import pytest
 pytest.importorskip("agents")
 
 from agents import (  # noqa: E402
+    LocalShellTool,
     Agent,
     GuardrailFunctionOutput,
     Handoff,
@@ -1620,3 +1621,138 @@ async def test_a_tool_call_whose_id_an_earlier_turns_call_had_still_gets_its_out
         "found two",
         "found three",
     ]
+
+
+# --- In process: the attempt is kept alive for the model's requests and a local tool's runs only ----
+
+
+class Seen:
+    """How many ``ctx.working`` scopes were open at each moment a test's own code ran."""
+
+    def __init__(self) -> None:
+        self.host: Any = None
+        self.at: dict[str, int] = {}
+
+    def mark(self, what: str) -> None:
+        self.at[what] = self.host.open_scopes
+
+
+def watching_invoker(obj: sessions.SessionObject, seen: Seen) -> Callable[..., Awaitable[Any]]:
+    """Invoke ``obj``'s ``ask``, with the host kept in ``seen``."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    backend = Backend()
+
+    async def ask(text: str) -> Any:
+        seen.host = Host(backend, service="asker", answers=PUBLISHED)
+        try:
+            return await invoke(obj, "ask", seen.host, request(), text)
+        finally:
+            seen.at["after"] = seen.host.open_scopes
+
+    return ask
+
+
+async def test_a_model_request_is_kept_alive_and_a_tool_of_your_own_is_not():
+    seen = Seen()
+
+    @tool
+    async def plain(city: str) -> str:
+        """Plain."""
+        seen.mark("plain")
+        return "plain done"
+
+    @tool(keepalive=True)
+    async def long(city: str) -> str:
+        """Long."""
+        seen.mark("long")
+        return "long done"
+
+    @function_tool(name_override="mine")
+    def mine(city: str) -> str:
+        """The user's own function tool."""
+        seen.mark("mine")
+        return "mine done"
+
+    def script(system: str | None, items: list[Item]) -> list[Output]:
+        seen.mark("model")
+        word = _prompts(items)[-1].split(" ")[0]
+        if items[-1].get("type") == "function_call_output":
+            return [said("done")]
+        return [calls(f"call-{uuid.uuid4().hex}", word, '{"city": "Rome"}')]
+
+    ask = watching_invoker(asker(model=Scripted(script), tools=[plain, long, mine]), seen)
+    for word in ("plain", "long", "mine"):
+        assert await ask(f"{word} now") == "done"
+    assert seen.at["model"] > 0
+    assert seen.at["plain"] == 0 and seen.at["mine"] == 0
+    assert seen.at["long"] == 1
+    assert seen.at["after"] == 0
+
+
+async def test_the_scope_of_a_request_ends_with_the_request_not_the_steering_and_stores_around_it():
+    seen = Seen()
+    during: list[int] = []
+
+    async def count_stores(data: CallModelData[Any]) -> ModelInputData:
+        # The input filter runs before the request: no scope is open yet.
+        during.append(seen.host.open_scopes)
+        return data.model_data
+
+    def script(system: str | None, items: list[Item]) -> list[Output]:
+        seen.mark("model")
+        return [said("ok")]
+
+    mine = Agent(name="mine", model=Scripted(script))
+    ask = watching_invoker(asker(agent=mine, run_config=RunConfig(call_model_input_filter=count_stores)), seen)
+    assert await ask("hi there") == "ok"
+    assert during == [0] and seen.at["model"] == 1 and seen.at["after"] == 0
+
+
+async def test_a_failed_request_and_a_failed_tool_release_their_scopes():
+    seen = Seen()
+    ask = watching_invoker(asker(model=Scripted(reply)), seen)
+    with pytest.raises(Exception):
+        await ask("refuse now")
+    assert seen.at["after"] == 0
+
+    @tool(keepalive=True)
+    async def broken(city: str) -> str:
+        """Fails."""
+        raise restate.TerminalError("no")
+
+    def call_it(system: str | None, items: list[Item]) -> list[Output]:
+        return [calls("c1", "broken", '{"city": "Rome"}')]
+
+    ask = watching_invoker(asker(model=Scripted(call_it), tools=[broken]), seen)
+    with pytest.raises(restate.TerminalError):
+        await ask("go")
+    assert seen.at["after"] == 0
+
+
+async def test_a_built_in_local_tool_is_kept_alive_while_it_runs():
+    from openai.types.responses.response_output_item import LocalShellCall  # pylint: disable=import-outside-toplevel
+    from openai.types.responses.response_output_item import (  # pylint: disable=import-outside-toplevel
+        LocalShellCallAction,
+    )
+
+    seen = Seen()
+
+    def execute(request: Any) -> str:
+        seen.mark("shell")
+        return "ran"
+
+    def script(system: str | None, items: list[Item]) -> list[Output]:
+        if items[-1].get("type") in ("function_call_output", "local_shell_call_output"):
+            return [said("done")]
+        action = LocalShellCallAction(type="exec", command=["ls"], env={})
+        call = LocalShellCall(id="ls1", action=action, call_id="c1", status="completed", type="local_shell_call")
+        return [typing.cast(Any, call)]
+
+    mine = Agent(name="shell", model=Scripted(script), tools=[LocalShellTool(executor=execute)])
+    ask = watching_invoker(asker(agent=mine), seen)
+    assert await ask("run it") == "done"
+    assert seen.at["shell"] == 1 and seen.at["after"] == 0

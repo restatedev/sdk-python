@@ -47,6 +47,10 @@ its stored events:
   with ``include_contents='none'`` starts each request at the latest message
   of the user: the requests after the one that takes a steered message start
   at it, without the prompt and the tools' results before it.
+- The attempt is kept alive (``ctx.working``) while a model request runs (not the steering and commits around it)
+  and while one of ADK's built-in local tools does (the shell and the environment's tools: ``_LOCAL_TOOLS``),
+  not while one of yours does: a ``FunctionTool``, or a ``tool`` of ours unless it has ``keepalive``. A code
+  executor of an agent (``code_executor``) is not covered.
 - A run of more model calls than its ``RunConfig``'s ``max_llm_calls`` (500 by
   default) fails its prompt for good: a retry would carry on with a fresh count.
 - An agent or ``App`` of your own runs as you configured it, with the
@@ -75,6 +79,7 @@ import logging
 import time
 import typing
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AsyncExitStack
 from typing import Any, Unpack
 
 from google.adk.agents import BaseAgent, LlmAgent, RunConfig
@@ -90,6 +95,8 @@ from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService, Session
 from google.adk.sessions.base_session_service import GetSessionConfig, ListSessionsResponse
 from google.adk.tools.base_tool import BaseTool
+from google.adk.tools.bash_tool import ExecuteBashTool
+from google.adk.tools.skill_toolset import RunSkillScriptTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow import BaseNode
 from google.genai import types
@@ -265,14 +272,59 @@ class _Sessions(BaseSessionService):
         await super().append_event(session, event)
 
 
+_LOCAL_TOOLS = (ExecuteBashTool, RunSkillScriptTool)
+"""ADK's built-in tools that work on the local machine (a shell, scripts), which run kept alive; and the
+environment's (``EnvironmentToolset``: execute, read, write and edit a file), whose classes ADK keeps in private
+modules, so they are known by their package (``_ENVIRONMENT_TOOLS``).
+
+Only these: not ours (``_AdkTool``), a user's own function (``FunctionTool``, which includes
+``LongRunningFunctionTool``), a sub-agent (``AgentTool``, whose model requests are kept alive by the plugin), nor
+the tools that call a service (MCP, OpenAPI, search, ...). Code executors (``LlmAgent.code_executor``) run as a
+processor of the flow, not as a tool."""
+
+_ENVIRONMENT_TOOLS = "google.adk.tools.environment."
+"""The package of the environment's tools (``EnvironmentToolset``)."""
+
+
+def _local(tool: BaseTool) -> bool:
+    """Whether ``tool`` is one of ADK's built-in local tools (see ``_LOCAL_TOOLS``)."""
+    return isinstance(tool, _LOCAL_TOOLS) or type(tool).__module__.startswith(_ENVIRONMENT_TOOLS)
+
+
 class _Restate(BasePlugin):
-    """Settle the earlier calls as each tool call starts, mark a tool's error as the tool's, and give the model the
-    messages steered to the turn."""
+    """Settle the earlier calls as each tool call starts, mark a tool's error as the tool's, give the model the
+    messages steered to the turn, and keep the attempt alive while a model request or a built-in local tool runs.
+
+    A scope (``ctx.working``) is opened by one hook and closed by another, so each is kept per request or per call:
+    the run closes what is left when it ends (``release_all``)."""
 
     def __init__(self, ctx: SessionContext, sessions: _Sessions) -> None:
         super().__init__(name="restate")
         self.ctx = ctx
         self.sessions = sessions
+        self.requests: dict[tuple[str, str, str], AsyncExitStack] = {}
+        """The scopes of the model requests in progress, by invocation, branch and agent: parallel agents each
+        have one."""
+        self.local: dict[str, AsyncExitStack] = {}
+        """The scopes of the built-in local tool calls in progress, by call id: tools run in parallel."""
+
+    async def _keep(self) -> AsyncExitStack:
+        stack = AsyncExitStack()
+        await stack.enter_async_context(self.ctx.working())
+        return stack
+
+    @staticmethod
+    async def _close(stack: AsyncExitStack | None) -> None:
+        if stack is not None:
+            await stack.aclose()
+
+    async def release_all(self) -> None:
+        """Close the scopes still open, as the run ends: whatever way, success, error or a stopped turn."""
+        stacks = [*self.requests.values(), *self.local.values()]
+        self.requests.clear()
+        self.local.clear()
+        for stack in stacks:
+            await self._close(stack)
 
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
@@ -287,16 +339,61 @@ class _Restate(BasePlugin):
             await self.sessions.add_stored(callback_context.session, event)
             if event.content is not None:
                 llm_request.contents.append(event.content.model_copy(deep=True))
+        # Kept alive from here, once the steering is done: the request is what follows (ADK resolves the model, runs
+        # the agent's own callbacks, and calls it). Closed by the response (``after_model_callback``), an error
+        # (``on_model_error_callback``), or the event that ends the step if a callback answered instead.
+        key = _request_key(callback_context.invocation_id, callback_context.branch, callback_context.agent_name)
+        await self._close(self.requests.pop(key, None))
+        self.requests[key] = await self._keep()
+        return None
+
+    async def after_model_callback(
+        self, *, callback_context: CallbackContext, llm_response: LlmResponse
+    ) -> LlmResponse | None:
+        # A streamed reply comes as partial responses, then its whole: the request is on until the whole.
+        if not llm_response.partial:
+            key = _request_key(callback_context.invocation_id, callback_context.branch, callback_context.agent_name)
+            await self._close(self.requests.pop(key, None))
+        return None
+
+    async def on_model_error_callback(
+        self, *, callback_context: CallbackContext, llm_request: LlmRequest, error: Exception
+    ) -> LlmResponse | None:
+        # Also called for a request that is cancelled (``error`` is the ``CancelledError``).
+        key = _request_key(callback_context.invocation_id, callback_context.branch, callback_context.agent_name)
+        await self._close(self.requests.pop(key, None))
+        return None
+
+    async def on_event_callback(self, *, invocation_context: Any, event: Event) -> Event | None:
+        # Backstop for what the callbacks miss: a response that a callback of the agent gave in place of the
+        # model's (no after or error callback runs then), or a tool call that one answered. An event of the
+        # agent that is whole ends its request, and a response to a call ends the call's scope.
+        if not event.partial:
+            await self._close(self.requests.pop(_request_key(event.invocation_id, event.branch, event.author), None))
+            for response in event.get_function_responses():
+                await self._close(self.local.pop(response.id or "", None))
         return None
 
     async def before_tool_callback(
         self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext
     ) -> None:
         await tool_call_started(self.ctx)
+        if _local(tool):
+            call_id = tool_context.function_call_id or ""
+            await self._close(self.local.pop(call_id, None))
+            self.local[call_id] = await self._keep()
+
+    async def after_tool_callback(
+        self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext, result: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        await self._close(self.local.pop(tool_context.function_call_id or "", None))
+        return None
 
     async def on_tool_error_callback(
         self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext, error: Exception
     ) -> dict[str, Any] | None:
+        # Also called for a call that is cancelled.
+        await self._close(self.local.pop(tool_context.function_call_id or "", None))
         if type(tool) is BaseTool:
             # A tool the agent does not have (ADK stands in a bare BaseTool for it): the model's to fix. Failing
             # the attempt would not help, as the retry resumes the same call.
@@ -304,6 +401,10 @@ class _Restate(BasePlugin):
         # Never mistaken for the model provider refusing; the attempt fails with it.
         from_tool(self.ctx, error)
         return None
+
+
+def _request_key(invocation: str, branch: str | None, agent: str) -> tuple[str, str, str]:
+    return (invocation, branch or "", agent)
 
 
 # --- Tools ----------------------------------------------------------------------------------------
@@ -467,7 +568,8 @@ def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
         sessions = _Sessions(conversation)
         # This package's plugin, after the app's own: a plugin of the app that answers in the model's place leaves
         # the messages steered to the turn to a request that goes out.
-        plugins = [*app.plugins, _Restate(ctx, sessions)]
+        restate = _Restate(ctx, sessions)
+        plugins = [*app.plugins, restate]
         runner = Runner(app=app.model_copy(update={"plugins": plugins}), session_service=sessions)
         answer = ""
         error: Event | None = None
@@ -488,6 +590,10 @@ def _run(ctx: SessionContext, app: App, config: RunConfig | None) -> Run:
         except LlmCallsLimitExceededError as limit:
             # A retry would carry on with a fresh count, and so would never end an agent that keeps calling tools.
             raise TerminalError(f"the run reached its limit of model calls: {limit}") from limit
+        finally:
+            # The scopes the plugin's hooks left open (a callback of the agent answered in place of the model or a
+            # tool, a failed or stopped run): the attempt is not kept alive past the run.
+            await restate.release_all()
         if error is not None:
             # The model would not answer (a safety block, say), as it would not again: the prompt fails.
             raise TerminalError(f"the model returned {error.error_code}: {error.error_message or ''}")
@@ -768,9 +874,11 @@ def _summarizer(model: PerSession[AnyModel | None]) -> Summarize:
         llm = LlmAgent(name="summarizer", model=_model(await configured(model, ctx))).canonical_model
         asked = LlmRequest(model=llm.model, contents=[types.Content(role="user", parts=[types.Part(text=request)])])
         texts: list[str] = []
-        async for response in llm.generate_content_async(asked):
-            if response.content is not None:
-                texts.extend(part.text for part in response.content.parts or [] if part.text)
+        # Kept alive for the request alone.
+        async with ctx.working():
+            async for response in llm.generate_content_async(asked):
+                if response.content is not None:
+                    texts.extend(part.text for part in response.content.parts or [] if part.text)
         return "".join(texts)
 
     return summarize

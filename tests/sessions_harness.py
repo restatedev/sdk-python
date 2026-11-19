@@ -260,17 +260,18 @@ async def waits_for_a_crawl(ctx: sessions.SessionContext) -> list[Any]:
 
 @slowpoke.handler()
 async def thinks(ctx: sessions.SessionContext) -> int:
-    """Works locally longer than the inactivity timeout, inside an annotation."""
+    """Works locally longer than the inactivity timeout, in ``ctx.working`` (and an annotation, which only times it)."""
     n = attempt(ctx)
     timed = internal.annotate(ctx, "model: thinking")
-    await asyncio.sleep(2.5)
+    async with ctx.working():
+        await asyncio.sleep(2.5)
     timed.end()
     return n
 
 
 @slowpoke.handler()
 async def daydreams(ctx: sessions.SessionContext) -> int:
-    """Works locally longer than the inactivity timeout, telling Restate nothing."""
+    """Works locally longer than the inactivity timeout, outside ``ctx.working``: telling Restate nothing."""
     n = attempt(ctx)
     await asyncio.sleep(2.5)
     daydreamt[ctx.key] = daydreamt.get(ctx.key, 0) + 1
@@ -449,30 +450,20 @@ async def test_a_shut_down_attempt_resumes_when_its_call_completes(harness: Harn
     assert n >= 2
 
 
-async def test_an_open_annotation_keeps_the_attempt_alive(harness: HarnessEnvironment, monkeypatch):
+async def test_work_in_working_keeps_the_attempt_alive(harness: HarnessEnvironment, monkeypatch):
+    # The attempt heartbeats in `ctx.working`: here faster than the object's inactivity timeout of a second, so the
+    # work is done in the first attempt.
     monkeypatch.setattr(_driver, "HEARTBEAT_INTERVAL", timedelta(seconds=0.3))
     key = str(uuid.uuid4())
     assert await harness.client.object_call(thinks, key=key, arg=None) == 1
 
 
-async def test_local_work_keeps_its_attempt_alive_with_nothing_of_restates_outstanding(
-    harness: HarnessEnvironment, monkeypatch
-):
-    # The attempt heartbeats while its handler works on its own, annotation or not: here faster than the object's
-    # inactivity timeout of a second, so the work is done in the first attempt.
+async def test_local_work_outside_working_is_shut_down_and_restarted(harness: HarnessEnvironment, monkeypatch):
+    # However quick the heartbeat, none is sent outside `ctx.working`: each attempt is shut down after a second with
+    # nothing heard from it, and restarted right away.
     monkeypatch.setattr(_driver, "HEARTBEAT_INTERVAL", timedelta(seconds=0.3))
     key = str(uuid.uuid4())
-    assert await harness.client.object_call(daydreams, key=key, arg=None) == 1
-    assert daydreamt.get(key, 0) == 1
-
-
-async def test_local_work_is_shut_down_and_restarted_when_the_heartbeat_is_slower_than_the_inactivity_timeout(
-    harness: HarnessEnvironment,
-):
-    key = str(uuid.uuid4())
     sent = await harness.client.object_send(daydreams, key=key, arg=None)
-    # The heartbeat comes every 20 seconds, and the object's inactivity timeout is a second: each attempt is shut
-    # down after a second with nothing heard from it, and restarted right away.
     for _ in range(300):
         if attempts.get(key, 0) >= 4:
             break

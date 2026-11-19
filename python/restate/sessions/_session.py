@@ -28,7 +28,7 @@ import time
 import typing
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Protocol
@@ -169,6 +169,8 @@ class _ObjectStore:
         self._name: str | None = name
         self.vm: PyExplicitRecoveryVM | None = host.vm
         self.database_name: str | None = name
+        # What keeps the attempt alive while a call of the database runs (an attempt on Restate's), if any.
+        self.working: Callable[[], AbstractAsyncContextManager[Any]] | None = getattr(host, "database_working", None)
 
     def _key(self, key: str) -> str:
         return key if self._name is None else _beside(self._name, key)
@@ -207,6 +209,8 @@ class _ReaderStore:
         self._name: str | None = name
         self.vm: PyExplicitRecoveryVM | None = host.vm
         self.database_name: str | None = name
+        # What keeps the attempt alive while a call of the database runs (an attempt on Restate's), if any.
+        self.working: Callable[[], AbstractAsyncContextManager[Any]] | None = getattr(host, "database_working", None)
 
     def get(self, key: str) -> Awaitable[bytes | None]:
         key = key if self._name is None else _beside(self._name, key)

@@ -457,15 +457,17 @@ sequenceDiagram
   message starts afresh: the cancelled prompt is over.
 - The cancellation reaches the turn's work at once. Restate shuts down an
   attempt it has heard nothing from for the inactivity timeout (a minute by
-  default), and the next attempt runs the turn from its start. So while the
-  turn works on its own (a model request, a tool), its attempt tells Restate
-  every 20 seconds that it makes progress, and Restate keeps it however long
-  the step takes. While the turn waits for an answer of Restate's instead (a
-  tool waiting for an approval, a call), it tells Restate nothing: Restate
-  shuts the attempt down after the timeout, so that a wait of days holds no
-  process, and the next attempt gets the cancellation as it starts. A
-  deployment that sets an inactivity timeout under 20 seconds is shut down
-  between two of those messages.
+  default), and the next attempt runs the turn from its start. So while a
+  model request runs, or a framework's built-in local tool (a shell, file
+  edits), the attempt tells Restate every 20 seconds that it makes progress
+  (`ctx.working`), and Restate keeps it however long the step takes. Nothing
+  else of a turn does: a tool of your own only with `tool(keepalive=True)`.
+  While the turn waits for an answer of Restate's (a tool waiting for an
+  approval, a call), it tells Restate nothing: Restate shuts the attempt down
+  after the timeout, so that a wait of days holds no process, and the next
+  attempt gets the cancellation as it starts. A deployment that sets an
+  inactivity timeout under 20 seconds is shut down between two of those
+  messages.
 - A cancellation that comes once the turn answered changes nothing: the
   answer stands.
 - A tool cut short by the stop raises the stop's reason, so the model never

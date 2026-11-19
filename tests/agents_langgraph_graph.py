@@ -16,10 +16,12 @@ The graph is scripted: it routes on the first word of the message.
 # pylint: disable=missing-function-docstring,missing-class-docstring
 
 import asyncio
+import contextlib
 import collections
 import threading
 import typing
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, NotRequired, TypedDict
@@ -45,6 +47,7 @@ import restate  # noqa: E402
 from support import RESTATE_IMAGE  # noqa: E402  # pylint: disable=import-error
 from restate import HarnessEnvironment, sessions  # noqa: E402
 from restate.agents import langgraph  # noqa: E402
+from restate.agents import tool as restate_tool  # noqa: E402
 from restate.agents.internal import CANCELLED, ENDED  # noqa: E402
 from restate.agents.langgraph import nodes  # noqa: E402
 from restate.agents.langgraph._errors import terminal_of  # noqa: E402
@@ -973,3 +976,200 @@ def test_context_is_for_a_graph_of_your_own():
     make: Any = langgraph.agent
     with pytest.raises(TypeError, match="context is an option of your own graph: pass it with graph="):
         make("plain", context=lambda ctx: Caller(ctx.key))
+
+
+# --- Kept alive -------------------------------------------------------------------------------------
+
+off_loop: list[bool] = []
+"""Each ``ctx.working`` scope entered off the attempt's event loop."""
+scopes: list[tuple[str, int]] = []
+"""The ``ctx.working`` scopes open (``Host.open_scopes``) when each part of a run saw it, in order."""
+now: list[Any] = []
+"""The host of the run in progress."""
+stuck = asyncio.Event()
+
+
+def mark(where: str) -> None:
+    scopes.append((where, now[0].open_scopes))
+
+
+class Probing(BaseChatModel):
+    """A model that notes the scopes it sees, and waits on ``stuck`` (never set) for a message that says ``stuck``."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "probing"
+
+    def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
+        # A sync node's request (`invoke`), in a thread of the graph's.
+        mark("sync model")
+        return ChatResult(generations=[ChatGeneration(message=AIMessage("done"))])
+
+    async def _agenerate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
+        mark("model")
+        if "stuck" in str(messages[-1].content):
+            await stuck.wait()
+        if "fail" in str(messages[-1].content):
+            raise RuntimeError("the model API is down")
+        return ChatResult(generations=[ChatGeneration(message=AIMessage("done"))])
+
+
+@restate_tool
+async def plain() -> str:
+    """A tool of ours."""
+    mark("plain")
+    return "ok"
+
+
+@restate_tool(keepalive=True)
+async def kept() -> str:
+    """A tool of ours that is kept alive."""
+    mark("kept")
+    return "ok"
+
+
+def _kept_graph() -> Any:
+    """A graph of the user's own: a node that asks a model (without passing it the run's config, as nodes do), one
+    that interrupts, one that asks a model in a subgraph, and one that calls tools."""
+    model = Probing()
+
+    async def llm(state: MessagesState) -> dict[str, Any]:
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    def sync_llm(state: MessagesState) -> dict[str, Any]:
+        # The usual shape of LangGraph's examples: LangChain runs the callbacks of a sync request on a loop of its own.
+        return {"messages": [model.invoke(state["messages"])]}
+
+    async def ask(state: MessagesState) -> dict[str, Any]:
+        mark("before the interrupt")
+        return {"messages": [AIMessage(f"approved: {interrupt('approve?')}")]}
+
+    def calls(state: MessagesState) -> dict[str, Any]:
+        word = str(state["messages"][-1].content).split(" ")[0]
+        return {"messages": [AIMessage("", tool_calls=[{"id": f"call-{word}", "name": word, "args": {}}])]}
+
+    inner = StateGraph(MessagesState)
+    inner.add_node("llm", llm)
+    inner.add_edge(START, "llm")
+
+    def route(state: MessagesState) -> str:
+        return {"ask": "ask", "plain": "calls", "kept": "calls", "nested": "nested", "sync": "sync_llm"}.get(
+            str(state["messages"][-1].content).split(" ")[0], "llm"
+        )
+
+    outer = StateGraph(MessagesState)
+    outer.add_node("llm", llm)
+    outer.add_node("sync_llm", sync_llm)
+    outer.add_node("ask", ask)
+    outer.add_node("calls", calls)
+    outer.add_node("tools", ToolNode(langgraph.tools([plain, kept])))
+    outer.add_node("nested", inner.compile())
+    outer.add_conditional_edges(START, route, ["llm", "sync_llm", "ask", "calls", "nested"])
+    outer.add_edge("calls", "tools")
+    for end in ("llm", "sync_llm", "ask", "tools", "nested"):
+        outer.add_edge(end, END)
+    return outer
+
+
+def keeping() -> Callable[..., Awaitable[Any]]:
+    """Return how to ask, in process, an agent of the user's own graph, which notes its scopes in ``scopes``."""
+    from sessions_database import Backend  # pylint: disable=import-error,import-outside-toplevel
+    from sessions_object import Host, request  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents import AgentObject  # pylint: disable=import-outside-toplevel
+    from restate.sessions.internal import invoke  # pylint: disable=import-outside-toplevel
+
+    class Watching(Host):
+        def generic_call(self, *args: Any, **kwargs: Any) -> Any:
+            if args[1] == "wait":
+                mark("wait")
+            return super().generic_call(*args, **kwargs)
+
+        @contextlib.asynccontextmanager
+        async def working(self) -> AsyncIterator[None]:
+            # As the driver's: a task that beats while the scope is open, on the loop the scope is entered on. A
+            # scope entered on another loop than the attempt's would hold that loop's caller until it closes.
+            if asyncio.get_running_loop() is not loop:
+                # LangChain swallows a handler's error: noted here instead, for the test to see.
+                off_loop.append(True)
+            async with super().working():
+                beat = asyncio.ensure_future(asyncio.sleep(3600))
+                try:
+                    yield
+                finally:
+                    beat.cancel()
+
+    loop = asyncio.get_running_loop()
+
+    graph = _kept_graph()
+    asker = AgentObject("kept_asker")
+
+    @asker.handler
+    async def ask(ctx: sessions.SessionContext, text: str) -> str:
+        return await langgraph.prompt(ctx, text, graph=graph)
+
+    backend = Backend()
+
+    async def asked(text: str) -> Any:
+        scopes.clear()
+        off_loop.clear()
+        answers = {"publish": b'{"revision": 1}', "wait": b'"yes"'}
+        now[:] = [Watching(backend, service="kept_asker", answers=answers)]
+        return await invoke(asker, "ask", now[0], request(), text)
+
+    return asked
+
+
+async def test_a_graphs_model_request_is_kept_alive_wherever_a_node_makes_it():
+    asked = keeping()
+    assert await asked("hi") == "done"
+    assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0
+    # In a subgraph the graph's nodes run: the handler is inherited.
+    assert await asked("nested x") == "done"
+    assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_a_sync_nodes_model_request_does_not_hang_and_leaves_no_scope_open():
+    # LangChain runs the callbacks of a sync request (`invoke`) on a loop of its own, in a thread, and waits there for
+    # every task they started: a scope entered there, with its heartbeat's task, would never let the request go out.
+    asked = keeping()
+    assert await asyncio.wait_for(asked("sync now"), timeout=10) == "done"
+    assert [where for where, _ in scopes] == ["sync model"]
+    assert not off_loop, "a scope was entered off the attempt's loop"
+    assert now[0].open_scopes == 0
+
+
+async def test_a_tool_of_ours_is_kept_alive_only_with_keepalive_in_a_graph_too():
+    asked = keeping()
+    await asked("plain x")
+    assert scopes == [("plain", 0)]
+    await asked("kept x")
+    assert scopes == [("kept", 1)]
+    assert now[0].open_scopes == 0
+
+
+async def test_an_interrupts_wait_for_its_signal_is_outside_any_scope():
+    asked = keeping()
+    assert await asked("ask x") == "approved: yes"
+    assert scopes == [("before the interrupt", 0), ("wait", 0), ("before the interrupt", 0)]
+    assert now[0].open_scopes == 0
+
+
+async def test_a_stopped_or_failed_request_of_a_graph_leaves_no_scope_open():
+    stuck.clear()
+    asked = keeping()
+    scopes.clear()
+    task = asyncio.ensure_future(asked("stuck x"))
+    while not scopes:
+        await asyncio.sleep(0.01)
+    assert now[0].open_scopes == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert now[0].open_scopes == 0
+    with pytest.raises(Exception):
+        await asked("fail x")
+    assert scopes == [("model", 1)]
+    assert now[0].open_scopes == 0

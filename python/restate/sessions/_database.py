@@ -121,7 +121,8 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Connect
     vm = getattr(store, "vm", None)
     name = getattr(store, "database_name", None) if vm is not None else None
     try:
-        native = await _settled(sql_open(namespace, boundary.dispatch, boundary.lists_keys, reader, vm, name))
+        async with boundary.alive():
+            native = await _settled(sql_open(namespace, boundary.dispatch, boundary.lists_keys, reader, vm, name))
     except Exception as error:
         if boundary.failed is not None:
             raise boundary.failed from error
@@ -155,6 +156,11 @@ class _Boundary:
     def __init__(self, store: Store, loop: asyncio.AbstractEventLoop) -> None:
         self.store: Store = store
         self.loop: asyncio.AbstractEventLoop = loop
+        # Keeps the attempt alive while a call of the database runs: the store of an attempt on Restate has it
+        # (its handler's ``working``). The database's calls are local work that never waits on Restate for long.
+        self._working: Callable[[], contextlib.AbstractAsyncContextManager[Any]] | None = getattr(
+            store, "working", None
+        )
         # The store's optional methods (see `Store`).
         self._keys: Callable[[], Sequence[str] | Awaitable[Sequence[str]]] | None = getattr(store, "keys", None)
         self.lists_keys: bool = callable(self._keys)
@@ -168,6 +174,10 @@ class _Boundary:
     def _keep(self, error: BaseException) -> None:
         if self.failed is None:
             self.failed = error
+
+    def alive(self) -> contextlib.AbstractAsyncContextManager[Any]:
+        """A scope that keeps the attempt alive, if the store has one: around each call of the database."""
+        return self._working() if self._working is not None else contextlib.nullcontext()
 
     def dispatch(self, op: int, key: Any, value: bytes | None, reply: SqlReply | None) -> None:
         """Handle one request of the extension; ``key`` is a store key, or empty for a sync or a commit."""
@@ -287,7 +297,8 @@ class _Sql(abc.ABC):
         that fails right away); it returns a value or an awaitable of one.
         """
         try:
-            return await _settled(call())
+            async with self._boundary.alive():
+                return await _settled(call())
         except Exception as error:
             raise self._failure(error) from None
 
@@ -374,7 +385,8 @@ class Connection(_Sql):
             # that wrote nothing does not sync, so they run afterwards instead.
             self._boundary.with_sync = tx.commit_runs()
             try:
-                await _settled(self._native.commit(records))
+                async with self._boundary.alive():
+                    await _settled(self._native.commit(records))
             except Exception as error:
                 # A failed COMMIT (a deferred constraint, say) leaves the
                 # transaction open; without a rollback, later calls would run

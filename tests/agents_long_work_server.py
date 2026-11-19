@@ -43,13 +43,14 @@ requests: dict[str, int] = {}
 async def answer(ctx: sessions.SessionContext, text: str) -> str:
     """A scripted framework whose model thinks for longer than the inactivity timeout, and says nothing meanwhile.
 
-    It is what a turn of any framework is while its model request runs: local work, with nothing of Restate's
-    outstanding.
+    It is what a turn of any framework is while its model request runs: local work in ``ctx.working``, as the
+    frameworks' requests run.
     """
 
     async def work(conversation: Conversation) -> str:
         requests[ctx.key] = requests.get(ctx.key, 0) + 1
-        await asyncio.sleep(3)
+        async with ctx.working():
+            await asyncio.sleep(3)
         await conversation.turn.append_reply({"role": "assistant", "text": f"echo: {text}"})
         return f"echo: {text}"
 

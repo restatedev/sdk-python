@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import typing
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AbstractAsyncContextManager
 from datetime import timedelta
 from typing import Any, Protocol
 
@@ -349,6 +350,26 @@ class SessionContext(Caller, Sender, Protocol):
         The cancellation is sent right away, and not awaited. Cancelling an
         invocation that has ended does nothing, so a retried attempt may
         cancel it again.
+        """
+        ...
+
+    def working(self) -> AbstractAsyncContextManager[None]:
+        """Keep the attempt alive while the body of an ``async with`` runs.
+
+        For work outside Restate that may outlast Restate's inactivity timeout
+        (a minute, by default), such as a model's request::
+
+            async with ctx.working():
+                reply = await model.generate(prompt)
+
+        Outside it, an attempt Restate hears nothing from for that long is shut
+        down: it suspends on the calls it waits for, and a new attempt runs the
+        handler from the start when one answers (or at once, if it waits for
+        none). So a wait of days holds no process, and work cut off that way is
+        done again. Inside it, the attempt sends a heartbeat every 20 seconds,
+        whatever it waits for: keep a long wait on Restate (a call, a signal)
+        out of it. The database's own calls keep the attempt alive by
+        themselves.
         """
         ...
 

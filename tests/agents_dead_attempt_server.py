@@ -45,7 +45,7 @@ completed: Counter[str] = Counter()
 """How many model requests ran to their end, by the conversation's key."""
 
 SLOW = 4.0
-"""How long a slow model request takes: longer than the inactivity timeout, shorter than a heartbeat (20 s)."""
+"""How long a slow model request takes: longer than the inactivity timeout, shorter than a heartbeat's interval (20 s)."""
 
 
 async def model(key: str) -> str:
@@ -61,12 +61,14 @@ async def model(key: str) -> str:
 
 
 async def answer(ctx: sessions.SessionContext, text: str) -> str:
-    """A scripted framework whose model request goes through the turn's stop signal, as the frameworks' do."""
+    """A scripted framework whose model request goes through the turn's stop signal, in ``ctx.working``, as the
+    frameworks' do."""
 
     async def work(conversation: Conversation) -> str:
         stop = stop_signal_of(ctx)
         assert stop is not None
-        await stop.guard(model(ctx.key))
+        async with ctx.working():
+            await stop.guard(model(ctx.key))
         await conversation.turn.append_reply({"role": "assistant", "text": f"echo: {text}"})
         return f"echo: {text}"
 
@@ -84,8 +86,9 @@ async def harness():
 
 
 async def test_a_dead_attempts_model_request_is_cancelled(harness: HarnessEnvironment):
-    # The attempt heartbeats every 20 s, by default: past the agent's inactivity timeout of a second, Restate
-    # shuts each slow attempt down in the middle of its model request, and the next attempt asks again.
+    # The model's request is kept alive, but the heartbeat comes every 20 s, by default: past the agent's inactivity
+    # timeout of a second, Restate shuts each slow attempt down in the middle of its model request, and the next
+    # attempt asks again.
     key = str(uuid.uuid4())
     async with httpx2.AsyncClient(timeout=60) as ingress:
         sent = await ingress.post(

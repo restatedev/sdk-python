@@ -30,6 +30,7 @@ and sends, and nothing else from the SDK's context::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import inspect
 import json
@@ -98,6 +99,11 @@ class AttemptContext(Calls, Sends):
 
     def cancel(self, invocation_id: str) -> None:
         self._cancel(invocation_id)
+
+    def working(self) -> contextlib.AbstractAsyncContextManager[None]:
+        # The host of an attempt on Restate keeps it alive; a test's host may count the scopes; else nothing to do.
+        working = getattr(self._call_host, "working", None)
+        return working() if working is not None else contextlib.nullcontext()
 
 
 @dataclass(frozen=True, eq=False)
