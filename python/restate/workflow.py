@@ -88,6 +88,12 @@ class Workflow:
             see the handler option of the same name. NOTE: in preview, it might change without notice.
         explicit_cancellation (bool, optional): (Preview) Explicit cancellation for all handlers of this workflow:
             see the handler option of the same name. NOTE: in preview, it might change without notice.
+        preemptable (bool, optional): When set to False, Restate never preempts invocations of this workflow,
+            with all its handlers: it doesn't eagerly suspend them while they wait on an await point to free
+            concurrency capacity for other invocations. They still suspend when the inactivity timeout fires.
+            Defaults to True, and can be overridden per handler.
+            NOTE: Only restate-server versions supporting service discovery protocol V6 read this field. Against older
+            ones it is left out of the discovery, which is safe since they never preempt invocations.
     """
 
     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
@@ -117,6 +123,7 @@ class Workflow:
         ] = None,
         explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
+        preemptable: typing.Optional[bool] = None,
     ):
         self.service_tag = ServiceTag("workflow", name, description, metadata)
         self.handlers = {}
@@ -132,6 +139,7 @@ class Workflow:
         self.context_managers = invocation_context_managers
         self.explicit_recovery = explicit_recovery
         self.explicit_cancellation = explicit_cancellation
+        self.preemptable = preemptable
 
     @property
     def name(self):
@@ -161,6 +169,7 @@ class Workflow:
         ] = None,
         explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
+        preemptable: typing.Optional[bool] = None,
     ) -> typing.Callable[[T], T]:
         """
         Mark this handler as a workflow entry point.
@@ -214,6 +223,12 @@ class Workflow:
             explicit_cancellation: (Preview) If true, Restate cancelling an invocation neither fails the handler's
                 awaits nor cancels its calls: the handler awaits `restate._preview.cancellation(ctx)` and decides
                 what to stop. NOTE: in preview, it might change without notice.
+            preemptable: When set to False, Restate never preempts invocations of this handler: it doesn't eagerly
+                suspend them while they wait on an await point to free concurrency capacity for other invocations.
+                They still suspend when the inactivity timeout fires. Overrides the value set on the service, which
+                defaults to True.
+                NOTE: Only restate-server versions supporting service discovery protocol V6 read this field. Against
+                older ones it is left out of the discovery, which is safe since they never preempt invocations.
         """
         return self._add_handler(
             name,
@@ -235,6 +250,7 @@ class Workflow:
             invocation_context_managers=invocation_context_managers,
             explicit_recovery=explicit_recovery,
             explicit_cancellation=explicit_cancellation,
+            preemptable=preemptable,
         )
 
     def handler(
@@ -258,6 +274,7 @@ class Workflow:
         ] = None,
         explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
+        preemptable: typing.Optional[bool] = None,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -312,6 +329,12 @@ class Workflow:
             explicit_cancellation: (Preview) If true, Restate cancelling an invocation neither fails the handler's
                 awaits nor cancels its calls: the handler awaits `restate._preview.cancellation(ctx)` and decides
                 what to stop. NOTE: in preview, it might change without notice.
+            preemptable: When set to False, Restate never preempts invocations of this handler: it doesn't eagerly
+                suspend them while they wait on an await point to free concurrency capacity for other invocations.
+                They still suspend when the inactivity timeout fires. Overrides the value set on the service, which
+                defaults to True.
+                NOTE: Only restate-server versions supporting service discovery protocol V6 read this field. Against
+                older ones it is left out of the discovery, which is safe since they never preempt invocations.
         """
         return self._add_handler(
             name,
@@ -333,6 +356,7 @@ class Workflow:
             invocation_context_managers,
             explicit_recovery=explicit_recovery,
             explicit_cancellation=explicit_cancellation,
+            preemptable=preemptable,
         )
 
     # pylint: disable=R0914
@@ -359,6 +383,7 @@ class Workflow:
         ] = None,
         explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
+        preemptable: typing.Optional[bool] = None,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -407,6 +432,12 @@ class Workflow:
                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
                 otherwise the service discovery will fail.
             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
+            preemptable: When set to False, Restate never preempts invocations of this handler: it doesn't eagerly
+                suspend them while they wait on an await point to free concurrency capacity for other invocations.
+                They still suspend when the inactivity timeout fires. Overrides the value set on the service, which
+                defaults to True.
+                NOTE: Only restate-server versions supporting service discovery protocol V6 read this field. Against
+                older ones it is left out of the discovery, which is safe since they never preempt invocations.
 
         Returns:
             Callable: The decorated function.
@@ -455,6 +486,7 @@ class Workflow:
                 context_managers=combined_context_managers,
                 explicit_recovery=explicit_recovery,
                 explicit_cancellation=explicit_cancellation,
+                preemptable=preemptable,
             )
             if handler.name in self.handlers:
                 raise ValueError(f"Handler {handler.name} already exists in {self.name}")

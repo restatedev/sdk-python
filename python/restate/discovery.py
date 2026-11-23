@@ -88,6 +88,7 @@ class Handler:
         enableLazyState: Optional[bool] = None,
         eagerStateKeysWhitelist: Optional[List[str]] = None,
         ingressPrivate: Optional[bool] = None,
+        preemptable: Optional[bool] = None,
         retryPolicyInitialInterval: Optional[int] = None,
         retryPolicyMaxInterval: Optional[int] = None,
         retryPolicyMaxAttempts: Optional[int] = None,
@@ -108,6 +109,7 @@ class Handler:
         self.enableLazyState = enableLazyState
         self.eagerStateKeysWhitelist = eagerStateKeysWhitelist
         self.ingressPrivate = ingressPrivate
+        self.preemptable = preemptable
         self.retryPolicyInitialInterval = retryPolicyInitialInterval
         self.retryPolicyMaxInterval = retryPolicyMaxInterval
         self.retryPolicyMaxAttempts = retryPolicyMaxAttempts
@@ -131,6 +133,7 @@ class Service:
         enableLazyState: Optional[bool] = None,
         eagerStateKeysWhitelist: Optional[List[str]] = None,
         ingressPrivate: Optional[bool] = None,
+        preemptable: Optional[bool] = None,
         retryPolicyInitialInterval: Optional[int] = None,
         retryPolicyMaxInterval: Optional[int] = None,
         retryPolicyMaxAttempts: Optional[int] = None,
@@ -149,6 +152,7 @@ class Service:
         self.enableLazyState = enableLazyState
         self.eagerStateKeysWhitelist = eagerStateKeysWhitelist
         self.ingressPrivate = ingressPrivate
+        self.preemptable = preemptable
         self.retryPolicyInitialInterval = retryPolicyInitialInterval
         self.retryPolicyMaxInterval = retryPolicyMaxInterval
         self.retryPolicyMaxAttempts = retryPolicyMaxAttempts
@@ -259,6 +263,14 @@ def compute_discovery_json(
     """
 
     ep = compute_discovery(endpoint, discovered_as)
+
+    if version <= 5:
+        # preemptable is only supported since discovery protocol version 6. Drop it rather than failing:
+        # runtimes older than that never preempt invocations, so leaving it out doesn't change their behavior.
+        for service in ep.services:
+            service.preemptable = None
+            for handler in service.handlers:
+                handler.preemptable = None
 
     # Validate that new discovery fields aren't used with older protocol versions
     if version <= 4:
@@ -400,6 +412,7 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                     enableLazyState=handler_enable_lazy_state,
                     eagerStateKeysWhitelist=handler_eager_state_keys_whitelist,
                     ingressPrivate=handler.ingress_private,
+                    preemptable=handler.preemptable,
                     retryPolicyInitialInterval=int(
                         handler.invocation_retry_policy.initial_interval.total_seconds() * 1000
                     )
@@ -455,6 +468,7 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                 enableLazyState=service_enable_lazy_state,
                 eagerStateKeysWhitelist=service_eager_state_keys_whitelist,
                 ingressPrivate=service.ingress_private,
+                preemptable=service.preemptable,
                 retryPolicyInitialInterval=int(service.invocation_retry_policy.initial_interval.total_seconds() * 1000)
                 if service.invocation_retry_policy and service.invocation_retry_policy.initial_interval
                 else None,

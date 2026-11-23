@@ -471,6 +471,15 @@ class SessionObject(VirtualObject):
             invocation with an idempotency key.
         ingress_private: Whether only other services may call it.
         invocation_retry_policy: How Restate retries a failed invocation.
+        preemptable: When set to False, Restate never preempts invocations of
+            this object, with all its handlers and views: it doesn't eagerly
+            suspend them while they wait on an await point to free concurrency
+            capacity for other invocations. They still suspend when the
+            inactivity timeout fires. Defaults to True, and can be overridden
+            per handler or view.
+            NOTE: Only restate-server versions supporting service discovery
+            protocol V6 read it. Against older ones it is left out of the
+            discovery, which is safe since they never preempt invocations.
 
     Raises:
         TypeError: If ``migrations`` is a string rather than a list.
@@ -489,6 +498,7 @@ class SessionObject(VirtualObject):
         idempotency_retention: timedelta | None = None,
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
+        preemptable: bool | None = None,
     ) -> None:
         super().__init__(
             name,
@@ -504,6 +514,7 @@ class SessionObject(VirtualObject):
             state_preload=[HEAD_KEY],
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
+            preemptable=preemptable,
         )
         self._config: ObjectConfig = ObjectConfig(schema=Schema(name, migrations) if steps_of(migrations) else None)
         ENTRIES.on(self, {})
@@ -540,6 +551,7 @@ class SessionObject(VirtualObject):
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
         explicit_cancellation: bool = False,
+        preemptable: bool | None = None,
     ) -> Callable[[F], F]: ...
 
     def handler(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -558,6 +570,7 @@ class SessionObject(VirtualObject):
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
         explicit_cancellation: bool = False,
+        preemptable: bool | None = None,
     ) -> F | Callable[[F], F]:
         """Register a handler, used bare (``@obj.handler``) or with options (``@obj.handler(...)``).
 
@@ -608,6 +621,7 @@ class SessionObject(VirtualObject):
                 "idempotency_retention": idempotency_retention,
                 "ingress_private": ingress_private,
                 "invocation_retry_policy": invocation_retry_policy,
+                "preemptable": preemptable,
             },
         )
 
@@ -630,6 +644,7 @@ class SessionObject(VirtualObject):
         idempotency_retention: timedelta | None = None,
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
+        preemptable: bool | None = None,
     ) -> Callable[[F], F]: ...
 
     def view(
@@ -647,6 +662,7 @@ class SessionObject(VirtualObject):
         idempotency_retention: timedelta | None = None,
         ingress_private: bool | None = None,
         invocation_retry_policy: InvocationRetryPolicy | None = None,
+        preemptable: bool | None = None,
     ) -> F | Callable[[F], F]:
         """Register a view, used bare (``@obj.view``) or with options (``@obj.view(...)``).
 
@@ -690,6 +706,7 @@ class SessionObject(VirtualObject):
                 "idempotency_retention": idempotency_retention,
                 "ingress_private": ingress_private,
                 "invocation_retry_policy": invocation_retry_policy,
+                "preemptable": preemptable,
             },
         )
 

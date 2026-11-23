@@ -99,6 +99,14 @@ class AgentOptions(TypedDict, total=False):
         budget: How many tokens of the turns before the window the model
             sees, as their messages and answers: the latest that fit.
             Defaults to ``BUDGET``.
+        preemptable: When set to False, Restate never preempts invocations of
+            the agent, with all its handlers and views: it doesn't eagerly
+            suspend them while they wait on an await point to free concurrency
+            capacity for other invocations. They still suspend when the
+            inactivity timeout fires. Defaults to True.
+            NOTE: Only restate-server versions supporting service discovery
+            protocol V6 read it. Against older ones it is left out of the
+            discovery, which is safe since they never preempt invocations.
     """
 
     description: str | None
@@ -113,6 +121,7 @@ class AgentOptions(TypedDict, total=False):
     invocation_retry_policy: InvocationRetryPolicy | None
     window: Window
     budget: int
+    preemptable: bool | None
 
 
 WAITS = timedelta(seconds=15)
@@ -240,6 +249,14 @@ class AgentObject(SessionObject):
             are their messages and answers. Defaults to 1.
         budget: How many tokens of the turns before the window the model
             sees: the latest that fit. Defaults to ``BUDGET``.
+        preemptable: When set to False, Restate never preempts invocations of
+            the agent, with all its handlers and views: it doesn't eagerly
+            suspend them while they wait on an await point to free concurrency
+            capacity for other invocations. They still suspend when the
+            inactivity timeout fires. Defaults to True.
+            NOTE: Only restate-server versions supporting service discovery
+            protocol V6 read it. Against older ones it is left out of the
+            discovery, which is safe since they never preempt invocations.
     """
 
     def __init__(
@@ -258,6 +275,7 @@ class AgentObject(SessionObject):
         invocation_retry_policy: InvocationRetryPolicy | None = RETRIES,
         window: Window = WINDOW,
         budget: int = BUDGET,
+        preemptable: bool | None = None,
     ) -> None:
         super().__init__(
             name,
@@ -271,6 +289,7 @@ class AgentObject(SessionObject):
             idempotency_retention=idempotency_retention,
             ingress_private=ingress_private,
             invocation_retry_policy=invocation_retry_policy,
+            preemptable=preemptable,
         )
         self.background: bool = background
         self._clear: Callable[[SessionContext], Awaitable[None]] | None = None
