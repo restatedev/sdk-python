@@ -255,3 +255,108 @@ async def test_shutdown_unblocks_concurrent_waiters():
         assert sorted(results) == [0, 1, 2]
     finally:
         await channel.close()
+
+
+async def test_concurrent_poll_wakes_all_waiters_on_shared_receive():
+    """When multiple tasks poll concurrently, one receive wakes peer waiters."""
+    from restate.server_context import ServerInvocationContext
+    from restate.vm import DoProgressAnyCompleted, DoProgressWaitExternalProgress, SingleUnresolvedFuture
+
+    completed: set[int] = set()
+    receive_calls = 0
+
+    vm = MagicMock()
+    vm.take_output.return_value = None
+
+    def fake_notify_input(body: bytes):
+        if body == b"second":
+            completed.add(2)
+        elif body == b"first":
+            completed.add(1)
+
+    def fake_do_progress(unresolved):
+        if unresolved.handle in completed:
+            return DoProgressAnyCompleted()
+        return DoProgressWaitExternalProgress()
+
+    vm.notify_input.side_effect = fake_notify_input
+    vm.do_progress.side_effect = fake_do_progress
+
+    events = [
+        {"type": "http.request", "body": b"second", "more_body": True},
+        {"type": "http.request", "body": b"first", "more_body": False},
+    ]
+    event_iter = iter(events)
+
+    async def mock_receive() -> ASGIReceiveEvent:
+        nonlocal receive_calls
+        try:
+            event = next(event_iter)
+        except StopIteration:
+            await asyncio.Event().wait()
+            raise RuntimeError("unreachable")
+        receive_calls += 1
+        if receive_calls == 1:
+            await asyncio.sleep(0.05)
+        return cast(ASGIReceiveEvent, event)
+
+    receive_channel = ReceiveChannel(mock_receive)
+
+    ctx = ServerInvocationContext.__new__(ServerInvocationContext)
+    ctx.vm = vm
+    ctx.handler = MagicMock()
+    ctx.invocation = MagicMock()
+    ctx.send = MagicMock()
+    ctx.receive = receive_channel
+    ctx.run_coros_to_execute = {}
+    ctx.tasks = MagicMock()
+    ctx._output_lock = asyncio.Lock()  # pylint: disable=protected-access
+
+    try:
+        task1 = asyncio.create_task(ctx.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(1)))
+        await asyncio.sleep(0)
+        task2 = asyncio.create_task(ctx.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(2)))
+
+        await asyncio.wait_for(task2, timeout=1.0)
+        await asyncio.wait_for(task1, timeout=1.0)
+    finally:
+        await receive_channel.close()
+
+
+async def test_concurrent_poll_propagates_disconnect_to_all_waiters():
+    """A single http.disconnect wakes all concurrent poll waiters with DisconnectedException."""
+    from restate.server_context import DisconnectedException, ServerInvocationContext
+    from restate.vm import DoProgressWaitExternalProgress, SingleUnresolvedFuture
+
+    vm = MagicMock()
+    vm.take_output.return_value = None
+    vm.do_progress.return_value = DoProgressWaitExternalProgress()
+
+    async def mock_receive() -> ASGIReceiveEvent:
+        await asyncio.sleep(0.05)
+        return cast(ASGIReceiveEvent, {"type": "http.disconnect"})
+
+    receive_channel = ReceiveChannel(mock_receive)
+
+    ctx = ServerInvocationContext.__new__(ServerInvocationContext)
+    ctx.vm = vm
+    ctx.handler = MagicMock()
+    ctx.invocation = MagicMock()
+    ctx.send = MagicMock()
+    ctx.receive = receive_channel
+    ctx.run_coros_to_execute = {}
+    ctx.tasks = MagicMock()
+    ctx._output_lock = asyncio.Lock()  # pylint: disable=protected-access
+
+    try:
+        task1 = asyncio.create_task(ctx.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(1)))
+        await asyncio.sleep(0)
+        task2 = asyncio.create_task(ctx.create_poll_or_cancel_coroutine(SingleUnresolvedFuture(2)))
+
+        results = await asyncio.wait_for(
+            asyncio.gather(task1, task2, return_exceptions=True),
+            timeout=1.0,
+        )
+        assert all(isinstance(r, DisconnectedException) for r in results)
+    finally:
+        await receive_channel.close()
