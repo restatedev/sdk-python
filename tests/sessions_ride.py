@@ -405,3 +405,59 @@ async def test_the_lone_write_is_not_refused_by_a_cancellation_that_is_owed():
         assert owed == [True]
 
     await attempt(body)
+
+
+# --- A flush waits for the transactions that are under way ---------------------------------------------------
+
+
+async def test_a_flush_while_a_transaction_is_under_way_returns_after_the_commit_that_carried_the_rider():
+    async def body(ctx: sessions.SessionContext, host: Counting) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def held() -> None:
+            async with ctx.db.transaction() as tx:
+                await tx.execute("INSERT INTO t VALUES ('own')")
+                entered.set()
+                await release.wait()
+
+        under_way = asyncio.ensure_future(held())
+        await entered.wait()
+        ride_commit(ctx.db, "a", insert("rode"))
+        flush = asyncio.ensure_future(flush_riders(ctx.db))
+        await hops(30)
+        assert not flush.done()
+        release.set()
+        await under_way
+        await flush
+        # Written once, by that transaction's commit; the flush had nothing left to commit.
+        assert host.syncs == 1
+        assert await rows(ctx.db) == ["own", "rode"]
+
+    await attempt(body)
+
+
+async def test_a_flush_while_a_transaction_is_under_way_that_rolls_back_writes_the_rider_itself():
+    async def body(ctx: sessions.SessionContext, host: Counting) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def held() -> None:
+            async with ctx.db.transaction() as tx:
+                await tx.execute("INSERT INTO t VALUES ('lost')")
+                entered.set()
+                await release.wait()
+                raise RuntimeError("rolled back")
+
+        under_way = asyncio.ensure_future(held())
+        await entered.wait()
+        ride_commit(ctx.db, "a", insert("rode"))
+        flush = asyncio.ensure_future(flush_riders(ctx.db))
+        await hops(30)
+        assert not flush.done()
+        release.set()
+        with pytest.raises(RuntimeError, match="rolled back"):
+            await under_way
+        await flush
+        assert host.syncs == 1
+        assert await rows(ctx.db) == ["rode"]
+
+    await attempt(body)

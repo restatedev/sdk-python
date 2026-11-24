@@ -30,7 +30,8 @@ latest id it was made with (``settle`` checks this after each write of the
 turn's steps that commits, and before each tool call). An error in the transcript does not count as the result,
 unless the call itself returned that error.
 
-Only the record of a new call commits of its own, before the call is made. That a call answered rides a commit
+Only the record of a new call commits of its own, before the call is made (with the commit of a transaction
+that is under way, if one is: it carries the pending answers, so none is left behind a result). That a call answered rides a commit
 that is under way or starts at once (``ride_commit``): the one that stores the call's result, so that the
 transcript never has a result of a call that is not recorded as answered. If none does (a slow tool of the round
 is still running, another call waits), it is written on its own once no transaction has started for a while (see
@@ -113,15 +114,29 @@ _RIDER = "restate-agents.calls"
 """The slot of the calls' write that rides the next commit (``_ride``)."""
 
 
+def _writer(state: _Calls) -> Callable[[Transaction], Awaitable[None]]:
+    """The write of ``state``, as it is when it runs."""
+
+    async def write(tx: Transaction) -> None:
+        await tx.execute(_UPSERT, [state.invocation, json.dumps(state.calls)])
+
+    return write
+
+
 async def _store(ctx: SessionContext, state: _Calls) -> None:
     """Store ``state``; it is committed before the call it records is made.
 
     The rows the conversation holds back are written first: the call outlives the attempt, and what led to it must
-    too. It is the whole row: what rides the next commit is written, and no longer pending.
+    too. It is the whole row, written as a rider that is flushed (``flush_riders``) rather than by a statement of its
+    own: a transaction that is under way (the write of an earlier call's result) carries it with its commit, so
+    that it never commits that result without the answer that is pending. Nothing under way, it is one commit of
+    its own. It returns once the row is committed.
     """
     await flush_held(ctx)
-    ride_commit(ctx.db, _RIDER, None)
-    await ctx.db.execute(_UPSERT, [state.invocation, json.dumps(state.calls)])
+    if ride_commit(ctx.db, _RIDER, _writer(state)):
+        await flush_riders(ctx.db)
+    else:
+        await ctx.db.execute(_UPSERT, [state.invocation, json.dumps(state.calls)])
 
 
 async def _ride(ctx: SessionContext, state: _Calls, urgent: bool = False) -> None:
@@ -131,11 +146,7 @@ async def _ride(ctx: SessionContext, state: _Calls, urgent: bool = False) -> Non
     own unless a commit starts soon to write it; one that is pending and urgent stays so. A database that cannot
     ride (a view's) commits it at once.
     """
-
-    async def write(tx: Transaction) -> None:
-        await tx.execute(_UPSERT, [state.invocation, json.dumps(state.calls)])
-
-    if not ride_commit(ctx.db, _RIDER, write, urgent=urgent):
+    if not ride_commit(ctx.db, _RIDER, _writer(state), urgent=urgent):
         await _store(ctx, state)
 
 

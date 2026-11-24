@@ -300,3 +300,41 @@ async def test_an_answer_stays_urgent_when_a_settling_is_registered_over_it():
         await until_records(backend, lambda records: [(r["ids"], r.get("done")) for r in records] == [(["c1"], True)])
 
     await calls_attempt(body)
+
+
+async def test_the_record_of_a_new_call_does_not_take_the_answer_from_a_transaction_that_is_under_way():
+    """A result's transaction is open when a new call is recorded: it carries the answer, and the new record with it."""
+    from restate.agents._calls import call_of
+
+    async def body(ctx: sessions.SessionContext, host: Counting, backend: Backend) -> None:
+        await ctx.db.execute("CREATE TABLE other (x)")
+        first = await call_of(ctx, "pay", {"n": 1}, "cA")
+        await first.answered()
+        start, host.syncs = len(host.committed), 0
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def result_written() -> None:
+            async with ctx.db.transaction() as tx:
+                await tx.execute("INSERT INTO other VALUES ('A-result')")
+                entered.set()
+                await release.wait()
+
+        under_way = asyncio.ensure_future(result_written())
+        await entered.wait()
+        second = asyncio.ensure_future(call_of(ctx, "pay", {"n": 2}, "cB"))
+        for _ in range(100):
+            await asyncio.sleep(0)
+        # Its record is not committed while the transaction holds the database.
+        assert not second.done()
+        release.set()
+        await under_way
+        await second
+        assert [(r["ids"], r.get("done")) for r in await records_of(backend)] == [(["cA"], True), (["cB"], None)]
+        for committed in host.committed[start:]:
+            text, records = await held(committed)
+            if "A-result" in text:
+                assert [r.get("done") for r in records if r["ids"] == ["cA"]] == [True], records
+        # The transaction carried both: nothing else committed.
+        assert host.syncs == 1
+
+    await calls_attempt(body)
