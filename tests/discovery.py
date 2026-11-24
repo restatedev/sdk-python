@@ -10,12 +10,14 @@
 #
 import json
 from datetime import timedelta
+from typing import Any
 
 import pytest
 
 import restate
 from restate.discovery import compute_discovery, compute_discovery_json
 from restate.endpoint import Endpoint
+from restate.server import send_discovery
 
 
 def test_zero_durations_are_preserved_in_manifest():
@@ -199,3 +201,58 @@ def test_state_preload_false_works_on_manifest_v4():
     manifest = json.loads(compute_discovery_json(Endpoint().bind(obj), 4, "bidi"))
     assert manifest["services"][0]["enableLazyState"] is True
     assert "eagerStateKeysWhitelist" not in manifest["services"][0]
+
+
+def _preemptable_endpoint() -> Endpoint:
+    service = restate.Service("Svc", preemptable=False)
+
+    @service.handler(preemptable=True)
+    async def overridden(ctx: restate.Context):
+        pass
+
+    @service.handler()
+    async def inherited(ctx: restate.Context):
+        pass
+
+    wf = restate.Workflow("Wf")
+
+    @wf.main(preemptable=False)
+    async def run(ctx: restate.WorkflowContext):
+        pass
+
+    return Endpoint().bind(service, wf)
+
+
+def test_preemptable_is_emitted_only_when_set():
+    svc, wf = json.loads(compute_discovery_json(_preemptable_endpoint(), 6, "bidi"))["services"]
+    assert svc["preemptable"] is False
+    handlers = {h["name"]: h for h in svc["handlers"]}
+    assert handlers["overridden"]["preemptable"] is True
+    assert "preemptable" not in handlers["inherited"]
+    assert "preemptable" not in wf
+    assert wf["handlers"][0]["preemptable"] is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "accept, version",
+    [
+        ("application/vnd.restate.endpointmanifest.v5+json, application/vnd.restate.endpointmanifest.v6+json", 6),
+        ("application/vnd.restate.endpointmanifest.v5+json", 5),
+    ],
+)
+async def test_discovery_negotiates_v6_and_drops_preemptable_below_it(accept: str, version: int):
+    sent: list[dict[str, Any]] = []
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"http_version": "2", "headers": [(b"accept", accept.encode())]}
+    await send_discovery(scope, send, _preemptable_endpoint())  # type: ignore[arg-type]
+
+    assert sent[0]["status"] == 200
+    assert (b"content-type", f"application/vnd.restate.endpointmanifest.v{version}+json".encode()) in sent[0]["headers"]
+    services = json.loads(sent[1]["body"])["services"]
+    emitted = [entity for svc in services for entity in [svc, *svc["handlers"]] if "preemptable" in entity]
+    # Runtimes older than V6 never preempt invocations: the flag is dropped, not rejected.
+    assert len(emitted) == (3 if version >= 6 else 0)

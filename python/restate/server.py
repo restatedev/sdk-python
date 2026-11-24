@@ -159,7 +159,9 @@ async def send_discovery(scope: Scope, send: Send, endpoint: Endpoint):
     # Negotiate discovery protocol version
     version = 2
     if accept_header:
-        if "application/vnd.restate.endpointmanifest.v5+json" in accept_header:
+        if "application/vnd.restate.endpointmanifest.v6+json" in accept_header:
+            version = 6
+        elif "application/vnd.restate.endpointmanifest.v5+json" in accept_header:
             version = 5
         elif "application/vnd.restate.endpointmanifest.v4+json" in accept_header:
             version = 4

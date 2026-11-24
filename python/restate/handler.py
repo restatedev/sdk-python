@@ -254,6 +254,7 @@ class Handler(Generic[I, O]):
         state_preload: Configures which state keys are preloaded ("eager state") at the start of each invocation.
             True preloads all state, False preloads nothing, a list preloads only the listed keys.
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
+        preemptable: If false, Restate never preempts (eagerly suspends) invocations of this handler.
         invocation_retry_policy: Optional retry policy configuration applied to this handler.
         explicit_recovery: If true, the handler runs with explicit recovery (preview): a retried or resumed
             invocation runs the handler again from the start, instead of replaying its journal. See the
@@ -279,6 +280,7 @@ class Handler(Generic[I, O]):
     enable_lazy_state: Optional[bool] = None
     state_preload: Optional[Union[bool, List[str]]] = None
     ingress_private: Optional[bool] = None
+    preemptable: Optional[bool] = None
     invocation_retry_policy: Optional[InvocationRetryPolicy] = None
     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None
     explicit_recovery: bool = False
@@ -311,6 +313,7 @@ def make_handler(
     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None,
     explicit_recovery: bool = False,
     explicit_cancellation: bool = False,
+    preemptable: Optional[bool] = None,
 ) -> Handler[I, O]:
     """
     Factory function to create a handler.
@@ -333,6 +336,7 @@ def make_handler(
         state_preload: Configures which state keys are preloaded ("eager state") at the start of each invocation.
             True preloads all state, False preloads nothing, a list preloads only the listed keys.
         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
+        preemptable: If false, Restate never preempts (eagerly suspends) invocations of this handler.
         invocation_retry_policy: Retry policy used by Restate when invoking this handler.
             NOTE: only supported with restate-server >= 1.5.
         explicit_recovery: If true, the handler runs with explicit recovery (preview).
@@ -370,6 +374,7 @@ def make_handler(
         enable_lazy_state=enable_lazy_state,
         state_preload=state_preload,
         ingress_private=ingress_private,
+        preemptable=preemptable,
         invocation_retry_policy=invocation_retry_policy,
         context_managers=context_managers,
         explicit_recovery=explicit_recovery,

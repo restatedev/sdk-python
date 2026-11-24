@@ -76,6 +76,12 @@ class Service:
             see the handler option of the same name. NOTE: in preview, it might change without notice.
         explicit_cancellation (bool, optional): (Preview) Explicit cancellation for all handlers of this service:
             see the handler option of the same name. NOTE: in preview, it might change without notice.
+        preemptable (bool, optional): When set to False, Restate never preempts invocations of this service,
+            with all its handlers: it doesn't eagerly suspend them while they wait on an await point to free
+            concurrency capacity for other invocations. They still suspend when the inactivity timeout fires.
+            Defaults to True, and can be overridden per handler.
+            NOTE: Only restate-server versions supporting service discovery protocol V6 read this field. Against older
+            ones it is left out of the discovery, which is safe since they never preempt invocations.
     """
 
     def __restate_services__(self) -> typing.Iterable["Servable"]:
@@ -101,6 +107,7 @@ class Service:
         ] = None,
         explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
+        preemptable: typing.Optional[bool] = None,
     ) -> None:
         self.service_tag = ServiceTag("service", name, description, metadata)
         self.handlers: typing.Dict[str, Handler] = {}
@@ -113,6 +120,7 @@ class Service:
         self.context_managers = invocation_context_managers
         self.explicit_recovery = explicit_recovery
         self.explicit_cancellation = explicit_cancellation
+        self.preemptable = preemptable
 
     @property
     def name(self):
@@ -140,6 +148,7 @@ class Service:
         ] = None,
         explicit_recovery: bool = False,
         explicit_cancellation: bool = False,
+        preemptable: typing.Optional[bool] = None,
     ) -> typing.Callable[[T], T]:
         """
         Decorator for defining a handler function.
@@ -187,6 +196,12 @@ class Service:
             explicit_cancellation: (Preview) If true, Restate cancelling an invocation neither fails the handler's
                 awaits nor cancels its calls: the handler awaits `restate._preview.cancellation(ctx)` and decides
                 what to stop. NOTE: in preview, it might change without notice.
+            preemptable: When set to False, Restate never preempts invocations of this handler: it doesn't eagerly
+                suspend them while they wait on an await point to free concurrency capacity for other invocations.
+                They still suspend when the inactivity timeout fires. Overrides the value set on the service, which
+                defaults to True.
+                NOTE: Only restate-server versions supporting service discovery protocol V6 read this field. Against
+                older ones it is left out of the discovery, which is safe since they never preempt invocations.
 
         Returns:
             Callable: The decorated function.
@@ -237,6 +252,7 @@ class Service:
                 combined_context_managers,
                 explicit_recovery=explicit_recovery,
                 explicit_cancellation=explicit_cancellation,
+                preemptable=preemptable,
             )
             if handler.name in self.handlers:
                 raise ValueError(f"Handler {handler.name} already exists in {self.name}")
