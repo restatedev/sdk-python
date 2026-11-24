@@ -27,6 +27,7 @@ import pytest
 
 import restate
 from restate import sessions
+from restate.sessions import Database
 from restate.agents import call, tool
 from restate.agents._tools import Tool
 from restate.sessions.internal import invoke
@@ -51,15 +52,17 @@ TOOL_CALLS = 3
 PLAIN_COMMITS = {
     "adk": 8,
     "langgraph agent": 8,
-    "langgraph graph": 26,
+    "langgraph graph": 19,
     "openai": 8,
     "pydantic_ai": 8,
 }
 """The commits of the second turn of a key, with plain tools, as measured. Each framework's own: the conversation
 stores the user's message (1), each model request's response that calls a tool (3) and each tool's result (3), and
 the last commit has the final response and the turn's answer (1). A graph of your own has more: LangGraph's
-checkpointer commits a checkpoint and the writes of each node of each step of the graph, besides the conversation's
-items."""
+checkpointer commits the checkpoint of each step of the graph, with the writes of the step's nodes, and besides the
+conversation's items (the copies of the 3 replies and 3 results, and the final reply with the answer) it has the input's
+checkpoint, the write of the ``__start__`` task (which its checkpoint does not follow at once, so it is a commit of its
+own), the 7 steps' (3 rounds of a model's reply and a tool's result, and the final reply), and the prune."""
 
 
 # --- The callee, the tools, and the host that counts ------------------------------------------------
@@ -291,7 +294,8 @@ async def test_langgraph_agent_turn():
     await assert_costs("langgraph agent", ask)
 
 
-async def test_langgraph_graph_turn():
+def langgraph_graph_ask() -> Ask:
+    """The turn of a graph of your own: a model node and a tool node, as LangGraph's examples have them."""
     pytest.importorskip("langgraph")
     from langchain_core.messages import AIMessage  # pylint: disable=import-outside-toplevel
     from langgraph.graph import END, START, MessagesState, StateGraph  # pylint: disable=import-outside-toplevel
@@ -323,7 +327,48 @@ async def test_langgraph_graph_turn():
         builder.add_edge("tools", "model")
         return await langgraph.prompt(ctx, text, graph=builder)
 
-    await assert_costs("langgraph graph", ask)
+    return ask
+
+
+async def test_langgraph_graph_turn():
+    pytest.importorskip("langgraph")
+    await assert_costs("langgraph graph", langgraph_graph_ask())
+
+
+async def test_langgraph_graph_checkpointer_commits(monkeypatch: pytest.MonkeyPatch):
+    """The checkpointer's commits, in order, of the second turn: a step's writes are in its checkpoint's commit."""
+    pytest.importorskip("langgraph")
+    from restate.agents.langgraph import SqlCheckpointSaver, _graph  # pylint: disable=import-outside-toplevel
+    from transactions_spy import Spy  # pylint: disable=import-outside-toplevel,import-error
+
+    spies: list[Spy] = []
+
+    class Recording(SqlCheckpointSaver):
+        def __init__(self, db: Database) -> None:
+            spies.append(Spy(db))
+            super().__init__(spies[-1].database)
+
+    monkeypatch.setattr(_graph, "SqlCheckpointSaver", Recording)
+    measured = await measure(langgraph_graph_ask(), restated=False)
+    assert len(spies) == 2  # one saver for each turn
+    put = ["restate_langgraph_channel_values", "restate_langgraph_checkpoints"]
+    step = ["restate_langgraph_writes", *put]
+    prune = ["restate_langgraph_checkpoints", "restate_langgraph_writes", "restate_langgraph_channel_values"]
+    # The input's checkpoint, the write of LangGraph's ``__start__`` task (which its checkpoint does not follow at
+    # once), the checkpoint of the first step; then each step of the other 7 (3 rounds of a model's reply and a tool's
+    # result, and the final reply), a commit with its writes; and the thread pruned to its latest checkpoint.
+    assert spies[1].tables == [
+        put,
+        ["restate_langgraph_writes"],
+        put,
+        *[step] * 7,
+        prune,
+    ]
+    # The commits that are not the checkpointer's are the conversation's: the user's message, the copies of the 3
+    # replies with tool calls and the 3 results (each after its checkpoint: they run beside the next step, whose
+    # commit may come first), and the final reply with the answer, last.
+    assert measured.commits - len(spies[1].commits) == 8
+    assert measured.commits == PLAIN_COMMITS["langgraph graph"]
 
 
 async def test_openai_turn():

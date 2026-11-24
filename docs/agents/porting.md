@@ -176,7 +176,7 @@ tests. Test names are this SDK's.
 | Call records: made once, rejoined under a new id, kept until stored, forgotten after | `tests/agents_tools.py` (`test_a_returned_call_is_kept_until_its_result_is_stored_and_forgotten_once_it_is`) |
 | The companion: start, close, `awaitTurn`, `settle`, waits and signals; one per agent, keyed as it, ingress-private | `tests/agents_signals.py`, `tests/agents_companion.py`, `tests/agents_object.py` |
 | Per framework: answer and the full view after it, a crash in a tool, a stored answer not asked again, refused, stopped, `output=`, several prompts | each framework's `tests/agents_<framework>*.py` |
-| The LangGraph checkpointer: resume, history, prune, `DeltaChannel`, many channels | `tests/agents_langgraph_checkpointer.py` |
+| The LangGraph checkpointer: resume, history, prune, `DeltaChannel`, many channels | `tests/agents_langgraph_checkpointer.py`, `tests/agents_langgraph_writes.py` (a task's writes with the checkpoint that follows, or alone; a parallel step cut while a node runs), `tests/agents_commits.py` (the commit sequence) |
 
 And the mutants of `scripts/resurrect.py` ([Testing](testing.md)): each
 brings back one bug that a fix describes, or breaks one rule of the turn. A

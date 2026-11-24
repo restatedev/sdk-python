@@ -26,11 +26,27 @@ writes them:
 - ``restate_langgraph_writes`` holds the pending writes of each checkpoint's
   tasks.
 
-Each ``aput`` and ``aput_writes`` runs in one SQL transaction, so a step is
-stored whole, in order with everything else the handler does. Operations run
-one at a time, in the order they are called, even when LangGraph writes the
-results of parallel tasks at once. The saver is async-only, because ``ctx.db``
-is.
+Each ``aput`` is one SQL transaction, so a step is stored whole, in order with
+everything else the handler does. Operations run one at a time, in the order
+they are called, even when LangGraph writes the results of parallel tasks at
+once. The saver is async-only, because ``ctx.db`` is.
+
+A task's ``aput_writes`` keeps its rows pending, and returns once they are
+stored (LangGraph waits for it before a run ends, whatever ends it, and before
+a step's ``aput`` if it carries delta writes); it fails with the error of the
+transaction that stored them. The ``aput`` of its step, if it is called at once,
+which it is when the step's last task has just finished, takes every pending
+row into its own transaction and stores them first, then its checkpoint: they
+are stored with it, and before any task of the next step starts. Else, the
+step has tasks still running, and the pending rows are stored on their own, in
+one transaction, when ``_HOPS`` event-loop iterations have passed: a task that
+finished has its writes stored while its siblings run, so it does not run
+again after a crash, and no ``aput_writes`` waits for an ``aput`` to be
+called. Reads (``aget_tuple``, ``alist``), ``aprune`` and ``adelete_thread``
+store what is pending first. Nothing is remembered of a failure: a failed
+transaction fails the ``aput_writes`` and the ``aput`` that it carried, which
+are not stored again (the run fails and goes on from what is stored), and
+later calls go ahead.
 
 A thread keeps every checkpoint, which LangGraph needs for ``alist``, time
 travel and forks, until ``aprune`` (LangGraph's API) deletes them: with
@@ -48,6 +64,7 @@ import asyncio
 import typing
 import uuid
 from collections.abc import AsyncIterator, Collection, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -112,6 +129,26 @@ _EMPTY = "empty"
 """The type of a channel a step emptied."""
 
 
+_HOPS = 3
+"""How many event-loop iterations a task's pending writes wait for the ``aput`` of their step, before they are stored
+on their own. Measured, on LangGraph 1.2: from a step's last ``aput_writes`` to its ``aput`` there are 0 or 1
+iterations for a step of one task, of parallel tasks, with stream modes, a subgraph or a step timeout, whether LangGraph
+starts tasks at once (Python 3.12 and later) or on the next iteration (3.11). It is a commit's duration, or unbounded,
+for the ``__start__`` write, with ``max_concurrency``, and for writes that LangGraph waits for before it calls ``aput``
+(delta channels, error handlers, ``update_state``): those are stored on their own. A larger number only delays the
+rows of a step whose ``aput`` does not follow."""
+
+
+@dataclass(eq=False)
+class _Pending:
+    """The rows of one ``aput_writes``, kept until they are stored, and the awaitable that resolves then."""
+
+    verb: str
+    rows: list[list[SqlParam]]
+    stored: asyncio.Future[None]
+    hop: asyncio.Handle | None = field(default=None)
+
+
 class SqlCheckpointSaver(BaseCheckpointSaver[str]):
     """A LangGraph checkpoint saver that stores checkpoints in a database session.
 
@@ -120,7 +157,16 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         app = graph.compile(checkpointer=SqlCheckpointSaver(ctx.db))
         await app.ainvoke(inputs, {"configurable": {"thread_id": ctx.key}})
 
-    See the module docstring for how checkpoints are stored.
+    See the module docstring for how checkpoints are stored. A task's writes
+    are stored in the transaction of the checkpoint that follows them, when it
+    follows at once, and in one of their own otherwise; this is so for your own
+    use of the saver, as for the agent's. An ``aput_writes`` returns once its
+    rows are stored, or raises the error of the transaction that was to store
+    them, as LangGraph expects; await it before a handler returns, as LangGraph
+    does for a run (it waits for them before ``ainvoke`` returns or raises,
+    unless the awaiting task is cancelled). The saver is async-only: the
+    synchronous ``put`` and ``put_writes``, which ``ctx.db`` could not serve,
+    raise ``NotImplementedError``, as LangGraph's base class has them.
 
     Args:
         db: The database to store checkpoints in, usually ``ctx.db``.
@@ -138,6 +184,10 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         self.db = db
         self._lock = asyncio.Lock()
         self._ready = False
+        self._pending: list[_Pending] = []
+        """The writes that LangGraph handed over and that are not stored yet, in the order of the calls."""
+        self._storing: set[asyncio.Task[None]] = set()
+        """The transactions of pending writes that have begun, which the operations after them wait for."""
 
     def get_next_version(self, current: str | None, channel: None = None) -> str:
         """Return the channel version that follows ``current``.
@@ -158,6 +208,73 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         if not self._ready:
             await SCHEMA.ensure(self.db)
             self._ready = True
+
+    def _take(self) -> list[_Pending]:
+        """Take every pending write, at once: what is taken is stored by the caller's transaction."""
+        taken, self._pending = self._pending, []
+        for pending in taken:
+            if pending.hop is not None:
+                pending.hop.cancel()
+        return taken
+
+    def _arm(self, pending: _Pending) -> None:
+        """Store ``pending`` on its own, after ``_HOPS`` iterations, if no ``aput`` took it.
+
+        A chain of ``call_soon``, one handle at a time, so that nothing waits for the saver to be called again.
+        """
+        loop = asyncio.get_running_loop()
+
+        def hop(count: int) -> None:
+            if count < _HOPS:
+                pending.hop = loop.call_soon(hop, count + 1)
+                return
+            pending.hop = None
+            if pending in self._pending:
+                at = self._pending.index(pending) + 1  # with the writes called before it
+                taken, self._pending = self._pending[:at], self._pending[at:]
+                for earlier in taken:
+                    if earlier.hop is not None:
+                        earlier.hop.cancel()
+                self._begin(taken)
+
+        pending.hop = loop.call_soon(hop, 1)
+
+    def _begin(self, taken: list[_Pending]) -> asyncio.Task[None]:
+        """Start the transaction that stores ``taken``, on its own."""
+        task = asyncio.get_running_loop().create_task(self._store(taken))
+        self._storing.add(task)
+        task.add_done_callback(self._storing.discard)
+        return task
+
+    async def _store(self, taken: list[_Pending]) -> None:
+        """Store ``taken`` in one transaction, and settle what it carried; a failure is theirs alone."""
+        try:
+            async with self._lock:
+                await self._setup()
+                async with self.db.transaction() as tx:
+                    await _insert(tx, taken)
+        except BaseException as error:
+            _settle(taken, error)
+            if not isinstance(error, Exception):
+                raise
+        else:
+            _settle(taken)
+
+    async def _after_stores_begun(self) -> None:
+        """Wait for every transaction of pending writes that has begun, so that the caller's comes after theirs.
+
+        One that begun in the same iteration as the caller's call may not have the lock yet: without waiting for it,
+        the caller could take the lock first, and store its rows before the earlier ones.
+        """
+        while self._storing:
+            await asyncio.wait(set(self._storing))
+
+    async def _store_pending(self) -> None:
+        """Store what is pending, before an operation that reads or deletes it."""
+        taken = self._take()
+        if taken:
+            self._begin(taken)
+        await self._after_stores_begun()
 
     def _load(self, type_: SqlValue, value: SqlValue) -> Any:
         return self.serde.loads_typed((str(type_), _bytes(value)))
@@ -210,6 +327,7 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         )
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        await self._store_pending()
         async with self._lock:
             await self._setup()
             thread_id, ns = _thread(config)
@@ -236,6 +354,7 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         before: RunnableConfig | None = None,
         limit: int | None = None,
     ) -> AsyncIterator[CheckpointTuple]:
+        await self._store_pending()
         async with self._lock:
             await self._setup()
             configurable: dict[str, Any] = dict((config or {}).get("configurable", {}))
@@ -269,37 +388,47 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        async with self._lock:
-            await self._setup()
-            thread_id, ns = _thread(config)
-            parent_id: str | None = _configurable(config).get("checkpoint_id")
-            stored: dict[str, Any] = dict(checkpoint)
-            values: dict[str, Any] = stored.pop("channel_values")
-            type_, serialized = self.serde.dumps_typed(stored)
-            metadata_type, metadata_value = self.serde.dumps_typed(get_checkpoint_metadata(config, metadata))
-            if type_ != metadata_type:
-                raise ValueError("Failed to serialize checkpoint and metadata to the same type.")
-            # The channels this step changed, at their new versions.
-            changed: list[list[SqlParam]] = [
-                [
-                    channel,
-                    str(version),
-                    *(self.serde.dumps_typed(values[channel]) if channel in values else (_EMPTY, None)),
+        # Taken before anything is awaited: the writes called until now are this checkpoint's.
+        taken = self._take()
+        try:
+            await self._after_stores_begun()
+            async with self._lock:
+                await self._setup()
+                thread_id, ns = _thread(config)
+                parent_id: str | None = _configurable(config).get("checkpoint_id")
+                stored: dict[str, Any] = dict(checkpoint)
+                values: dict[str, Any] = stored.pop("channel_values")
+                type_, serialized = self.serde.dumps_typed(stored)
+                metadata_type, metadata_value = self.serde.dumps_typed(get_checkpoint_metadata(config, metadata))
+                if type_ != metadata_type:
+                    raise ValueError("Failed to serialize checkpoint and metadata to the same type.")
+                # The channels this step changed, at their new versions.
+                changed: list[list[SqlParam]] = [
+                    [
+                        channel,
+                        str(version),
+                        *(self.serde.dumps_typed(values[channel]) if channel in values else (_EMPTY, None)),
+                    ]
+                    for channel, version in new_versions.items()
                 ]
-                for channel, version in new_versions.items()
-            ]
-            async with self.db.transaction() as tx:
-                for row in changed:
+                async with self.db.transaction() as tx:
+                    await _insert(tx, taken)
+                    for row in changed:
+                        await tx.execute(
+                            "INSERT OR REPLACE INTO restate_langgraph_channel_values "
+                            "(thread_id, checkpoint_ns, channel, version, type, value) VALUES (?, ?, ?, ?, ?, ?)",
+                            [thread_id, ns, *row],
+                        )
                     await tx.execute(
-                        "INSERT OR REPLACE INTO restate_langgraph_channel_values "
-                        "(thread_id, checkpoint_ns, channel, version, type, value) VALUES (?, ?, ?, ?, ?, ?)",
-                        [thread_id, ns, *row],
+                        f"INSERT OR REPLACE INTO restate_langgraph_checkpoints ({_COLUMNS}) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        [thread_id, ns, checkpoint["id"], parent_id, type_, serialized, metadata_value],
                     )
-                await tx.execute(
-                    f"INSERT OR REPLACE INTO restate_langgraph_checkpoints ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    [thread_id, ns, checkpoint["id"], parent_id, type_, serialized, metadata_value],
-                )
-            return {"configurable": {"thread_id": thread_id, "checkpoint_ns": ns, "checkpoint_id": checkpoint["id"]}}
+        except BaseException as error:
+            _settle(taken, error)
+            raise
+        _settle(taken)
+        return {"configurable": {"thread_id": thread_id, "checkpoint_ns": ns, "checkpoint_id": checkpoint["id"]}}
 
     async def aput_writes(
         self,
@@ -308,34 +437,32 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        async with self._lock:
-            await self._setup()
-            thread_id, ns = _thread(config)
-            checkpoint_id = str(_configurable(config)["checkpoint_id"])
-            # Special writes (errors, interrupts) replace; others keep the first.
-            verb = (
-                "INSERT OR REPLACE" if all(channel in WRITES_IDX_MAP for channel, _ in writes) else "INSERT OR IGNORE"
-            )
-            rows: list[list[SqlParam]] = [
-                [
-                    thread_id,
-                    ns,
-                    checkpoint_id,
-                    task_id,
-                    task_path,
-                    WRITES_IDX_MAP.get(channel, idx),
-                    channel,
-                    *self.serde.dumps_typed(value),
-                ]
-                for idx, (channel, value) in enumerate(writes)
+        """Keep a task's ``writes`` pending, and return once they are stored.
+
+        They are stored by the next ``aput`` if it is called within a few event-loop iterations, else on their own;
+        the error of the transaction that was to store them is raised.
+        """
+        thread_id, ns = _thread(config)
+        checkpoint_id = str(_configurable(config)["checkpoint_id"])
+        # Special writes (errors, interrupts) replace; others keep the first.
+        verb = "INSERT OR REPLACE" if all(channel in WRITES_IDX_MAP for channel, _ in writes) else "INSERT OR IGNORE"
+        rows: list[list[SqlParam]] = [
+            [
+                thread_id,
+                ns,
+                checkpoint_id,
+                task_id,
+                task_path,
+                WRITES_IDX_MAP.get(channel, idx),
+                channel,
+                *self.serde.dumps_typed(value),
             ]
-            async with self.db.transaction() as tx:
-                for row in rows:
-                    await tx.execute(
-                        f"{verb} INTO restate_langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, "
-                        "task_path, idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        row,
-                    )
+            for idx, (channel, value) in enumerate(writes)
+        ]
+        pending = _Pending(verb, rows, asyncio.get_running_loop().create_future())
+        self._pending.append(pending)
+        self._arm(pending)
+        await pending.stored
 
     async def adelete_thread(self, thread_id: str) -> None:
         await self.aprune([thread_id], strategy="delete")
@@ -358,6 +485,7 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         """
         if strategy not in ("keep_latest", "delete"):
             raise ValueError(f'unknown strategy {strategy!r}: use "keep_latest" or "delete"')
+        await self._store_pending()
         async with self._lock:
             await self._setup()
             async with self.db.transaction() as tx:
@@ -410,6 +538,35 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
             waiting = counted if waiting is None else waiting & counted
             at = parent
         return kept
+
+
+async def _insert(tx: DatabaseWriter, pending: Sequence[_Pending]) -> None:
+    """Write the rows of ``pending``, in the order of the calls, each with its own verb."""
+    for writes in pending:
+        for row in writes.rows:
+            await tx.execute(
+                f"{writes.verb} INTO restate_langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, "
+                "task_path, idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                row,
+            )
+
+
+def _settle(pending: Sequence[_Pending], error: BaseException | None = None) -> None:
+    """Resolve the ``aput_writes`` of ``pending``, or fail them with ``error``.
+
+    A failure is marked as retrieved: a run that was cancelled does not await its writes any more, and nothing may be
+    logged for that.
+    """
+    for writes in pending:
+        if writes.stored.done():
+            continue
+        if error is None:
+            writes.stored.set_result(None)
+        elif isinstance(error, asyncio.CancelledError):
+            writes.stored.cancel()
+        else:
+            writes.stored.set_exception(error)
+            writes.stored.exception()
 
 
 def _thread(config: RunnableConfig) -> tuple[str, str]:
