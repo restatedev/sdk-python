@@ -21,6 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCENARIO = """
 import asyncio, hashlib, os
 from pathlib import Path
@@ -119,6 +121,112 @@ async def main():
         assert "RESTATE_SQL_OBJECT_STORE=memory:///" in str(error), error
     else:
         raise AssertionError("the open succeeded")
+
+asyncio.run(main())
+"""
+    ran = subprocess.run([sys.executable, "-c", scenario], env=env, capture_output=True, text=True, check=False)
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+
+
+SMALL = """
+import asyncio, os, re
+from pathlib import Path
+
+from restate.sessions._database import open
+from sessions_database import Backend, listing
+
+
+def files(path):
+    if not path.exists():
+        return []
+    return [str(f.relative_to(path)) for f in path.rglob("*") if f.is_file()]
+
+
+def store(backend):
+    request = backend.request()
+    request.keys = listing(backend)
+    return request
+
+
+async def main():
+    packs = Path(os.environ["PACKS"]) / "_4cedger_2fsmall"
+    backend = Backend()
+    db = await open("Ledger/small", store(backend))
+    await db.execute("CREATE TABLE blobs (id INTEGER PRIMARY KEY, data BLOB NOT NULL)")
+    await db.execute("CREATE TABLE counter (n INTEGER NOT NULL)")
+    await db.execute("INSERT INTO counter VALUES (0)")
+    # 2 MiB that does not compress, 64 KiB a commit, then small commits: a checkpoint at each 128 of them.
+    for i in range(32):
+        await db.execute("INSERT INTO blobs VALUES (?, ?)", [i, os.urandom(64 << 10)])
+    for _ in range(300):
+        await db.execute("UPDATE counter SET n = n + 1")
+    await db.save()
+
+    packs_in_restate = [k for k in backend.stored if not re.match(r"^v22/(head$|tail/|manifest/)", k)]
+    print("L1", len([f for f in files(packs) if f.startswith("l1/")]))
+    print("OTHER", len([f for f in files(packs) if not f.startswith("l1/")]))
+    print("RESTATE", len(packs_in_restate))
+
+    again = await open("Ledger/small", store(backend))
+    assert await again.values("SELECT n FROM counter") == [[300]]
+    assert await again.values("SELECT count(*) FROM blobs") == [[32]]
+
+asyncio.run(main())
+"""
+
+
+def small_database(tmp_path: Path, **variables: str) -> dict[str, int]:
+    """Run ``SMALL`` in a process of its own with ``variables`` (an empty value unsets one): the packs it left in the
+    object store's ``l1/``, elsewhere in it, and in Restate."""
+    env = {
+        **os.environ,
+        "RESTATE_SQL_OBJECT_STORE": f"file://{tmp_path / 'packs'}",
+        "RESTATE_SQL_CACHE": "off",
+        "RESTATE_SQL_L0_BYTES": "",
+        "PACKS": str(tmp_path / "packs"),
+        "PYTHONPATH": os.pathsep.join(filter(None, [str(Path(__file__).parent), os.environ.get("PYTHONPATH")])),
+        **variables,
+    }
+    ran = subprocess.run([sys.executable, "-c", SMALL], env=env, capture_output=True, text=True, check=False)
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    return {name.lower(): int(count) for name, count in (line.split() for line in ran.stdout.splitlines())}
+
+
+def test_l0_bytes_of_zero_keeps_every_pack_of_a_small_database_in_the_object_store(tmp_path: Path):
+    kept = small_database(tmp_path, RESTATE_SQL_L0_BYTES="0")
+    assert kept["l1"] > 0, kept
+    # Restate holds no pack, only the head, the tail and the manifests.
+    assert kept["other"] == 0 and kept["restate"] == 0, kept
+
+
+def test_without_l0_bytes_a_small_database_keeps_its_packs_in_restate(tmp_path: Path):
+    kept = small_database(tmp_path)
+    assert kept["l1"] == 0 and kept["restate"] > 0, kept
+
+
+@pytest.mark.parametrize("value,store", [("4MB", True), ("-1", True), ("1.5MiB", False)])
+def test_an_l0_bytes_that_is_not_a_size_fails_every_open_with_its_message(tmp_path: Path, value: str, store: bool):
+    # With an object store, or without one, where it would change nothing.
+    env = {
+        **os.environ,
+        "RESTATE_SQL_L0_BYTES": value,
+        "RESTATE_SQL_OBJECT_STORE": f"file://{tmp_path}" if store else "",
+        "PYTHONPATH": os.pathsep.join(filter(None, [str(Path(__file__).parent), os.environ.get("PYTHONPATH")])),
+    }
+    scenario = """
+import asyncio, os
+from restate.sessions._database import open
+from sessions_database import Backend
+
+async def main():
+    expected = f"RESTATE_SQL_L0_BYTES={os.environ['RESTATE_SQL_L0_BYTES']}: not a size (bytes, or with KiB, MiB or GiB)"
+    for _ in range(2):
+        try:
+            await open("Ledger/c", Backend().request())
+        except Exception as error:
+            assert expected in str(error), error
+        else:
+            raise AssertionError("the open succeeded")
 
 asyncio.run(main())
 """
