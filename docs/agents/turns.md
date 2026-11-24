@@ -691,7 +691,10 @@ tool calls, and no call or result after it), the note that closed it, or
 else its answer, stored as its reply, from the agent the turn is with (a
 turn that ended with a tool's output that is the answer, say). That message
 is the answer's in the summary, under the same id. Only an empty answer gets
-no message. A LangGraph graph, which keeps its own messages, is given only a
+no message. A LangGraph agent's model sees an empty answer, and a reply of
+its own with nothing in it (stored as it came), as `(no answer)` in the
+conversation that goes on: a model provider may refuse an empty message. A
+LangGraph graph, which keeps its own messages, is given only a
 closed turn's closing record, never an answer the conversation stored.
 
 **Asking again within a turn.** A turn can ask the model again before it
