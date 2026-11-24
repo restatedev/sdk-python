@@ -35,6 +35,7 @@ from restate.handler import TypeHint
 from restate.object import VirtualObject
 from restate.workflow import Workflow
 from restate.aws_lambda import is_lambda_compression_supported
+from restate._internal import explicit_recovery_protocol_range  # pylint: disable=no-name-in-module
 
 
 class ProtocolMode(Enum):
@@ -52,6 +53,22 @@ class ServiceHandlerType(Enum):
     WORKFLOW = "WORKFLOW"
     EXCLUSIVE = "EXCLUSIVE"
     SHARED = "SHARED"
+
+
+class ProtocolFamily(Enum):
+    """The service protocol a handler speaks (manifest v6): durable execution (the default), or explicit recovery,
+    which has no journal (session objects)."""
+
+    DURABLE_EXECUTION = "DURABLE_EXECUTION"
+    EXPLICIT_RECOVERY = "EXPLICIT_RECOVERY"
+
+
+class ExplicitRecoveryProtocol:
+    """The range of versions of the explicit recovery protocol the endpoint speaks (manifest v6)."""
+
+    def __init__(self, minVersion: int, maxVersion: int):
+        self.minVersion = minVersion
+        self.maxVersion = maxVersion
 
 
 class InputPayload:
@@ -93,6 +110,9 @@ class Handler:
         retryPolicyMaxAttempts: Optional[int] = None,
         retryPolicyExponentiationFactor: Optional[float] = None,
         retryPolicyOnMaxAttempts: Optional[str] = None,
+        protocolFamily: Optional[ProtocolFamily] = None,
+        enableLazyInvocationState: Optional[bool] = None,
+        eagerInvocationStateKeysWhitelist: Optional[List[str]] = None,
     ):
         self.name = name
         self.ty = ty
@@ -113,6 +133,9 @@ class Handler:
         self.retryPolicyMaxAttempts = retryPolicyMaxAttempts
         self.retryPolicyExponentiationFactor = retryPolicyExponentiationFactor
         self.retryPolicyOnMaxAttempts = retryPolicyOnMaxAttempts
+        self.protocolFamily = protocolFamily
+        self.enableLazyInvocationState = enableLazyInvocationState
+        self.eagerInvocationStateKeysWhitelist = eagerInvocationStateKeysWhitelist
 
 
 class Service:
@@ -136,6 +159,9 @@ class Service:
         retryPolicyMaxAttempts: Optional[int] = None,
         retryPolicyExponentiationFactor: Optional[float] = None,
         retryPolicyOnMaxAttempts: Optional[str] = None,
+        protocolFamily: Optional[ProtocolFamily] = None,
+        enableLazyInvocationState: Optional[bool] = None,
+        eagerInvocationStateKeysWhitelist: Optional[List[str]] = None,
     ):
         self.name = name
         self.ty = ty
@@ -154,17 +180,32 @@ class Service:
         self.retryPolicyMaxAttempts = retryPolicyMaxAttempts
         self.retryPolicyExponentiationFactor = retryPolicyExponentiationFactor
         self.retryPolicyOnMaxAttempts = retryPolicyOnMaxAttempts
+        self.protocolFamily = protocolFamily
+        self.enableLazyInvocationState = enableLazyInvocationState
+        self.eagerInvocationStateKeysWhitelist = eagerInvocationStateKeysWhitelist
 
 
 class Endpoint:
     def __init__(
-        self, protocolMode: ProtocolMode, minProtocolVersion: int, maxProtocolVersion: int, services: List[Service]
+        self,
+        protocolMode: ProtocolMode,
+        minProtocolVersion: Optional[int],
+        maxProtocolVersion: Optional[int],
+        services: List[Service],
+        explicitRecoveryProtocol: Optional[ExplicitRecoveryProtocol] = None,
     ):
         self.protocolMode = protocolMode
+        # The durable execution protocol's range: none for an endpoint whose handlers are all on the explicit
+        # recovery protocol (session objects alone).
         self.minProtocolVersion = minProtocolVersion
         self.maxProtocolVersion = maxProtocolVersion
+        self.explicitRecoveryProtocol = explicitRecoveryProtocol
         self.services = services
         self.lambdaCompression = is_lambda_compression_supported()
+
+
+DURABLE_EXECUTION_PROTOCOL_RANGE = (5, 7)
+"""The versions of the durable execution protocol this SDK serves."""
 
 
 PROTOCOL_MODES = {"bidi": ProtocolMode.BIDI_STREAM, "request_response": ProtocolMode.REQUEST_RESPONSE}
@@ -261,6 +302,19 @@ def compute_discovery_json(
     ep = compute_discovery(endpoint, discovered_as)
 
     # Validate that new discovery fields aren't used with older protocol versions
+    if version <= 5:
+        explicit = [
+            f"{service.name}/{handler.name}"
+            for service in ep.services
+            for handler in service.handlers
+            if handler.protocolFamily is ProtocolFamily.EXPLICIT_RECOVERY
+        ]
+        if explicit or ep.explicitRecoveryProtocol is not None:
+            raise ValueError(
+                "the Restate server is too old: session objects use the explicit recovery protocol, which needs "
+                f"discovery protocol version 6 (handlers: {', '.join(explicit)})"
+            )
+
     if version <= 4:
         # Note: enableLazyState itself is available since v3; only the eager state whitelist requires v5.
         for service in ep.services:
@@ -373,6 +427,7 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
             handler_enable_lazy_state, handler_eager_state_keys_whitelist = resolve_state_preload(
                 handler.state_preload, handler.enable_lazy_state
             )
+            family = ProtocolFamily(handler.protocol_family) if handler.protocol_family is not None else None
             # add the handler
             service_handlers.append(
                 Handler(
@@ -421,6 +476,8 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
                         and handler.invocation_retry_policy.on_max_attempts is not None
                         else None
                     ),
+                    # Invocation state takes the runtime's default preload (all of it) until an API sets it.
+                    protocolFamily=family,
                 )
             )
         # add the service
@@ -479,4 +536,26 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
         protocol_mode = PROTOCOL_MODES[endpoint.protocol]
     else:
         protocol_mode = PROTOCOL_MODES[discovered_as]
-    return Endpoint(protocolMode=protocol_mode, minProtocolVersion=5, maxProtocolVersion=7, services=services)
+
+    handlers = [handler for service in services for handler in service.handlers]
+    explicit = [h for h in handlers if h.protocolFamily is ProtocolFamily.EXPLICIT_RECOVERY]
+    explicit_recovery_protocol: Optional[ExplicitRecoveryProtocol] = None
+    if explicit:
+        if protocol_mode is not ProtocolMode.BIDI_STREAM:
+            names = ", ".join(h.name for h in explicit)
+            raise ValueError(
+                "session objects need a bidirectional stream (HTTP/2): the explicit recovery protocol is not served "
+                f"over request/response (handlers: {names})"
+            )
+        min_version, max_version = explicit_recovery_protocol_range()
+        explicit_recovery_protocol = ExplicitRecoveryProtocol(minVersion=min_version, maxVersion=max_version)
+    # The durable execution range only if a handler speaks that protocol.
+    durable = len(explicit) < len(handlers) or not handlers
+    min_durable, max_durable = DURABLE_EXECUTION_PROTOCOL_RANGE if durable else (None, None)
+    return Endpoint(
+        protocolMode=protocol_mode,
+        minProtocolVersion=min_durable,
+        maxProtocolVersion=max_durable,
+        services=services,
+        explicitRecoveryProtocol=explicit_recovery_protocol,
+    )

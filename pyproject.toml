@@ -47,7 +47,11 @@ module-name = "restate._internal"
 python-source = "python"
 
 # Rebuilt by `uv sync` when the Rust changes, not only the Python.
+# The environment `uv sync` builds (development, tests, CI) has the fake runtime of the explicit
+# recovery protocol (`restate._internal._FakeRuntime`, Cargo feature `fake_runtime`); the release
+# wheels, built by maturin-action, which does not read this section, do not.
 [tool.uv]
+config-settings = { "build-args" = "--features fake_runtime" }
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "Cargo.toml" },

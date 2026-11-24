@@ -154,6 +154,8 @@ class Request:
         scope (Optional[str]): The scope key with which this invocation was submitted, if any.
         limit_key (Optional[str]): The limit key with which this invocation was submitted, if any.
         idempotency_key (Optional[str]): The idempotency key with which this invocation was submitted, if any.
+        attempt (Optional[int]): The number of this attempt of the invocation, from 1: on the explicit recovery
+            protocol (session objects). ``None`` on the durable execution protocol, which has none.
     """
 
     id: str
@@ -164,6 +166,7 @@ class Request:
     scope: Optional[str] = None
     limit_key: Optional[str] = None
     idempotency_key: Optional[str] = None
+    attempt: Optional[int] = None
 
 
 class KeyValueStore(abc.ABC):

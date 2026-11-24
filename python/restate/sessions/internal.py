@@ -32,19 +32,30 @@ it. It provides:
   on its own, for bookkeeping that is stored with the next write (the agents' record of a call that answered).
 - ``ScopeKey`` and ``definition_of``: state a library keeps per attempt, and
   the object an attempt belongs to.
+- ``invocation_state``, ``read_signal``, ``send_signal`` and ``flush``
+  (provisional: what the explicit recovery protocol offers, with no public
+  API designed yet; they may change or go): the invocation's own state, which
+  every attempt of it finds; the signals it receives, read by name and index;
+  signals to other invocations; and a wait until Restate applied every
+  earlier action.
 - ``invoke``, ``SqlHost`` and ``ObjectConfig``: run one attempt of a handler
   against a host of your own, without Restate, for tests.
 """
 
 from restate.sessions._object import (
     Annotation,
+    InvocationState,
     annotate,
     attach_invocation,
     cancel_calls,
     cancelled,
     definition_of,
+    flush,
     hide_entries,
+    invocation_state,
     invoke,
+    read_signal,
+    send_signal,
     start,
 )
 from restate.sessions._schema import Schema, ensure_schemas
@@ -53,6 +64,7 @@ from restate.sessions._session import ObjectConfig, SqlHost, database, flush_rid
 
 __all__ = [
     "Annotation",
+    "InvocationState",
     "ObjectConfig",
     "Schema",
     "ScopeKey",
@@ -64,10 +76,14 @@ __all__ = [
     "database",
     "definition_of",
     "ensure_schemas",
+    "flush",
     "flush_riders",
     "hide_entries",
+    "invocation_state",
     "invoke",
+    "read_signal",
     "reset",
     "ride_commit",
+    "send_signal",
     "start",
 ]

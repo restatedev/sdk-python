@@ -36,6 +36,9 @@ from typing import Any, Protocol
 from restate._internal import (  # pylint: disable=import-error,no-name-in-module
     SQL_CLEAR,
     SQL_COMMIT,
+    SQL_COMMIT_ABORT,
+    SQL_COMMIT_BEGIN,
+    SQL_COMMIT_END,
     SQL_GET,
     SQL_KEYS,
     SQL_SET,
@@ -101,6 +104,14 @@ class Store(Protocol):
       syncs with the VM directly, instead of calling the store's methods.
     - ``database_name`` names a database of the key other than the object's
       own (see ``_session.database``).
+    - ``begin_commit()``, ``end_commit()`` and ``abort_commit()`` bracket a
+      commit (its writes, then what the transaction makes at its commit) so
+      that Restate applies it as one atomic group: ``begin_commit`` returns
+      whether it opened one, ``end_commit`` returns an awaitable of the
+      group's result. Without them, a commit's writes are followed by a sync.
+    - ``commit_alone(run)`` runs ``run`` (a commit's callbacks, when the commit
+      wrote nothing) in a group of its own, and returns an awaitable of its
+      result.
     """
 
     def get(self, key: str, /) -> bytes | None | Awaitable[bytes | None]: ...
@@ -148,9 +159,11 @@ class _Boundary:
     and ends the session, so the first one is kept here: the calls that then
     fail re-raise the original exception (the SDK's suspension, for example).
     A failed write cannot fail its caller, which has moved on, so the next
-    ``sync`` fails instead. Before a commit's sync, the callbacks the
-    transaction registered with ``ConnectionTransaction.with_commit`` run,
-    after the commit's writes and before anything is awaited.
+    ``sync`` or commit fails instead. The callbacks the transaction
+    registered with ``ConnectionTransaction.with_commit`` run inside the
+    commit, after its writes and before anything is awaited: in its atomic
+    group, on a store over Restate (``COMMIT`` with the VM, ``COMMIT_END``
+    without).
     """
 
     def __init__(self, store: Store, loop: asyncio.AbstractEventLoop) -> None:
@@ -170,6 +183,8 @@ class _Boundary:
         self.with_sync: Callable[[], None] | None = None
         # The first failed write; every sync after it fails.
         self._write_failed: BaseException | None = None
+        # Whether a commit's atomic group is open on the store (``COMMIT_BEGIN`` to ``COMMIT_END``).
+        self._grouped: bool = False
 
     def _keep(self, error: BaseException) -> None:
         if self.failed is None:
@@ -179,8 +194,46 @@ class _Boundary:
         """A scope that keeps the attempt alive, if the store has one: around each call of the database."""
         return self._working() if self._working is not None else contextlib.nullcontext()
 
+    def _run_with_sync(self) -> None:
+        """Run the committing transaction's callbacks, if any, once."""
+        run, self.with_sync = self.with_sync, None
+        if run is not None:
+            run()
+
+    def _abort(self) -> None:
+        """Drop the commit's group, if one is open."""
+        if self._grouped:
+            self._grouped = False
+            abort = getattr(self.store, "abort_commit", None)
+            if abort is not None:
+                abort()
+
+    async def commit_alone(self, run: Callable[[], None]) -> None:
+        """Run ``run``, the callbacks of a commit that wrote nothing, in a group of its own on a store that has
+        groups, and wait for it to be stored."""
+        alone = getattr(self.store, "commit_alone", None)
+        if alone is None:
+            run()
+            return
+        await _settled(alone(run))
+
     def dispatch(self, op: int, key: Any, value: bytes | None, reply: SqlReply | None) -> None:
         """Handle one request of the extension; ``key`` is a store key, or empty for a sync or a commit."""
+        if op == SQL_COMMIT_BEGIN:
+            begin = getattr(self.store, "begin_commit", None)
+            try:
+                self._grouped = bool(begin()) if begin is not None else False
+            except BaseException as error:  # pylint: disable=broad-exception-caught
+                self._keep(error)
+                if self._write_failed is None:
+                    self._write_failed = error
+            return
+        if op == SQL_COMMIT_ABORT:
+            try:
+                self._abort()
+            except BaseException as error:  # pylint: disable=broad-exception-caught
+                self._keep(error)
+            return
         if op in (SQL_SET, SQL_CLEAR):
             try:
                 if op == SQL_SET:
@@ -201,21 +254,29 @@ class _Boundary:
                 assert self._keys is not None
                 result = self._keys()
             elif op == SQL_COMMIT:
-                # A store over the VM syncs with an acked write of the head: what the transaction
-                # makes at its commit runs between that write and the wait for its ack.
-                run, self.with_sync = self.with_sync, None
-                if run is not None:
-                    run()
+                # A store over the VM: the commit's atomic group is open, with its writes. What the
+                # transaction makes at its commit (its sends) lands in it, before it is closed.
+                self._run_with_sync()
                 result = None
             elif self._write_failed is not None:
+                self._abort()
                 reply(None, str(self._write_failed))
                 return
+            elif op == SQL_COMMIT_END:
+                # A store implemented in Python: the commit's writes are issued, in its group if the
+                # store has groups. Its sends join them, then the group closes, or the writes sync.
+                self._run_with_sync()
+                if self._grouped:
+                    self._grouped = False
+                    result = typing.cast(Any, self.store).end_commit()
+                else:
+                    result = self.store.sync()
             else:
-                run, self.with_sync = self.with_sync, None
-                if run is not None:
-                    run()
                 result = self.store.sync()
         except BaseException as error:  # pylint: disable=broad-exception-caught
+            if op == SQL_COMMIT_END:
+                with contextlib.suppress(BaseException):
+                    self._abort()
             self._keep(error)
             reply(None, str(error))
             return
@@ -241,7 +302,7 @@ class _Boundary:
 
 def _reply_value(op: int, result: object) -> object:
     """Convert a request's result to what the extension expects: a value, a list of keys, or ``None``."""
-    if op in (SQL_SYNC, SQL_COMMIT):
+    if op in (SQL_SYNC, SQL_COMMIT, SQL_COMMIT_END):
         return None
     if op == SQL_KEYS:
         return list(typing.cast("Sequence[str]", result))
@@ -381,8 +442,8 @@ class Connection(_Sql):
             finally:
                 _running.reset(token)
             records = await tx.end()
-            # The commit's sync runs the callbacks given to `with_commit`. A commit
-            # that wrote nothing does not sync, so they run afterwards instead.
+            # The commit runs the callbacks given to `with_commit`, in its atomic group. A commit
+            # that wrote nothing has none, so they run afterwards instead, in a group of their own.
             self._boundary.with_sync = tx.commit_runs()
             try:
                 async with self._boundary.alive():
@@ -396,7 +457,11 @@ class Connection(_Sql):
             finally:
                 unsynced, self._boundary.with_sync = self._boundary.with_sync, None
             if unsynced is not None:
-                unsynced()
+                try:
+                    async with self._boundary.alive():
+                        await self._boundary.commit_alone(unsynced)
+                except Exception as error:
+                    raise self._failure(error) from None
 
     async def record(self, name: str) -> bytes:
         """Return the committed value of the record ``name``, or empty bytes if it was never set.
@@ -489,10 +554,10 @@ class ConnectionTransaction(_Sql):
     def with_commit(self, run: Callable[[], None]) -> None:
         """Call ``run`` during the commit, after its writes and before waiting for them to be stored.
 
-        Whatever ``run`` hands the store's host (Restate sends, which are
-        stored in order with the writes) therefore follows the writes, and
-        comes before anything that could fail the wait. ``run`` is not called
-        if the transaction rolls back.
+        On a store over Restate, the commit is one atomic group, and whatever
+        ``run`` hands the store's host (Restate sends) lands in it: the sends
+        are applied with the writes, or not at all. ``run`` must not await.
+        It is not called if the transaction rolls back.
         """
         self._refuse_ended()
         self._with_commits.append(run)

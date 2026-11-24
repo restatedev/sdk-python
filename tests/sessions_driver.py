@@ -8,7 +8,8 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""A session object's attempt on the explicit recovery VM, with Restate's side played on the wire (``sessions_wire``).
+"""A session object's attempt on the explicit recovery protocol, with Restate's side played by the shared core's fake
+runtime (``sessions_wire``).
 
 No server and no endpoint: the attempt runs through the object's runner, and a
 real database over the object's state. Above all, where a cancellation lands.
@@ -30,7 +31,7 @@ import pytest
 from restate import TerminalError, sessions
 from restate.sessions import _driver, internal
 from restate.sessions._object import HEAD_KEY
-from sessions_wire import REQUESTED_ACK, TYPE, RestateSide, output_of, run  # pylint: disable=import-error
+from sessions_wire import TYPE, RestateSide, output_of, run  # pylint: disable=import-error
 
 
 @pytest.fixture
@@ -240,7 +241,7 @@ async def three_times(ctx: sessions.SessionContext) -> str:
 @notes.handler()
 async def two_commits(ctx: sessions.SessionContext) -> str:
     """A commit, a wait outside Restate where the test cancels the invocation, then a transaction with a send of its
-    own: sends are made between a commit's head write and the wait for its ack."""
+    own: sends are made in the commit's atomic group, after its writes and before its wait."""
     first = await said(insert(ctx, "a"))
     await gate_of().wait()
 
@@ -255,7 +256,7 @@ async def two_commits(ctx: sessions.SessionContext) -> str:
 
 @notes.handler()
 async def sending_transaction_then_insert(ctx: sessions.SessionContext) -> str:
-    """A transaction with a send, whose commit empties the outbox after it, then a commit."""
+    """A transaction with a send, made in its commit's atomic group, then a commit."""
 
     async def transaction() -> None:
         async with ctx.db.transaction() as tx:
@@ -385,19 +386,21 @@ async def cleans_up_after_its_end(ctx: sessions.SessionContext) -> str:
 
 
 def acked(side: RestateSide) -> int:
-    """How many of the attempt's commands asked for an ack: a commit each, on either store."""
-    return sum(1 for m in side.sent() if 0x0400 <= m.type < 0x8000 and m.flags & REQUESTED_ACK)
+    """How many of the attempt's actions asked to be told they are stored: a commit each (or a flush), on either
+    store."""
+    return sum(1 for m in side.sent() if m.is_commit)
 
 
 def describe(side: RestateSide) -> str:
-    """What the attempt wrote, as message types in order: for a failure's message."""
-    return " ".join(f"{m.type:#06x}" for m in side.sent())
+    """What the attempt wrote, as message types in order (``!`` for an action that wants its result): for a failure's
+    message."""
+    return " ".join(f"{m.type:#06x}{'!' if m.is_action and m.wants_result else ''}" for m in side.sent())
 
 
 def acked_after_signal(side: RestateSide) -> int:
-    """How many of the commands the attempt wrote after the cancel signal went in asked for an ack: its commits."""
+    """How many of the actions the attempt wrote after the cancel signal went in asked to be told they are stored."""
     assert side.signalled_at is not None, f"no cancel signal went in: {describe(side)}"
-    return sum(1 for m in side.sent()[side.signalled_at :] if 0x0400 <= m.type < 0x8000 and m.flags & REQUESTED_ACK)
+    return sum(1 for m in side.sent()[side.signalled_at :] if m.is_commit)
 
 
 def types_after_signal(side: RestateSide) -> list[int]:
@@ -469,17 +472,17 @@ async def test_a_cancellation_does_not_fail_a_commit_already_under_way_its_head_
     assert output_of(after.sent()) == 3, describe(after)
 
 
-async def test_the_outbox_emptied_after_a_commit_does_not_take_the_cancellation_that_landed_on_the_commit():
-    # The signal lands on the transaction's commit, which made its send. The session then empties the outbox, a
-    # call of the database of its own: the cancellation is not its, and the transaction reports what it did.
+async def test_a_cancellation_that_lands_on_a_sending_commit_goes_to_the_await_after_it():
+    # The signal lands on the transaction's commit, which made its send in its atomic group: the transaction
+    # reports what it did, and the cancellation goes to the next call of the database.
     side = RestateSide(await seeded("kb"), cancel_on_commit=True)
     side.start("kb", None)
     await run(notes, "sending_transaction_then_insert", side)
-    sent = side.sent()
-    assert output_of(sent) == "ok,cancelled", describe(side)
-    # The premise: the signal went in, and the transaction's send went out.
+    assert output_of(side.sent()) == "ok,cancelled", describe(side)
+    # The premise: the signal went in, and the transaction's send went out, inside its commit.
     assert side.signalled_at is not None, describe(side)
-    assert TYPE.one_way_call in [m.type for m in sent], describe(side)
+    assert [s.input for s in side.sends] == ['"t"'], describe(side)
+    assert any(member.type == TYPE.call for m in side.sent() if m.is_commit for member in m.members()), describe(side)
 
 
 async def test_a_cancellation_that_fails_a_call_it_finds_waiting_is_not_carried_as_well():
@@ -536,8 +539,8 @@ async def test_a_call_whose_invocation_id_comes_after_the_cancellation_is_cancel
     types = [m.type for m in sent]
     assert TYPE.cancel_invocation in types, describe(side)
     cancel = types.index(TYPE.cancel_invocation)
-    assert cancel < types.index(TYPE.output), describe(side)
-    assert sent[cancel].bytes_of(1) == b"inv_started", describe(side)
+    assert cancel < types.index(TYPE.end), describe(side)
+    assert sent[cancel].text_of(1) == side.calls[0].invocation_id, describe(side)
 
 
 async def test_a_call_whose_invocation_id_came_before_the_cancellation_is_cancelled():
@@ -549,8 +552,8 @@ async def test_a_call_whose_invocation_id_came_before_the_cancellation_is_cancel
     types = [m.type for m in sent]
     assert TYPE.cancel_invocation in types, describe(side)
     cancel = types.index(TYPE.cancel_invocation)
-    assert cancel < types.index(TYPE.output), describe(side)
-    assert sent[cancel].bytes_of(1) == b"inv_started", describe(side)
+    assert cancel < types.index(TYPE.end), describe(side)
+    assert sent[cancel].text_of(1) == side.calls[0].invocation_id, describe(side)
 
 
 async def test_once_the_attempt_has_ended_a_carried_cancellation_is_not_delivered():
@@ -627,7 +630,7 @@ async def test_a_schema_the_handler_ensures_takes_a_carried_cancellation_as_its_
 
 def heartbeats(side: RestateSide) -> int:
     """How many times the attempt told Restate that it makes progress."""
-    return sum(1 for m in side.sent() if m.type == TYPE.awaiting_on)
+    return sum(1 for m in side.sent() if m.type == TYPE.heartbeat)
 
 
 async def beats_while_at(gate_: Gate, handler: str, side: RestateSide) -> int:
@@ -845,7 +848,7 @@ async def test_a_read_that_asks_restate_nothing_sees_a_carried_cancellation_too_
     await run_cancelling_at(gate, "commit_then_reads", side)
     assert output_of(side.sent()) == "ok,cancelled,ok", describe(side)
     # The premise: the reads after the signal asked Restate for nothing.
-    assert types_after_signal(side) == [TYPE.output, TYPE.end], describe(side)
+    assert types_after_signal(side) == [TYPE.end], describe(side)
 
 
 async def test_a_carried_cancellation_fails_the_next_call_of_the_database_before_it_writes_or_sends_anything(
@@ -860,12 +863,11 @@ async def test_a_carried_cancellation_fails_the_next_call_of_the_database_before
     assert output_of(sent) == "ok,cancelled", describe(side)
     # The transaction failed before its body ran.
     assert not gate.seen, gate.seen
-    # What came after the signal went in: the handler's output, and before it no command at all.
-    after = [t for t in types_after_signal(side) if 0x0400 <= t < 0x8000]
-    assert after == [TYPE.output], f"the cancelled transaction issued commands: {describe(side)}"
-    # Its sends are made between a commit's head write and the wait for that write's ack, so they are the first
-    # thing to escape a commit that is failed late.
-    assert not any(m.type == TYPE.one_way_call for m in sent), "the cancelled transaction's sends went out"
+    # What came after the signal went in: the handler's end, and before it no action at all.
+    after = [t for t in types_after_signal(side) if 0x0400 <= t < 0x8000 or t == TYPE.end]
+    assert after == [TYPE.end], f"the cancelled transaction issued actions: {describe(side)}"
+    # Its sends are made inside the commit's group: none went out.
+    assert side.sends == [], "the cancelled transaction's sends went out"
 
 
 async def test_a_retrys_carried_cancellation_fails_the_calls_result_not_the_id_it_makes_first():

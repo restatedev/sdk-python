@@ -26,7 +26,7 @@ import restate
 from restate import sessions
 from restate.sessions import internal
 from restate.context import AttemptFinishedEvent, Request
-from restate.discovery import compute_discovery
+from restate.discovery import ProtocolFamily, compute_discovery
 from restate.endpoint import Endpoint
 from restate.exceptions import TerminalError
 from restate.handler import handler_from_callable
@@ -278,43 +278,126 @@ async def test_the_sends_of_a_transaction_are_made_once_it_commits_and_never_if_
     assert len(host.sends) == 1
     sent = host.sends[0]
     assert (sent.service, sent.handler, sent.key, sent.arg) == ("audit", "record", "orders", b'"o1"')
-    assert sent.idempotency_key is not None and sent.idempotency_key.startswith("transaction/")
+    # No key of the SDK's own: a send commits with its transaction, once, and nothing keeps it for later.
+    assert sent.idempotency_key is None
     with pytest.raises(ValueError):
         await run(shop, "place", host, "bad")
     assert len(host.sends) == 1
-    # The outbox is empty: a later attempt makes nothing again.
+    # A later attempt makes nothing again.
     again = Host(host.backend, service="shop")
     await run(shop, "place", again, "o2")
     assert [send.arg for send in again.sends] == [b'"o2"']
 
 
-async def test_the_sends_a_crash_left_in_the_outbox_are_made_again_with_the_same_keys():
+@dataclass
+class GroupHost(Host):
+    """A host whose store applies a commit as one atomic group, as Restate does: its writes and its sends, or none."""
+
+    log: list[str] = field(default_factory=list)
+    """What the store saw, in order: ``begin``, ``set``, ``clear``, ``send``, ``end`` or ``abort``."""
+    _group: list[Any] | None = None
+    _commits_left: int | None = None
+
+    def crash_at_commit(self, commits: int) -> None:
+        """Let ``commits`` more commits through, then crash: the next one is lost whole, writes and sends."""
+        self._commits_left = commits
+
+    def set(self, key: str, value: bytes) -> None:
+        if self._group is None:
+            super().set(key, value)
+            return
+        self.log.append("set")
+        self._group.append(("set", key, value))
+
+    def clear(self, key: str) -> None:
+        if self._group is None:
+            super().clear(key)
+            return
+        self.log.append("clear")
+        self._group.append(("clear", key))
+
+    def generic_send(
+        self, service, handler, arg, key=None, send_delay=None, idempotency_key=None, headers=None, name=None
+    ):
+        if self._group is None:
+            return super().generic_send(service, handler, arg, key, send_delay, idempotency_key, headers, name)
+        self.log.append("send")
+        self._group.append(("send", Send(service, handler, arg, key, send_delay, idempotency_key, name)))
+        return Sent(f"inv_{service}/{key}")
+
+    def begin_commit(self) -> None:
+        self.log.append("begin")
+        self._group = []
+
+    def abort_commit(self) -> None:
+        self.log.append("abort")
+        self._group = None
+
+    async def end_commit(self) -> None:
+        self.log.append("end")
+        group, self._group = self._group or [], None
+        if self._commits_left is not None:
+            if self._commits_left == 0:
+                self.backend.lose()
+                raise RuntimeError("the commit failed")
+            self._commits_left -= 1
+        for action in group:
+            if action[0] == "set":
+                self.backend.request().set(action[1], action[2])
+            elif action[0] == "clear":
+                self.backend.request().clear(action[1])
+            else:
+                self.sends.append(action[1])
+        self.backend.confirm()
+
+
+async def test_a_transactions_sends_are_in_its_commits_atomic_group_with_its_writes():
     shop = sessions.SessionObject("shop2", migrations=["CREATE TABLE orders (id TEXT PRIMARY KEY)"])
 
     @shop.handler()
-    async def place(ctx: sessions.SessionContext, order: str) -> None:
+    async def place(ctx: sessions.SessionContext, order: str) -> int:
         async with ctx.db.transaction() as tx:
             await tx.execute("INSERT INTO orders VALUES (?)", [order])
             tx.send(record, order, key="orders")
-            # The commit's sync goes through; then the process crashes, before the outbox is emptied.
-            first.crash_after(1)
+        row = await ctx.db.get("SELECT count(*) AS n FROM orders")
+        assert row is not None
+        return typing.cast(int, row["n"])
 
     backend = Backend()
-    first = Host(backend, service="shop2")
-    with pytest.raises(RuntimeError, match="the sync failed"):
-        await run(shop, "place", first, "o1")
-    assert len(first.sends) == 1
+    first = GroupHost(backend, service="shop2")
+    assert await run(shop, "place", first, "o1") == 1
+    assert [send.arg for send in first.sends] == [b'"o1"']
+    # The transaction's commit: its writes, then its send, in one group.
+    send = first.log.index("send")
+    begin = max(i for i, seen in enumerate(first.log[:send]) if seen == "begin")
+    assert "set" in first.log[begin:send] and first.log[send + 1] == "end", first.log
 
-    # The next attempt opens the database as it starts, and makes them again.
-    second = Host(backend, service="shop2")
-    await run(shop, "place", second, "o2")
-    keys = [send.idempotency_key for send in second.sends]
-    assert keys[0] == first.sends[0].idempotency_key
-    assert [send.arg for send in second.sends] == [b'"o1"', b'"o2"']
+    # A crash that loses the commit loses its send too: neither the row nor the send is there.
+    second = GroupHost(backend, service="shop2")
+    second.crash_at_commit(0)
+    with pytest.raises(RuntimeError, match="the commit failed"):
+        await run(shop, "place", second, "o2")
+    assert second.sends == []
 
-    third = Host(backend, service="shop2")
-    await run(shop, "place", third, "o3")
+    # The next attempt finds the first commit alone, and sends nothing again.
+    third = GroupHost(backend, service="shop2")
+    assert await run(shop, "place", third, "o3") == 2
     assert [send.arg for send in third.sends] == [b'"o3"']
+
+
+async def test_the_sends_of_a_transaction_that_wrote_nothing_are_a_group_of_their_own():
+    shop = sessions.SessionObject("shop3", migrations=["CREATE TABLE orders (id TEXT PRIMARY KEY)"])
+
+    @shop.handler()
+    async def notify(ctx: sessions.SessionContext) -> None:
+        async with ctx.db.transaction() as tx:
+            await tx.execute("SELECT count(*) FROM orders")
+            tx.send(record, "nothing written", key="orders")
+
+    host = GroupHost(Backend(), service="shop3")
+    await run(shop, "notify", host)
+    assert [send.arg for send in host.sends] == [b'"nothing written"']
+    assert host.log[-3:] == ["begin", "send", "end"], host.log
 
 
 async def test_an_sql_error_fails_the_handler_with_a_terminal_error():
@@ -437,7 +520,7 @@ async def test_ctx_send_is_made_at_once_and_cancel_takes_an_invocation_id():
     assert host.cancelled == ["inv_1"]
 
 
-async def test_calls_and_sends_carry_the_name_of_their_journal_entry_through_the_outbox_too():
+async def test_calls_and_sends_carry_the_name_of_their_journal_entry_in_a_transaction_too():
     named = sessions.SessionObject(
         "named_calls", migrations=["CREATE TABLE t (a TEXT)"], metadata=internal.hide_entries("mine")
     )
@@ -461,8 +544,7 @@ async def test_calls_and_sends_carry_the_name_of_their_journal_entry_through_the
         (b'"plain"', None),
     ]
     assert named.service_tag.metadata is not None
-    assert named.service_tag.metadata["dev.restate.tooling.journal.hidden.names"] == "sync,mine"
-    assert named.service_tag.metadata["dev.restate.tooling.journal.hidden.name.prefix"] == "v22/"
+    assert named.service_tag.metadata["dev.restate.tooling.journal.hidden.names"] == "mine"
 
 
 async def test_another_database_of_the_key_is_apart_from_the_objects_own():
@@ -515,17 +597,25 @@ def test_an_sdk_handler_is_refused():
         obj.handler()(add)
 
 
-def test_a_session_object_runs_its_handlers_with_explicit_recovery_and_its_head_preloaded():
-    assert notes.handlers["add"].explicit_recovery
-    assert notes.handlers["texts"].explicit_recovery
+def test_a_session_object_runs_its_handlers_on_the_explicit_recovery_protocol_with_its_head_preloaded():
+    assert notes.handlers["add"].protocol_family == "EXPLICIT_RECOVERY"
+    assert notes.handlers["texts"].protocol_family == "EXPLICIT_RECOVERY"
+    # Not the durable execution protocol's explicit recovery (a journal not replayed): no journal at all.
+    assert not notes.handlers["add"].explicit_recovery
     assert notes.handlers["texts"].kind == "shared"
     # Restate sends the database's head with each invocation, and the rest of the state as it is read.
-    manifest = compute_discovery(Endpoint().bind(notes), "bidi").services[0]
+    endpoint = compute_discovery(Endpoint().bind(notes), "bidi")
+    manifest = endpoint.services[0]
     assert manifest.enableLazyState
     assert manifest.eagerStateKeysWhitelist == [HEAD_KEY]
     assert all(handler.eagerStateKeysWhitelist is None for handler in manifest.handlers)
-    assert notes.service_tag.metadata is not None
-    assert notes.service_tag.metadata["dev.restate.tooling.journal.hidden.name.prefix"] == "v22/"
+    assert all(handler.protocolFamily is ProtocolFamily.EXPLICIT_RECOVERY for handler in manifest.handlers)
+    # The database's actions are recorded as nothing: no metadata hides them.
+    assert not notes.service_tag.metadata
+    # Session objects alone: the explicit recovery protocol's range, no durable execution range.
+    assert endpoint.explicitRecoveryProtocol is not None
+    assert (endpoint.explicitRecoveryProtocol.minVersion, endpoint.explicitRecoveryProtocol.maxVersion) == (1, 1)
+    assert endpoint.minProtocolVersion is None and endpoint.maxProtocolVersion is None
 
 
 def test_a_handler_or_view_is_named_after_its_function_or_as_its_option_says():
@@ -744,7 +834,7 @@ async def test_an_attempt_is_freed_once_it_ends():
     assert kept[0]() is None
 
 
-async def test_a_request_response_transport_is_refused_before_the_handler_runs():
+async def test_a_request_of_another_protocol_is_refused_with_415_before_the_handler_runs():
     from restate.server_types import ReceiveChannel  # pylint: disable=import-outside-toplevel
 
     obj = sessions.SessionObject("transported")
@@ -784,14 +874,11 @@ async def test_a_request_response_transport_is_refused_before_the_handler_runs()
             attempt_headers={},
             receive=channel,
             send=send,
-            bidirectional=False,
             server_headers=[],
         )
     finally:
         await channel.close()
     assert not ran
-    assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 200
-    # The error that pauses the invocation, then the end of the response.
-    bodies = [message for message in sent[1:] if message["type"] == "http.response.body"]
-    assert bodies[0]["body"], sent
-    assert bodies[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
+    # The durable execution protocol's content type: the VM's code, 415, not a 500, and no body.
+    assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 415
+    assert sent[1:] == [{"type": "http.response.body", "body": b"", "more_body": False}]

@@ -295,11 +295,11 @@ async def test_the_calls_to_the_companion_are_named_for_the_agents_metadata_to_h
         f"{companion}/close",
     ]
     assert {name for _, name in seen.names} == {"signals"}
-    # Restate's UI hides them, with the database's entries; an agent's own metadata still wins.
+    # Restate's UI hides them (the database's actions are recorded as nothing); an agent's own metadata still wins.
     hidden = "dev.restate.tooling.journal.hidden.names"
-    assert (agent.service_tag.metadata or {})[hidden] == "sync,signals"
-    shown = make(framework, Seen(), metadata={hidden: "sync"})
-    assert (shown.service_tag.metadata or {})[hidden] == "sync"
+    assert (agent.service_tag.metadata or {})[hidden] == "signals"
+    shown = make(framework, Seen(), metadata={hidden: "mine"})
+    assert (shown.service_tag.metadata or {})[hidden] == "mine"
 
 
 @pytest.mark.parametrize("framework", list(AGENTS))

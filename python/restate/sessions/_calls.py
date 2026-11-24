@@ -39,7 +39,7 @@ O = typing.TypeVar("O")
 
 @dataclass(frozen=True)
 class GenericSend:
-    """A send with its input already serialized, as ``ctx.send`` makes it or a transaction's outbox stores it."""
+    """A send with its input already serialized, as ``ctx.send`` makes it or a transaction collects it (``tx.send``)."""
 
     service: str
     handler: str

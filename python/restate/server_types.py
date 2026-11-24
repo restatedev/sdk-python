@@ -148,6 +148,7 @@ class ReceiveChannel:
         self._queue = asyncio.Queue[Union[ASGIReceiveEvent, RestateEvent]]()
         self._http_input_closed = asyncio.Event()
         self._disconnected = asyncio.Event()
+        self._shutdown_requested = asyncio.Event()
 
         async def loop():
             """Receive loop."""
@@ -172,7 +173,16 @@ class ReceiveChannel:
 
     def notify_shutdown(self) -> None:
         """Signal that a graceful shutdown has been requested (e.g. SIGTERM)."""
+        self._shutdown_requested.set()
         self._http_input_closed.set()
+
+    def is_shutdown_requested(self) -> bool:
+        """Whether a graceful shutdown has been requested (e.g. SIGTERM)."""
+        return self._shutdown_requested.is_set()
+
+    async def block_until_shutdown_requested(self) -> None:
+        """Wait until a graceful shutdown is requested (e.g. SIGTERM): not the end of the request body."""
+        await self._shutdown_requested.wait()
 
     async def block_until_http_input_closed(self) -> None:
         """Wait until the HTTP input is closed or a shutdown signal is received."""

@@ -13,24 +13,20 @@
 The database itself is stored in the object's state (see ``_database.py``).
 An exclusive handler's attempt opens it when it starts, a view's on its
 first read, and the attempt saves it when the handler ends. Transactions
-commit together with the sends made through ``tx.send``.
+commit together with the sends made through ``tx.send``: Restate applies a
+commit as one atomic group, its writes and its sends, or none of it.
 """
 
 from __future__ import annotations
 
 import abc
 import asyncio
-import base64
 import contextlib
-import json
 import re
-import time
 import typing
-import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -200,6 +196,35 @@ class _ObjectStore:
         """Wait until every earlier write is stored; the request is issued now, in order with the writes."""
         return _until_attempt_end(self._host, self._host.sync())
 
+    # A commit as one atomic group, on a host that has groups (an attempt on Restate's).
+
+    def begin_commit(self) -> bool:
+        """Open the commit's atomic group, if the host has groups: whether it did."""
+        begin = getattr(self._host, "begin_commit", None)
+        if begin is None:
+            return False
+        begin()
+        return True
+
+    def end_commit(self) -> Awaitable[Any]:
+        """Close the commit's group: once it is stored, every write and send of it is."""
+        return _until_attempt_end(self._host, typing.cast(Any, self._host).end_commit())
+
+    def abort_commit(self) -> None:
+        typing.cast(Any, self._host).abort_commit()
+
+    def commit_alone(self, run: Callable[[], None]) -> Awaitable[Any]:
+        """Run ``run`` (the sends of a commit that wrote nothing) in a group of its own; once stored, they are."""
+        if not self.begin_commit():
+            run()
+            return self.sync()
+        try:
+            run()
+        except BaseException:
+            self.abort_commit()
+            raise
+        return self.end_commit()
+
 
 class _ReaderStore:
     """The object's state as a view's ``Store``, which reads alongside the exclusive handler and never writes."""
@@ -253,81 +278,34 @@ async def _until_attempt_end(host: SqlHost, request: Awaitable[T]) -> T:
     raise host.attempt_end() or SuspendedException()
 
 
-# --- The outbox -----------------------------------------------------------------------------------
+# --- A transaction's sends -----------------------------------------------------------------------
 
-# A transaction's sends commit with it, in the database's `outbox` record
-# (stored next to its tables, not in one), which holds each committed
-# transaction's sends until they are stored by Restate. They are sent during
-# the commit (see `Attempt.transaction`). A later open sends again whatever is
-# still in the outbox, with the same idempotency keys
-# (`transaction/<id>/<index>`, where the id is random per transaction), so
-# Restate drops the duplicates. Restate keeps an attempt's commands in the
-# order they were made, so a send made before a commit is stored whenever the
-# commit is: the next commit removes the sends this attempt made from the
-# outbox, and so does the end of the attempt. The record's format is a wire
-# format shared with other SDKs: keep it compatible.
-
-OUTBOX = "outbox"
-"""The name of the record that holds the outbox."""
-
-Outgoing = dict[str, Any]
-"""The sends of one committed transaction, as stored in the outbox: ``{"id": ..., "sends": [...]}``."""
-
-
-def _encode_outbox(outbox: list[Outgoing]) -> bytes:
-    """Encode the outbox as its record; an empty outbox is stored as empty bytes, like a record never set."""
-    return json.dumps(outbox).encode() if outbox else b""
-
-
-def _decode_outbox(record: bytes) -> list[Outgoing]:
-    return json.loads(record.decode()) if record else []
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+# A transaction's sends (``tx.send``) are made during its commit, inside the
+# commit's atomic group (see ``ConnectionTransaction.with_commit``): Restate
+# applies them together with the commit's writes, or none of it. Nothing is
+# kept for a later attempt to send again.
 
 
 class _Sends:
     """The sends that one transaction's body makes with ``tx.send``, collected until it ends."""
 
     def __init__(self) -> None:
-        self._sends: list[dict[str, Any]] = []
+        self._sends: list[GenericSend] = []
         self._open: bool = True
 
     def record(self, send: GenericSend) -> None:
         if not self._open:
             raise TerminalError("the transaction has ended: send from inside its body")
-        stored: dict[str, Any] = {
-            "service": send.service,
-            "method": send.handler,
-            "parameter": base64.b64encode(send.parameter).decode("ascii"),
-        }
-        if send.key is not None:
-            stored["key"] = send.key
-        if send.delay is not None:
-            stored["delay"] = int(send.delay.total_seconds() * 1000)
-        if send.idempotency_key is not None:
-            stored["idempotencyKey"] = send.idempotency_key
-        if send.headers:
-            stored["headers"] = send.headers
-        if send.name is not None:
-            stored["name"] = send.name
-        self._sends.append(stored)
+        self._sends.append(send)
 
-    def close(self) -> Outgoing | None:
-        """Close the collection and return the transaction's sends, if any, with delays counted from now."""
+    def close(self) -> list[GenericSend]:
+        """Close the collection and return the transaction's sends."""
         self._open = False
-        if not self._sends:
-            return None
-        now = _now_ms()
-        for send in self._sends:
-            if "delay" in send:
-                send["due"] = now + send["delay"]
-        return {"id": str(uuid.uuid4()), "sends": self._sends}
+        return self._sends
 
 
 def _refused_send(_: GenericSend) -> None:
-    """Refuse a send from a transaction without an outbox (a view's, or another database's)."""
+    """Refuse a send from a transaction that cannot commit one (a view's, or another database's)."""
     raise TerminalError("a send of a transaction is an exclusive handler's, in the object's own database")
 
 
@@ -434,8 +412,8 @@ def database(db: Database, name: str) -> Database:
 
     This is for libraries whose tables must live in a database of their own.
     Like ``ctx.db``, it opens on first use and closes when the attempt ends.
-    It has neither the object's migrations nor an outbox, so ``tx.send`` is
-    not available in its transactions::
+    It has not the object's migrations, and ``tx.send`` is not available in
+    its transactions::
 
         checkpoints = internal.database(ctx.db, "checkpoints")
 
@@ -507,7 +485,7 @@ async def reset(tx: Transaction) -> None:
 
     Every table, view, index and trigger is dropped, and then the schemas are
     applied again: the object's migrations, and those of any library this
-    attempt used. The outbox is kept. The reset commits with ``tx``, so
+    attempt used. The reset commits with ``tx``, so
     whatever ``tx`` writes afterwards becomes the new database's first rows::
 
         async with ctx.db.transaction() as tx:
@@ -606,20 +584,19 @@ class Attempt:
     It opens on first use, or when an exclusive attempt starts (``open_now``),
     is shared by everything the handler does, and is saved when the handler
     ends (``end``). With ``name``, it is the key's separate database ``name``
-    (see ``database``), which has neither the object's schema nor an outbox.
+    (see ``database``), which has not the object's schema, and whose
+    transactions send nothing.
     """
 
     def __init__(self, host: SqlHost, config: ObjectConfig | None = None, name: str | None = None) -> None:
         self._host: SqlHost = host
         self._config: ObjectConfig = config or ObjectConfig()
         self._name: str | None = name
-        # Only the object's own database, in an exclusive handler, has an outbox.
-        self._has_outbox: bool = not host.shared and name is None
+        # Only the object's own database, in an exclusive handler, commits sends.
+        self._sends_commit: bool = not host.shared and name is None
         # The key's other databases this attempt opened, by name.
         self._databases: dict[str, Attempt] = {}
         self._session: _Session | None = None
-        # The ids of the outbox transactions whose sends this attempt has made.
-        self._made: set[str] = set()
         # The schemas fully applied to this attempt's database, by name.
         self._ensured: dict[str, Schema] = {}
         self._ended: bool = False
@@ -648,9 +625,8 @@ class Attempt:
         This is where the database delivers a cancellation, and the only place.
         What the handler asks for passes through here: ``ctx.db``'s statements,
         its ``transaction()``, and a schema it ensures. What the session does for
-        itself does not: the open, the object's schema, the sends a crashed
-        attempt left unmade, emptying the outbox after a commit, the save at
-        the handler's end, and the write of an urgent rider that no commit came
+        itself does not: the open, the object's schema, the save at the
+        handler's end, and the write of an urgent rider that no commit came
         to carry (``ride_commit``): a call that answered is recorded even while
         a cancellation is owed to the handler, which stays owed to its next call. A cancellation that failed one of
         those would be
@@ -750,12 +726,11 @@ class Attempt:
         return other.db
 
     def open_now(self) -> None:
-        """Open the session now, as the attempt starts, rather than on first use.
+        """Open the session now, as the attempt starts, rather than on first use: an exclusive handler's own database.
 
-        Opening makes any sends that a crashed attempt committed but did not
-        make, and those should not wait until the handler uses the database.
+        Its reads of the state go out before the handler's first call needs them.
         """
-        if self._has_outbox and self._session is None:
+        if self._sends_commit and self._session is None:
             # A failure is reported to the first call, as if that call had opened the session.
             self._current().ready.add_done_callback(lambda t: t.cancelled() or t.exception())
 
@@ -801,15 +776,10 @@ class Attempt:
         """Run the body of an ``async with`` in one transaction.
 
         In the object's own database of an exclusive handler, the transaction's
-        sends are committed to the outbox with it, and are made during the
-        commit, right after its writes and before it waits for anything (see
-        ``with_commit``). Since Restate stores an attempt's commands in order,
-        the sends are stored only if the commit is, and anything that fails the
-        commit's wait (the attempt's end, say) comes after them. A second commit
-        empties the outbox before the transaction returns. If the sends stayed
-        until the handler's end, an attempt that resumes after a long wait could
-        make them again after the idempotency retention has expired, so that
-        the duplicates would no longer be dropped.
+        sends are made during the commit, inside its atomic group, after its
+        writes and before it waits for anything (see ``with_commit``): Restate
+        applies them with the writes, or none of it. A transaction that rolls
+        back sends nothing.
         """
         # Before the session opens or the transaction begins: see ``asked``.
         self.asked()
@@ -822,18 +792,18 @@ class Attempt:
 
         They are written after the body, which may have registered one (a transaction held open for more work),
         and before the commit; one that is registered since is for the next commit. What it leaves pending (it
-        rolled back, or the rider came after it ran them) is counted again as it ends, if ``rearm``.
+        rolled back, or the rider came after it ran them) is counted again as it ends, if ``rearm``. The sends the
+        transaction made are made by its commit, inside the commit's atomic group.
         """
         self._active += 1
         try:
-            outgoing: Outgoing | None = None
             # The riders this transaction wrote: pending until it has committed.
             rode: list[tuple[str, _Pending]] = []
             session = self._current()
             try:
                 db = await session.ready
                 async with db.transaction() as handle:
-                    sends = _Sends() if self._has_outbox else None
+                    sends = _Sends() if self._sends_commit else None
                     # A view's writes stay in its own session, so there is nothing to reset.
                     tx = AttemptTransaction(handle, sends.record if sends is not None else _refused_send)
                     if not self._host.shared:
@@ -841,13 +811,13 @@ class Attempt:
                     try:
                         yield tx
                     finally:
-                        outgoing = sends.close() if sends is not None else None
+                        made = sends.close() if sends is not None else []
                     if self._riders:
                         rode = list(self._riders.items())
                         for _, pending in rode:
                             await pending.write(tx)
-                    if self._has_outbox:
-                        await self._commit_outbox(handle, outgoing)
+                    if made:
+                        handle.with_commit(lambda: self._make(made))
             except BaseException:
                 if session.ended:
                     session.retired = True
@@ -855,22 +825,11 @@ class Attempt:
             for slot, pending in rode:
                 if self._riders.get(slot) is pending:
                     del self._riders[slot]
-            if outgoing is not None:
-                await self.call(self._flush)
         finally:
             self._active -= 1
             if rearm:
                 self._stop_counting()
                 self._arm()
-
-    async def _commit_outbox(self, handle: ConnectionTransaction, outgoing: Outgoing | None) -> None:
-        """Write the outbox in ``handle``: the unstored committed sends, plus ``outgoing``, which the commit makes."""
-        outbox = await self._unstored(handle)
-        if outgoing is not None:
-            outbox.append(outgoing)
-            sent = outgoing
-            handle.with_commit(lambda: self._make(sent))
-        handle.set_record(OUTBOX, _encode_outbox(outbox))
 
     def _current(self) -> _Session:
         """Return the current session, opening a new one if there is none or it was retired."""
@@ -903,16 +862,6 @@ class Attempt:
             # Views write nothing: make a write fail, rather than vanish with the attempt.
             if host.shared:
                 await db.execute("PRAGMA query_only = 1")
-            if self._has_outbox:
-                # Make the sends a crash left unmade. When this attempt reopens the
-                # database, the sends it already made were stored first, so skip them.
-                left = _decode_outbox(await db.record(OUTBOX))
-                for outgoing in left:
-                    if outgoing["id"] not in self._made:
-                        self._make(outgoing, again=True)
-                # Empty the outbox right away, as for a transaction's own sends.
-                if left:
-                    await self._flush(db)
             # Views too, although their writes are never stored: a key never written reads as empty tables.
             own = self._own_schema()
             if own is not None:
@@ -925,10 +874,9 @@ class Attempt:
     async def _end_session(self, error: BaseException | None) -> None:
         """End the session, then re-raise the handler's error, if any.
 
-        The handler's error takes precedence: what it committed is stored, and
-        the next open makes any sends left in the outbox. A failure to end the
-        session (a transaction left open, say) fails a handler that succeeded,
-        and a retry then ends it.
+        The handler's error takes precedence: what it committed is stored,
+        with its sends. A failure to end the session (a transaction left open,
+        say) fails a handler that succeeded, and a retry then ends it.
         """
         self._ended = True
         failed: BaseException | None = None
@@ -945,11 +893,8 @@ class Attempt:
         """Close the session as the attempt ends.
 
         A view's session just closes, as it only read its snapshot. Any other
-        session is saved, after emptying its outbox. If a failure ended it, it
-        is closed, and the object's own database is reopened and saved, since
-        its outbox may hold sends not yet made (left by a crash, when this
-        attempt's open failed) or made but not removed (when the commit's wait
-        failed).
+        session is saved; if a failure ended it, it is closed: what it
+        committed is stored already, with its sends.
         """
         if self._session is None:
             return
@@ -964,19 +909,10 @@ class Attempt:
         if db is not None:
             with contextlib.suppress(Exception):
                 await db.close()
-        if not self._has_outbox or self._host.attempt_end() is not None:
-            return
-        again = self._open()
-        try:
-            await self._save(await again.ready)
-        finally:
-            await again.end()
 
     async def _save(self, db: Connection) -> None:
-        """Empty the outbox and save the session, closing it if that fails."""
+        """Save the session, closing it if that fails."""
         try:
-            if self._has_outbox:
-                await self._flush(db)
             await db.save()
         except BaseException:
             with contextlib.suppress(Exception):
@@ -998,37 +934,19 @@ class Attempt:
         for schema in lacking:
             self._ensured[schema.name] = schema
 
-    def _make(self, outgoing: Outgoing, again: bool = False) -> None:
-        """Make the sends of a committed transaction, with idempotency keys so that repeats are dropped."""
-        for index, send in enumerate(outgoing["sends"]):
-            delay = send.get("delay")
-            due = send.get("due")
-            if delay is not None and again and due is not None:
-                # When made again, a delayed send waits only for the rest of its delay.
-                delay = max(0, due - _now_ms())
+    def _make(self, sends: list[GenericSend]) -> None:
+        """Make a committing transaction's sends: inside its commit's atomic group, on Restate."""
+        for send in sends:
             self._host.generic_send(
-                send["service"],
-                send["method"],
-                base64.b64decode(send["parameter"]),
-                send.get("key"),
-                None if delay is None else timedelta(milliseconds=delay),
-                send.get("idempotencyKey") or f"transaction/{outgoing['id']}/{index}",
-                send.get("headers"),
-                name=send.get("name"),
+                send.service,
+                send.handler,
+                send.parameter,
+                send.key,
+                send.delay,
+                send.idempotency_key,
+                send.headers,
+                name=send.name,
             )
-        self._made.add(outgoing["id"])
-
-    async def _unstored(self, db: Connection | ConnectionTransaction) -> list[Outgoing]:
-        """Return the committed outbox without the transactions whose sends this attempt made (a later commit stores those)."""
-        return [outgoing for outgoing in _decode_outbox(await db.record(OUTBOX)) if outgoing["id"] not in self._made]
-
-    async def _flush(self, db: Connection) -> None:
-        """Remove the sends this attempt made from the outbox, so that a later open does not make them again."""
-        if not await db.record(OUTBOX):
-            return
-        # Read the outbox in the transaction that writes it, to keep sends committed in the meantime.
-        async with db.transaction() as tx:
-            tx.set_record(OUTBOX, _encode_outbox(await self._unstored(tx)))
 
 
 async def with_attempt(handler: Callable[[], Awaitable[T]], attempt: Attempt) -> T:

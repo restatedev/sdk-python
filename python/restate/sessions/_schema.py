@@ -175,8 +175,8 @@ async def apply_in(tx: ConnectionTransaction, schemas: Sequence[Schema]) -> None
 async def drop_all(tx: ConnectionTransaction, schemas: Sequence[Schema]) -> None:
     """Empty the database inside the transaction ``tx``, then apply ``schemas`` again.
 
-    Drops every table, view, index and trigger and forgets every schema; other
-    records, such as the outbox, are kept. The change commits with ``tx``, so
+    Drops every table, view, index and trigger and forgets every schema; the
+    records (``set_record``) are kept. The change commits with ``tx``, so
     whatever ``tx`` writes afterwards becomes the new database's first rows.
     """
     made = await tx.values("SELECT type, name FROM sqlite_schema WHERE substr(name, 1, 7) != 'sqlite_'")

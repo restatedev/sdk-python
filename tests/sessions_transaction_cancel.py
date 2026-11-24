@@ -8,7 +8,7 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""A transaction under a cancellation, on the wire (``sessions_wire``).
+"""A transaction under a cancellation, with Restate's side played by the shared core's fake runtime (``sessions_wire``).
 
 Wherever the signal lands, ``transaction()`` either returns, and then its rows
 are committed and each of its sends went out once, or raises the cancellation
@@ -28,11 +28,11 @@ import pytest
 from restate import TerminalError, sessions
 from restate.sessions import _driver
 from sessions_wire import (  # pylint: disable=import-error
-    REQUESTED_ACK,
     TYPE,
     Made,
     Message,
     RestateSide,
+    flat,
     outcome,
     run,
 )
@@ -246,8 +246,8 @@ async def rows_of(ctx: sessions.ViewContext) -> list[str]:
 
 
 def describe(side: RestateSide) -> str:
-    """What the attempt wrote, as message types in order (``!`` for a command that asks for an ack)."""
-    return " ".join(f"{m.type:#06x}{'!' if m.flags & REQUESTED_ACK else ''}" for m in side.sent())
+    """What the attempt wrote, as message types in order (``!`` for an action that wants its result)."""
+    return " ".join(f"{m.type:#06x}{'!' if m.is_action and m.wants_result else ''}" for m in side.sent())
 
 
 async def attempt(handler: str, state: dict[str, bytes], key: str, input_: Any = None, **options: Any) -> RestateSide:
@@ -287,36 +287,28 @@ def sends_of(side: RestateSide, body: str) -> list[Made]:
     return [s for s in side.sends if s.input == f'"{body}"']
 
 
-def is_command(m: Message) -> bool:
-    return 0x0400 <= m.type < 0x8000
-
-
-def acks_asked(sent: list[Message]) -> list[int]:
-    """The positions in ``sent`` of the commands that asked for an ack."""
-    return [i for i, m in enumerate(sent) if is_command(m) and m.flags & REQUESTED_ACK]
+def is_send(m: Message) -> bool:
+    return m.type == TYPE.call and not m.wants_result
 
 
 def writes_before_send(side: RestateSide) -> list[int]:
-    """The types of the commands the attempt sent before its first send."""
-    sent = side.sent()
-    first = next(i for i, m in enumerate(sent) if m.type == TYPE.one_way_call)
-    return [m.type for m in sent[:first] if is_command(m) and m.type != TYPE.input]
+    """The types of the actions the attempt sent before its first send (an atomic group's, in their place)."""
+    actions = [m for m in flat(side.sent()) if m.is_action]
+    first = next(i for i, m in enumerate(actions) if is_send(m))
+    return [m.type for m in actions[:first]]
 
 
 def send_is_inside_commit(sent: list[Message], store: str, commit: int) -> bool:
-    """Whether the first send went out between the writes of the ``commit``-th commit that asks for an ack (from 0)
-    and Restate's ack of it.
-
-    On the VM's store the commit's last write asks for the ack, and the sends follow it; on the Python store the
-    sends follow the writes, and the sync that asks for the ack follows the sends.
-    """
-    acks = acks_asked(sent)
-    send = next(i for i, m in enumerate(sent) if m.type == TYPE.one_way_call)
-    if store == "vm":
-        return acks[commit] < send < acks[commit + 1]
-    before = acks[commit - 1] if commit > 0 else 0
-    writes = [i for i in range(before + 1, send) if sent[i].type == TYPE.set_state]
-    return bool(writes) and before < send < acks[commit] and sent[acks[commit]].type == TYPE.clear_state
+    """Whether the first send is in the atomic group of the ``commit``-th commit (from 0), with writes before it: the
+    sends are applied with the commit's writes, or not at all. On both stores alike."""
+    del store
+    groups = [m for m in sent if m.is_commit]
+    if commit >= len(groups) or groups[commit].type != TYPE.atomic_group:
+        return False
+    members = groups[commit].members()
+    sends = [i for i, m in enumerate(members) if is_send(m)]
+    first_send = next((m for m in sent for member in m.members() if is_send(member)), None)
+    return bool(sends) and first_send is groups[commit] and any(m.type == TYPE.set_state for m in members[: sends[0]])
 
 
 def keyed(name: str, store: str) -> str:
@@ -346,11 +338,10 @@ def table_of(swept: list[Swept]) -> str:
 
 
 ACKS = [
-    "the transaction's commit (writes out, ack outstanding)",
-    "the outbox's flush, after the transaction's commit",
+    "the transaction's commit (its group out, its result outstanding)",
     "the statement's commit, after the transaction",
 ]
-"""What the sweep's acks are of, in order."""
+"""What the sweep's acks are of, in order: there is no outbox to empty after the transaction's commit."""
 
 ACKS_LATER = ["the first statement's commit, before the transaction", *ACKS]
 """What ``sweep_later``'s acks are of, in order."""
@@ -397,13 +388,15 @@ async def sweep_over(handler: str, store: str, steps: list[str], acks: list[str]
         table.append(Swept(n, phase(r, n, acks), outcomes, stored, len(sends)))
 
         problems: list[str] = []
-        if any(m.type == TYPE.one_way_call for m in sent) and not send_is_inside_commit(sent, store, commit):
+        if any(is_send(member) for m in sent for member in m.members()) and not send_is_inside_commit(
+            sent, store, commit
+        ):
             problems.append("the transaction's send is not inside its commit")
         tx = ended["tx"]
         if tx == "ok":
             if "tx" not in stored:
                 problems.append("returned, but its row is not stored")
-            if len(sends) != 1 or len({s.idempotency_key for s in sends}) != 1:
+            if len(sends) != 1:
                 problems.append("returned, but its send did not go out once")
         elif tx == "cancelled":
             if "tx" in stored:
@@ -533,14 +526,15 @@ async def test_4_shut_down_while_the_commits_ack_is_outstanding_not_the_cancella
     assert seen.terminal == [False], seen.seen
     assert outcome(r.sent()) is None, describe(r)
 
-    # A plain retry: its open makes what the outbox holds.
+    # A plain retry: it has nothing to make again.
     again = await attempt("seed", state, key)
     assert returned(again) == "seeded", describe(again)
     stored = await stored_rows(state, key)
     sends = [*sends_of(r, "tx"), *sends_of(again, "tx")]
-    # A stored row has its send, made by one attempt or both, always with the one key, so Restate makes it once; no
-    # row, no send at all.
-    assert len({s.idempotency_key for s in sends}) == (1 if "tx" in stored else 0), (stored, sends)
+    # The commit is one atomic group: a stored row has its send, made once, by the attempt that committed; no row,
+    # no send at all.
+    assert len(sends) == (1 if "tx" in stored else 0), (stored, sends)
+    assert sends_of(again, "tx") == [], sends
 
 
 async def test_4b_the_commits_wait_fails_at_a_shutdown_as_a_calls_await_does(store: str, seen: Seen):

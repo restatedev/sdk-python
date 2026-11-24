@@ -8,7 +8,8 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""A saga written as a session object, run on the wire (``sessions_wire``).
+"""A saga written as a session object, with Restate's side played by the shared core's fake runtime
+(``sessions_wire``).
 
 Its progress lives in ``ctx.db``, every attempt resumes from what is stored,
 and a cancellation or a terminal failure compensates the steps that may have
@@ -279,7 +280,7 @@ async def test_d_known_limitation_a_signal_on_the_commit_of_reserved_is_carried_
     # call.
     assert r.signalled_at is not None, describe(r)
     assert commits(sent[: r.signalled_at]) == 3, describe(r)
-    after = next((m for m in sent[r.signalled_at :] if 0x0400 <= m.type < 0x8000), None)
+    after = next((m for m in sent[r.signalled_at :] if m.is_action), None)
     assert after is not None and after.type == TYPE.call, describe(r)
     assert [target(c) for c in r.calls] == [
         "Inventory/reserve inv_test/reserve",

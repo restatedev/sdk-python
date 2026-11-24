@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from restate._internal import PyExplicitRecoveryVM, PyInput  # pylint: disable=no-name-in-module
+from restate._internal import PyExplicitRecoveryVM, PyInput, VMException  # pylint: disable=no-name-in-module
 from restate.context import Request
 from restate.exceptions import TerminalError
 from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL, Handler, handler_from_callable
@@ -62,28 +62,21 @@ F = typing.TypeVar("F", bound=Callable[..., Awaitable[Any]])
 HEAD_KEY = "v22/head"
 """The state key of the database's head, the first thing read when it opens."""
 
+PROTOCOL_FAMILY = "EXPLICIT_RECOVERY"
+"""The service protocol family of a session object's handlers, as discovery states it: no journal."""
+
 HIDDEN_NAMES = "dev.restate.tooling.journal.hidden.names"
-"""The metadata key of the names of the journal entries that Restate's UI hides: a comma-separated list."""
-
-SQL_METADATA = {
-    HIDDEN_NAMES: "sync",
-    "dev.restate.tooling.journal.hidden.name.prefix": "v22/",
-}
-"""Metadata added to every session object.
-
-It tells Restate's UI to hide the database from the journal view: its head,
-tail, manifests and packs, and the writes that only ask for an ack (state keys
-under ``v22/``), and the ``sync`` runs of earlier versions.
-"""
+"""The metadata key of the names of the entries that Restate's UI hides: a comma-separated list."""
 
 
 def hide_entries(*names: str) -> dict[str, str]:
-    """Return the metadata that has Restate's UI hide the journal entries named ``names``, besides the database's.
+    """Return the metadata that has Restate's UI hide the actions named ``names``.
 
-    Pass it as a session object's metadata, and name the calls, sends or runs
-    to hide with one of ``names``. Restate's UI still shows them on request.
+    Pass it as a session object's metadata, and name the calls or sends to hide
+    with one of ``names``. The database's own actions need none of it: they are
+    recorded as nothing (``RECORD_NONE``).
     """
-    return {HIDDEN_NAMES: ",".join([SQL_METADATA[HIDDEN_NAMES], *names])}
+    return {HIDDEN_NAMES: ",".join(names)}
 
 
 @dataclass(frozen=True, eq=False)
@@ -219,6 +212,7 @@ async def _invoke(
         scope=request.scope,
         limit_key=request.limit_key,
         idempotency_key=request.idempotency_key,
+        attempt=request.attempt,
     )
     output = handler.handler_io.output_serde.serialize(await _attempt(entry, host, context_request, args))
     if codec is not None:
@@ -227,7 +221,11 @@ async def _invoke(
 
 
 def _runner(entry: _Entry) -> Callable[..., Awaitable[None]]:
-    """Return what runs an attempt of ``entry`` on Restate, on its own VM (see ``_driver``)."""
+    """Return what runs an attempt of ``entry`` on Restate, on its own VM (see ``_driver``).
+
+    An attempt of the explicit recovery protocol needs a bidirectional stream: discovery refuses
+    a session object on a request/response endpoint, so Restate never sends one there.
+    """
 
     async def run(
         handler: Handler[Any, Any],
@@ -236,11 +234,17 @@ def _runner(entry: _Entry) -> Callable[..., Awaitable[None]]:
         attempt_headers: dict[str, str],
         receive: ReceiveChannel,
         send: Send,
-        bidirectional: bool,
         server_headers: list[tuple[bytes, bytes]],
         journal_codec: Any = None,
     ) -> None:
-        vm = PyExplicitRecoveryVM(request_headers, bidirectional)
+        try:
+            vm = PyExplicitRecoveryVM(request_headers)
+        except VMException as error:
+            # Another protocol family or version (415): answered with the VM's code, no body.
+            code = error.args[1] if len(error.args) > 1 and isinstance(error.args[1], int) else 500
+            await send({"type": "http.response.start", "status": code, "headers": server_headers, "trailers": False})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
         head = vm.get_response_head()
         await send(
             {
@@ -348,39 +352,36 @@ async def start(
 
 
 class Annotation:
-    """Some work of a handler, timed in the journal as a run that nothing executes or awaits.
+    """Some work of a handler, timed as a span of the attempt that nothing executes or awaits.
 
-    Restate's UI shows it as any run: its name, when it started and ended,
-    and the value or failure it ended with. A handler of a session object is
-    never replayed, so the run need not be made again on a later attempt. Its
-    end is not waited for: the attempt goes on as Restate stores it.
-
-    A run its attempt left without an end (a crash, say) is failed by the
-    next attempt.
+    Restate's UI shows its name, when it started and ended, and the value or
+    failure it ended with. Its end is not waited for: the attempt goes on as
+    Restate stores it. A span its attempt left open (a crash, say) is closed
+    by Restate.
     """
 
     def __init__(self, host: VmHost | None = None, handle: int | None = None) -> None:
         self._host: VmHost | None = host
         self._handle: int | None = handle
-        # The trace, which stays a parent after it ends.
+        # The span, which stays a parent after it ends.
         self._trace: int | None = handle
 
     def end(self, summary: Any = None) -> None:
-        """End the work, with ``summary`` (as JSON) as the run's value. It does nothing if it has ended."""
-        self._close(json.dumps(summary, default=str).encode() if summary is not None else b"", None)
+        """End the work, with ``summary`` (as JSON) as the span's value, or nothing. It does nothing if it has ended."""
+        self._close(json.dumps(summary, default=str).encode() if summary is not None else None, None)
 
     def fail(self, message: str) -> None:
-        """End the work as failed: the run fails with ``message``. It does nothing if it has ended."""
-        self._close(b"", message)
+        """End the work as failed: the span fails with ``message``. It does nothing if it has ended."""
+        self._close(None, message)
 
-    def _close(self, value: bytes, failure: str | None) -> None:
+    def _close(self, value: bytes | None, failure: str | None) -> None:
         handle, self._handle = self._handle, None
         if handle is not None and self._host is not None:
             self._host.close_annotation(handle, value, failure)
 
 
 def annotate(ctx: SessionContext, name: str, *, parent: Annotation | None = None) -> Annotation:
-    """Start timing some work of the handler of ``ctx`` (a model request, say), as a run named ``name``.
+    """Start timing some work of the handler of ``ctx`` (a model request, say), as a span named ``name``.
 
     The work is part of ``parent``'s, if given, or else of the attempt's. End
     it with ``end`` or ``fail``. Outside a session object's handler on Restate
@@ -400,6 +401,72 @@ def attach_invocation(ctx: SessionContext, invocation_id: str) -> Awaitable[byte
         TypeError: If ``ctx`` is not the context of a session object's handler.
     """
     return _host_of(ctx).attach_invocation(invocation_id)
+
+
+def _vm_host_of(ctx: SessionContext | ViewContext, operation: str) -> VmHost:
+    """The attempt's host on Restate behind ``ctx``, a handler's or a view's."""
+    host = ctx._call_host if isinstance(ctx, (AttemptContext, AttemptViewContext)) else None  # pyright: ignore[reportPrivateUsage]
+    if not isinstance(host, VmHost):
+        raise TypeError(f"{operation} takes the context of a session object's attempt on Restate")
+    return host
+
+
+class InvocationState:
+    """The invocation's own state (internal, no public API yet): every attempt of the invocation finds it, any
+    handler can use it, nobody else sees it, and it ends with the invocation.
+
+    Values are bytes. Writes are not awaited; Restate applies them in order with the attempt's other actions, and a
+    read sees the attempt's earlier writes.
+    """
+
+    def __init__(self, host: VmHost) -> None:
+        self._host: VmHost = host
+
+    def get(self, key: str) -> Awaitable[bytes | None]:
+        """The value of ``key``, or ``None``."""
+        return self._host.invocation_state_get(key)
+
+    def set(self, key: str, value: bytes) -> None:
+        self._host.invocation_state_set(key, value)
+
+    def clear(self, key: str) -> None:
+        self._host.invocation_state_clear(key)
+
+    def clear_all(self) -> None:
+        self._host.invocation_state_clear_all()
+
+    def keys(self) -> Awaitable[list[str]]:
+        return self._host.invocation_state_keys()
+
+
+def invocation_state(ctx: SessionContext | ViewContext) -> InvocationState:
+    """The invocation state of the attempt of ``ctx`` (provisional: no public API is designed yet).
+
+    Raises:
+        TypeError: If ``ctx`` is not the context of a session object's attempt on Restate.
+    """
+    return InvocationState(_vm_host_of(ctx, "invocation state"))
+
+
+def read_signal(ctx: SessionContext | ViewContext, name: str, index: int = 0) -> Awaitable[bytes | None]:
+    """Wait for the signal ``index`` (from 0) named ``name`` that the invocation of ``ctx`` received (provisional).
+
+    Returns its payload, or ``None`` for a signal that carries nothing; a signal that carries a failure raises it as
+    ``TerminalError``. The handler keeps the index itself: a later attempt reads from the start again.
+    """
+    return _vm_host_of(ctx, "a signal read").signal_read(name, index)
+
+
+def send_signal(
+    ctx: SessionContext | ViewContext, invocation_id: str, name: str, value: bytes | TerminalError | None = None
+) -> None:
+    """Send the invocation ``invocation_id`` the signal ``name`` (provisional): ``value``, a failure, or nothing."""
+    _vm_host_of(ctx, "a signal send").signal_send(invocation_id, name, value)
+
+
+def flush(ctx: SessionContext | ViewContext) -> Awaitable[Any]:
+    """Wait until Restate applied every action the attempt of ``ctx`` made so far (provisional)."""
+    return _vm_host_of(ctx, "a flush").flush()
 
 
 def definition_of(ctx: SessionContext | ViewContext) -> SessionObject | None:
@@ -493,7 +560,7 @@ class SessionObject(VirtualObject):
         super().__init__(
             name,
             description=description,
-            metadata={**SQL_METADATA, **(metadata or {})},
+            metadata=metadata,
             inactivity_timeout=inactivity_timeout,
             abort_timeout=abort_timeout,
             journal_retention=journal_retention,
@@ -729,14 +796,15 @@ class SessionObject(VirtualObject):
                 definition=weakref.ref(self),
                 explicit_cancellation=bool(options.get("explicit_cancellation")),
             )
-            # Attempts are not replayed: each runs from the start, on a VM of its
-            # own (see _driver), against the current state, so it may read
-            # differently from earlier attempts.
-            registered = VirtualObject.handler(
-                self, name, kind="shared" if view else "exclusive", explicit_recovery=True, **options
-            )(_sdk_handler(entry))
+            # Attempts are not replayed: each runs from the start, on the explicit
+            # recovery protocol (see _driver), against the current state, so it may
+            # read differently from earlier attempts.
+            registered = VirtualObject.handler(self, name, kind="shared" if view else "exclusive", **options)(
+                _sdk_handler(entry)
+            )
             sdk: Handler[Any, Any] = handler_from_callable(registered)
             sdk.attempt_runner = _runner(entry)
+            sdk.protocol_family = PROTOCOL_FAMILY
             entries = ENTRIES.of(self)
             assert entries is not None
             entries[sdk.name] = entry

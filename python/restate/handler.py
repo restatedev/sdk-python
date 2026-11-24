@@ -285,6 +285,9 @@ class Handler(Generic[I, O]):
     explicit_cancellation: bool = False
     attempt_runner: Optional[Callable[..., Awaitable[None]]] = None
     """What runs an attempt instead of the SDK's context, on a VM of its own (a session object's)."""
+    protocol_family: Optional[str] = None
+    """The service protocol family of the handler, as discovery states it: ``None`` for the durable execution
+    protocol (the default), ``"EXPLICIT_RECOVERY"`` for a session object's handler (no journal)."""
 
 
 # disable too many arguments warning

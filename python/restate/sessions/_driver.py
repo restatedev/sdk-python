@@ -8,22 +8,29 @@
 #  directory of this repository or package, or at
 #  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 #
-"""One attempt of a session object's handler, on the explicit recovery VM (``PyExplicitRecoveryVM``).
+"""One attempt of a session object's handler, on the explicit recovery protocol (``PyExplicitRecoveryVM``).
 
-The VM never replays a journal: every attempt runs the handler from the start.
-An action returns a handle, and its result comes back as a notification of that
-handle, which settles the action's future here. Two things move the attempt
-along:
+The protocol has no journal: every attempt runs the handler from the start,
+and recovers from state. An action returns a handle, and its result comes back
+as a notification of that handle, which settles the action's future here. Two
+things move the attempt along:
 
 - **The input pump**, the only reader of the request body: it hands the VM
   each chunk, and the end of the body.
 - **The tick**, scheduled after every call to the VM (once per turn of the
-  event loop): it writes the VM's output, settles the futures, and notices the
-  end of the attempt.
+  event loop): it writes the VM's output, takes every notification and settles
+  its future in the same turn, and notices the end of the attempt. Only the
+  tick takes notifications: a notification taken counts as processed in the
+  ``ShutdownMessage`` the VM answers a shutdown with. The cancel signal is the
+  notification of handle 1, which no action has (``CANCEL_NOTIFICATION_HANDLE``).
 
-Restate shuts an attempt down by closing the request body: from then on every
-action raises ``SuspendedException``, and the futures still pending fail with
-it. A new attempt runs the handler from the start.
+Restate shuts an attempt down by closing the request body: the VM answers with
+``ShutdownMessage`` at once, from then on every action raises
+``SuspendedException``, and the futures still pending fail with it. A new
+attempt runs the handler from the start. After the handler's end (``EndMessage``
+or ``ErrorMessage``), Restate closes its side first, and the attempt closes the
+response after it (``should_close_output``). A SIGTERM ends the attempt with an
+unasked ``ShutdownMessage`` (``vm.shutdown()``): Restate restarts it elsewhere.
 """
 
 from __future__ import annotations
@@ -91,8 +98,18 @@ def heartbeat_interval() -> float:
     return millis / 1000 if math.isfinite(millis) and millis > 0 else default
 
 
-SYNC_KEY = "v22/sync"
-"""The state key a sync clears with an ack, under the state format's prefix, which tooling hides."""
+CLOSE_TIMEOUT = timedelta(seconds=30)
+"""How long an attempt that wrote its last message waits for Restate to close its side before it closes its own.
+
+Restate closes first, as soon as it has the last message: this only bounds a runtime that never does.
+"""
+
+PAGE: typing.Final = "none"
+"""The record level of the database's reads, writes and flushes: the runtime keeps no record of them."""
+
+OBJECT: typing.Final = "object"
+INVOCATION: typing.Final = "invocation"
+"""The two state scopes: the object's (shared by its invocations), and the invocation's own."""
 
 
 def _quiet(future: asyncio.Future[Any]) -> asyncio.Future[Any]:
@@ -180,6 +197,10 @@ class AttemptDriver:
         """Why the attempt ended, once it did: ``SuspendedException`` for a shutdown or the end of the handler."""
         self.cancellation: asyncio.Future[None] = _quiet(self._loop.create_future())
         """Resolved once Restate cancels the invocation; cancelled if the attempt ends first."""
+        # A SIGTERM ends the attempt with an unasked shutdown (``_watch_shutdown``).
+        self._shutdown_watch: asyncio.Task[None] | None = None
+        if hasattr(receive, "block_until_shutdown_requested"):
+            self._shutdown_watch = asyncio.ensure_future(self._watch_shutdown())
         vm.set_scheduler(self.schedule)
 
     # --- Start and end
@@ -270,16 +291,44 @@ class AttemptDriver:
         self._writer.cancel()
         if self._pump is not None:
             self._pump.cancel()
+        if self._shutdown_watch is not None:
+            self._shutdown_watch.cancel()
+
+    async def _watch_shutdown(self) -> None:
+        """On a SIGTERM, end a running attempt with an unasked ``ShutdownMessage``: Restate restarts it."""
+        await self._receive.block_until_shutdown_requested()
+        if self.vm.state() != "closed":
+            logger.debug("Shutting the attempt down: the process is going away")
+            self.vm.shutdown()
+        self._tick()
 
     async def leave(self) -> None:
-        """Write the rest of the output, wait for Restate to close the request, then close the response."""
+        """Write the rest of the output, wait for Restate to close the request, then close the response.
+
+        After the attempt's last message (``EndMessage``, ``ErrorMessage`` or ``ShutdownMessage``),
+        Restate closes its side first, and the attempt closes after it: once the VM says
+        ``should_close_output``. A SIGTERM closes at once, as the process is going away.
+        """
         self._tick()
         self._end(SuspendedException())
-        self._output.put_nowait(None)
-        await self._writer
-        await self._receive.block_until_http_input_closed()
+        try:
+            await asyncio.wait_for(self._receive.block_until_http_input_closed(), CLOSE_TIMEOUT.total_seconds())
+        except TimeoutError:
+            logger.warning("Restate did not close the request within %s of the attempt's end: closing", CLOSE_TIMEOUT)
+        shutting_down = getattr(self._receive, "is_shutdown_requested", lambda: False)()
+        if self._pump is not None and not shutting_down:
+            # The pump hands the VM the end of the input, which the channel has seen.
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(asyncio.shield(self._pump), 5)
         if self._pump is not None:
             self._pump.cancel()
+        if self._shutdown_watch is not None:
+            self._shutdown_watch.cancel()
+        self._tick()
+        if not shutting_down and not self.vm.should_close_output():
+            logger.debug("Closing the response before the VM's last message and the end of the request")
+        self._output.put_nowait(None)
+        await self._writer
         await self._send({"type": "http.response.body", "body": b"", "more_body": False})
 
     # --- Input and output
@@ -327,6 +376,8 @@ class AttemptDriver:
             self._wrote_at = self._loop.time()
         if self.ended is not None:
             return
+        # The actions of an atomic group the store aborted in Rust: never notified.
+        self.never_notified(self.vm.take_aborted())
         try:
             while (notification := self.vm.take_notification()) is not None:
                 handle, value = notification
@@ -349,6 +400,14 @@ class AttemptDriver:
                 self._cancelled()
             if self.vm.state() == "closed":
                 self._end(SuspendedException())
+
+    def never_notified(self, handles: list[int]) -> None:
+        """Fail the futures of ``handles``, which will never be notified: the actions of an aborted atomic group."""
+        for handle in handles:
+            self._left_to_settle.discard(handle)
+            future = self._futures.pop(handle, None)
+            if future is not None and not future.done():
+                future.set_exception(SdkInternalException())
 
     def _end(self, reason: BaseException) -> None:
         """The attempt ended: fail what still waits, and tell the listeners."""
@@ -667,7 +726,7 @@ class VmHost:
         return self.driver.vm if self._codec is None else None
 
     def get(self, key: str) -> Awaitable[bytes | None]:
-        handle = self.driver.act(lambda vm: vm.get_state(key, key))
+        handle = self.driver.act(lambda vm: vm.get_state(OBJECT, key, record=PAGE))
         read = self.driver.store_future(handle)
         codec = self._codec
         if codec is None:
@@ -682,20 +741,68 @@ class VmHost:
     def set(self, key: str, value: bytes) -> None:
         if self._codec is not None:
             value = self._codec.encode(value)
-        self.driver.act(lambda vm: vm.set_state(key, value, key))
+        self.driver.act(lambda vm: vm.set_state(OBJECT, key, value, record=PAGE))
 
     def clear(self, key: str) -> None:
-        self.driver.act(lambda vm: vm.clear_state(key, key))
+        self.driver.act(lambda vm: vm.clear_state(OBJECT, key, record=PAGE))
 
     def state_keys(self) -> Awaitable[list[str]]:
-        # Named under the state format's prefix, which tooling hides.
-        handle = self.driver.act(lambda vm: vm.get_state_keys("v22/keys"))
+        handle = self.driver.act(lambda vm: vm.get_state_keys(OBJECT, record=PAGE))
         return self.driver.store_future(handle)
 
     def sync(self) -> Awaitable[Any]:
-        """Clear ``SYNC_KEY`` with an ack: once acked, every earlier write is stored too."""
-        handle = self.driver.act(lambda vm: vm.clear_state(SYNC_KEY, SYNC_KEY, True))
+        """A flush: its result comes once every earlier write is stored."""
+        handle = self.driver.act(lambda vm: vm.flush(record=PAGE))
         return self.driver.store_future(handle)
+
+    # --- A commit as one atomic group (the store without the VM: a journal codec's)
+
+    def begin_commit(self) -> None:
+        """Open the commit's atomic group: the writes and sends until ``end_commit`` are applied together."""
+        self.driver.act(lambda vm: vm.atomic_group_start())
+
+    def end_commit(self) -> Awaitable[Any]:
+        """Close the commit's group: its result, once every write and send of it is stored."""
+        handle = self.driver.act(lambda vm: vm.atomic_group_end(want_result=True, name="commit"))
+        assert handle is not None
+        return self.driver.store_future(handle)
+
+    def abort_commit(self) -> None:
+        """Drop the commit's group: nothing of it is sent."""
+        self.driver.never_notified(self.driver.act(lambda vm: vm.atomic_group_abort()))
+
+    # --- Invocation state, signals, flush: internal (``restate.sessions.internal``), no public API yet
+
+    def invocation_state_get(self, key: str) -> Awaitable[bytes | None]:
+        """Read the invocation's own state ``key``: every attempt of this invocation finds it, nobody else."""
+        return self.driver.future(self.driver.act(lambda vm: vm.get_state(INVOCATION, key)))
+
+    def invocation_state_set(self, key: str, value: bytes) -> None:
+        self.driver.act(lambda vm: vm.set_state(INVOCATION, key, value))
+
+    def invocation_state_clear(self, key: str) -> None:
+        self.driver.act(lambda vm: vm.clear_state(INVOCATION, key))
+
+    def invocation_state_clear_all(self) -> None:
+        self.driver.act(lambda vm: vm.clear_all_state(INVOCATION))
+
+    def invocation_state_keys(self) -> Awaitable[list[str]]:
+        return self.driver.future(self.driver.act(lambda vm: vm.get_state_keys(INVOCATION)))
+
+    def signal_read(self, name: str, index: int) -> Awaitable[bytes | None]:
+        """The signal ``index`` (from 0) named ``name`` that this invocation received: its payload, ``None`` if it
+        carried nothing; a signal that carries a failure raises it as ``TerminalError``. Until it arrives, the
+        attempt waits (and is suspended, if it waits on nothing else)."""
+        return self.driver.future(self.driver.act(lambda vm: vm.signal_read(name, index)))
+
+    def signal_send(self, invocation_id: str, name: str, value: bytes | TerminalError | None = None) -> None:
+        """Send the invocation ``invocation_id`` the signal ``name``: ``value``, a failure, or nothing."""
+        payload: Any = _failure_of(value) if isinstance(value, TerminalError) else value
+        self.driver.act(lambda vm: vm.signal_send(invocation_id, name, payload))
+
+    def flush(self) -> Awaitable[Any]:
+        """Complete once every action made before it is applied by Restate."""
+        return self.driver.future(self.driver.act(lambda vm: vm.flush()))
 
     def take_cancellation(self) -> bool:
         """Whether a cancellation is owed to the handler's next await, taking it (see ``Attempt.asked``)."""
@@ -721,7 +828,7 @@ class VmHost:
         name: str | None = None,
     ) -> RestateDurableCallFuture[bytes]:
         handle = self.driver.act(
-            lambda vm: vm.call(service, handler, arg, key, idempotency_key, _headers_of(headers), name)
+            lambda vm: vm.call(service, handler, arg, key, idempotency_key, _headers_of(headers), name=name)
         )
         call = _CallFuture(
             self.driver,
@@ -744,7 +851,7 @@ class VmHost:
     ) -> _SendHandle:
         delay = int(send_delay.total_seconds() * 1000) if send_delay is not None else None
         handle = self.driver.act(
-            lambda vm: vm.send(service, handler, arg, key, delay, idempotency_key, _headers_of(headers), name)
+            lambda vm: vm.send(service, handler, arg, key, delay, idempotency_key, _headers_of(headers), name=name)
         )
         return _SendHandle(self.driver, self.driver.invocation_id_future(handle))
 
@@ -760,14 +867,12 @@ class VmHost:
         return self.driver.working()
 
     def open_annotation(self, name: str, parent: int | None = None) -> int | None:
-        return self.driver.act(lambda vm: vm.start_trace(name, parent))
+        """Start a span named ``name``, inside ``parent``'s or the attempt's: its id."""
+        return self.driver.act(lambda vm: vm.span_start(name, parent))
 
-    def close_annotation(self, handle: int, value: bytes, failure: str | None) -> None:
-        try:
-            if failure is None:
-                self.driver.act(lambda vm: vm.end_trace_success(handle, value))
-            else:
-                self.driver.act(lambda vm: vm.end_trace_failure(handle, PyFailure(500, failure)))
-        except SdkInternalBaseException:
-            # The attempt ended: the next one fails the trace.
-            pass
+    def close_annotation(self, handle: int, value: bytes | None, failure: str | None) -> None:
+        """End the span ``handle``: with ``value``, a failure, or nothing."""
+        result: Any = value if failure is None else PyFailure(500, failure)
+        # The attempt ended: Restate closes the spans it left open.
+        with contextlib.suppress(SdkInternalBaseException):
+            self.driver.act(lambda vm: vm.span_end(handle, result))

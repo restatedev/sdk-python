@@ -24,7 +24,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # 8.7.1: a cancellation resumes an invocation shut down while it waits for a call (sdk-shared-core#120).
 # 8.7.3: SQL calls run where they are polled; compiled statements are shared between the sessions of one
 # schema (sdk-shared-core#121, #123).
-restate-sdk-shared-core = { version = "8.7.3", features = [
+# The explicit recovery protocol (session objects): the shared core of the worktree next to this one,
+# 8.7.3 (d0bd464) plus the new VM (`explicit_recovery`), its commit path and its fake runtime. Not released yet.
+restate-sdk-shared-core = { path = "../sdk-shared-core", features = [
     "request_identity",
     "sha2_random_seed",
     "aws_lc_rs",
@@ -48,3 +50,9 @@ tokio-util = { version = "0.7", default-features = false }
 
 # Sessions (`src/sessions.rs`): the database's futures, polled on Python's event loop.
 futures = "0.3"
+
+[features]
+default = []
+# For tests only: the shared core's fake Restate runtime for the explicit recovery protocol, as the
+# class `_FakeRuntime` of `restate._internal` (`src/fake_runtime.rs`). Never in a release build.
+fake_runtime = ["restate-sdk-shared-core/__fake_runtime"]

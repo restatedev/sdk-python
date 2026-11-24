@@ -1,5 +1,7 @@
 mod asgi;
 mod explicit_recovery;
+#[cfg(feature = "fake_runtime")]
+mod fake_runtime;
 mod tunnel;
 
 use pyo3::create_exception;
@@ -63,6 +65,19 @@ struct PyResponseHead {
     status_code: u16,
     #[pyo3(get, set)]
     headers: Vec<(String, String)>,
+}
+
+impl From<restate_sdk_shared_core::explicit_recovery::ResponseHead> for PyResponseHead {
+    fn from(value: restate_sdk_shared_core::explicit_recovery::ResponseHead) -> Self {
+        PyResponseHead {
+            status_code: value.status_code,
+            headers: value
+                .headers
+                .into_iter()
+                .map(|Header { key, value }| (key.into(), value.into()))
+                .collect(),
+        }
+    }
 }
 
 impl From<ResponseHead> for PyResponseHead {
@@ -241,6 +256,28 @@ pub struct PyInput {
     limit_key: Option<String>,
     #[pyo3(get, set)]
     idempotency_key: Option<String>,
+    /// The number of this attempt, from 1: on the explicit recovery protocol only. The durable
+    /// execution protocol has none (`None`).
+    #[pyo3(get, set)]
+    attempt: Option<u32>,
+}
+
+/// The input of an attempt on the explicit recovery protocol, which has an attempt number and no
+/// random seed (0).
+impl From<restate_sdk_shared_core::explicit_recovery::Input> for PyInput {
+    fn from(value: restate_sdk_shared_core::explicit_recovery::Input) -> Self {
+        PyInput {
+            invocation_id: value.invocation_id,
+            random_seed: 0,
+            key: value.key,
+            headers: value.headers.into_iter().map(Into::into).collect(),
+            input: value.input.into(),
+            scope: value.scope,
+            limit_key: value.limit_key,
+            idempotency_key: value.idempotency_key,
+            attempt: Some(value.attempt),
+        }
+    }
 }
 
 impl From<Input> for PyInput {
@@ -254,6 +291,7 @@ impl From<Input> for PyInput {
             scope: value.scope,
             limit_key: value.limit_key,
             idempotency_key: value.idempotency_key,
+            attempt: None,
         }
     }
 }
@@ -1105,7 +1143,13 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
         PyNotificationHandle::from(CANCEL_NOTIFICATION_HANDLE),
     )?;
 
+    m.add_function(wrap_pyfunction!(
+        explicit_recovery::explicit_recovery_protocol_range,
+        m
+    )?)?;
     sessions::register(m)?;
+    #[cfg(feature = "fake_runtime")]
+    fake_runtime::register(m)?;
 
     // Set customized error formatter
     set_error_formatter(PythonErrorFormatter);

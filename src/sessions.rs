@@ -23,19 +23,20 @@
 //! # The store
 //!
 //! The state the database is kept in: `set` and `clear` queue a write; `sync`
-//! completes once every write before it is stored. The object's state keeps
-//! writes in issue order, so a crash loses only a suffix of them (see
-//! [`KvStore`]): a statement that commits queues its writes, then completes
-//! once the write of its head is acked. With `keys`, a checkpoint deletes the
-//! packs no checkpoint needs; a store without keeps its garbage.
+//! completes once every write before it is stored; `commit` is a flush's last
+//! step (its parts, the deletes, its head) and completes once all of it is
+//! stored. The object's state keeps writes in issue order, so a crash loses
+//! only a suffix of them (see [`KvStore`]).
 //!
 //! The store is the attempt's VM (`PyExplicitRecoveryVM`, see
-//! [`crate::explicit_recovery`]), which never replays a journal ([`VmStore`]):
-//! reads, writes, the listing of the keys and the acks are its actions, and
-//! the store awaits their completions itself, in Rust. Only what a commit
-//! makes besides (a transaction's outbox sends) goes through Python
-//! (`COMMIT`). Or, without a VM (in tests, or with a journal codec), a store
-//! implemented in Python ([`PyStore`]). Either way, Python's side is one
+//! [`crate::explicit_recovery`]), on the explicit recovery protocol ([`VmStore`]):
+//! reads, writes, the listing of the keys and the flushes are its actions, all
+//! recorded as nothing (`RecordLevel::None`), and the store awaits their results
+//! itself, in Rust. A commit is one atomic group: its writes, and what the
+//! committing transaction makes with it (its sends, `COMMIT`, through Python),
+//! with the group's result as the commit. Or, without a VM (in tests, or with a
+//! journal codec), a store implemented in Python ([`PyStore`]), which brackets a
+//! commit with `COMMIT_BEGIN` and `COMMIT_END`. Either way, Python's side is one
 //! function, `dispatch(op, arg, value, reply)`, called directly, on the
 //! loop's thread, in the order of the requests, so that a read sees the
 //! writes before it.
@@ -56,7 +57,12 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
-use restate_sdk_shared_core::explicit_recovery::ExplicitRecoveryVM;
+use restate_sdk_shared_core::explicit_recovery::commit::{
+    begin_commit, end_commit, ATOMIC_GROUP_BUDGET,
+};
+use restate_sdk_shared_core::explicit_recovery::{
+    ActionOptions, ExplicitRecoveryVM, RecordLevel, StateScope,
+};
 use restate_sdk_shared_core::sql::{self, Numeric, Value};
 use restate_sdk_shared_core::state::{
     self, BlobStore, KvStore, ObjectStoreBlobs, ObjectStoreL1, PageCache, PageCacheConfig,
@@ -88,9 +94,17 @@ pub(crate) const SET: u32 = 1;
 pub(crate) const CLEAR: u32 = 2;
 pub(crate) const SYNC: u32 = 3;
 pub(crate) const KEYS: u32 = 4;
-/// Run what the committing transaction makes at its commit (its outbox's sends): between the
-/// commit's acked write of the head and the wait for its ack ([`VmStore`]).
+/// Run what the committing transaction makes at its commit (its sends), answering at once: inside
+/// the commit's atomic group, after its writes and before it is closed ([`VmStore::commit`]).
 pub(crate) const COMMIT: u32 = 5;
+/// A store implemented in Python: a commit begins (no answer). Its writes follow, then
+/// `COMMIT_END`, or `COMMIT_ABORT` ([`PyStore::commit`]).
+pub(crate) const COMMIT_BEGIN: u32 = 6;
+/// A store implemented in Python: run what the committing transaction makes at its commit, then
+/// complete the commit begun, answering once it is stored.
+pub(crate) const COMMIT_END: u32 = 7;
+/// A store implemented in Python: drop the commit begun, if any (no answer).
+pub(crate) const COMMIT_ABORT: u32 = 8;
 
 // --- Running calls on the loop's thread ------------------------------------------------------------
 
@@ -366,6 +380,21 @@ impl Dispatch {
         }
     }
 
+    /// A request answered within the call, as `COMMIT` is: nothing in between awaits.
+    fn request_now(&self, op: u32) -> io::Result<Answer> {
+        let (sender, mut receiver) = oneshot::channel();
+        let reply = SqlReply {
+            sender: Mutex::new(Some(sender)),
+        };
+        self.call(op, "", None, Some(reply))?;
+        match receiver.try_recv() {
+            Ok(Some(Ok(answer))) => Ok(answer),
+            Ok(Some(Err(error))) => Err(io_error(error)),
+            Ok(None) => Err(io_error("the store did not answer within the call")),
+            Err(_) => Err(io_error("the store dropped the request")),
+        }
+    }
+
     async fn sync(&self) -> io::Result<()> {
         self.request(SYNC, "").await.map(drop)
     }
@@ -416,6 +445,47 @@ impl KvStore for PyStore {
         Box::pin(self.dispatch.sync())
     }
 
+    /// Bracketed for the store (`COMMIT_BEGIN`, `COMMIT_END`): over Restate, an atomic group, as
+    /// [`VmStore::commit`]'s, with what exceeds the budget written first. A store without groups
+    /// (a test's) syncs at `COMMIT_END`, as the default sequence does.
+    fn commit<'a>(
+        &'a self,
+        puts: Vec<(String, Bytes)>,
+        deletes: &'a [String],
+        head_key: &'a str,
+        head: Bytes,
+    ) -> BoxFuture<'a, io::Result<()>> {
+        let begun = (|| {
+            let mut puts = puts.into_iter().peekable();
+            let mut in_group = head_key.len()
+                + head.len()
+                + deletes.iter().map(String::len).sum::<usize>()
+                + puts.clone().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+            while in_group > ATOMIC_GROUP_BUDGET {
+                let Some((key, value)) = puts.next() else {
+                    break;
+                };
+                in_group -= key.len() + value.len();
+                self.put(&key, value)?;
+            }
+            self.dispatch.call(COMMIT_BEGIN, "", None, None)?;
+            for (key, value) in puts {
+                self.put(&key, value)?;
+            }
+            for key in deletes {
+                self.delete(key)?;
+            }
+            self.put(head_key, head)
+        })();
+        Box::pin(async move {
+            if let Err(error) = begun {
+                let _ = self.dispatch.call(COMMIT_ABORT, "", None, None);
+                return Err(error);
+            }
+            self.dispatch.request(COMMIT_END, "").await.map(drop)
+        })
+    }
+
     fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
         Box::pin(async move {
             match self.lists_keys {
@@ -428,23 +498,24 @@ impl KvStore for PyStore {
 
 // --- The invocation's VM as the store --------------------------------------------------------------
 
-/// The state key of the store's writes that only ask for an ack ([`VmStore::sync`]): under the
-/// state format's prefix, which tooling hides.
-const SYNC_KEY: &str = "v22/sync";
+/// The options of the store's actions: recorded as nothing, so that the runtime keeps no record
+/// of the database's pages (what tooling hid by name before).
+fn page() -> ActionOptions {
+    ActionOptions::default().recorded(RecordLevel::None)
+}
 
 /// The object's state through the attempt's VM (`PyExplicitRecoveryVM`), without Python on the
-/// way: a read, a write and the listing of the keys are the VM's actions, and the store awaits
-/// their completions itself ([`PyExplicitRecoveryVM::wait_in_rust`]).
+/// way: a read, a write, a flush and the listing of the keys are the VM's actions, and the store
+/// awaits their results itself ([`PyExplicitRecoveryVM::wait_in_rust`]).
 ///
-/// The sync is Restate's ack of a write: a flush writes its head with
-/// [`KvStore::put_and_sync`], an acked write of the head, and since Restate stores writes in
-/// order, the ack means every earlier write is stored too. Between the head and the wait for
-/// its ack, Python runs what the committing transaction makes at its commit (`COMMIT`, its
-/// outbox's sends). A sync with writes since the last ack (garbage collection, an open)
-/// clears [`SYNC_KEY`] with an ack.
+/// A commit ([`KvStore::commit`]) is one atomic group, in one synchronous section: what exceeds
+/// [`ATOMIC_GROUP_BUDGET`] leaves first as plain writes, then the group opens with the rest, the
+/// deletes and the head ([`begin_commit`]); Python runs what the committing transaction makes at
+/// its commit (`COMMIT`: its sends land in the group); the group closes ([`end_commit`]), or is
+/// aborted on any error. Only then does the store wait, for the group's result: the commit. A
+/// sync with writes since the last result (garbage collection, an open) is a flush.
 ///
-/// Each action is named after its key, so that tooling can hide the database by name. With
-/// `name`, the database `name` of the key, apart from the object's own: each key under
+/// With `name`, the database `name` of the key, apart from the object's own: each key under
 /// `db/<name>/` (see `_beside` in `restate/sessions/_session.py`). A reader (a view's) writes
 /// nothing. After each call, the VM's scheduler has Python write the output.
 struct VmStore {
@@ -452,7 +523,7 @@ struct VmStore {
     dispatch: Dispatch,
     name: Option<String>,
     reader: bool,
-    /// The writes issued, and how many of them an ack covers.
+    /// The writes issued (a commit counts one), and how many of them a result covers.
     issued: AtomicU64,
     synced: AtomicU64,
 }
@@ -495,24 +566,63 @@ impl VmStore {
         }
     }
 
-    /// Issue a write with `f`: its count, and its handle (notified by the ack, if it asks for one).
+    /// Issue a write with `f`, which wants no result: its count.
     fn write(
         &self,
         f: impl FnOnce(
             &mut PyExplicitRecoveryVM,
-        ) -> Result<NotificationHandle, restate_sdk_shared_core::Error>,
+        ) -> Result<Option<NotificationHandle>, restate_sdk_shared_core::Error>,
+    ) -> io::Result<u64> {
+        if self.reader {
+            return Err(io_error("a view writes no state"));
+        }
+        self.act(|vm| f(vm).map(drop).map_err(vm_error))?;
+        Ok(self.issued.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// The commit's synchronous section (see [`VmStore`]): its count, and the handle of its
+    /// group's result.
+    fn begin(
+        &self,
+        puts: Vec<(String, Bytes)>,
+        deletes: &[String],
+        head_key: &str,
+        head: Bytes,
     ) -> io::Result<(u64, u32)> {
         if self.reader {
             return Err(io_error("a view writes no state"));
         }
-        let handle = self.act(|vm| f(vm).map(u32::from).map_err(vm_error))?;
+        let puts: Vec<_> = puts.into_iter().map(|(k, v)| (self.key(&k), v)).collect();
+        let deletes: Vec<_> = deletes.iter().map(|k| self.key(k)).collect();
+        let head_key = self.key(head_key);
+        // On an error the attempt failed: the VM wrote why, and holds no group.
+        self.act(|vm| {
+            begin_commit(
+                &mut vm.vm,
+                StateScope::Object,
+                puts,
+                &deletes,
+                &head_key,
+                head,
+                ATOMIC_GROUP_BUDGET,
+            )
+            .map_err(vm_error)
+        })?;
+        // What commits with it: the transaction's sends, made by Python into the open group.
+        if let Err(error) = self.dispatch.request_now(COMMIT) {
+            let _ = self.act(|vm| {
+                let handles = vm.vm.atomic_group_abort().map_err(vm_error)?;
+                vm.forget(handles);
+                Ok(())
+            });
+            return Err(error);
+        }
+        let handle = self.act(|vm| end_commit(&mut vm.vm).map(u32::from).map_err(vm_error))?;
         Ok((self.issued.fetch_add(1, Ordering::SeqCst) + 1, handle))
     }
 
-    /// Wait for the ack of the write `issued`, after running the committing transaction's
-    /// callbacks: every write issued up to it is then stored.
-    async fn acked(&self, issued: u64, handle: u32) -> io::Result<()> {
-        self.dispatch.request(COMMIT, "").await?;
+    /// Wait for the result of `handle`, which covers every write issued up to `issued`.
+    async fn stored(&self, issued: u64, handle: u32) -> io::Result<()> {
         self.wait(handle).await?;
         self.synced.fetch_max(issued, Ordering::SeqCst);
         Ok(())
@@ -533,7 +643,7 @@ impl KvStore for VmStore {
             let key = self.key(key);
             let handle = self.act(|vm| {
                 vm.vm
-                    .cmd_state_get(key.clone(), Some(key))
+                    .cmd_state_get(StateScope::Object, key, page())
                     .map(u32::from)
                     .map_err(vm_error)
             })?;
@@ -548,23 +658,34 @@ impl KvStore for VmStore {
 
     fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
         let key = self.key(key);
-        self.write(|vm| vm.vm.cmd_state_set(key.clone(), value, Some(key), false))
-            .map(drop)
+        self.write(|vm| {
+            vm.vm
+                .cmd_state_set(StateScope::Object, key, value, page(), false)
+        })
+        .map(drop)
     }
 
     fn delete(&self, key: &str) -> io::Result<()> {
         let key = self.key(key);
-        self.write(|vm| vm.vm.cmd_state_clear(key.clone(), Some(key), false))
-            .map(drop)
+        self.write(|vm| {
+            vm.vm
+                .cmd_state_clear(StateScope::Object, key, page(), false)
+        })
+        .map(drop)
     }
 
-    fn put_and_sync<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        let key = self.key(key);
-        // Issued now, as a put is.
-        let written = self.write(|vm| vm.vm.cmd_state_set(key.clone(), value, Some(key), true));
+    fn commit<'a>(
+        &'a self,
+        puts: Vec<(String, Bytes)>,
+        deletes: &'a [String],
+        head_key: &'a str,
+        head: Bytes,
+    ) -> BoxFuture<'a, io::Result<()>> {
+        // Issued now, before the first await, as a put is.
+        let begun = self.begin(puts, deletes, head_key, head);
         Box::pin(async move {
-            let (issued, handle) = written?;
-            self.acked(issued, handle).await
+            let (issued, handle) = begun?;
+            self.stored(issued, handle).await
         })
     }
 
@@ -574,14 +695,12 @@ impl KvStore for VmStore {
                 // A reader wrote nothing to sync.
                 return Ok(());
             }
-            if self.synced.load(Ordering::SeqCst) == self.issued.load(Ordering::SeqCst) {
-                self.dispatch.request(COMMIT, "").await?;
+            let issued = self.issued.load(Ordering::SeqCst);
+            if self.synced.load(Ordering::SeqCst) == issued {
                 return Ok(());
             }
-            let key = self.key(SYNC_KEY);
-            let (issued, handle) =
-                self.write(|vm| vm.vm.cmd_state_clear(key.clone(), Some(key), true))?;
-            self.acked(issued, handle).await
+            let handle = self.act(|vm| vm.vm.cmd_flush(page()).map(u32::from).map_err(vm_error))?;
+            self.stored(issued, handle).await
         })
     }
 
@@ -590,10 +709,9 @@ impl KvStore for VmStore {
             if self.reader {
                 return Err(no_keys());
             }
-            // Named under the state format's prefix, which tooling hides.
             let handle = self.act(|vm| {
                 vm.vm
-                    .cmd_state_get_keys(Some("v22/keys".to_owned()))
+                    .cmd_state_get_keys(StateScope::Object, page())
                     .map(u32::from)
                     .map_err(vm_error)
             })?;
@@ -995,5 +1113,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SQL_SYNC", SYNC)?;
     m.add("SQL_KEYS", KEYS)?;
     m.add("SQL_COMMIT", COMMIT)?;
+    m.add("SQL_COMMIT_BEGIN", COMMIT_BEGIN)?;
+    m.add("SQL_COMMIT_END", COMMIT_END)?;
+    m.add("SQL_COMMIT_ABORT", COMMIT_ABORT)?;
     Ok(())
 }

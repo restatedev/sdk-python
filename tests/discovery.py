@@ -199,3 +199,105 @@ def test_state_preload_false_works_on_manifest_v4():
     manifest = json.loads(compute_discovery_json(Endpoint().bind(obj), 4, "bidi"))
     assert manifest["services"][0]["enableLazyState"] is True
     assert "eagerStateKeysWhitelist" not in manifest["services"][0]
+
+
+# --- Manifest v6: session objects on the explicit recovery protocol
+
+
+def _session_object(name: str = "Notes") -> restate.VirtualObject:
+    from restate import sessions  # pylint: disable=import-outside-toplevel
+
+    notes = sessions.SessionObject(name, migrations=["CREATE TABLE notes (body TEXT)"])
+
+    @notes.handler()
+    async def add(ctx: sessions.SessionContext, body: str) -> None:
+        await ctx.db.execute("INSERT INTO notes (body) VALUES (?)", [body])
+
+    @notes.view()
+    async def count(ctx: sessions.ViewContext) -> int:
+        return 0
+
+    return notes
+
+
+def test_v6_session_objects_alone_advertise_the_explicit_recovery_range_and_no_durable_one():
+    manifest = json.loads(compute_discovery_json(Endpoint().bind(_session_object()), 6, "bidi"))
+    assert manifest["protocolMode"] == "BIDI_STREAM"
+    assert manifest["explicitRecoveryProtocol"] == {"minVersion": 1, "maxVersion": 1}
+    # The runtime was asked to accept an endpoint without a durable execution range (see 13-python-impl.md).
+    assert "minProtocolVersion" not in manifest and "maxProtocolVersion" not in manifest
+    [service] = manifest["services"]
+    assert service["ty"] == "VIRTUAL_OBJECT"
+    assert service["enableLazyState"] is True and service["eagerStateKeysWhitelist"] == ["v22/head"]
+    assert {h["name"]: (h["ty"], h["protocolFamily"]) for h in service["handlers"]} == {
+        "add": ("EXCLUSIVE", "EXPLICIT_RECOVERY"),
+        "count": ("SHARED", "EXPLICIT_RECOVERY"),
+    }
+    # Invocation state takes the runtime's default preload: nothing is said.
+    assert all("enableLazyInvocationState" not in h for h in service["handlers"])
+    assert "protocolFamily" not in service
+
+
+def test_v6_with_durable_services_too_advertises_both_ranges():
+    greeter = restate.Service("Greeter")
+
+    @greeter.handler()
+    async def greet(ctx: restate.Context, name: str) -> str:
+        return name
+
+    manifest = json.loads(compute_discovery_json(Endpoint().bind(greeter, _session_object("Mixed")), 6, "bidi"))
+    assert (manifest["minProtocolVersion"], manifest["maxProtocolVersion"]) == (5, 7)
+    assert manifest["explicitRecoveryProtocol"] == {"minVersion": 1, "maxVersion": 1}
+    families = {s["name"]: [h.get("protocolFamily") for h in s["handlers"]] for s in manifest["services"]}
+    assert families == {"Greeter": [None], "Mixed": ["EXPLICIT_RECOVERY", "EXPLICIT_RECOVERY"]}
+
+
+def test_without_session_objects_the_manifest_is_as_before():
+    greeter = restate.Service("Plain")
+
+    @greeter.handler()
+    async def greet(ctx: restate.Context, name: str) -> str:
+        return name
+
+    manifest = json.loads(compute_discovery_json(Endpoint().bind(greeter), 6, "bidi"))
+    assert (manifest["minProtocolVersion"], manifest["maxProtocolVersion"]) == (5, 7)
+    assert "explicitRecoveryProtocol" not in manifest
+
+
+def test_a_server_older_than_v6_is_refused_with_session_objects():
+    with pytest.raises(ValueError, match="too old"):
+        compute_discovery_json(Endpoint().bind(_session_object("Old")), 5, "bidi")
+
+
+def test_session_objects_are_refused_on_a_request_response_endpoint():
+    with pytest.raises(ValueError, match="bidirectional"):
+        compute_discovery(Endpoint().bind(_session_object("Lambda")), "request_response")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_the_server_answers_v6_when_asked(anyio_backend):
+    del anyio_backend
+    app = restate.app([_session_object("Served")])
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    accept = "application/vnd.restate.endpointmanifest.v6+json, application/vnd.restate.endpointmanifest.v5+json"
+    scope = {
+        "type": "http",
+        "http_version": "2",
+        "method": "GET",
+        "path": "/discover",
+        "headers": [(b"accept", accept.encode())],
+    }
+    await app(scope, receive, send)
+    assert sent[0]["status"] == 200
+    headers = dict(sent[0]["headers"])
+    assert headers[b"content-type"] == b"application/vnd.restate.endpointmanifest.v6+json"
+    manifest = json.loads(sent[1]["body"])
+    assert manifest["explicitRecoveryProtocol"] == {"minVersion": 1, "maxVersion": 1}
