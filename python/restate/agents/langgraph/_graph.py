@@ -476,7 +476,10 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
             # Inherited by the nodes' own runs: the models they call keep the attempt alive while they request.
             "callbacks": [alive],
         }
-        if asked and not snapshot.next:
+        # ``next`` leaves out the tasks whose writes are stored, so a step whose writes were stored before its
+        # checkpoint (a crash between them) has no ``next`` but still has tasks: that run goes on, from those writes,
+        # without running the tasks again. A finished run has no tasks.
+        if asked and not snapshot.tasks:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
             await _copied(ctx, turn, known, messages, prompt_id)
             await saver.aprune([THREAD_ID])
