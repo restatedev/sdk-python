@@ -511,6 +511,10 @@ async def auto_close_extension_data(data: Dict[str, Any]):
 class ServerInvocationContext(ObjectContext):
     """This class implements the context for the restate framework based on the server."""
 
+    _receiving: bool = False
+    _progress_event: Optional[asyncio.Event] = None
+    _disconnected: bool = False
+
     def __init__(
         self,
         vm: VMWrapper,
@@ -541,6 +545,9 @@ class ServerInvocationContext(ObjectContext):
         # Taking the VM's output and sending it is one step, so that output sent from two tasks (an
         # annotation's flush, beside the awaits') keeps its order.
         self._output_lock = asyncio.Lock()
+        self._receiving = False
+        self._progress_event = None
+        self._disconnected = False
 
     def _encode(self, buffer: bytes) -> bytes:
         """Apply the journal value codec encode step, if a codec is configured."""
@@ -722,17 +729,37 @@ class ServerInvocationContext(ObjectContext):
                 # Send what do_progress wrote before blocking: the AwaitingOn message, which tells Restate
                 # what this attempt awaits while it waits, so that Restate may suspend it.
                 await self.take_and_send_output()
-                chunk = await self.receive()
-                if chunk.get("type") == "restate.run_completed":
-                    continue
-                if chunk.get("type") == "http.disconnect":
-                    raise DisconnectedException()
+                await self._wait_for_external_progress()
+
+    async def _wait_for_external_progress(self) -> None:
+        if self._disconnected:
+            raise DisconnectedException()
+        if self._progress_event is None:
+            self._progress_event = asyncio.Event()
+        if self._receiving:
+            event = self._progress_event
+            await event.wait()
+            if self._disconnected:
+                raise DisconnectedException()
+            return
+        self._receiving = True
+        event = self._progress_event
+        try:
+            chunk = await self.receive()
+            if chunk.get("type") == "http.disconnect":
+                self._disconnected = True
+                raise DisconnectedException()
+            if chunk.get("type") != "restate.run_completed":
                 # Skip empty body frames to avoid hot loop (see #175)
                 body: bytes | None = chunk.get("body", None)  # type: ignore[assignment]
                 if body is not None and len(body) > 0:
                     self.vm.notify_input(body)
                 if not chunk.get("more_body", False):
                     self.vm.notify_input_closed()
+        finally:
+            self._receiving = False
+            self._progress_event = asyncio.Event()
+            event.set()
 
     def _create_fetch_result_coroutine(self, handle: int, serde: Serde[T] | None = None):
         """Create a coroutine that fetches a result from a notification handle."""
