@@ -649,8 +649,11 @@ class Attempt:
         What the handler asks for passes through here: ``ctx.db``'s statements,
         its ``transaction()``, and a schema it ensures. What the session does for
         itself does not: the open, the object's schema, the sends a crashed
-        attempt left unmade, emptying the outbox after a commit, and the save at
-        the handler's end. A cancellation that failed one of those would be
+        attempt left unmade, emptying the outbox after a commit, the save at
+        the handler's end, and the write of an urgent rider that no commit came
+        to carry (``ride_commit``): a call that answered is recorded even while
+        a cancellation is owed to the handler, which stays owed to its next call. A cancellation that failed one of
+        those would be
         delivered to nobody, or would report a transaction as cancelled after it
         committed.
 
@@ -685,7 +688,7 @@ class Attempt:
 
     def _arm(self) -> None:
         """Start counting the iterations an urgent rider waits, if one is pending and nothing is counting."""
-        if self._hop is not None or self._ended or self._closing:
+        if self._hop is not None or self._ended or self._closing or self._host.attempt_end() is not None:
             return
         if not any(pending.urgent for pending in self._riders.values()):
             return
@@ -701,7 +704,7 @@ class Attempt:
         """One iteration of the loop has passed: write the urgent riders alone once enough have, with nothing under way."""
         self._hop = None
         # A transaction under way writes them, or counts again as it ends.
-        if self._ended or self._closing or self._active > 0:
+        if self._ended or self._closing or self._active > 0 or self._host.attempt_end() is not None:
             return
         if not any(pending.urgent for pending in self._riders.values()):
             return

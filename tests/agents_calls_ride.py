@@ -214,3 +214,89 @@ async def test_a_crash_right_after_a_result_is_stored_forgets_the_record_and_a_l
     # The same tool and input again, under a new id: not the call the model has the result of.
     assert keys_of(first, retry) == [f"{req.id}:call_1", f"{req.id}:call_2"]
     assert [i for i, _ in await read_results(backend)] == ["call_1", "call_2"]
+
+
+# --- The records themselves --------------------------------------------------------------------------------
+
+
+async def calls_attempt(body: typing.Callable[[sessions.SessionContext, Counting, Backend], typing.Awaitable[None]]):
+    """Run ``body`` as a handler over a host that counts its syncs, from the second one (the first opens the schema)."""
+    obj = sessions.SessionObject("asker")
+    backend = Backend()
+    host = Counting(backend, service="asker")
+
+    @obj.handler
+    async def run(ctx: sessions.SessionContext) -> None:
+        await ctx.db.execute("SELECT 1")
+        await body(ctx, host, backend)
+
+    await invoke(obj, "run", host, request())
+
+
+async def until_records(backend: Backend, wanted: typing.Callable[[list[dict[str, Any]]], bool]) -> None:
+    for _ in range(1000):
+        if wanted(await records_of(backend)):
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"the committed records never were as wanted: {await records_of(backend)}")
+
+
+async def test_the_records_are_written_by_a_commit_under_way_or_on_their_own_an_answer_at_once_a_settling_with_the_next():
+    from restate.agents._calls import call_of, flush_calls, settle
+
+    async def body(ctx: sessions.SessionContext, host: Counting, backend: Backend) -> None:
+        first = await call_of(ctx, "pay", {"n": 1}, "c1")
+        # The record of a new call commits before the call.
+        assert [r["tool"] for r in await records_of(backend)] == ["pay"]
+        host.syncs = 0
+        await first.answered()
+        assert host.syncs == 0
+        # No commit is coming: the answer is written on its own, soon.
+        await until_records(backend, lambda records: [r.get("done") for r in records] == [True])
+        assert host.syncs == 1
+        # Settled, it is forgotten with the next commit: nothing writes it by itself.
+        await settle(ctx, lambda _id, _failed: True)
+        for _ in range(200):
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.02)
+        assert host.syncs == 1
+        assert len(await records_of(backend)) == 1
+        await ctx.db.execute("CREATE TABLE IF NOT EXISTS other (x)")
+        assert host.syncs == 2
+        assert await records_of(backend) == []
+        await flush_calls(ctx)
+        assert host.syncs == 2
+
+    await calls_attempt(body)
+
+
+async def test_the_record_of_a_new_call_writes_the_whole_row_and_leaves_nothing_pending():
+    from restate.agents._calls import call_of, flush_calls
+
+    async def body(ctx: sessions.SessionContext, host: Counting, backend: Backend) -> None:
+        await (await call_of(ctx, "pay", {"n": 1}, "c1")).answered()
+        host.syncs = 0
+        await call_of(ctx, "pay", {"n": 2}, "c2")
+        # One commit, with the answer of the first in it, and nothing pending after.
+        assert host.syncs == 1
+        records = await records_of(backend)
+        assert [(r["ids"], r.get("done")) for r in records] == [(["c1"], True), (["c2"], None)]
+        await flush_calls(ctx)
+        assert host.syncs == 1
+
+    await calls_attempt(body)
+
+
+async def test_an_answer_stays_urgent_when_a_settling_is_registered_over_it():
+    from restate.agents._calls import call_of, settle
+
+    async def body(ctx: sessions.SessionContext, host: Counting, backend: Backend) -> None:
+        first = await call_of(ctx, "pay", {"n": 1}, "c1")
+        second = await call_of(ctx, "pay", {"n": 2}, "c2")
+        await first.answered()
+        await second.answered()
+        # The transcript has the second's result: forgetting it replaces the pending write, which stays urgent.
+        await settle(ctx, lambda call_id, _failed: call_id == "c2")
+        await until_records(backend, lambda records: [(r["ids"], r.get("done")) for r in records] == [(["c1"], True)])
+
+    await calls_attempt(body)
