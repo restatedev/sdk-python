@@ -369,7 +369,9 @@ class SessionContext(Caller, Sender, Protocol):
         done again. Inside it, the attempt sends a heartbeat every 20 seconds,
         whatever it waits for: keep a long wait on Restate (a call, a signal)
         out of it. The database's own calls keep the attempt alive by
-        themselves.
+        themselves. A deployment that shortens Restate's inactivity timeout
+        must shorten the interval with it: ``RESTATE_SESSIONS_HEARTBEAT`` sets
+        it, in milliseconds.
         """
         ...
 
