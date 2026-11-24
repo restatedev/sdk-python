@@ -541,6 +541,10 @@ class ServerInvocationContext(ObjectContext):
         # Taking the VM's output and sending it is one step, so that output sent from two tasks (an
         # annotation's flush, beside the awaits') keeps its order.
         self._output_lock = asyncio.Lock()
+        # One poller at a time reads the input channel; the others wait for it to hand the event to
+        # the VM, then poll again (see _wait_for_input).
+        self._input_reader_active = False
+        self._input_handled = asyncio.Event()
 
     def _encode(self, buffer: bytes) -> bytes:
         """Apply the journal value codec encode step, if a codec is configured."""
@@ -722,17 +726,37 @@ class ServerInvocationContext(ObjectContext):
                 # Send what do_progress wrote before blocking: the AwaitingOn message, which tells Restate
                 # what this attempt awaits while it waits, so that Restate may suspend it.
                 await self.take_and_send_output()
-                chunk = await self.receive()
-                if chunk.get("type") == "restate.run_completed":
-                    continue
-                if chunk.get("type") == "http.disconnect":
-                    raise DisconnectedException()
-                # Skip empty body frames to avoid hot loop (see #175)
-                body: bytes | None = chunk.get("body", None)  # type: ignore[assignment]
-                if body is not None and len(body) > 0:
-                    self.vm.notify_input(body)
-                if not chunk.get("more_body", False):
-                    self.vm.notify_input_closed()
+                await self._wait_for_input()
+
+    async def _wait_for_input(self) -> None:
+        """
+        Wait until the next input event has been handed to the VM.
+
+        Several tasks can poll at once, each awaiting its own future. Only one of them reads the
+        input channel; the others wait for it to finish and then poll again, since the event it read
+        may complete their futures rather than its own (#315).
+        """
+        if self._input_reader_active:
+            await self._input_handled.wait()
+            return
+        self._input_reader_active = True
+        try:
+            chunk = await self.receive()
+            if chunk.get("type") == "restate.run_completed":
+                return
+            if chunk.get("type") == "http.disconnect":
+                raise DisconnectedException()
+            # Skip empty body frames to avoid hot loop (see #175)
+            body: bytes | None = chunk.get("body", None)  # type: ignore[assignment]
+            if body is not None and len(body) > 0:
+                self.vm.notify_input(body)
+            if not chunk.get("more_body", False):
+                self.vm.notify_input_closed()
+        finally:
+            # Wake the other pollers even if this one failed or was cancelled: one of them reads next.
+            self._input_reader_active = False
+            self._input_handled.set()
+            self._input_handled = asyncio.Event()
 
     def _create_fetch_result_coroutine(self, handle: int, serde: Serde[T] | None = None):
         """Create a coroutine that fetches a result from a notification handle."""
