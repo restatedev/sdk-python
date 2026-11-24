@@ -321,6 +321,8 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
 
     active_channels: Set[ReceiveChannel] = set()
     sigterm_installed = False
+    # Set by SIGTERM: the process is going away.
+    shutting_down = False
 
     # Journal value codec resolution.
     # A codec (or an async provider building one) may be configured on the endpoint. Whether one is
@@ -345,6 +347,8 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
 
     def _on_sigterm() -> None:
         """Notify all active receive channels of graceful shutdown."""
+        nonlocal shutting_down
+        shutting_down = True
         for ch in active_channels:
             ch.notify_shutdown()
 
@@ -403,6 +407,16 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
             handler = service.handlers.get(handler_name)
             if not handler:
                 await send404(send, receive)
+                return
+            if handler.attempt_runner is not None and shutting_down:
+                # A session object's attempt that arrives after SIGTERM, while the server drains: Restate
+                # restarted one this process shut down (an unasked ShutdownMessage restarts at once), on the
+                # same connection. Refused before anything runs, it is retried with backoff, on the process
+                # that replaces this one; started, it would be cut off by the drain.
+                await send(
+                    {"type": "http.response.start", "status": 503, "headers": X_RESTATE_SERVER, "trailers": False}
+                )
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
                 return
             #
             # At this point we have a valid handler.
