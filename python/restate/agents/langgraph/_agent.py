@@ -42,7 +42,9 @@ start, and the run resumes from the last step stored:
 - The model sees the earlier turns as their messages and answers, and the
   latest turns whole (the agent's ``window``), as many as its ``budget``
   holds; the built-in agent has its model summarize the earliest once they
-  outgrow it, after a turn's answer (``_conversation.py``).
+  outgrow it, after a turn's answer (``_conversation.py``). A reply of the
+  model with nothing in it is stored as it came, and sent as ``(no answer)``,
+  as an empty answer is: a model provider may refuse an empty message.
 - The model sees the latest messages of a conversation that lives long: as
   many as fit in ``WINDOW`` of its context window, by LangChain's
   ``trim_messages`` (starting with a prompt, never with a message steered to
@@ -90,6 +92,7 @@ from pydantic import BaseModel, PrivateAttr
 
 from restate.agents._common import (
     MODEL_ENV,
+    NO_ANSWER,
     Check,
     ModelError,
     PerSession,
@@ -240,6 +243,25 @@ def _text(message: BaseMessage) -> str:
     return str(message.text)
 
 
+def _blank(message: BaseMessage) -> bool:
+    """Return whether ``message`` is a reply of the model with nothing in it: no text, no tool call, no other content."""
+    if not isinstance(message, AIMessage) or message.tool_calls or message.invalid_tool_calls:
+        return False
+    if isinstance(message.content, str):
+        return not message.content.strip()
+    return all(
+        (isinstance(block, str) and not block.strip())
+        or (isinstance(block, dict) and block.get("type") == "text" and not str(block.get("text") or "").strip())
+        for block in message.content
+    )
+
+
+def _sendable(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """Return ``messages`` as a model provider takes them: a reply of the model with nothing in it (stored as it came)
+    says so, as an empty answer does. Anthropic's API refuses an empty message but the last."""
+    return [AIMessage(NO_ANSWER, id=m.id) if _blank(m) else m for m in messages]
+
+
 STEER = "steer:"
 """The prefix of the id that a message steered to a turn has in the graph: ``steer:<the message's id>``."""
 
@@ -267,7 +289,8 @@ class _Items:
         return HumanMessage(text, id=f"{STEER}{steer_id}")
 
     def reply(self, text: str, agent: str | None = None) -> Item:
-        return AIMessage(text)
+        # A model provider may refuse an empty message: an empty answer, as the model sees it later, says so.
+        return AIMessage(text if text.strip() else NO_ANSWER)
 
     def results(self, results: Sequence[tuple[Call, str]]) -> list[Item]:
         return [ToolMessage(text, tool_call_id=call.id, name=call.name, status="error") for call, text in results]
@@ -391,7 +414,7 @@ def _run(ctx: SessionContext, model: ChatModel | None, system: str | None, given
             return final
         graph = _graph(ctx, conversation, chat_model, tools, system)
         try:
-            state = typing.cast(State, await graph.ainvoke({"messages": conversation.history()}))
+            state = typing.cast(State, await graph.ainvoke({"messages": _sendable(conversation.history())}))
         except Exception as error:
             if (terminal := terminal_of(error)) is not None:
                 # LangGraph's own error, which a retry would meet again: its recursion limit, say.

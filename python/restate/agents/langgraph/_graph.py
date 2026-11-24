@@ -18,7 +18,10 @@ message as a new ``HumanMessage``:
 - The graph's checkpoints are in the key's database (``SqlCheckpointSaver``),
   stored before each step runs (``durability="sync"``), and the prebuilt
   ``nodes`` and the tools of ``tools()`` get the handler's context in it
-  (``_context.py``). LangGraph's run context is the graph's own
+  (``_context.py``). A task's writes are stored with the checkpoint of its
+  step when that follows at once, and alone otherwise, as a parallel step's
+  finished task's are, so that a crash does not run it again (see the
+  checkpointer). LangGraph's run context is the graph's own
   (``context=``), else the handler's. A retried attempt resumes the run it
   cut off. A run that finishes prunes the thread to the latest checkpoint
   of each namespace (LangGraph's ``aprune``), and what LangGraph rebuilds
@@ -476,7 +479,10 @@ def run_of(ctx: SessionContext, graph: AnyGraph, context: Any = None) -> Run:
             # Inherited by the nodes' own runs: the models they call keep the attempt alive while they request.
             "callbacks": [alive],
         }
-        if asked and not snapshot.next:
+        # ``next`` leaves out the tasks whose writes are stored, so a step whose writes were stored before its
+        # checkpoint (a crash between them) has no ``next`` but still has tasks: that run goes on, from those writes,
+        # without running the tasks again. A finished run has no tasks.
+        if asked and not snapshot.tasks:
             # The run had finished, but its answer was not stored: that is the answer, rather than run again.
             await _copied(ctx, turn, known, messages, prompt_id)
             await saver.aprune([THREAD_ID])

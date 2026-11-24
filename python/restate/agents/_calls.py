@@ -30,11 +30,26 @@ latest id it was made with (``settle`` checks this after each write of the
 turn's steps that commits, and before each tool call). An error in the transcript does not count as the result,
 unless the call itself returned that error.
 
+Only the record of a new call commits of its own, before the call is made (with the commit of a transaction
+that is under way, if one is: it carries the pending answers, so none is left behind a result). That a call answered rides a commit
+that is under way or starts at once (``ride_commit``): the one that stores the call's result, so that the
+transcript never has a result of a call that is not recorded as answered. If none does (a slow tool of the round
+is still running, another call waits), it is written on its own once no transaction has started for a while (see
+``URGENT_HOPS``), so it is never left unrecorded for long. That its record is forgotten rides the next commit,
+whenever it comes. A crash in the few moments before an answer is written reads the call as one that did not
+answer, as a crash just before a commit of its own would have: it is made again, under the same key, and cut off
+for a stopped turn that another invocation closes.
+
 A framework's own wait (``wait_for``) is its tool call's alone: the framework
 stored the tool call before it waits, so a retried attempt waits again under
 the same id, and a new call with the same input waits anew. An approval that a
 tool call waited for is not the call itself: a stopped turn does not report the
 call as done because its approval returned (``outcomes``).
+
+A call made while ``answer_once`` answers a prompt is kept as that prompt's (``for_prompt``), so that an
+invocation that prompts more than once keeps the calls of each apart: a call is matched, and rejoined, among
+its prompt's alone. Without it, a second prompt that makes the call the first made (the same tool and input)
+would take the first's after a crash, while its record is not yet forgotten, and never make its own.
 """
 
 from __future__ import annotations
@@ -43,12 +58,12 @@ import asyncio
 import json
 import typing
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 
 from restate.agents._common import flush_held
-from restate.sessions import SessionContext
-from restate.sessions.internal import Schema, ScopeKey
+from restate.sessions import SessionContext, Transaction
+from restate.sessions.internal import Schema, ScopeKey, flush_riders, ride_commit
 
 SCHEMA = Schema(
     "restate-agents.calls",
@@ -81,6 +96,8 @@ class _Call(_Made, total=False):
     approval: bool
     """Whether the call is an approval that its tool call waited for (``wait_for``): its returning is not the tool
     call's."""
+    prompt: str
+    """The prompt whose turn made the call (``for_prompt``); absent for a call made outside a prompt."""
 
 
 @dataclass
@@ -91,17 +108,51 @@ class _Calls:
     calls: list[_Call] = field(default_factory=list[_Call])
 
 
+_UPSERT = "INSERT OR REPLACE INTO restate_agent_calls (row, invocation, calls) VALUES (0, ?, ?)"
+
+_RIDER = "restate-agents.calls"
+"""The slot of the calls' write that rides the next commit (``_ride``)."""
+
+
+def _writer(state: _Calls) -> Callable[[Transaction], Awaitable[None]]:
+    """The write of ``state``, as it is when it runs."""
+
+    async def write(tx: Transaction) -> None:
+        await tx.execute(_UPSERT, [state.invocation, json.dumps(state.calls)])
+
+    return write
+
+
 async def _store(ctx: SessionContext, state: _Calls) -> None:
     """Store ``state``; it is committed before the call it records is made.
 
     The rows the conversation holds back are written first: the call outlives the attempt, and what led to it must
-    too.
+    too. It is the whole row, written as a rider that is flushed (``flush_riders``) rather than by a statement of its
+    own: a transaction that is under way (the write of an earlier call's result) carries it with its commit, so
+    that it never commits that result without the answer that is pending. Nothing under way, it is one commit of
+    its own. It returns once the row is committed.
     """
     await flush_held(ctx)
-    await ctx.db.execute(
-        "INSERT OR REPLACE INTO restate_agent_calls (row, invocation, calls) VALUES (0, ?, ?)",
-        [state.invocation, json.dumps(state.calls)],
-    )
+    if ride_commit(ctx.db, _RIDER, _writer(state)):
+        await flush_riders(ctx.db)
+    else:
+        await ctx.db.execute(_UPSERT, [state.invocation, json.dumps(state.calls)])
+
+
+async def _ride(ctx: SessionContext, state: _Calls, urgent: bool = False) -> None:
+    """Store ``state`` with the next commit of the database, rather than commit it, as it is then.
+
+    A later change replaces it, and the latest state is written. An ``urgent`` one (an answer) is written on its
+    own unless a commit starts soon to write it; one that is pending and urgent stays so. A database that cannot
+    ride (a view's) commits it at once.
+    """
+    if not ride_commit(ctx.db, _RIDER, _writer(state), urgent=urgent):
+        await _store(ctx, state)
+
+
+async def flush_calls(ctx: SessionContext) -> None:
+    """Write what rides the next commit (``_ride``) now, if it is pending: at the end of a turn, when no commit follows."""
+    await flush_riders(ctx.db)
 
 
 async def _load(ctx: SessionContext, invocation: str) -> _Calls:
@@ -134,6 +185,29 @@ async def _calls_of(ctx: SessionContext) -> tuple[_Attempt, _Calls]:
     return attempt, attempt.calls
 
 
+T = typing.TypeVar("T")
+
+_PROMPT: ScopeKey[str] = ScopeKey("the prompt of the calls")
+
+
+async def for_prompt(ctx: SessionContext, prompt: str, work: Callable[[], Awaitable[T]]) -> T:
+    """Run ``work``, a turn's, with the calls its tools make kept as prompt ``prompt``'s.
+
+    They are matched, and rejoined, within the prompt only. An invocation that prompts twice, its second prompt
+    making the call its first made (the same tool and input), would otherwise take the first's after a crash (its
+    record not yet forgotten), and never make its own.
+    """
+    outer = _PROMPT.get(ctx)
+    _PROMPT.set(ctx, prompt)
+    try:
+        return await work()
+    finally:
+        if outer is None:
+            _PROMPT.delete(ctx)
+        else:
+            _PROMPT.set(ctx, outer)
+
+
 @dataclass
 class Call:
     """The call a tool call makes: its id (possibly from an earlier attempt), and a way to record that it returned."""
@@ -144,11 +218,19 @@ class Call:
     _call: _Call
 
     async def answered(self, failed: str | None = None) -> None:
-        """Record that the call returned, with ``failed`` if it returned a terminal error."""
+        """Record that the call returned, with ``failed`` if it returned a terminal error.
+
+        It is kept until the transcript has the call's result. It rides the commit that stores the result, and is
+        otherwise written on its own soon (``_ride``): a call that answered must not stay unrecorded while
+        something else runs (a slow tool of the same round, a call that waits for a signal). A crash before it is
+        written reads the call as one that did not answer: made again under the same key, and cut off for a stopped
+        turn that another invocation closes (``outcomes`` reads the stored row; the attempt's own turn reads its
+        state).
+        """
         self._call["done"] = True
         if failed is not None:
             self._call["failed"] = failed
-        await _store(self._ctx, self._state)
+        await _ride(self._ctx, self._state, urgent=True)
 
 
 async def call_of(
@@ -159,15 +241,18 @@ async def call_of(
     That is the call it made to ``tool`` before (if it runs again), or else,
     if ``rejoin``, the call an earlier attempt made with the same tool and
     input (if the model made it again under a new id), or else a new call. A
-    new call is an ``approval`` that its tool call waits for, if so.
+    new call is an ``approval`` that its tool call waits for, if so. Only the
+    calls of the current prompt (``for_prompt``) are matched.
     """
     attempt, state = await _calls_of(ctx)
     encoded = json.dumps(input, sort_keys=True)
+    prompt = _PROMPT.get(ctx)
+    ours = [c for c in state.calls if c.get("prompt") == prompt]
     # A tool call may make more than one call (an approval, then the tool's own), each to a tool of its own.
-    call = next((c for c in state.calls if call_id in c["ids"] and c["tool"] == tool), None)
+    call = next((c for c in ours if call_id in c["ids"] and c["tool"] == tool), None)
     if call is None and rejoin:
         call = next(
-            (c for c in state.calls if c["attempt"] != attempt.id and c["tool"] == tool and c["input"] == encoded),
+            (c for c in ours if c["attempt"] != attempt.id and c["tool"] == tool and c["input"] == encoded),
             None,
         )
     if call is not None:
@@ -178,6 +263,8 @@ async def call_of(
         call = _Call(tool=tool, input=encoded, ids=[call_id], attempt=attempt.id)
         if approval:
             call["approval"] = True
+        if prompt is not None:
+            call["prompt"] = prompt
         state.calls.append(call)
     await _store(ctx, state)
     return Call(id=call["ids"][0], _ctx=ctx, _state=state, _call=call)
@@ -195,11 +282,11 @@ async def settle(ctx: SessionContext, stored: Callable[[str, str | None], bool])
     if len(kept) == len(state.calls):
         return
     state.calls = kept
-    await _store(ctx, state)
+    await _ride(ctx, state)
 
 
 async def outcomes(
-    ctx: SessionContext, call_ids: Iterable[str], invocation: str | None = None
+    ctx: SessionContext, call_ids: Iterable[str], invocation: str | None = None, prompt: str | None = None
 ) -> dict[str, str | None]:
     """Return which of ``call_ids`` made a Restate call that returned in this invocation, or in ``invocation``.
 
@@ -208,7 +295,8 @@ async def outcomes(
     one whose only returned call is its approval, which the tool call ran (or was denied) after.
 
     An earlier ``invocation``'s calls are read only while they are still stored: until an invocation of
-    the key makes calls of its own. They are read, never changed.
+    the key makes calls of its own. They are read, never changed. With ``prompt``, only the calls of its turn
+    count.
     """
     if invocation is not None and invocation != ctx.request.id:
         state = await _load(ctx, invocation)
@@ -218,7 +306,10 @@ async def outcomes(
     return {
         i: call.get("failed")
         for call in state.calls
-        if call.get("done") and not call.get("approval")
+        if call.get("done")
+        and not call.get("approval")
+        # Another prompt's call, of the same invocation: not this turn's.
+        and (prompt is None or call.get("prompt") in (None, prompt))
         for i in call["ids"]
         if i in wanted
     }

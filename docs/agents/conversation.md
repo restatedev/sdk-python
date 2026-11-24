@@ -190,7 +190,7 @@ CREATE TABLE restate_agent_steers (          -- the messages steered to a turn t
 | --- | --- | --- |
 | `restate_agent_calls` (schema `restate-agents.calls`), in the key's database | one row: the invocation's Restate calls made by tools, as JSON ([Tool calls, once](#tool-calls-once-the-call-records)) | the tools built on Restate (`call`, `send`, `workflow`, `subagent`, `wait_for_signal`) and `wait_for` |
 | the companion's state: the agent's own object `<agent>.prebuilt.restate`, keyed as the agent | `turn`: the turn being answered (`Started`: its invocation, since when, whether it takes steered messages and whether `start` publishes it); `waiting`: the tools' waits, each with its awakeable; `kept`: signals that came before their wait; `revision`; `watching`: the `watch` calls waiting for a newer revision | the companion's handlers (`start`, `close`, `wait`, `signal`, `publish`, `watch`) |
-| `restate_langgraph_checkpoints`, `restate_langgraph_channel_values`, `restate_langgraph_writes` (schema `restate_agents.langgraph`) | a LangGraph graph's checkpoints, channel values by version, and pending writes, per thread and namespace | `SqlCheckpointSaver`, for `langgraph.agent(graph=...)`; pruned to what the latest checkpoint of each namespace needs after each run |
+| `restate_langgraph_checkpoints`, `restate_langgraph_channel_values`, `restate_langgraph_writes` (schema `restate_agents.langgraph`) | a LangGraph graph's checkpoints, channel values by version, and pending writes, per thread and namespace | `SqlCheckpointSaver`, for `langgraph.agent(graph=...)`; a step's writes are in the commit of the checkpoint that follows them, when it follows at once; pruned to what the latest checkpoint of each namespace needs after each run |
 | `restate_pydantic_ai_plan`, `restate_pydantic_ai_spills`, `restate_pydantic_ai_journal` (schema `restate_agents.pydantic_ai`) | the harness's plan (`plan_store()`), spilled tool results (`overflow_store()`), and each tool call's journal of plan reads and writes, for the current invocation | the Pydantic AI stores |
 | `restate_pydantic_ai_memory`, `..._receipts`, `..._generation` (schema `restate_agents.pydantic_ai.memory`), in a memory object's key | the harness's memory files, the receipts of the changes, and the version counter: one key per namespace (a user), shared by that user's conversations | `memory()`'s session object |
 
@@ -525,6 +525,7 @@ invocation (the next invocation's first call replaces it):
 | `attempt` | the attempt that last made it |
 | `done`, `failed` | whether the Restate call returned, and the terminal error it returned, if any |
 | `approval` | the call is an approval that its tool call waited for (`wait_for(..., approval=True)`) |
+| `prompt` | the prompt whose turn made the call; absent for a call made outside a prompt, and in a row an earlier version stored |
 
 - **Matching a call.** A tool call finds the record it made before by its id
   and its tool: one tool call may make two calls (an approval, then the
@@ -533,11 +534,24 @@ invocation (the next invocation's first call replaces it):
   input: a framework that tells the model its call was cut off gets the call
   again under a new id, and that is the same Restate call, with the same
   idempotency key, which it waits for again or whose result it gets.
+- **Per prompt.** An invocation can prompt more than once (`<id>`, `<id>:2`, ...). `answer_once` keeps the
+  calls its run makes as its prompt's, and a call is matched, and rejoined, among its prompt's records only: a
+  second prompt that makes the call the first made (the same tool and input) takes a call of its own, not the
+  first's, which a crash left stored.
 - **A framework's own wait is its tool call's alone** (`wait_for`). The
   framework stored the tool call before it waits, so a retried attempt waits
   again under the same id; a new call with the same input (the model asking
   again after the first's answer) waits anew, and never gets an earlier
   call's approval or denial.
+- **When it is written.** Only the record of a new call commits of its own, before the call is made. That a call
+  returned (`done`) rides a commit that is under way or starts at once: the one that stores the call's result,
+  so that the transcript never has a result of a call that is not recorded as returned. If none does (a slow
+  tool of the round still runs, another call waits), it is written in a transaction of its own once no commit has
+  started for `URGENT_HOPS` event-loop iterations, so it is never left unrecorded for long. That a record is
+  forgotten rides the next commit, whenever it comes, and a turn's end writes what is still pending. A crash in
+  the few moments before the return is written reads the call as one that did not return: it is made again under
+  the same key, and a stopped turn that another invocation closes reports it as cut off. This is
+  `restate.sessions.internal.ride_commit`.
 - **Forgetting.** After each write of steps that commits (once, before the
   publish an agent's turn makes there, and in a plain session object's turn
   too, which publishes nothing) and before each tool call, a record whose
@@ -550,7 +564,8 @@ invocation (the next invocation's first call replaces it):
 - **Closing a turn.** A turn that closes with open calls gives each a result:
   the error its Restate call returned, or `RETURNED_UNRECORDED` ("Done, but
   the turn was stopped before this call's result was recorded: it did
-  happen…") if it returned, or else the note that closes the turn. The
+  happen…") if it returned (a call of its own prompt: another prompt's call of the invocation is not its),
+  or else the note that closes the turn. The
   results, the note and the answer are one transaction: a crash between them
   would leave the turn open, and closing it again would add a second note. An
   approval returning is not the call: a denied call is closed with the note.

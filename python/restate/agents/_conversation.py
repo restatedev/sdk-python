@@ -97,7 +97,7 @@ from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
 from restate.agents._api import Steer
 from restate.agents._calls import SCHEMA as CALLS_SCHEMA
-from restate.agents._calls import outcomes
+from restate.agents._calls import for_prompt, outcomes
 from restate.agents._common import (
     BUDGET,
     CANCELLED,
@@ -991,7 +991,7 @@ class Turn:
                 return
             self._check_writable()
             calls = self.open_calls()
-            returned = await outcomes(ctx, [call.id for call in calls], invocation_of(self.id))
+            returned = await outcomes(ctx, [call.id for call in calls], invocation_of(self.id), self.id)
             closing = [
                 *items.results([(call, cut_off_result(returned, call.id, note)) for call in calls]),
                 items.reply(note),
@@ -1719,7 +1719,7 @@ async def answer_once(
         return running is not None and running.id == prompt_id and running.stored(call_id, failed)
 
     try:
-        answered = await answering(ctx, stored, work)
+        answered = await for_prompt(ctx, prompt_id, lambda: answering(ctx, stored, work))
     except TerminalError:
         # The turn ended for good, closed with the error (`_answer`): its answer is stored, so what follows the
         # answer runs, and a follower hears the turn end. An attempt that failed otherwise ends no turn, and runs
