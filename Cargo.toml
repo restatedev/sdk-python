@@ -22,7 +22,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # directory); `tunnel` is Restate Cloud's. `aws_lc_rs` is the crypto of all of them (the
 # tunnel's TLS, request identity's signatures), as the object stores' must be aws-lc.
 # 8.7.1: a cancellation resumes an invocation shut down while it waits for a call (sdk-shared-core#120).
-restate-sdk-shared-core = { version = "8.7.1", features = [
+# 8.7.3: SQL calls run where they are polled; compiled statements are shared between the sessions of one
+# schema (sdk-shared-core#121, #123).
+restate-sdk-shared-core = { version = "8.7.3", features = [
     "request_identity",
     "sha2_random_seed",
     "aws_lc_rs",
