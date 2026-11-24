@@ -36,7 +36,7 @@ its context as LangGraph's run context, a checkpointer in its database, and
     async def refund(ctx: sessions.SessionContext, refund: Refund) -> State:
         app: Any = graph.compile(checkpointer=SqlCheckpointSaver(ctx.db))  # Any: LangGraph types no Restate context
         config: RunnableConfig = {"configurable": {"thread_id": "refunds"}}
-        resuming = (await app.aget_state(config)).next
+        resuming = (await app.aget_state(config)).tasks
         return await app.ainvoke(None if resuming else {"refund": refund}, config, context=ctx, durability="sync")
 
 Each node does its step once. A crash re-runs a node from the checkpoint it
