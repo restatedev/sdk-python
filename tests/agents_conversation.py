@@ -694,6 +694,47 @@ async def test_settle_closes_only_the_turn_its_gone_invocation_left_and_only_onc
     assert results == {"c1": RETURNED_UNRECORDED, "c2": ENDED}
 
 
+async def test_a_turn_left_without_an_answer_gets_the_outcomes_of_its_own_prompts_calls_only():
+    from restate.agents._calls import call_of  # pylint: disable=import-outside-toplevel
+    from restate.agents._common import ENDED  # pylint: disable=import-outside-toplevel
+
+    seen: list[Conversation] = []
+    obj = sessions.SessionObject("asker")
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext) -> str:
+        async def first(conversation: Conversation) -> str:
+            seen.append(conversation)
+            await conversation.turn.append_reply(_calling("c1"))
+            # The first prompt's call returned, and its result was never stored.
+            await (await call_of(ctx, "lookup", {}, "c1")).answered()
+            return "one"
+
+        async def second(conversation: Conversation) -> str:
+            seen.append(conversation)
+            # The second prompt's tool call has the same id, and its call did not return.
+            await conversation.turn.append_reply(_calling("c1"))
+            raise RuntimeError("the invocation is gone")
+
+        await answer_once(ctx, "one", ITEMS, first)
+        return await answer_once(ctx, "two", ITEMS, second)
+
+    @obj.handler
+    async def again(ctx: sessions.SessionContext, text: str) -> str:
+        async def run(conversation: Conversation) -> str:
+            seen.append(conversation)
+            return "fine"
+
+        return await answer_once(ctx, text, ITEMS, run)
+
+    backend = Backend()
+    with pytest.raises(RuntimeError):
+        await invoke(obj, "ask", Host(backend, service="asker", answers=PUBLISHED), request())
+    await invoke(obj, "again", Host(backend, service="asker", answers=PUBLISHED), request(), "third")
+    results = {r.id: r.output for e in seen[-1].entries for r in e.results}
+    assert results == {"c1": ENDED}
+
+
 async def test_a_turn_left_without_an_answer_is_closed_once_however_a_crash_cuts_the_close():
     from restate.agents.internal import ENDED  # pylint: disable=import-outside-toplevel
 

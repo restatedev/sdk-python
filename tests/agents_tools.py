@@ -267,6 +267,56 @@ async def test_a_returned_call_is_kept_until_its_result_is_stored_and_forgotten_
     assert await internal.invoke(obj, "records", Host(backend, service="crashed_caller"), req) == []
 
 
+async def test_an_invocation_that_prompts_twice_keeps_the_calls_of_each_prompt_apart():
+    """A crash in the second prompt, whose tool makes the call the first prompt's tool made (the same tool and input).
+
+    The first prompt's record is still stored, its result never was. The retry's second prompt makes a call of its
+    own, under its own idempotency key, and does not take the first's.
+    """
+    from agents_conversation import ITEMS, PUBLISHED  # pylint: disable=import-error,import-outside-toplevel
+
+    from restate.agents._conversation import Conversation, answer_once  # pylint: disable=import-outside-toplevel
+
+    lookup = call(status, description="The status of an order.")
+    args = {"key": "eu", "order": "o1"}
+    obj = sessions.SessionObject("two_prompts")
+    runs: list[str] = []
+
+    async def calling(conversation: Conversation, call_id: str) -> None:
+        calls = [{"id": call_id, "name": lookup.name, "input": args}]
+        await conversation.turn.append_reply({"role": "assistant", "text": "", "calls": calls})
+
+    @obj.handler
+    async def ask(ctx: sessions.SessionContext) -> str:
+        async def first(conversation: Conversation) -> str:
+            runs.append("first")
+            await calling(conversation, "t1")
+            await lookup.run(args, ToolCall(ctx, "t1"))
+            return "one"  # the model ended without the result being stored
+
+        async def second(conversation: Conversation) -> str:
+            runs.append("second")
+            await calling(conversation, "t2")
+            if runs.count("second") == 1:
+                raise RuntimeError("the process crashed")
+            await lookup.run(args, ToolCall(ctx, "t2"))
+            return "two"
+
+        assert await answer_once(ctx, "one", ITEMS, first) == "one"
+        return await answer_once(ctx, "two", ITEMS, second)
+
+    backend, req = Backend(), request()
+    answers = {**PUBLISHED, "status": b'{"order": "o1", "status": "shipped"}'}
+    first_attempt = Host(backend, service="two_prompts", answers=answers)
+    with pytest.raises(RuntimeError, match="crashed"):
+        await internal.invoke(obj, "ask", first_attempt, req)
+    retry = Host(backend, service="two_prompts", answers=answers)
+    assert await internal.invoke(obj, "ask", retry, req) == "two"
+
+    made = [c for c in [*first_attempt.calls, *retry.calls] if c[1] == "status"]
+    assert [c[4] for c in made] == [f"{req.id}:t1", f"{req.id}:t2"]
+
+
 # --- Waits need an agent ------------------------------------------------------------------------------------------
 
 NEEDS_AGENT = "needs an agent, whose companion holds its waits: 'desk' is a plain session object"

@@ -525,6 +525,7 @@ invocation (the next invocation's first call replaces it):
 | `attempt` | the attempt that last made it |
 | `done`, `failed` | whether the Restate call returned, and the terminal error it returned, if any |
 | `approval` | the call is an approval that its tool call waited for (`wait_for(..., approval=True)`) |
+| `prompt` | the prompt whose turn made the call; absent for a call made outside a prompt, and in a row an earlier version stored |
 
 - **Matching a call.** A tool call finds the record it made before by its id
   and its tool: one tool call may make two calls (an approval, then the
@@ -533,6 +534,10 @@ invocation (the next invocation's first call replaces it):
   input: a framework that tells the model its call was cut off gets the call
   again under a new id, and that is the same Restate call, with the same
   idempotency key, which it waits for again or whose result it gets.
+- **Per prompt.** An invocation can prompt more than once (`<id>`, `<id>:2`, ...). `answer_once` keeps the
+  calls its run makes as its prompt's, and a call is matched, and rejoined, among its prompt's records only: a
+  second prompt that makes the call the first made (the same tool and input) takes a call of its own, not the
+  first's, which a crash left stored.
 - **A framework's own wait is its tool call's alone** (`wait_for`). The
   framework stored the tool call before it waits, so a retried attempt waits
   again under the same id; a new call with the same input (the model asking
@@ -550,7 +555,8 @@ invocation (the next invocation's first call replaces it):
 - **Closing a turn.** A turn that closes with open calls gives each a result:
   the error its Restate call returned, or `RETURNED_UNRECORDED` ("Done, but
   the turn was stopped before this call's result was recorded: it did
-  happen…") if it returned, or else the note that closes the turn. The
+  happen…") if it returned (a call of its own prompt: another prompt's call of the invocation is not its),
+  or else the note that closes the turn. The
   results, the note and the answer are one transaction: a crash between them
   would leave the turn open, and closing it again would add a second note. An
   approval returning is not the call: a denied call is closed with the note.

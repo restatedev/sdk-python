@@ -35,6 +35,11 @@ stored the tool call before it waits, so a retried attempt waits again under
 the same id, and a new call with the same input waits anew. An approval that a
 tool call waited for is not the call itself: a stopped turn does not report the
 call as done because its approval returned (``outcomes``).
+
+A call made while ``answer_once`` answers a prompt is kept as that prompt's (``for_prompt``), so that an
+invocation that prompts more than once keeps the calls of each apart: a call is matched, and rejoined, among
+its prompt's alone. Without it, a second prompt that makes the call the first made (the same tool and input)
+would take the first's after a crash, while its record is not yet forgotten, and never make its own.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ import asyncio
 import json
 import typing
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 
 from restate.agents._common import flush_held
@@ -81,6 +86,8 @@ class _Call(_Made, total=False):
     approval: bool
     """Whether the call is an approval that its tool call waited for (``wait_for``): its returning is not the tool
     call's."""
+    prompt: str
+    """The prompt whose turn made the call (``for_prompt``); absent for a call made outside a prompt."""
 
 
 @dataclass
@@ -134,6 +141,29 @@ async def _calls_of(ctx: SessionContext) -> tuple[_Attempt, _Calls]:
     return attempt, attempt.calls
 
 
+T = typing.TypeVar("T")
+
+_PROMPT: ScopeKey[str] = ScopeKey("the prompt of the calls")
+
+
+async def for_prompt(ctx: SessionContext, prompt: str, work: Callable[[], Awaitable[T]]) -> T:
+    """Run ``work``, a turn's, with the calls its tools make kept as prompt ``prompt``'s.
+
+    They are matched, and rejoined, within the prompt only. An invocation that prompts twice, its second prompt
+    making the call its first made (the same tool and input), would otherwise take the first's after a crash (its
+    record not yet forgotten), and never make its own.
+    """
+    outer = _PROMPT.get(ctx)
+    _PROMPT.set(ctx, prompt)
+    try:
+        return await work()
+    finally:
+        if outer is None:
+            _PROMPT.delete(ctx)
+        else:
+            _PROMPT.set(ctx, outer)
+
+
 @dataclass
 class Call:
     """The call a tool call makes: its id (possibly from an earlier attempt), and a way to record that it returned."""
@@ -159,15 +189,18 @@ async def call_of(
     That is the call it made to ``tool`` before (if it runs again), or else,
     if ``rejoin``, the call an earlier attempt made with the same tool and
     input (if the model made it again under a new id), or else a new call. A
-    new call is an ``approval`` that its tool call waits for, if so.
+    new call is an ``approval`` that its tool call waits for, if so. Only the
+    calls of the current prompt (``for_prompt``) are matched.
     """
     attempt, state = await _calls_of(ctx)
     encoded = json.dumps(input, sort_keys=True)
+    prompt = _PROMPT.get(ctx)
+    ours = [c for c in state.calls if c.get("prompt") == prompt]
     # A tool call may make more than one call (an approval, then the tool's own), each to a tool of its own.
-    call = next((c for c in state.calls if call_id in c["ids"] and c["tool"] == tool), None)
+    call = next((c for c in ours if call_id in c["ids"] and c["tool"] == tool), None)
     if call is None and rejoin:
         call = next(
-            (c for c in state.calls if c["attempt"] != attempt.id and c["tool"] == tool and c["input"] == encoded),
+            (c for c in ours if c["attempt"] != attempt.id and c["tool"] == tool and c["input"] == encoded),
             None,
         )
     if call is not None:
@@ -178,6 +211,8 @@ async def call_of(
         call = _Call(tool=tool, input=encoded, ids=[call_id], attempt=attempt.id)
         if approval:
             call["approval"] = True
+        if prompt is not None:
+            call["prompt"] = prompt
         state.calls.append(call)
     await _store(ctx, state)
     return Call(id=call["ids"][0], _ctx=ctx, _state=state, _call=call)
@@ -199,7 +234,7 @@ async def settle(ctx: SessionContext, stored: Callable[[str, str | None], bool])
 
 
 async def outcomes(
-    ctx: SessionContext, call_ids: Iterable[str], invocation: str | None = None
+    ctx: SessionContext, call_ids: Iterable[str], invocation: str | None = None, prompt: str | None = None
 ) -> dict[str, str | None]:
     """Return which of ``call_ids`` made a Restate call that returned in this invocation, or in ``invocation``.
 
@@ -208,7 +243,8 @@ async def outcomes(
     one whose only returned call is its approval, which the tool call ran (or was denied) after.
 
     An earlier ``invocation``'s calls are read only while they are still stored: until an invocation of
-    the key makes calls of its own. They are read, never changed.
+    the key makes calls of its own. They are read, never changed. With ``prompt``, only the calls of its turn
+    count.
     """
     if invocation is not None and invocation != ctx.request.id:
         state = await _load(ctx, invocation)
@@ -218,7 +254,10 @@ async def outcomes(
     return {
         i: call.get("failed")
         for call in state.calls
-        if call.get("done") and not call.get("approval")
+        if call.get("done")
+        and not call.get("approval")
+        # Another prompt's call, of the same invocation: not this turn's.
+        and (prompt is None or call.get("prompt") in (None, prompt))
         for i in call["ids"]
         if i in wanted
     }
