@@ -17,6 +17,7 @@ over the in-process host that counts its syncs. The cost of the Restate tools is
 
 # pylint: disable=missing-function-docstring,missing-class-docstring
 
+import asyncio
 import json
 import typing
 from collections.abc import Awaitable, Callable
@@ -31,7 +32,7 @@ from restate.agents import call, tool
 from restate.agents._tools import Tool
 from restate.sessions.internal import invoke
 from sessions_database import Backend  # pylint: disable=import-error
-from sessions_object import Host, request  # pylint: disable=import-error
+from sessions_object import Answer, Host, request  # pylint: disable=import-error
 
 
 @pytest.fixture
@@ -39,10 +40,10 @@ def anyio_backend():
     return "asyncio"
 
 
-EXTRA_COMMITS_PER_RESTATE_CALL = 3
-"""What each Restate tool call costs in commits, over the same call of a plain tool. The call's record, in
-``restate_agent_calls``, is committed: (1) before the call is made, (2) when it answered, and (3) when the record is
-forgotten, after the framework stored the tool's result."""
+EXTRA_COMMITS_PER_RESTATE_CALL = 1
+"""What each Restate tool call costs in commits, over the same call of a plain tool. Only the call's record, in
+``restate_agent_calls``, commits of its own, before the call is made. That the call answered rides the commit that
+stores the tool's result, and so does that the record is forgotten, after the framework stored it."""
 
 REQUESTS = 4
 TOOL_CALLS = 3
@@ -105,6 +106,50 @@ def arguments_of(index: int) -> dict[str, str]:
     return {"key": "eu", "input": order_of(index)}
 
 
+SHAPE: list[str] = ["serial"]
+"""The model's plan: ``serial`` is a tool call after each of the first ``TOOL_CALLS`` requests, ``parallel`` is one
+round of two Restate calls and a slow plain tool, and then the answer."""
+
+
+def round_of(n: int) -> list[tuple[str, str, dict[str, str]]] | None:
+    """The tool calls (id, tool, arguments) that the model's ``n``-th request makes, or ``None`` if it answers."""
+    if SHAPE[0] == "serial":
+        return [(call_id(n), "lookup", arguments_of(n))] if n < TOOL_CALLS else None
+    if n == 0:
+        return [
+            (call_id(0), "lookup", arguments_of(0)),
+            (call_id(1), "lookup", arguments_of(1)),
+            (call_id(2), "slow", {}),
+        ]
+    return None
+
+
+SLOW: list[asyncio.Event] = []
+"""The slow plain tool of the parallel round waits for it."""
+
+
+@tool(name="slow")
+async def slow_tool() -> str:
+    """A plain tool that runs until the test says so."""
+    await SLOW[0].wait()
+    return "slow done"
+
+
+class Gated(Answer):
+    """A call's result, once ``gate`` is set."""
+
+    def __init__(self, value: bytes, gate: asyncio.Event) -> None:
+        super().__init__(value)
+        self.gate = gate
+
+    def __await__(self):
+        async def value() -> bytes:
+            await self.gate.wait()
+            return self.value
+
+        return value().__await__()
+
+
 @dataclass
 class Counting(Host):
     """A host that counts its syncs (each a commit), keeps what each committed, and answers the faked callee."""
@@ -117,10 +162,16 @@ class Counting(Host):
         self.syncs += 1
         self.committed.append(dict(self.backend.stored))
 
+    gate: asyncio.Event | None = None
+    """When set, the call about the second order answers once it is."""
+
     def generic_call(self, service, handler, arg, key=None, idempotency_key=None, headers=None, name=None):
         if handler == "status":
             self.answers[handler] = json.dumps(result_of(json.loads(arg))).encode()
-        return super().generic_call(service, handler, arg, key, idempotency_key, headers, name)
+        answer = super().generic_call(service, handler, arg, key, idempotency_key, headers, name)
+        if self.gate is not None and order_of(1) in arg.decode():
+            return Gated(self.answers[handler], self.gate)
+        return answer
 
 
 @dataclass
@@ -184,16 +235,16 @@ async def held(committed: dict[str, bytes]) -> tuple[str, list[dict[str, Any]]]:
     return await invoke(reader, "read", Host(copy, service="asker"), request())
 
 
-async def assert_no_result_ahead_of_its_record(measured: Measured) -> None:
+async def assert_no_result_ahead_of_its_record(measured: Measured, calls: int = TOOL_CALLS) -> None:
     """At no commit does the committed state hold a tool's real result while that call's record is not marked done.
 
     A call whose record was forgotten (after it was marked done) may hold its result."""
     done: set[int] = set()
-    seen_result = [False] * TOOL_CALLS
+    seen_result = [False] * calls
     for committed in measured.committed:
         text, records = await held(committed)
-        present = {i for i in range(TOOL_CALLS) for r in records if f'"{order_of(i)}"' in r["input"]}
-        for i in range(TOOL_CALLS):
+        present = {i for i in range(calls) for r in records if f'"{order_of(i)}"' in r["input"]}
+        for i in range(calls):
             for r in records:
                 if f'"{order_of(i)}"' in r["input"] and r.get("done"):
                     done.add(i)
@@ -203,7 +254,7 @@ async def assert_no_result_ahead_of_its_record(measured: Measured) -> None:
                 assert i not in present or i in done
     # The check is not vacuous: every result was committed, and each record was seen done.
     assert all(seen_result)
-    assert done == set(range(TOOL_CALLS))
+    assert done == set(range(calls))
 
 
 async def assert_costs(name: str, ask: Ask) -> None:
@@ -223,7 +274,7 @@ async def assert_costs(name: str, ask: Ask) -> None:
 # --- Each framework's turn -----------------------------------------------------------------------
 
 
-async def test_adk_turn():
+async def adk_ask() -> Ask:
     pytest.importorskip("google.adk")
     from collections.abc import AsyncGenerator  # pylint: disable=import-outside-toplevel
 
@@ -243,19 +294,21 @@ async def test_adk_turn():
         ) -> AsyncGenerator[LlmResponse, None]:
             n = len(self.asked)
             self.asked.append(n)
-            if n < TOOL_CALLS:
-                part = types.Part(function_call=types.FunctionCall(id=call_id(n), name="lookup", args=arguments_of(n)))
-            else:
-                part = types.Part(text="done")
-            yield LlmResponse(content=types.Content(role="model", parts=[part]))
+            planned = round_of(n)
+            parts = (
+                [types.Part(function_call=types.FunctionCall(id=i, name=name, args=args)) for i, name, args in planned]
+                if planned
+                else [types.Part(text="done")]
+            )
+            yield LlmResponse(content=types.Content(role="model", parts=parts))
 
     async def ask(ctx: sessions.SessionContext, text: str, tools: list[Tool]) -> str:
         return await adk.prompt(ctx, text, model=Scripted(asked=[]), tools=[*tools])
 
-    await assert_costs("adk", ask)
+    return ask
 
 
-async def test_langgraph_agent_turn():
+async def langgraph_agent_ask() -> Ask:
     pytest.importorskip("langgraph")
     from langchain_core.language_models import BaseChatModel  # pylint: disable=import-outside-toplevel
     from langchain_core.messages import AIMessage, BaseMessage  # pylint: disable=import-outside-toplevel
@@ -279,8 +332,9 @@ async def test_langgraph_agent_turn():
         async def _agenerate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
             n = len(self.asked)
             self.asked.append(n)
-            if n < TOOL_CALLS:
-                reply = AIMessage("", tool_calls=[{"id": call_id(n), "name": "lookup", "args": arguments_of(n)}])
+            planned = round_of(n)
+            if planned:
+                reply = AIMessage("", tool_calls=[{"id": i, "name": name, "args": args} for i, name, args in planned])
             else:
                 reply = AIMessage("done")
             return ChatResult(generations=[ChatGeneration(message=reply)])
@@ -288,10 +342,10 @@ async def test_langgraph_agent_turn():
     async def ask(ctx: sessions.SessionContext, text: str, tools: list[Tool]) -> str:
         return await langgraph.prompt(ctx, text, model=Scripted(asked=[]), tools=[*tools])
 
-    await assert_costs("langgraph agent", ask)
+    return ask
 
 
-async def test_langgraph_graph_turn():
+async def langgraph_graph_ask() -> Ask:
     pytest.importorskip("langgraph")
     from langchain_core.messages import AIMessage  # pylint: disable=import-outside-toplevel
     from langgraph.graph import END, START, MessagesState, StateGraph  # pylint: disable=import-outside-toplevel
@@ -305,8 +359,9 @@ async def test_langgraph_graph_turn():
         async def model(state: MessagesState) -> dict[str, Any]:
             n = len(asked)
             asked.append(n)
-            if n < TOOL_CALLS:
-                reply = AIMessage("", tool_calls=[{"id": call_id(n), "name": "lookup", "args": arguments_of(n)}])
+            planned = round_of(n)
+            if planned:
+                reply = AIMessage("", tool_calls=[{"id": i, "name": name, "args": args} for i, name, args in planned])
             else:
                 reply = AIMessage("done")
             return {"messages": [reply]}
@@ -323,10 +378,10 @@ async def test_langgraph_graph_turn():
         builder.add_edge("tools", "model")
         return await langgraph.prompt(ctx, text, graph=builder)
 
-    await assert_costs("langgraph graph", ask)
+    return ask
 
 
-async def test_openai_turn():
+async def openai_ask() -> Ask:
     pytest.importorskip("agents")
     from agents import Model, ModelResponse, Usage, set_tracing_disabled  # pylint: disable=import-outside-toplevel
     from openai.types.responses import (  # pylint: disable=import-outside-toplevel
@@ -346,17 +401,18 @@ async def test_openai_turn():
         async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:
             n = self.asked
             self.asked += 1
-            output: Any
-            if n < TOOL_CALLS:
-                output = ResponseFunctionToolCall(
-                    type="function_call", call_id=call_id(n), name="lookup", arguments=json.dumps(arguments_of(n))
-                )
+            output: list[Any]
+            if planned := round_of(n):
+                output = [
+                    ResponseFunctionToolCall(type="function_call", call_id=i, name=name, arguments=json.dumps(args))
+                    for i, name, args in planned
+                ]
             else:
                 text: list[Any] = [ResponseOutputText(type="output_text", text="done", annotations=[])]
-                output = ResponseOutputMessage(
-                    id="msg", type="message", role="assistant", status="completed", content=text
-                )
-            return ModelResponse(output=[output], usage=Usage(), response_id=None)
+                output = [
+                    ResponseOutputMessage(id="msg", type="message", role="assistant", status="completed", content=text)
+                ]
+            return ModelResponse(output=output, usage=Usage(), response_id=None)
 
         def stream_response(self, *args: Any, **kwargs: Any) -> Any:
             raise NotImplementedError
@@ -364,10 +420,10 @@ async def test_openai_turn():
     async def ask(ctx: sessions.SessionContext, text: str, tools: list[Tool]) -> str:
         return await openai.prompt(ctx, text, model=Scripted(), tools=[*tools])
 
-    await assert_costs("openai", ask)
+    return ask
 
 
-async def test_pydantic_ai_turn():
+async def pydantic_ai_ask() -> Ask:
     pytest.importorskip("pydantic_ai")
     from pydantic_ai.messages import (  # pylint: disable=import-outside-toplevel
         ModelMessage,
@@ -385,10 +441,78 @@ async def test_pydantic_ai_turn():
         def scripted(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             n = len(asked)
             asked.append(n)
-            if n < TOOL_CALLS:
-                return ModelResponse(parts=[ToolCallPart("lookup", arguments_of(n), tool_call_id=call_id(n))])
+            if planned := round_of(n):
+                return ModelResponse(parts=[ToolCallPart(name, args, tool_call_id=i) for i, name, args in planned])
             return ModelResponse(parts=[TextPart("done")])
 
         return await pydantic_ai.prompt(ctx, text, model=FunctionModel(scripted), tools=[*tools])
 
-    await assert_costs("pydantic_ai", ask)
+    return ask
+
+
+FRAMEWORKS: dict[str, Callable[[], Awaitable[Ask]]] = {
+    "adk": adk_ask,
+    "langgraph agent": langgraph_agent_ask,
+    "langgraph graph": langgraph_graph_ask,
+    "openai": openai_ask,
+    "pydantic_ai": pydantic_ai_ask,
+}
+
+
+@pytest.mark.parametrize("name", FRAMEWORKS)
+async def test_a_turns_restate_calls_cost_one_commit_each(name: str):
+    SHAPE[0] = "serial"
+    await assert_costs(name, await FRAMEWORKS[name]())
+
+
+# --- Two Restate calls and a slow plain tool in one round --------------------------------------------
+
+
+async def records_done(host: Counting) -> set[int]:
+    """The calls (by the index of their order) that the latest commit has as done."""
+    _, records = await held(host.committed[-1])
+    return {i for i in range(2) for r in records if f'"{order_of(i)}"' in r["input"] and r.get("done")}
+
+
+async def until_done(host: Counting, wanted: set[int]) -> None:
+    for _ in range(1000):
+        if host.committed and await records_done(host) == wanted:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"the committed records never had {wanted} done: {await records_done(host)}")
+
+
+@pytest.mark.parametrize("name", FRAMEWORKS)
+async def test_each_answer_of_a_round_is_committed_on_its_own_while_a_slow_tool_still_runs(name: str):
+    """The commit that stores the results waits for the slow tool, and the answers do not wait for it: call 1's
+    answer is committed (written alone, as no commit is coming), then call 2's, each before the slow tool ends."""
+    SHAPE[0] = "parallel"
+    try:
+        ask = await FRAMEWORKS[name]()
+        asker = sessions.SessionObject("asker")
+
+        @asker.handler
+        async def run(ctx: sessions.SessionContext, text: str) -> str:
+            return await ask(ctx, text, [restated_lookup, slow_tool])
+
+        TURN[0] = "round"
+        SLOW[:] = [asyncio.Event()]
+        gate = asyncio.Event()
+        host = Counting(Backend(), service="asker", answers={"publish": b'{"revision": 1}'}, gate=gate)
+        turn = asyncio.ensure_future(invoke(asker, "run", host, request(), "round"))
+        try:
+            await until_done(host, {0})
+            assert not turn.done() and not SLOW[0].is_set()
+            gate.set()
+            await until_done(host, {0, 1})
+            assert not turn.done() and not SLOW[0].is_set()
+            SLOW[0].set()
+            assert await turn == "done"
+        finally:
+            SLOW[0].set()
+            gate.set()
+            await asyncio.gather(turn, return_exceptions=True)
+        measured = Measured(host.syncs, host.committed, 2, "done", host.backend)
+        await assert_no_result_ahead_of_its_record(measured, calls=2)
+    finally:
+        SHAPE[0] = "serial"
