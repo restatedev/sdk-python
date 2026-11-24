@@ -43,7 +43,8 @@
 //! Every database of the process is kept warm in one page cache
 //! ([`page_cache`]), and keeps the checkpoints it outgrows Restate with in
 //! the object store `RESTATE_SQL_OBJECT_STORE` names, if any
-//! ([`object_store`]). That store's requests are reqwest's, which need a
+//! ([`object_store`]), past the share `RESTATE_SQL_L0_BYTES` leaves Restate
+//! ([`state_options`]). That store's requests are reqwest's, which need a
 //! tokio runtime: they alone are polled inside one ([`InRuntime`]).
 use crate::explicit_recovery::{vm_error, PyExplicitRecoveryVM};
 use bytes::Bytes;
@@ -59,6 +60,7 @@ use restate_sdk_shared_core::explicit_recovery::ExplicitRecoveryVM;
 use restate_sdk_shared_core::sql::{self, Numeric, Value};
 use restate_sdk_shared_core::state::{
     self, BlobStore, KvStore, ObjectStoreBlobs, ObjectStoreL1, PageCache, PageCacheConfig,
+    StateOptions,
 };
 use restate_sdk_shared_core::NotificationHandle;
 use restate_sdk_shared_core::Value as VmValue;
@@ -644,26 +646,72 @@ async fn page_cache() -> io::Result<Option<PageCache>> {
 
 /// The page cache's configuration, from the environment: `None` when it is off.
 fn cache_config() -> io::Result<Option<PageCacheConfig>> {
-    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let off = var("RESTATE_SQL_CACHE").map(|v| v.to_ascii_lowercase());
     if matches!(off.as_deref(), Some("off" | "0" | "false" | "no")) {
         return Ok(None);
     }
-    let size = |name: &str, default: usize| match var(name) {
-        Some(value) => state::parse_size(&value).ok_or_else(|| {
-            io::Error::other(format!(
-                "{name}={value}: not a size (bytes, or with KiB, MiB or GiB)"
-            ))
-        }),
-        None => Ok(default),
-    };
     Ok(Some(PageCacheConfig {
         file: std::env::var_os("RESTATE_SQL_CACHE_FILE").map(std::path::PathBuf::from),
         ..PageCacheConfig::sized(
-            size("RESTATE_SQL_CACHE_MEMORY", 256 << 20)?,
-            size("RESTATE_SQL_CACHE_DISK", 1 << 30)?,
+            size("RESTATE_SQL_CACHE_MEMORY")?.unwrap_or(256 << 20),
+            size("RESTATE_SQL_CACHE_DISK")?.unwrap_or(1 << 30),
         )
     }))
+}
+
+/// The environment variable `name`, unless unset or empty.
+fn var(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// The size the environment variable `name` gives, if set: bytes, or with
+/// KiB, MiB or GiB ([`state::parse_size`]). One that is not a size is an
+/// error that says so.
+fn size(name: &str) -> io::Result<Option<usize>> {
+    let Some(value) = var(name) else {
+        return Ok(None);
+    };
+    match state::parse_size(&value) {
+        Some(size) => Ok(Some(size)),
+        None => Err(io::Error::other(format!(
+            "{name}={value}: not a size (bytes, or with KiB, MiB or GiB)"
+        ))),
+    }
+}
+
+/// How the process's databases flush: shared-core's defaults
+/// ([`StateOptions::default`]), with L0's share from `RESTATE_SQL_L0_BYTES`,
+/// read once: a database keeps its checkpoints' packs in the object's state
+/// (L0) until they hold this many bytes, and the checkpoint after that moves
+/// them, with its own, to the object store ([`StateOptions::l0_bytes`], 4
+/// MiB by default; bytes, or with KiB, MiB or GiB). `0` puts every
+/// checkpoint's pack in the object store. Without an object store it changes
+/// nothing: every pack stays in the state. A size that is not one fails
+/// every open, with its message, as a page cache size that is not one does.
+///
+/// It may differ from one process, or open, to the next: it never changes
+/// what is stored, only where the next checkpoint puts its pack. Every
+/// pack's name says its tier, which is where reads and garbage collection
+/// look for it, so a lower one moves what L0 holds at the next checkpoint,
+/// and a higher one keeps more packs in the state from then on; packs never
+/// move back from the object store.
+fn state_options() -> io::Result<StateOptions> {
+    static L0_BYTES: Mutex<Option<u64>> = Mutex::new(None);
+    let mut l0 = L0_BYTES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let defaults = StateOptions::default();
+    let l0_bytes = match *l0 {
+        Some(bytes) => bytes,
+        None => {
+            let set = size("RESTATE_SQL_L0_BYTES")?;
+            *l0.insert(set.map_or(defaults.l0_bytes, |bytes| bytes as u64))
+        }
+    };
+    Ok(StateOptions {
+        l0_bytes,
+        ..defaults
+    })
 }
 
 /// The process's object store, the one `RESTATE_SQL_OBJECT_STORE` names
@@ -724,7 +772,7 @@ fn in_runtime<'a, T: 'a>(mut future: BoxFuture<'a, T>) -> BoxFuture<'a, T> {
 }
 
 /// Open the database of `namespace`, kept warm in the process's page cache,
-/// with its packs past L0 in the process's object store, if any ([`object_store`]),
+/// with its packs past L0 ([`state_options`]) in the process's object store, if any ([`object_store`]),
 /// over the invocation's `vm` if given (with `name`, the key's database
 /// `name`), or else over the store behind `dispatch` (`lists_keys` if it has
 /// `keys`): see the module's doc. See [`sql::Open::reader`] for a `reader`.
@@ -755,7 +803,8 @@ pub(crate) fn sql_open<'py>(
         }),
     };
     answer(py, async move {
-        let mut open = sql::Database::open(store);
+        let options = state_options().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut open = sql::Database::open(store).options(options);
         let cache = page_cache()
             .await
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
