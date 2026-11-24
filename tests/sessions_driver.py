@@ -160,6 +160,17 @@ async def works_alone(ctx: sessions.SessionContext, kept: bool) -> str:
 
 
 @notes.handler()
+async def scopes_then_waits(ctx: sessions.SessionContext, scopes: int) -> str:
+    """Opens and closes ``scopes`` scopes of ``ctx.working`` back to back (the database opens one a statement), then
+    waits outside Restate, in no scope, until the test lets it go on."""
+    for _ in range(scopes):
+        async with ctx.working():
+            await asyncio.sleep(0)
+    await gate_of().wait()
+    return "done"
+
+
+@notes.handler()
 async def works_beside_a_call(ctx: sessions.SessionContext, how: str) -> str:
     """Waits for a call that is never answered, working meanwhile: in ``ctx.working`` (``kept``), in an annotation
     (``annotated``), or neither."""
@@ -658,6 +669,122 @@ async def test_an_open_annotation_is_a_trace_and_keeps_nothing_alive(gate: Gate,
     side = RestateSide()
     side.start("kh5", "annotated")
     assert await beats_while_at(gate, "works_beside_a_call", side) == 0, describe(side)
+
+
+class Scheduling:
+    """What the driver schedules for its heartbeats while a test runs: the tasks it creates, and the timers it arms."""
+
+    def __init__(self) -> None:
+        self.tasks = 0
+        self.timers = 0
+
+
+@pytest.fixture
+async def scheduling(monkeypatch) -> typing.AsyncIterator[Scheduling]:
+    loop = asyncio.get_running_loop()
+    seen = Scheduling()
+    previous = loop.get_task_factory()
+    arm = loop.call_at
+
+    def factory(loop_: asyncio.AbstractEventLoop, coro: Any, **kwargs: Any) -> asyncio.Future[Any]:
+        if "heartbeat" in getattr(coro, "__qualname__", ""):
+            seen.tasks += 1
+        if previous is not None:
+            return previous(loop_, coro, **kwargs)
+        return asyncio.Task(coro, loop=loop_, **kwargs)
+
+    def call_at(when: float, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> asyncio.TimerHandle:
+        if "beat" in getattr(callback, "__name__", ""):
+            seen.timers += 1
+        return arm(when, callback, *args, **kwargs)
+
+    loop.set_task_factory(factory)
+    monkeypatch.setattr(loop, "call_at", call_at)
+    try:
+        yield seen
+    finally:
+        loop.set_task_factory(previous)
+
+
+@pytest.fixture
+def slow_heartbeats(monkeypatch) -> None:
+    # Long enough that the scopes all close before the first beat is due.
+    monkeypatch.setattr(_driver, "HEARTBEAT_INTERVAL", timedelta(seconds=0.2))
+
+
+async def idle_after_scopes(gate_: Gate, side: RestateSide, scheduling: Scheduling) -> tuple[int, int, int]:
+    """Run ``scopes_then_waits``, leave it waiting outside any scope for ten heartbeat intervals, then let it end.
+
+    Returns the heartbeats it sent, and the tasks and timers it created, up to the end of that wait (the end of the
+    attempt opens scopes of the database's own).
+    """
+    running = asyncio.ensure_future(run(notes, "scopes_then_waits", side))
+    await gate_.reached.wait()
+    await asyncio.sleep(10 * _driver.HEARTBEAT_INTERVAL.total_seconds())
+    seen = (heartbeats(side), scheduling.tasks, scheduling.timers)
+    gate_.opened.set()
+    await running
+    return seen
+
+
+async def test_scopes_that_follow_one_another_share_one_timer(
+    gate: Gate, slow_heartbeats: None, scheduling: Scheduling
+):
+    # The database opens a scope for each statement: none of them starts and cancels a task or a timer of its own.
+    side = RestateSide()
+    side.start("kt1", 50)
+    beats, tasks, timers = await idle_after_scopes(gate, side, scheduling)
+    assert (tasks, timers) == (0, 1), describe(side)
+    assert beats == 0, describe(side)
+    assert output_of(side.sent()) == "done", describe(side)
+
+
+async def test_after_the_last_scope_closed_nothing_beats_and_nothing_is_left_running(
+    gate: Gate, slow_heartbeats: None, scheduling: Scheduling
+):
+    side = RestateSide()
+    side.start("kt2", 5)
+    # Ten intervals after the scopes closed: the timer fired once, found no scope open, and was not armed again.
+    beats, tasks, timers = await idle_after_scopes(gate, side, scheduling)
+    assert (beats, tasks, timers) == (0, 0, 1), describe(side)
+
+
+@pytest.mark.parametrize("value", ["", "abc", "0", "-5", "nan", "inf", "1_0", "1e999"])
+def test_an_invalid_heartbeat_setting_is_the_default(monkeypatch, value: str):
+    monkeypatch.setenv("RESTATE_SESSIONS_HEARTBEAT", value)
+    assert _driver.heartbeat_interval() == _driver.HEARTBEAT_INTERVAL.total_seconds()
+
+
+@pytest.mark.parametrize("value,seconds", [("20", 0.02), ("1500", 1.5), (" 250 ", 0.25), ("0.5", 0.0005)])
+def test_the_heartbeat_setting_is_in_milliseconds(monkeypatch, value: str, seconds: float):
+    monkeypatch.setenv("RESTATE_SESSIONS_HEARTBEAT", value)
+    assert _driver.heartbeat_interval() == seconds
+
+
+def test_an_unset_heartbeat_setting_is_twenty_seconds(monkeypatch):
+    monkeypatch.delenv("RESTATE_SESSIONS_HEARTBEAT", raising=False)
+    assert _driver.heartbeat_interval() == 20.0
+
+
+async def test_the_heartbeat_setting_sets_the_interval_of_an_attempt(gate: Gate, monkeypatch):
+    monkeypatch.setenv("RESTATE_SESSIONS_HEARTBEAT", "20")
+    side = RestateSide()
+    side.start("kt3", True)
+    # The interval is 20 ms from the environment, not the 20 s default.
+    running = asyncio.ensure_future(run(notes, "works_alone", side))
+    await gate.reached.wait()
+    await asyncio.sleep(0.4)
+    gate.opened.set()
+    await running
+    assert heartbeats(side) >= 3, describe(side)
+
+
+async def test_a_heartbeat_setting_that_is_invalid_leaves_the_default_interval(gate: Gate, monkeypatch):
+    monkeypatch.setenv("RESTATE_SESSIONS_HEARTBEAT", "soon")
+    monkeypatch.setattr(_driver, "HEARTBEAT_INTERVAL", timedelta(seconds=0.02))
+    side = RestateSide()
+    side.start("kt4", True)
+    assert await beats_while_at(gate, "works_alone", side) >= 3, describe(side)
 
 
 async def test_a_read_that_asks_restate_nothing_sees_a_carried_cancellation_too_once(gate: Gate):

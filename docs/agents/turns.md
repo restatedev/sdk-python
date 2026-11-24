@@ -467,7 +467,8 @@ sequenceDiagram
   after the timeout, so that a wait of days holds no process, and the next
   attempt gets the cancellation as it starts. A deployment that sets an
   inactivity timeout under 20 seconds is shut down between two of those
-  messages.
+  messages, unless it shortens the interval with `RESTATE_SESSIONS_HEARTBEAT`
+  (in milliseconds).
 - A cancellation that comes once the turn answered changes nothing: the
   answer stands.
 - A tool cut short by the stop raises the stop's reason, so the model never
