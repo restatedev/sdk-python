@@ -391,6 +391,14 @@ class AttemptDatabase(Writes):
         self._attempt.asked()
         return await self._attempt.call(lambda db: db.query_columns(sql, params))
 
+    async def execute(self, sql: str, params: Sequence[SqlParam] | None = None) -> None:
+        # A write while a rider is pending is the transaction that carries it (see ``ride_commit``).
+        if self._attempt.riding:
+            async with self._attempt.transaction() as tx:
+                await tx.execute(sql, params)
+        else:
+            await super().execute(sql, params)
+
     def transaction(self) -> typing.AsyncContextManager[Transaction]:
         return self._attempt.transaction()
 
@@ -448,6 +456,50 @@ def database(db: Database, name: str) -> Database:
     if attempt is None:
         raise TerminalError("database takes a handler's ctx.db")
     return attempt.database(name)
+
+
+Rider = Callable[[Transaction], Awaitable[None]]
+"""A write that rides the next commit of a database, in that commit's transaction."""
+
+URGENT_HOPS = 64
+"""How many event-loop iterations an urgent rider waits for a transaction to start before it is written alone.
+
+A framework asks for the commit that stores a tool's result a few iterations after the tool's call answered, with
+no I/O between (3 to 23 were measured, the most in the OpenAI Agents SDK); a count of iterations, unlike a time, does
+not change with the load of the process. A transaction that does not start within it is not coming soon (another
+tool of the round still runs), and an answer must not stay unrecorded for as long."""
+
+
+def ride_commit(db: Database, slot: str, write: Rider | None, *, urgent: bool = False) -> bool:
+    """Have ``write`` run in the next transaction of ``db`` that commits, before its commit, rather than commit on its own.
+
+    This is for bookkeeping that must be stored with the next write, not before it. A write by ``db.execute``
+    outside a transaction, made while a rider is pending, is that transaction; a read (``get``, ``values``,
+    ``query``) is not, and writes nothing. A transaction that rolls back leaves the rider pending, and so does
+    one that ends the handler before it commits: ``flush_riders`` writes what is left. Nothing rides after the
+    attempt ended, and what is pending is dropped with it.
+
+    A database has one rider per ``slot``: a later one replaces the earlier, and ``None`` clears it. A rider
+    registered while a commit that runs the earlier one is under way is for the commit after.
+
+    An ``urgent`` rider waits only for a transaction that is under way: if none is asked for within
+    ``URGENT_HOPS`` event-loop iterations of its registration (or of the end of one that left it pending), it is
+    written in a transaction of its own. A write of its own that fails is not retried and raises nothing: the rider
+    stays pending for the next commit or ``flush_riders``. A rider that replaces an urgent one stays urgent.
+
+    Returns:
+        ``False``, registering nothing, for a database that cannot ride (a view's, or one that is not a handler's
+        ``ctx.db``): the caller writes at once.
+    """
+    attempt = _ATTEMPT.of(db)
+    return attempt.ride(slot, write, urgent) if attempt is not None else False
+
+
+async def flush_riders(db: Database) -> None:
+    """Write what is pending (see ``ride_commit``) in a transaction of its own: nothing, if nothing is."""
+    attempt = _ATTEMPT.of(db)
+    if attempt is not None:
+        await attempt.flush_riders()
 
 
 async def reset(tx: Transaction) -> None:
@@ -540,6 +592,14 @@ class _Session:
         task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
 
+@dataclass
+class _Pending:
+    """A rider that is pending, and whether it may not wait for a commit that is not under way."""
+
+    write: Rider
+    urgent: bool
+
+
 class Attempt:
     """The SQL session of one attempt.
 
@@ -563,6 +623,17 @@ class Attempt:
         # The schemas fully applied to this attempt's database, by name.
         self._ensured: dict[str, Schema] = {}
         self._ended: bool = False
+        # The writes that ride the next commit, by slot (see ``ride_commit``).
+        self._riders: dict[str, _Pending] = {}
+        # The transactions asked for and not finished: one that is under way writes the riders.
+        self._active: int = 0
+        # The next hop of the chain that counts the iterations an urgent rider waits, and the hops counted so far.
+        self._hop: asyncio.Handle | None = None
+        self._hops: int = 0
+        # The transaction that writes an urgent rider alone, while it runs.
+        self._lone: asyncio.Task[None] | None = None
+        # Set when the handler has ended: nothing rides from then on.
+        self._closing: bool = False
         self.db: AttemptDatabase = AttemptDatabase(self)
         """``ctx.db``."""
         ensuring(self.db, self._ensure)
@@ -595,6 +666,77 @@ class Attempt:
         if take is not None and take():
             raise TerminalError("cancelled", 409)
 
+    @property
+    def riding(self) -> bool:
+        """Whether a rider is pending."""
+        return bool(self._riders)
+
+    def ride(self, slot: str, write: Rider | None, urgent: bool) -> bool:
+        """Register the rider of ``slot`` (see ``ride_commit``); ``False`` if this database cannot ride."""
+        if self._host.shared or self._ended or self._closing:
+            return False
+        if write is None:
+            self._riders.pop(slot, None)
+        else:
+            earlier = self._riders.get(slot)
+            self._riders[slot] = _Pending(write, urgent or (earlier is not None and earlier.urgent))
+            self._arm()
+        return True
+
+    def _arm(self) -> None:
+        """Start counting the iterations an urgent rider waits, if one is pending and nothing is counting."""
+        if self._hop is not None or self._ended or self._closing:
+            return
+        if not any(pending.urgent for pending in self._riders.values()):
+            return
+        self._hops = 0
+        self._hop = asyncio.get_running_loop().call_soon(self._step)
+
+    def _stop_counting(self) -> None:
+        if self._hop is not None:
+            self._hop.cancel()
+            self._hop = None
+
+    def _step(self) -> None:
+        """One iteration of the loop has passed: write the urgent riders alone once enough have, with nothing under way."""
+        self._hop = None
+        # A transaction under way writes them, or counts again as it ends.
+        if self._ended or self._closing or self._active > 0:
+            return
+        if not any(pending.urgent for pending in self._riders.values()):
+            return
+        self._hops += 1
+        if self._hops < URGENT_HOPS:
+            self._hop = asyncio.get_running_loop().call_soon(self._step)
+            return
+        self._lone = asyncio.ensure_future(self._alone())
+
+    async def _alone(self) -> None:
+        """Write the riders in a transaction of their own, which is not the handler's to ask for (see ``asked``).
+
+        The handler's cancellation is not for it: it stays owed to the handler's next call. A failure leaves the
+        riders pending for the next commit or ``flush_riders`` and is not tried again by a timer; it raises
+        nothing, as nothing awaits this.
+        """
+        try:
+            try:
+                async with self._transacted(rearm=False):
+                    pass
+            except asyncio.CancelledError:
+                raise
+            except BaseException:  # pylint: disable=broad-exception-caught
+                return
+            # After a success, a rider that came while it committed is counted now.
+            self._arm()
+        finally:
+            self._lone = None
+
+    async def flush_riders(self) -> None:
+        """Write what is pending in a transaction of its own (see ``flush_riders``)."""
+        if self._riders:
+            async with self.transaction():
+                pass
+
     def database(self, name: str) -> Database:
         """Return the key's separate database ``name`` for this attempt (see ``database``)."""
         if self._ended:
@@ -620,6 +762,12 @@ class Attempt:
         Re-raises ``error``, the handler's exception, if there is one;
         otherwise raises any failure to end a session.
         """
+        # What is pending is dropped, and nothing counts or writes from here on.
+        self._closing = True
+        self._riders.clear()
+        self._stop_counting()
+        if self._lone is not None:
+            await asyncio.wait({self._lone})
         failures: list[BaseException] = []
         for other in self._databases.values():
             try:
@@ -662,28 +810,55 @@ class Attempt:
         """
         # Before the session opens or the transaction begins: see ``asked``.
         self.asked()
-        outgoing: Outgoing | None = None
-        session = self._current()
+        async with self._transacted() as tx:
+            yield tx
+
+    @asynccontextmanager
+    async def _transacted(self, rearm: bool = True) -> AsyncGenerator[AttemptTransaction, None]:
+        """``transaction`` without ``asked``: it counts as under way until it ends, and runs the pending riders.
+
+        They are written after the body, which may have registered one (a transaction held open for more work),
+        and before the commit; one that is registered since is for the next commit. What it leaves pending (it
+        rolled back, or the rider came after it ran them) is counted again as it ends, if ``rearm``.
+        """
+        self._active += 1
         try:
-            db = await session.ready
-            async with db.transaction() as handle:
-                sends = _Sends() if self._has_outbox else None
-                # A view's writes stay in its own session, so there is nothing to reset.
-                tx = AttemptTransaction(handle, sends.record if sends is not None else _refused_send)
-                if not self._host.shared:
-                    _RESET.on(tx, lambda: self._reset(handle))
-                try:
-                    yield tx
-                finally:
-                    outgoing = sends.close() if sends is not None else None
-                if self._has_outbox:
-                    await self._commit_outbox(handle, outgoing)
-        except BaseException:
-            if session.ended:
-                session.retired = True
-            raise
-        if outgoing is not None:
-            await self.call(self._flush)
+            outgoing: Outgoing | None = None
+            # The riders this transaction wrote: pending until it has committed.
+            rode: list[tuple[str, _Pending]] = []
+            session = self._current()
+            try:
+                db = await session.ready
+                async with db.transaction() as handle:
+                    sends = _Sends() if self._has_outbox else None
+                    # A view's writes stay in its own session, so there is nothing to reset.
+                    tx = AttemptTransaction(handle, sends.record if sends is not None else _refused_send)
+                    if not self._host.shared:
+                        _RESET.on(tx, lambda: self._reset(handle))
+                    try:
+                        yield tx
+                    finally:
+                        outgoing = sends.close() if sends is not None else None
+                    if self._riders:
+                        rode = list(self._riders.items())
+                        for _, pending in rode:
+                            await pending.write(tx)
+                    if self._has_outbox:
+                        await self._commit_outbox(handle, outgoing)
+            except BaseException:
+                if session.ended:
+                    session.retired = True
+                raise
+            for slot, pending in rode:
+                if self._riders.get(slot) is pending:
+                    del self._riders[slot]
+            if outgoing is not None:
+                await self.call(self._flush)
+        finally:
+            self._active -= 1
+            if rearm:
+                self._stop_counting()
+                self._arm()
 
     async def _commit_outbox(self, handle: ConnectionTransaction, outgoing: Outgoing | None) -> None:
         """Write the outbox in ``handle``: the unstored committed sends, plus ``outgoing``, which the commit makes."""

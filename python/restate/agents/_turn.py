@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 
 from restate.agents import _signals
 from restate.agents._api import AgentContext, Answering, Published, Steer
-from restate.agents._calls import settle
+from restate.agents._calls import flush_calls, settle
 from restate.agents._common import (
     BUDGET,
     WINDOW,
@@ -371,6 +371,13 @@ async def answering(ctx: SessionContext, stored: Stored, work: Callable[[], Awai
                 _ANSWERING.set(ctx, outer)
             else:
                 _ANSWERING.delete(ctx)
+            # What rides the next commit is written if none is to come. After a turn that answered, the commit that
+            # stored its answer wrote it, and this does nothing. A failed attempt's own error is not this write's.
+            if failed:
+                with contextlib.suppress(BaseException):
+                    await flush_calls(ctx)
+            else:
+                await flush_calls(ctx)
 
 
 def _now() -> str:

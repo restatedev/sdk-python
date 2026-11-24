@@ -543,6 +543,15 @@ invocation (the next invocation's first call replaces it):
   again under the same id; a new call with the same input (the model asking
   again after the first's answer) waits anew, and never gets an earlier
   call's approval or denial.
+- **When it is written.** Only the record of a new call commits of its own, before the call is made. That a call
+  returned (`done`) rides a commit that is under way or starts at once: the one that stores the call's result,
+  so that the transcript never has a result of a call that is not recorded as returned. If none does (a slow
+  tool of the round still runs, another call waits), it is written in a transaction of its own once no commit has
+  started for `URGENT_HOPS` event-loop iterations, so it is never left unrecorded for long. That a record is
+  forgotten rides the next commit, whenever it comes, and a turn's end writes what is still pending. A crash in
+  the few moments before the return is written reads the call as one that did not return: it is made again under
+  the same key, and a stopped turn that another invocation closes reports it as cut off. This is
+  `restate.sessions.internal.ride_commit`.
 - **Forgetting.** After each write of steps that commits (once, before the
   publish an agent's turn makes there, and in a plain session object's turn
   too, which publishes nothing) and before each tool call, a record whose
