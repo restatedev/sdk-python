@@ -479,6 +479,8 @@ async def test_a_flush_that_has_begun_is_stored_before_a_put_called_in_the_same_
     """The write's rows wait, and are stored on their own just as a put is called, in the iteration where the wait
     ended; the put is started at once (as LangGraph's are, on Python 3.12 and later), so it could take the database
     first. The rows of the writes called before the put come first."""
+    if not lazy_tasks and not hasattr(asyncio, "eager_task_factory"):
+        pytest.skip("Python 3.11 has no eager tasks: LangGraph never starts a task at once there")
 
     async def body(pair: Pair) -> None:
         loop = asyncio.get_running_loop()
@@ -500,8 +502,11 @@ async def test_a_flush_that_has_begun_is_stored_before_a_put_called_in_the_same_
 
         loop.call_soon(late, 2)
         await asyncio.gather(first, *results[:0])
-        while len(results) < 2:
+        for _ in range(100):  # bounded: a callback that failed must fail the test, not hang it
+            if len(results) == 2:
+                break
             await asyncio.sleep(0)
+        assert len(results) == 2
         await asyncio.gather(*results)
         assert pair.rows() == [("a", "x"), ("b", "y")]
         assert pair.spy.tables == [[WRITES], [WRITES, CHECKPOINTS]]
