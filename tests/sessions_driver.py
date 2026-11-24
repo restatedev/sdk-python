@@ -160,6 +160,24 @@ async def works_alone(ctx: sessions.SessionContext, kept: bool) -> str:
 
 
 @notes.handler()
+async def works_after_silence(ctx: sessions.SessionContext, args: list[float]) -> str:
+    """Is silent for ``args[0]`` seconds, then works in ``ctx.working`` (in ``args[1]`` scopes that follow one another
+    at once, if more than one) until the test lets it go on. Tells the gate when it started."""
+    silence, scopes = args[0], int(args[1])
+    gate_of().seen.append(str(asyncio.get_running_loop().time()))
+    await asyncio.sleep(silence)
+    if scopes > 1:
+        for _ in range(scopes):
+            async with ctx.working():
+                pass
+        await gate_of().wait()
+    else:
+        async with ctx.working():
+            await gate_of().wait()
+    return "done"
+
+
+@notes.handler()
 async def scopes_then_waits(ctx: sessions.SessionContext, scopes: int) -> str:
     """Opens and closes ``scopes`` scopes of ``ctx.working`` back to back (the database opens one a statement), then
     waits outside Restate, in no scope, until the test lets it go on."""
@@ -747,6 +765,38 @@ async def test_after_the_last_scope_closed_nothing_beats_and_nothing_is_left_run
     # Ten intervals after the scopes closed: the timer fired once, found no scope open, and was not armed again.
     beats, tasks, timers = await idle_after_scopes(gate, side, scheduling)
     assert (beats, tasks, timers) == (0, 0, 1), describe(side)
+
+
+async def test_a_scope_opened_part_way_into_an_interval_of_silence_beats_when_the_silence_reaches_the_interval(
+    gate: Gate, monkeypatch
+):
+    # Silent for 0.3 s of a 0.4 s interval, then working: the first beat is due at 0.4 s of silence, not 0.4 s after
+    # the scope opened (0.7 s), or Restate may hear nothing for nearly two intervals.
+    monkeypatch.setattr(_driver, "HEARTBEAT_INTERVAL", timedelta(seconds=0.4))
+    side = RestateSide()
+    side.start("kt5", [0.3, 1])
+    running = asyncio.ensure_future(run(notes, "works_after_silence", side))
+    await gate.reached.wait()
+    started = float(gate.seen[0])
+    await asyncio.sleep(max(0.0, started + 0.55 - asyncio.get_running_loop().time()))
+    beats = heartbeats(side)
+    gate.opened.set()
+    await running
+    assert beats == 1, describe(side)
+
+
+async def test_scopes_opened_together_after_a_long_silence_send_one_heartbeat(gate: Gate, monkeypatch):
+    monkeypatch.setattr(_driver, "HEARTBEAT_INTERVAL", timedelta(seconds=0.2))
+    side = RestateSide()
+    side.start("kt6", [0.3, 3])
+    running = asyncio.ensure_future(run(notes, "works_after_silence", side))
+    await gate.reached.wait()
+    # The scopes closed at once; the timer of the run fires after an interval, finds none open, and sends nothing.
+    await asyncio.sleep(0.1)
+    beats = heartbeats(side)
+    gate.opened.set()
+    await running
+    assert beats == 1, describe(side)
 
 
 @pytest.mark.parametrize("value", ["", "abc", "0", "-5", "nan", "inf", "1_0", "1e999"])

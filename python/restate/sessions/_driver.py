@@ -530,7 +530,8 @@ class AttemptDriver:
             self._scopes -= 1
 
     def _start_heartbeats(self, every: float) -> None:
-        """A run of scopes opens: its beats are ``every`` after it opened, and every ``every`` while a scope stays open.
+        """A run of scopes opens: its first beat is due once the attempt has been silent for ``every`` (at once, if it
+        has), and the next ``every`` after each beat, while a scope stays open.
 
         The timer is armed for the first. On firing it beats if the run it finds is that old, waits out the rest if a
         run that opened later is younger, and is let go if no scope is open.
@@ -539,11 +540,13 @@ class AttemptDriver:
             return
         now = self._loop.time()
         # The first once the silence reaches an interval: at once, if it already has.
-        if now - self._wrote_at >= every:
+        first = self._wrote_at + every
+        if first <= now:
             self._heartbeat()
+            first = now + every
         self._run_every = every
-        self._next_beat = now + every
-        self._arm(self._next_beat)
+        self._next_beat = first
+        self._arm(first)
 
     def _arm(self, due: float) -> None:
         """Arm the timer for ``due``, unless it is armed for that or earlier."""
@@ -570,6 +573,9 @@ class AttemptDriver:
         # If the attempt ended, the tick notices.
         with contextlib.suppress(SdkInternalBaseException):
             self.act(lambda vm: vm.heartbeat())
+            # The write restarts Restate's inactivity timer, as the tick will note: scopes opened before it do not beat
+            # again.
+            self._wrote_at = self._loop.time()
 
 
 def _cancelled_error() -> TerminalError:
