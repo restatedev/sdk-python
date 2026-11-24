@@ -229,7 +229,8 @@ class DefaultSerde(Serde[I]):
     Behavior:
     - Serialization:
         - If the object is an instance of Pydantic's `BaseModel`,
-            it uses `model_dump_json()` for serialization.
+            it uses `model_dump_json(by_alias=True)` for serialization, so the JSON
+            uses the same field names `model_validate_json()` reads back.
         - Otherwise, it falls back to `json.dumps()`.
     - Deserialization:
         - Uses `json.loads()` to convert byte arrays into Python objects.
@@ -307,7 +308,9 @@ class DefaultSerde(Serde[I]):
         if Msgspec.is_struct(hint):
             return Msgspec.encode(obj)
         if is_pydantic(hint):
-            return obj.model_dump_json().encode("utf-8")  # type: ignore[attr-defined]
+            # by_alias: model_validate_json() reads aliases, so dumping field names
+            # would break the round trip for aliased fields.
+            return obj.model_dump_json(by_alias=True).encode("utf-8")  # type: ignore[attr-defined]
         if is_dataclass(obj):
             data = DaciteToDict(obj)  # type: ignore
             return json.dumps(data).encode("utf-8")
@@ -351,7 +354,8 @@ class PydanticJsonSerde(Serde[I]):
         """
         if obj is None:
             return bytes()
-        json_str = obj.model_dump_json()  # type: ignore[attr-defined]
+        # by_alias: see DefaultSerde.serialize.
+        json_str = obj.model_dump_json(by_alias=True)  # type: ignore[attr-defined]
         return json_str.encode("utf-8")
 
 
