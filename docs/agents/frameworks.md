@@ -409,6 +409,17 @@ sequenceDiagram
   pointing to) the whole state, the message list included. There is no turn:
   a thread is a chain of checkpoints. Messages have ids, and
   `RemoveMessage(id)` (or `REMOVE_ALL_MESSAGES`) removes them.
+- **A task's writes are saved apart from its step's checkpoint:** the saver
+  is called with `put_writes` as each task finishes, and with `put` once the
+  step's last task has (before the next step starts, with
+  `durability="sync"`). A parallel step's finished tasks are therefore
+  saved while their siblings still run, so that they do not run again after
+  a crash. LangGraph waits for every `put_writes` before a run ends, and
+  before the step's `put` only for a `DeltaChannel`'s writes, an error
+  handler's and `update_state`'s. The checkpointer keeps a task's writes
+  pending, and the `put` that follows at once stores them in its own
+  transaction, before its checkpoint; else they are stored alone after a few
+  event-loop iterations.
 - **`DeltaChannel`** (a beta) stores a channel's writes, and its whole value
   only now and then (a snapshot); its value is rebuilt from the latest
   snapshot and the writes after it.

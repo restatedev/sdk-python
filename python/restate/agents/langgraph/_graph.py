@@ -18,7 +18,10 @@ message as a new ``HumanMessage``:
 - The graph's checkpoints are in the key's database (``SqlCheckpointSaver``),
   stored before each step runs (``durability="sync"``), and the prebuilt
   ``nodes`` and the tools of ``tools()`` get the handler's context in it
-  (``_context.py``). LangGraph's run context is the graph's own
+  (``_context.py``). A task's writes are stored with the checkpoint of its
+  step when that follows at once, and alone otherwise, as a parallel step's
+  finished task's are, so that a crash does not run it again (see the
+  checkpointer). LangGraph's run context is the graph's own
   (``context=``), else the handler's. A retried attempt resumes the run it
   cut off. A run that finishes prunes the thread to the latest checkpoint
   of each namespace (LangGraph's ``aprune``), and what LangGraph rebuilds
