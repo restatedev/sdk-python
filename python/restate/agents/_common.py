@@ -292,6 +292,10 @@ def is_cancellation(error: BaseException) -> bool:
     return isinstance(error, TerminalError) and error.status_code == CANCELLATION and error.message == "cancelled"
 
 
+NO_ANSWER = "(no answer)"
+"""What an empty answer says, as the model sees it later in the conversation: a model provider may refuse an empty
+text (Anthropic's does)."""
+
 CANCELLED = "Cancelled: the turn was stopped before it finished."
 """The answer of a cancelled turn, and the result of each tool call it cut off, which the model sees later in the conversation."""
 

@@ -822,3 +822,57 @@ async def test_a_stopped_or_failed_request_leaves_no_scope_open():
         await asked("fail x")
     assert scopes == [("model", 1)]
     assert now[0].open_scopes == 0
+
+
+async def test_a_blank_reply_of_the_model_is_sent_later_as_no_answer():
+    seen: list[list[BaseMessage]] = []
+
+    class Blank(Scripted):
+        def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
+            seen.append(list(messages))
+            prompt = next(m for m in reversed(messages) if isinstance(m, HumanMessage))
+            if str(prompt.content).startswith("blank"):
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(" "))])
+            return ChatResult(generations=[ChatGeneration(message=AIMessage("done"))])
+
+    ask = asking(model=Blank())
+    assert (await ask("blank 1")).strip() == ""
+    assert await ask("next 2") == "done"
+    # The model's blank reply, in the middle of the next request, says so: a provider may refuse it.
+    assert [(type(m).__name__, m.content) for m in seen[-1]] == [
+        ("HumanMessage", "blank 1"),
+        ("AIMessage", "(no answer)"),
+        ("HumanMessage", "next 2"),
+    ]
+
+
+async def test_an_empty_answer_is_sent_later_as_no_answer_and_a_reply_with_tool_calls_is_not_blank():
+    from restate.agents.langgraph import _agent  # pylint: disable=import-outside-toplevel
+
+    # The reply of an earlier turn that fell out of the window is made of its answer.
+    assert _agent._Items().reply("  ") == AIMessage("(no answer)")  # pyright: ignore[reportPrivateUsage]
+    assert _agent._Items().reply("hi") == AIMessage("hi")  # pyright: ignore[reportPrivateUsage]
+    call = AIMessage("", tool_calls=[{"id": "c1", "name": "get_weather", "args": {"city": "x"}}])
+    text = AIMessage([{"type": "text", "text": "hi"}])
+    blank = AIMessage([{"type": "text", "text": " "}], id="m1")
+    assert _agent._sendable([call, text, blank]) == [call, text, AIMessage("(no answer)", id="m1")]  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_blank_reply_that_is_not_the_answer_asked_for_is_asked_again_without_being_sent_blank():
+    import pydantic  # pylint: disable=import-outside-toplevel
+
+    class Weather(pydantic.BaseModel):
+        city: str
+
+    seen: list[list[BaseMessage]] = []
+
+    class Blank(Scripted):
+        def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> ChatResult:
+            seen.append(list(messages))
+            text = "" if len(seen) == 1 else '{"city": "Rome"}'
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(text))])
+
+    ask = asking(model=Blank(), output=Weather)
+    assert await ask("where") == Weather(city="Rome")
+    assert len(seen) == 2
+    assert [m.content for m in seen[-1] if isinstance(m, AIMessage)] == ["(no answer)"]
