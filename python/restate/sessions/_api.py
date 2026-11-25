@@ -249,10 +249,10 @@ class Sender(Protocol):
 class Transaction(DatabaseWriter, Sender, Protocol):
     """One transaction of a ``Database``: its SQL, and the sends it commits with.
 
-    ``tx.send`` sends right after the transaction commits, and never if it
-    rolls back. Each committed send goes out once: if the process fails after
-    the commit but before the send, the next attempt makes it, under the same
-    idempotency key, and Restate drops any duplicate.
+    ``tx.send`` sends with the transaction's commit, and never if it rolls
+    back: the rows and the sends are applied by Restate together, all or
+    nothing, so each committed send goes out once, also if the process fails
+    right after the commit.
 
     A retried attempt that runs the transaction's body again commits a new
     transaction, with sends of its own. To send once across attempts, give the
@@ -350,6 +350,10 @@ class SessionContext(Caller, Sender, Protocol):
         The cancellation is sent right away, and not awaited. Cancelling an
         invocation that has ended does nothing, so a retried attempt may
         cancel it again.
+
+        Raises:
+            TerminalError: ``invocation_id`` is not an invocation id (400).
+                Nothing is sent, and the handler may catch it and go on.
         """
         ...
 

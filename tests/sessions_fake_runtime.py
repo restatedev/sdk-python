@@ -27,7 +27,7 @@ from collections.abc import Iterator
 import pytest
 
 from restate import TerminalError, sessions
-from restate._internal import PyFailure  # pylint: disable=no-name-in-module
+from restate._internal import PyFailure, _FakeRuntime  # pylint: disable=no-name-in-module
 from restate.sessions import _driver, internal
 from restate.sessions._object import HEAD_KEY
 from sessions_wire import TYPE, RestateSide, decode, outcome, run  # pylint: disable=import-error
@@ -341,14 +341,146 @@ async def test_a_signal_read_suspends_the_invocation_and_its_arrival_wakes_it(st
 
 
 async def test_a_signal_sent_to_another_invocation(store: str):
+    other = _FakeRuntime.invocation_id(9)
     side = RestateSide()
-    side.start(keyed("notify", store), "inv_other")
+    side.start(keyed("notify", store), other)
     await run(shop, "notify", side)
     assert outcome(side.sent()) == ("value", "notified"), describe(side)
     rt = side.rt
     assert rt is not None
     [(target, name, value)] = rt.signals_sent()
-    assert (target, name, value) == ("inv_other", "done", b'"shipped"')
+    assert (target, name, value) == (other, "done", b'"shipped"')
+
+
+# --- The attempt's end, seen by a database call that waits on Restate
+
+
+_noted: list[str] = []
+
+
+@shop.handler()
+async def inserts_in_a_task(ctx: sessions.SessionContext, id_: str) -> str:
+    """Inserts from a task of its own, which outlives the handler's task: the driver cancels only the latter."""
+
+    async def work() -> None:
+        try:
+            await ctx.db.execute("INSERT INTO orders (id) VALUES (?)", [id_])
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            _noted.append(f"caught {type(error).__name__}: {error}")
+        except BaseException as error:
+            _noted.append(f"ended {type(error).__name__}")
+            raise
+
+    await asyncio.shield(asyncio.ensure_future(work()))
+    return "inserted"
+
+
+async def test_a_database_call_waiting_when_the_attempt_is_shut_down_raises_nothing_user_code_catches(store: str):
+    # The insert's commit waits for its ack (the second thing asked for, after the migrations' commit), which never
+    # comes: Restate shuts the attempt down. On the VM's store the commit waits in Rust, and its failure came back
+    # as a RuntimeError, which an ``except Exception`` caught (the e2e campaign's B2).
+    _noted.clear()
+    side = RestateSide(withhold_answer=2)
+    side.start(keyed("shut-mid-call", store), "o1")
+    first = asyncio.ensure_future(run(shop, "inserts_in_a_task", side))
+    await side.until(lambda: len(side.asks) >= 2, "the insert's commit asking for its ack")
+    assert side.asks == ["ack", "ack"], side.asks
+    side.shut_down()
+    await first
+    await side.until(lambda: bool(_noted), "the insert's end")
+    assert _noted == ["ended SuspendedException"], _noted
+    assert outcome(side.sent()) is None, describe(side)
+
+
+# --- Invalid input to an action (D65): a terminal error the handler can catch, and the attempt goes on
+
+MALFORMED_IDS = ["inv_garbage", "inv_1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", "not-an-id"]
+
+
+@shop.handler()
+async def targets_malformed_ids(ctx: sessions.SessionContext, other: str) -> list[str]:
+    """Cancels, signals and attaches to each malformed id, catching what each raises; then does all three right."""
+    caught: list[str] = []
+    for malformed in MALFORMED_IDS:
+        try:
+            ctx.cancel(malformed)
+        except TerminalError as error:
+            caught.append(f"{error.status_code} {error.message}")
+        try:
+            internal.send_signal(ctx, malformed, "done", b'"x"')
+        except TerminalError as error:
+            caught.append(f"{error.status_code} {error.message}")
+        attached = internal.attach_invocation(ctx, malformed)
+        try:
+            await attached
+        except TerminalError as error:
+            caught.append(f"{error.status_code} {error.message}")
+    ctx.cancel(other)
+    internal.send_signal(ctx, other, "done", b'"shipped"')
+    async with ctx.db.transaction() as tx:
+        # In a transaction too: the error is the handler's, which may roll the transaction back or go on.
+        try:
+            ctx.cancel("inv_garbage")
+        except TerminalError:
+            caught.append("in the transaction")
+        await tx.execute("INSERT INTO orders (id) VALUES ('after')")
+    await internal.flush(ctx)
+    return caught
+
+
+@shop.handler()
+async def sends_with_an_empty_idempotency_key(ctx: sessions.SessionContext, with_row: bool) -> list[str]:
+    """A transaction whose send Restate would refuse (an empty idempotency key), with a row or without; then a row."""
+    noted: list[str] = []
+    try:
+        async with ctx.db.transaction() as tx:
+            if with_row:
+                await tx.execute("INSERT INTO orders (id) VALUES ('rolled back')")
+            tx.generic_send("Shipping", "ship", "x", key="x", idempotency_key="")
+    except TerminalError as error:
+        noted.append(f"{error.status_code} {error.message}")
+    await ctx.db.execute("INSERT INTO orders (id) VALUES ('after')")
+    return noted
+
+
+@pytest.mark.parametrize("with_row", [True, False])
+async def test_a_send_restate_would_refuse_fails_its_commit_with_a_terminal_error_and_the_attempt_goes_on(
+    store: str, with_row: bool
+):
+    key = keyed(f"empty-key-{with_row}", store)
+    side = RestateSide()
+    side.start(key, with_row)
+    await run(shop, "sends_with_an_empty_idempotency_key", side)
+    assert outcome(side.sent()) == ("value", ["400 the idempotency key is empty"]), describe(side)
+    rt = side.rt
+    assert rt is not None
+    # The commit's group was dropped, its row with it; nothing was sent.
+    assert rt.violations() == [] and rt.outcomes() == [("completed",)]
+    assert side.sends == []
+    assert await stored_orders(side.state, key) == ["after"]
+
+
+async def test_a_malformed_invocation_id_is_a_terminal_error_the_handler_catches(store: str):
+    other = _FakeRuntime.invocation_id(9)
+    side = RestateSide()
+    side.start(keyed("malformed", store), other)
+    await run(shop, "targets_malformed_ids", side)
+    ended = outcome(side.sent())
+    assert ended is not None and ended[0] == "value", (ended, describe(side))
+    caught = ended[1]
+    assert len(caught) == 3 * len(MALFORMED_IDS) + 1, caught
+    assert all(c.startswith("400 ") and "is not an invocation id" in c for c in caught[:-1]), caught
+    assert "'inv_garbage' is not an invocation id" in caught[0]
+    assert caught[-1] == "in the transaction"
+    rt = side.rt
+    assert rt is not None
+    # Nothing malformed reached Restate: one attempt, no violation, only the good cancel and signal.
+    assert rt.violations() == []
+    assert rt.outcomes() == [("completed",)]
+    assert rt.cancels_sent() == [other]
+    assert [target for target, _, _ in rt.signals_sent()] == [other]
+    assert not any(m.type == TYPE.attach_invocation for m in side.sent()), describe(side)
+    assert await stored_orders(side.state, keyed("malformed", store)) == ["after"]
 
 
 async def test_a_signal_that_arrived_before_the_read_answers_it_at_once(store: str):

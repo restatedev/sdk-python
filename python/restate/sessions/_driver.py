@@ -49,6 +49,7 @@ from typing import Any
 
 from restate._internal import (  # pylint: disable=no-name-in-module
     AttemptShutDownException,
+    InvalidInputException,
     PyExplicitRecoveryVM,
     PyFailure,
     PyHeader,
@@ -444,13 +445,20 @@ class AttemptDriver:
     # --- Actions
 
     def act(self, f: Callable[[PyExplicitRecoveryVM], T]) -> T:
-        """Call the VM with ``f``, then schedule a tick; the attempt's end raises ``SuspendedException``."""
+        """Call the VM with ``f``, then schedule a tick; the attempt's end raises ``SuspendedException``.
+
+        A value user code passed that Restate would refuse (an invocation id that is not one, say) raises
+        ``TerminalError`` (400): that action fails alone, nothing was sent, and the attempt goes on.
+        """
         if self.ended is not None:
             raise self.ended
         try:
             return f(self.vm)
         except AttemptShutDownException:
             raise SuspendedException() from None
+        except InvalidInputException as error:
+            message, code = error.args
+            raise TerminalError(message, status_code=code) from None
         except VMException as error:
             raise SdkInternalException() from error
         finally:
@@ -856,7 +864,14 @@ class VmHost:
         return _SendHandle(self.driver, self.driver.invocation_id_future(handle))
 
     def attach_invocation(self, invocation_id: str) -> Awaitable[bytes]:
-        return self.driver.future(self.driver.act(lambda vm: vm.attach_invocation(invocation_id)))
+        try:
+            handle = self.driver.act(lambda vm: vm.attach_invocation(invocation_id))
+        except TerminalError as error:
+            # Not an invocation id (see ``act``): the awaitable fails with it, as with any failure of the attach.
+            failed: asyncio.Future[bytes] = _quiet(asyncio.get_running_loop().create_future())
+            failed.set_exception(error)
+            return failed
+        return self.driver.future(handle)
 
     def working(self) -> contextlib.AbstractAsyncContextManager[None]:
         """The handler's ``ctx.working``: the attempt is kept alive while its body runs."""

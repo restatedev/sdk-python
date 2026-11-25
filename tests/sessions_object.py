@@ -505,17 +505,16 @@ async def test_start_sends_and_returns_the_invocation_id_that_attach_invocation_
 
 
 async def test_ctx_send_is_made_at_once_and_cancel_takes_an_invocation_id():
+    # A malformed id is the shared core's to refuse: see sessions_fake_runtime.
     sender = sessions.SessionObject("sender")
 
     @sender.handler()
     async def go(ctx: sessions.SessionContext) -> None:
         ctx.send(record, "entry", key="k")
         ctx.cancel("inv_1")
-        ctx.cancel("not-an-id")
 
     host = Host(Backend(), service="sender")
-    with pytest.raises(TerminalError, match="not an invocation id"):
-        await run(sender, "go", host)
+    await run(sender, "go", host)
     assert [(s.handler, s.key, s.idempotency_key) for s in host.sends] == [("record", "k", None)]
     assert host.cancelled == ["inv_1"]
 

@@ -48,7 +48,7 @@ from restate._internal import (  # pylint: disable=import-error,no-name-in-modul
     SqlReply,
     sql_open,
 )
-from restate.exceptions import TerminalError
+from restate.exceptions import SuspendedException, TerminalError
 
 SqlValue = None | int | float | str | bytes
 """A value read from the database: ``None``, ``int`` (64-bit), ``float``, ``str`` or ``bytes`` (a BLOB)."""
@@ -367,13 +367,21 @@ class _Sql(abc.ABC):
         """Return the exception to raise for ``error``.
 
         That is an ``SqlError`` if a retry would fail the same way, or the
-        store's own error if that is what ended the session.
+        store's own error if that is what ended the session. A ``TerminalError``
+        stays what it is: an ``SqlError`` already, or the handler's own (a send
+        of a commit that Restate would refuse, D65), with its code.
         """
-        if isinstance(error, SqlError):
+        if isinstance(error, TerminalError):
             return error
         failed = self._boundary.failed
         if failed is not None and not self._native.is_usable():
             return failed
+        vm = getattr(self._boundary.store, "vm", None)
+        if vm is not None and vm.state() == "closed":
+            # The attempt is over (Restate shut it down, say, while the call waited on the VM in Rust, whose error
+            # reaches here only as text): the call failed for that, which the handler must not take for an error of
+            # its own. Tested by sessions_fake_runtime's test_a_database_call_waiting_when_the_attempt_is_shut_down….
+            return SuspendedException()
         refused = isinstance(error, (SqlRefusedException, TypeError, ValueError))
         if refused or self._native.is_usable():
             sql_error = SqlError(str(error))

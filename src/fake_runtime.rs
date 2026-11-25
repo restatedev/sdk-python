@@ -13,7 +13,7 @@ use pyo3::exceptions::{PyAssertionError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use restate_sdk_shared_core::explicit_recovery::fake_runtime::{
-    request_headers, AttemptOutcome, CalleeBehavior, FakeRuntime, FakeRuntimeError,
+    self, request_headers, AttemptOutcome, CalleeBehavior, FakeRuntime, FakeRuntimeError,
     FakeRuntimeOptions, InvocationSpec, InvocationStatus, Preload, ShutdownReason,
 };
 use restate_sdk_shared_core::Value;
@@ -71,7 +71,7 @@ impl PyFakeRuntime {
     #[new]
     #[pyo3(signature = (
         *,
-        invocation_id = "inv_1fakeruntime0000000000000000".to_owned(),
+        invocation_id = None,
         service = "FakeObject".to_owned(),
         handler = "handle".to_owned(),
         key = Some("key".to_owned()),
@@ -90,7 +90,7 @@ impl PyFakeRuntime {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        invocation_id: String,
+        invocation_id: Option<String>,
         service: String,
         handler: String,
         key: Option<String>,
@@ -111,7 +111,7 @@ impl PyFakeRuntime {
             return Err(PyValueError::new_err("first_next_result_id is at least 1"));
         }
         let spec = InvocationSpec {
-            invocation_id,
+            invocation_id: invocation_id.unwrap_or_else(|| fake_runtime::invocation_id(0)),
             service,
             handler,
             key,
@@ -138,6 +138,14 @@ impl PyFakeRuntime {
             ..Default::default()
         };
         Ok(Self(FakeRuntime::with_options(spec, options)))
+    }
+
+    /// An invocation id in Restate's format, the `n`-th the fake mints: 0 is the invocation's own
+    /// by default, its calls' are 1, 2, … A test takes one above those for an invocation the fake
+    /// does not run (a signal's target, say).
+    #[staticmethod]
+    fn invocation_id(n: u64) -> String {
+        fake_runtime::invocation_id(n)
     }
 
     /// The headers of the request that opens an attempt.

@@ -275,6 +275,16 @@ The ``ReceiveChannel``'s loop takes it, the input pump hands it to the VM and
 schedules a tick, and the tick acts on it: three turns.
 """
 
+
+def _database_opens() -> list[asyncio.Task[Any]]:
+    """The attempts' databases that are opening now (``Attempt._start``): see ``RestateSide.quiet``."""
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if not task.done() and getattr(task.get_coro(), "__qualname__", "") == "Attempt._start"
+    ]
+
+
 OBJECT_PRELOAD = [HEAD_KEY]
 """What Restate preloads of a session object's state: the database's head alone (lazy, the head whitelisted)."""
 
@@ -380,6 +390,7 @@ class RestateSide:
         self._parsed = 0
         self._frames: asyncio.Queue[Message] = asyncio.Queue()
         self._delivering = 0
+        self._pushed = 0
         self._closed_input = False
         self._withheld = False
         self.ended = False
@@ -401,6 +412,7 @@ class RestateSide:
 
     def _push(self, chunk: bytes) -> None:
         if chunk:
+            self._pushed += 1
             self._inbound.put_nowait({"type": "http.request", "body": chunk, "more_body": True})
 
     def _push_output(self) -> None:
@@ -487,10 +499,27 @@ class RestateSide:
         return any(c.target == target for c in self.calls)
 
     async def quiet(self) -> None:
-        """Return once Restate took in everything the attempt wrote, and the attempt acted on every answer."""
+        """Return once Restate took in everything the attempt wrote, and the attempt acted on every answer.
+
+        Also once the database the attempt opens as it starts (``Attempt.open_now``, an exclusive handler's) is open:
+        the open runs partly in Rust, off the event loop, so its migrations' commit can go out after any number of
+        turns, and with it a notification the attempt would not have processed at a shutdown (rule 3).
+        """
         while True:
+            opening = _database_opens()
+            if opening:
+                await asyncio.wait(opening)
+                continue
+            pushed = self._pushed
             await self.handed_off()
-            if self._frames.empty() and self._delivering == 0 and self._parsed == len(self.sent()):
+            # An answer pushed while the attempt was handed what came before it is not handed off yet: once more.
+            if (
+                self._pushed == pushed
+                and self._frames.empty()
+                and self._delivering == 0
+                and self._parsed == len(self.sent())
+                and not _database_opens()
+            ):
                 return
 
     async def until(self, condition: Callable[[], bool], what: str, timeout: float = 20.0) -> None:

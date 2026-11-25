@@ -35,12 +35,23 @@ create_exception!(
     "Restate shut the attempt down: it is over, and a new attempt will run the handler from the start."
 );
 
-/// A VM error as Python gets it: the attempt's shutdown is an `AttemptShutDownException`; any
-/// other a `VMException` whose args are `(message, code)`: a refused `new` answers the request
-/// with that code as its HTTP status (415), not with a 500.
+create_exception!(
+    restate_sdk_python_core,
+    InvalidInputException,
+    pyo3::exceptions::PyException,
+    "A value user code passed to an action is one Restate would refuse (an invocation id that is not one, say): the VM sent nothing, and the attempt goes on. Its args are `(message, code)`: the driver raises it to user code as a `TerminalError`."
+);
+
+/// A VM error as Python gets it: the attempt's shutdown is an `AttemptShutDownException`; a
+/// value user code passed to an action that Restate would refuse, an `InvalidInputException`
+/// (`(message, code)`), which fails that action alone; any other a `VMException` whose args are
+/// `(message, code)`: a refused `new` answers the request with that code as its HTTP status
+/// (415), not with a 500.
 pub(crate) fn vm_error(error: Error) -> PyErr {
     if error.is_suspended_error() {
         AttemptShutDownException::new_err(error.to_string())
+    } else if error.is_invalid_input() {
+        InvalidInputException::new_err((error.message().to_owned(), error.code()))
     } else {
         VMException::new_err((error.to_string(), error.code()))
     }

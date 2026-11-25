@@ -1130,6 +1130,11 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
             .get_type::<explicit_recovery::AttemptShutDownException>(),
     )?;
     m.add(
+        "InvalidInputException",
+        m.py()
+            .get_type::<explicit_recovery::InvalidInputException>(),
+    )?;
+    m.add(
         "IdentityKeyException",
         m.py().get_type::<IdentityKeyException>(),
     )?;

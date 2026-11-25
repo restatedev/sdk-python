@@ -30,6 +30,10 @@ def __getattr__(name: str) -> Any: ...
 class AttemptShutDownException(Exception):
     """Restate shut the attempt down: a new attempt will run the handler from the start."""
 
+class InvalidInputException(Exception):
+    """A value user code passed to an action is one Restate would refuse: that action fails alone, the attempt goes
+    on. ``args`` is ``(message, code)``."""
+
 class PyInput:
     invocation_id: str
     random_seed: int
@@ -190,7 +194,7 @@ class _FakeRuntime:
     def __init__(
         self,
         *,
-        invocation_id: str = ...,
+        invocation_id: str | None = None,
         service: str = ...,
         handler: str = ...,
         key: str | None = ...,
@@ -207,6 +211,8 @@ class _FakeRuntime:
         max_idle_restarts: int = 3,
         features: Sequence[int] = ...,
     ) -> None: ...
+    @staticmethod
+    def invocation_id(n: int) -> str: ...
     @staticmethod
     def request_headers() -> list[tuple[str, str]]: ...
     def content_type(self) -> str: ...

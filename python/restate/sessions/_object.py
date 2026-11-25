@@ -117,9 +117,7 @@ def _cancel_of(host: SqlHost) -> Callable[[str], None]:
     """Return the context's ``cancel``, implemented on ``host``."""
 
     def cancel(invocation_id: str) -> None:
-        # Terminal: a retry would fail the same way.
-        if not invocation_id.startswith("inv"):
-            raise TerminalError(f"not an invocation id: {invocation_id}")
+        # An id that is not one raises TerminalError (400): the shared core checks it as Restate parses it.
         host.cancel_invocation(invocation_id)
 
     return cancel
@@ -397,6 +395,9 @@ def annotate(ctx: SessionContext, name: str, *, parent: Annotation | None = None
 def attach_invocation(ctx: SessionContext, invocation_id: str) -> Awaitable[bytes]:
     """Wait for the invocation ``invocation_id`` to end, and return its result, serialized.
 
+    The awaitable fails with ``TerminalError`` (400) if ``invocation_id`` is not an invocation id: nothing is sent,
+    and the handler may catch it and go on.
+
     Raises:
         TypeError: If ``ctx`` is not the context of a session object's handler.
     """
@@ -460,7 +461,12 @@ def read_signal(ctx: SessionContext | ViewContext, name: str, index: int = 0) ->
 def send_signal(
     ctx: SessionContext | ViewContext, invocation_id: str, name: str, value: bytes | TerminalError | None = None
 ) -> None:
-    """Send the invocation ``invocation_id`` the signal ``name`` (provisional): ``value``, a failure, or nothing."""
+    """Send the invocation ``invocation_id`` the signal ``name`` (provisional): ``value``, a failure, or nothing.
+
+    Raises:
+        TerminalError: ``invocation_id`` is not an invocation id (400). Nothing is sent, and the handler may catch it
+            and go on.
+    """
     _vm_host_of(ctx, "a signal send").signal_send(invocation_id, name, value)
 
 
